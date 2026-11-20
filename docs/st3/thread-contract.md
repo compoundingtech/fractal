@@ -1,12 +1,13 @@
 # Fractal topic threads
 
-Status: proposed contract for review. The examples describe the intended behavior. The existing
-client protocol and daemon do not yet provide this thread resource.
+Status: implemented contract. Thread clients require the current daemon thread resource and
+exact summary feed; upgrade older endpoints before using threads. Stored history and existing
+device pairings are preserved across that upgrade.
 
-Fractal already stores addressed messages and their `in_reply_to` edges. Inbox's **Chat about
-this** currently finds a discussion by the message subject. That works while returning to the
-same Inbox item. A fresh request with a different title can refer to the same discussion even
-though it needs its own answer and decision history.
+Fractal stores addressed messages and their `in_reply_to` edges. Earlier Inbox discussions
+were found by message subject. Durable threads replace that subject-based identity: a fresh
+request with a different title can refer to the same discussion while retaining its own answer
+and decision history. Existing subject-based messages remain ordinary conversation history.
 
 ## Identity and history
 
@@ -14,6 +15,14 @@ A thread has an opaque durable identity in the `thread/` family. Its editable ti
 state, conversation, message history and related items are read through that identity. A
 new thread started from an Inbox item can commit its creation, origin link and first message
 together. A client may hold an unsent draft without publishing an empty thread.
+
+The typed first-message writer uses `append_claim_with_commit_context_tx` inside the
+thread-creation transaction, with the creation's batch ID. This sanctioned seam shares
+the ordinary commit-context preflight and serialized admission, including recipient
+retirement checks, without nesting a writer lock. The secondary message keeps its
+`thread-start-message:` operation body identity and signature expectation in that same
+transaction; a refusal or caller rollback leaves neither thread nor message. Ordinary
+untyped appends still cannot set thread relation fields.
 
 The thread ID is independent of the first message ID. Anchoring it to the first message could
 reuse reply-chain lookup, but would couple the discussion's identity and availability to that
@@ -24,7 +33,8 @@ rules for mutations and links.
 Every message still has its own message ID and ordinary sender attribution. Its thread
 reference is explicit. A reply to a specific message records a thread quote whose parent belongs
 to the same thread. Ordinary `in_reply_to` retains its request settlement behavior. The reply can
-appear in the agent conversation and in the thread as one message. Clients use authoritative order, current conversation visibility and stable cursors.
+appear in the agent conversation and in the thread as one message. Clients use authoritative
+order, current conversation visibility and stable cursors.
 Subjects, titles, text similarity, and agent incarnation are presentation or context data.
 
 ## Links and lifecycle
@@ -38,11 +48,103 @@ and show its full history without reopening it. An explicit predecessor and reas
 a future decision-history view. Existing mission step gates own dependency trees and
 conditional activation.
 
+The typed daemon start/send boundary also accepts retained episodes after resolution.
+One shared, privately constructed `QualifiedDiscussionSource` proves an existing canonical
+opening, its original recipient, and the current recipient. Supported retained sources are
+runtime asks (`work.person-asked`), manifest-defined custom items (creation claim and
+`recipient_field`), human gate reviews (`gate.requested`), and reserved notices with the
+pinned notice creation, registration and owner chain. The notice episode is its source
+creation claim ID, not a snapshot ID. Labels, `about` links and arbitrary
+`custom.attention.*` kinds confer no authority. Reassignment removes retained discussion
+rights. Enrollment, browser/device admission, message scope, rollout and responsible-agent
+checks still apply; a retained source never grants an otherwise refused write.
+Current and retained starts preserve the original source agent unless native authoritative
+`agent.retired` lifecycle evidence proves terminal retirement/removal. Only that terminal
+proof selects the configured `inbox_fallback_agent`; offline or unknown runtime, a missing
+declaration, reversible stop and other admission refusals never select a replacement.
+There is no inferred role or default agent. Existing threads retain their frozen audience;
+they are never retargeted and the retired agent is never revived.
+
+Before first send, read the current Inbox row's optional `start_recipient`, or request
+`GET /v1/client/threads/start-context?source_id=...&episode=...` for an exact opening key
+already known from an Inbox card, a bounded existing history read or source context.
+This is not a retained-source discovery list. Successful preview returns that same
+`start_recipient` union: `original`, `configured` for a source without an original agent,
+or `fallback` with the original agent and authoritative terminal retirement claim reference.
+On current rows, `conversation_id` equals its `agent_id`. Denied/missing openings share
+the unknown-source 404; an unconfigured fallback after terminal retirement returns the
+already-declared `recipient-retired` conflict. Source and pairing authority are rechecked.
+The Start request still carries its displayed `agent_id` and optional signature; a recipient
+mismatch refuses without rewriting the signed packet. Refresh the preview before confirming
+a changed recipient. The scoped MCP thread-read family mirrors this metadata-only preview
+under its existing exact conversation binding; MCP remains read-only.
+
+Authored human steps require an exact retained READY opening, a hash-verified
+generation-pinned mission revision, and the immutable `mission-run.created` inputs,
+requester, root/parent/workspace and initial default selector. The opening recipient is
+reconstructed with the native selector materialization and canonically ordered assignment
+mutations before the opening; today's assignee or generation is never opening proof.
+Native recipient-bearing `work.released` and `work.handoff-returned` READY receipts
+also open exact episodes; no synthetic second `step-run.state` receipt is required.
+The shared proof passes bounded immutable materialization variables to the missions
+reader, which interpolates historical title/goals with the existing template engine.
+An unchanged title keeps its generation-creation attempt; retry goals are already
+materialized and are never interpolated again.
+Carried openings recover their epoch from the canonically prior actual READY write,
+following the exact source-generation chain and matching attempts. Literal/inherited and
+retained-input selectors qualify; missing admission/definition/interpolation/READY facts,
+unrecoverable carried epochs or a different current recipient fail closed.
+Before hydrating opening/source/manifest bodies, metadata-only admission bounds each
+proof's complete read set (including repaired history) to 512 entries and 256 KiB.
+Oversized/unprovable proofs are unavailable, never exempted from the bound. Notice
+disposition reads select an exact canonical latest claim, not complete snapshot history.
+Harness prompts, seat login, planning, revision proposals and operational faults have no
+supported retained proof. An unknown, fabricated or unsupported retained episode receives
+the same unavailable error. Phase A history uses this same qualifier, so a syntax-valid
+but never-opened authored key exposes no historical row content.
+
+Start never coalesces by origin, for current or retained sources. Every new operation
+key creates an independent thread and persists that request's first message, even if
+another discussion already links the exact source episode and recipient. Same-key
+replay recovers its original result; changed intent under that key conflicts. Recovery
+keeps its existing current-principal checks and works after source changes or retirement.
+A fallback Start creates its own discussion without retargeting existing participants.
+Open/list is navigation, not Start deduplication. Starting or replying to a retained
+discussion does not reactivate its resolved Inbox source or settle its original work.
+
+Unread Inbox-position lookup batch-qualifies the selected exact episodes through that
+same source qualifier before inspecting owned thread replies. Opening/current-policy
+discovery is one keyed SQL lookup for the full input, with indexed batched notice snapshot
+discovery. Reserved notices additionally reuse the native per-notice keyed
+source/registration/member-chain security validation; there is no per-row source
+qualifier call or live Inbox refold for supported retained sources. Live-only families
+keep their existing current-source qualification. This separate unread integration is
+owned by the shared writer, under FPL's backend contract.
+
+The native CLI convenience `fractal alerts discuss ITEM --body TEXT --as PERSON`
+starts the same durable thread through `thread.start`. It uses the exact current source and
+episode and the daemon-assigned responsible agent. It offers no recipient override. Use
+`--idempotency-key KEY` to deduplicate a start while the source episode, title and responsible
+agent remain unchanged. This stateless convenience rereads the current Inbox source; it does
+not retain the original action packet. A resolved source is refused locally, and a changed
+source or recipient with the same explicit key conflicts instead of creating another thread.
+Inspect retained history by its durable thread ID in a current thread client. Without an
+explicit key, the CLI uses its ordinary content-and-hour deduplication policy; an explicit key
+keeps retry identity stable across that hour boundary. Clients that retain the original exact
+action packet can use the daemon's receipt recovery after the source resolves.
+
+A bound agent can create an ask with `fractal work ask`, then run
+`fractal work link-thread ASK --thread THREAD --episode CLAIM --as "$ST_AGENT"`.
+The `work.person-asked` claim ID is available in `fractal --json trace show ASK`. Repeating
+the same link returns the original operation receipt. An attachment failure leaves the
+ask available to retry with its exact episode.
+
 The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
-threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
-from the agent joins closed history without reopening the thread, adding an alert or resurrecting
-the Inbox row. When admission sees a closed thread, the owning person must explicitly reopen it
-before sending a reply. A fresh linked ask can still show the closed thread. An authorized rename changes the shared title everywhere and
+threads, leaves history readable and keeps any linked ask answerable. Ordinary replies from
+the person or agent join closed history without reopening the thread, adding an alert or
+resurrecting the Inbox row. Reopen is an explicit lifecycle action, independent of replying.
+A fresh linked ask can still show the closed thread. An authorized rename changes the shared
+title everywhere and
 preserves the thread, messages, links, unread state and current lifecycle.
 
 Show rename, close and reopen as events in the thread timeline with their actor and time.
@@ -67,12 +169,34 @@ Use the conversation composer with an explicit destination. When a thread is act
 composer sends into it without a separate reply mode. A quoted reply adds the message target.
 Agent conversation and thread drafts are separate and survive switching destinations.
 
-Track read progress per reader and thread against ordered messages. Moving a cursor forward can
-clear an unread reply on the existing Inbox row without creating an ask, changing the alert count
-or resolving an approval. Which visible interaction advances the read cursor should be tested
-with real UI visibility and reviewed before client implementations treat it as read.
+Mark shown messages read explicitly. The client submits up to 50 exact rendered message IDs
+and the newest of those IDs as an anchor. Fetching or preloading a page alone does not mark it
+read. The daemon verifies the authenticated person's ownership and every selected message before
+writing ordinary replicated read facts for incoming replies. A late arrival stays unread even if
+it sorts before the anchor. A retry of the same selection returns the same acknowledged incoming
+IDs without duplicating facts. Empty selections acknowledge nothing.
+
+Read progress also works in closed threads and requires the same message-control scope as
+ordinary read actions. It does not reopen a thread, resolve an ask, or change the alert count.
 
 ## Daemon boundary
+
+Inbox discussion responsibility is separate from the item's publisher and its human approval
+recipient. Resolve the originating/assigned agent first, preserving historical associations even
+when that agent has stopped. For a system or person-owned source with no such agent, configure
+`inbox_fallback_agent = "agent/your-existing-agent"` in the daemon's TOML configuration and
+restart the daemon. Home Manager exposes the same setting as
+`services.smalltalk.inboxFallbackAgent`. This is an explicit agent identity, never an inferred company role or the
+fault handler. Missing configuration and undeclared fallback agents appear in the
+`inbox-responsibility` doctor diagnostic. A pending or conflicting identity retains its recorded
+association and adds a discussion diagnostic in the resource's existing `operational.reasons`;
+the card's person-only actions stay actionable. New discussion admission still refuses the
+unavailable identity. Database failures remain errors. Setup and person-only security approvals remain
+available before an agent is configured; creating a discussion requires an admitted recipient.
+The fallback is daemon-local routing policy, not replicated history. Changing it updates current
+Inbox associations and invalidates their derived caches. A thread freezes its responsible agent
+when created: configuration changes do not retarget existing threads, change their audience or
+rewrite their history. Discussing a security request does not authorize or settle its approval.
 
 Each thread belongs to one existing person and agent conversation. Reuse that conversation's
 principal identities, reader authorization, sender attribution and grant enforcement. The
@@ -101,7 +225,12 @@ Writes validate authority in the admitting daemon transaction. Bind idempotency 
 operation and target, and reauthorize receipt recovery after revocation. Rename, Close and Reopen
 check the metadata revision visible at admission. A stale client refreshes and may retry. An
 accepted incoming reply remains append-only and does not change the title or lifecycle
-revision. Existing historical subject-based discussion remains readable through its existing
+revision. Metadata successors override their causal ancestors even if the writer's clock is
+behind. Canonical claim order resolves only concurrent edits. The opaque metadata revision
+fences every known causal frontier branch and the effective creation, title, and lifecycle
+claims. Excluding a previously effective claim by repair changes that version even when the
+frontier itself is unchanged. The next accepted edit retains all frontier branches as predecessors. A title's revision still identifies the exact effective title claim.
+Existing historical subject-based discussion remains readable through its existing
 path. There is no inferred migration from subjects to durable thread IDs.
 
 ### Fleet behavior and receipts
@@ -113,6 +242,10 @@ conversation operations when an agent moves. They do not require the old runtime
 a separate writer service. If the conversation path cannot admit an operation, report its
 actual availability or refusal.
 
+Lifecycle action receipts expose the immutable acknowledged operation claim as `metadata_claim_id`.
+It is not a CAS revision. Obtain the next metadata fence from the rendered `ThreadSummary.revision`;
+receipt recovery must not manufacture a fresh version for metadata the client has not observed.
+
 Use the daemon's typed receipt to show an accepted action. Local acceptance confirms the
 local commit, not admission at another member or delivery to the agent. If the response is
 lost, retry the same request key. A member that has the receipt returns it. Partitioned
@@ -121,8 +254,7 @@ conflicting key reuse produces the existing typed conflict. Surface that outcome
 the affected view rather than presenting the earlier local receipt as fleet-wide proof.
 
 A revision check fences stale changes against the admitting member's known state. Concurrent
-changes accepted on different members reconcile by a deterministic claim projection. Close
-prevents outgoing replies on a member that knows the thread is closed. An independently
+changes accepted on different members reconcile by a deterministic claim projection. Ordinary replies remain in a closed thread without reopening it. An independently
 admitted reply and close may both stand after exchange. Preserve accepted replies in history.
 The operation does not impose an atomic order across disconnected members. The
 [existing replication rules](replication.md) define the underlying
@@ -169,3 +301,33 @@ Select exact operation names, claim schemas,
 subscription shapes, and cursor format only when the fixture runs through the existing
 client boundary. The [original topic projection discussion](https://github.com/compoundingtech/fractal/issues/49)
 and [normalized conversation contract](conversation-normalization-design.md) provide context.
+
+## Initial rollout
+
+Release note: client capability `threads-v1` version 3 advertises the unread-reminder
+contract (mark/clear actions, around-anchor timeline reads, and marked-unread discovery).
+
+Install the privacy reader release on all serving fleet members before enabling typed writes.
+The writer verifies the configured and active readers' privacy capability inside its transaction.
+Reader readiness version 3 includes causal metadata projection and its frontier revision fence;
+version 2 protects message content but cannot enable current writes. The signed message envelope
+marker remains `thread_reader_version: 2`: this rollout changes metadata semantics, not that format.
+A legacy member that receives a signed thread-bearing message retains the envelope in quarantine.
+After upgrade, normal startup retries admission and restores the original timeline entry once.
+Fractal application stores advance published main's default storage version 20 to the privacy
+floor 23. Main's versions 21 and 22 retain their signature-reference and dependency-reader
+meanings; the shared graph store still defaults to 20 when no privacy application is installed.
+Private reader-pilot stores at versions 21 and 22 use the same normal application upgrade path.
+Version 23 keeps all older max-22 binaries, including timestamp-only privacy pilots, from
+reopening this upgraded store.
+The privacy floor also activates main's existing compact-signature writer and migration:
+every reader allowed to open version 23 includes the version-21/22 format readers, and the
+downgrade fence excludes older readers. The normal open path preserves claim authority,
+history, pairings, and operation receipts while those supported physical representations
+migrate. Do not lower `user_version` to run an old binary against this state.
+
+That local floor does not protect a fresh old network member. Before activating writes, directly
+verify the current build and reader-readiness v3 on every serving/configured member; historical
+startup advertisements alone are insufficient deployment evidence. Keep old fresh rejoins out
+of the serving fleet. The transaction's existing peer-readiness gate remains fail-closed when
+a known configured/active member advertises an older reader.

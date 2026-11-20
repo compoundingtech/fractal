@@ -95,11 +95,15 @@ fn keyed_only(kind: &str) -> bool {
 }
 
 #[test]
-fn the_corpus_includes_every_registry_kind() {
+fn every_registry_kind_has_a_corpus_or_typed_thread_coverage() {
+    // Reminder references must name real signed operations on an owned thread, so the
+    // generic corpus cannot construct them. Bind their exemption to exercised admission.
+    let typed_unread_kinds = typed_thread_unread_converges_after_replication_and_restart();
     for kind in fractal_schema::registry().claims.keys() {
         assert!(
-            corpus().contains_key(kind),
-            "add {kind} to a versioned corpus"
+            corpus().contains_key(kind) || typed_unread_kinds.contains(kind) || matches!(kind.as_str(),
+                "thread.created" | "thread.title-set" | "thread.state-set" | "thread.ask-linked"),
+            "add {kind} to a versioned corpus or its dedicated typed-admission coverage"
         );
     }
 }
@@ -2337,6 +2341,299 @@ fn generated_run_lineage_links_are_admitted_and_replicate() {
         world.tap(0);
         assert!(claims(&world.oracle).contains_key(&claim.id));
         assert!(world.failures.is_empty(), "{}", world.report());
+    }
+}
+
+/// Return only kinds actually admitted, replicated and folded below, not a static allowlist.
+fn typed_thread_unread_converges_after_replication_and_restart() -> BTreeSet<String> {
+    use fractal_daemon::store::thread_delivery::append_reply;
+    use fractal_daemon::store::thread_metadata::{Edit as MetadataEdit, PersonAuthority, apply, summary};
+    use fractal_daemon::store::thread_reading::{Edit, apply_as};
+
+    let mut world = World::new(1, Sabotage::None);
+    let person = "person/robin";
+    let thread = "thread/unread-convergence";
+    let agent = "agent/sample/reviewer";
+    let anchor = "message/unread-convergence";
+    for node in &world.nodes[..2] {
+        node.store.configure_thread_write_rollout([]);
+        node.store.append_claim(&ClaimInput {
+            subject: format!("daemon/{}", node.store.origin()),
+            kind: "daemon.started".into(),
+            actor: None,
+            fields: serde_json::from_value(json!({
+                "status": "running",
+                "features": {"thread_read_privacy": fractal_schema::threads::READ_PRIVACY_VERSION},
+            })).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    apply(&world.nodes[0].store, person, thread, "unread-create", MetadataEdit::Create {
+        agent, title: "Unread convergence",
+    }).unwrap();
+    append_reply(&world.nodes[0].store, &ClaimInput {
+        subject: anchor.into(),
+        kind: "message.sent".into(),
+        actor: Some(agent.into()),
+        fields: serde_json::from_value(json!({
+            "from": agent, "to": person, "content": "Review this reply",
+            "status": "sent", "thread_id": thread,
+        })).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: Some("unread-reply".into()),
+    }, PersonAuthority::TrustedLocal, None).unwrap();
+    assert!(world.exchange(0, 1, true) > 0);
+    assert!(world.exchange(1, 0, true) > 0);
+
+    let mut admitted = Vec::new();
+    let mut marks = Vec::new();
+    // Neither writer observes the other's mark.
+    for (index, key) in ["unread-left", "unread-right"].into_iter().enumerate() {
+        let (claim, appended) = apply_as(
+            &world.nodes[index].store, PersonAuthority::TrustedLocal,
+            person, thread, key, Edit::Mark { anchor_message: anchor, observed_marks: &[] },
+        ).unwrap();
+        assert!(appended);
+        assert_eq!(claim.kind, "thread.unread-marked");
+        let reminder = summary(&world.nodes[index].store, person, thread).unwrap()
+            .unread_reminder.unwrap();
+        assert_eq!(reminder.marks.len(), 1);
+        assert_eq!(reminder.marks[0].anchor_message_id, anchor);
+        // Public summary IDs are the opaque signed operation IDs accepted as references.
+        marks.push(reminder.marks[0].mark_id.clone());
+        admitted.push(claim);
+    }
+    let observed_left = vec![marks[0].clone()];
+    let (cleared, appended) = apply_as(
+        &world.nodes[0].store, PersonAuthority::TrustedLocal,
+        person, thread, "unread-stale-clear", Edit::Clear { observed_marks: &observed_left },
+    ).unwrap();
+    assert!(appended);
+    assert_eq!(cleared.kind, "thread.unread-cleared");
+    assert!(summary(&world.nodes[0].store, person, thread).unwrap().unread_reminder.is_none());
+    admitted.push(cleared);
+
+    assert!(world.exchange(0, 1, true) > 0);
+    assert!(world.exchange(1, 0, true) > 0);
+    for restarted in [false, true] {
+        if restarted { world.restart(0); world.restart(1); }
+        assert!(world.failures.is_empty(), "{}", world.report());
+        for node in &world.nodes[..2] {
+            node.store.configure_thread_write_rollout([]);
+            let reminder = summary(&node.store, person, thread).unwrap().unread_reminder.unwrap();
+            assert_eq!(reminder.marks.len(), 1, "a stale clear must preserve the unseen mark");
+            assert_eq!(reminder.marks[0].mark_id, marks[1]);
+            assert_eq!(reminder.marks[0].anchor_message_id, anchor);
+            let replicated = claims(&node.store);
+            for claim in &admitted {
+                assert_eq!(replicated.get(&claim.id).unwrap().body, claim.body);
+            }
+            assert!(summary(&node.store, "person/other", thread).is_err());
+            assert!(apply_as(
+                &node.store, PersonAuthority::TrustedLocal, "person/other", thread,
+                "unread-foreign-clear", Edit::Clear { observed_marks: &[] },
+            ).is_err());
+            // An exact operation retry cannot bypass fresh source authorization.
+            assert!(apply_as(
+                &node.store, PersonAuthority::LocalWeb { expires_at: 0 }, person, thread,
+                "unread-stale-clear", Edit::Clear { observed_marks: &observed_left },
+            ).is_err());
+            let (retry, appended) = apply_as(
+                &node.store, PersonAuthority::TrustedLocal, person, thread,
+                "unread-stale-clear", Edit::Clear { observed_marks: &observed_left },
+            ).unwrap();
+            assert!(!appended, "replicated reminder receipts survive restart");
+            assert_eq!(retry.id, admitted[2].id);
+        }
+    }
+    let observed_right = vec![marks[1].clone()];
+    let (cleared, appended) = apply_as(
+        &world.nodes[0].store, PersonAuthority::TrustedLocal,
+        person, thread, "unread-final-clear", Edit::Clear { observed_marks: &observed_right },
+    ).unwrap();
+    assert!(appended);
+    admitted.push(cleared);
+    assert!(world.exchange(0, 1, true) > 0);
+    world.restart(0);
+    world.restart(1);
+    assert!(world.failures.is_empty(), "{}", world.report());
+    for node in &world.nodes[..2] {
+        assert!(summary(&node.store, person, thread).unwrap().unread_reminder.is_none());
+        let replicated = claims(&node.store);
+        for claim in &admitted {
+            assert_eq!(replicated.get(&claim.id).unwrap().body, claim.body);
+        }
+    }
+    admitted.into_iter().map(|claim| claim.kind).collect()
+}
+
+#[test]
+fn typed_thread_metadata_converges_after_replication_and_restart() {
+    use fractal_daemon::store::thread_metadata::{Edit, apply, summary};
+    let mut world = World::new(1, Sabotage::None);
+    let person = "person/robin";
+    let thread = "thread/convergence";
+    let agent = "agent/sample/reviewer";
+    let (created, _) = apply(&world.nodes[0].store, person, thread, "thread-create", Edit::Create {
+        agent, title: "Initial title",
+    }).unwrap();
+    let created_revision = summary(&world.nodes[0].store, person, thread).unwrap().revision;
+    assert!(world.exchange(0, 1, true) > 0);
+    let (renamed, _) = apply(&world.nodes[1].store, person, thread, "thread-rename", Edit::Rename {
+        title: "Reviewed title", title_revision: &created.id, revision: &created_revision,
+    }).unwrap();
+    let renamed_revision = summary(&world.nodes[1].store, person, thread).unwrap().revision;
+    assert!(world.exchange(1, 0, true) > 0);
+    let (closed, _) = apply(&world.nodes[0].store, person, thread, "thread-close", Edit::Close {
+        revision: &renamed_revision,
+    }).unwrap();
+    let closed_revision = summary(&world.nodes[0].store, person, thread).unwrap().revision;
+    assert_eq!(closed.predecessors, std::slice::from_ref(&renamed.id));
+    assert!(world.exchange(0, 1, true) > 0);
+    for node in &world.nodes[..2] {
+        assert_eq!(summary(&node.store, person, thread).unwrap().revision, closed_revision);
+        assert_eq!(apply(&node.store, person, thread, "stale-reopen", Edit::Reopen {
+            revision: &renamed_revision,
+        }).unwrap_err().code, "stale-subject");
+    }
+    world.restart(0);
+    world.restart(1);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    for node in &world.nodes[..2] {
+        let current = summary(&node.store, person, thread).unwrap();
+        assert_eq!(current.title, "Reviewed title");
+        assert_eq!(current.title_revision, renamed.id);
+        assert_eq!(current.revision, closed_revision);
+        assert_eq!(current.state, "closed");
+        assert_eq!(current.agent_id, agent);
+        assert!(summary(&node.store, "person/other", thread).is_err());
+        let (retry, appended) = apply(&node.store, person, thread, "thread-create", Edit::Create {
+            agent, title: "Initial title",
+        }).unwrap();
+        assert_eq!(retry.id, created.id);
+        assert!(!appended, "replicated operation receipts survive restart");
+    }
+}
+
+#[test]
+fn causal_thread_successors_override_faster_ancestor_clocks() {
+    use fractal_daemon::store::thread_metadata::{Edit, apply, summary};
+    let mut world = World::new(1, Sabotage::None);
+    let person = "person/robin";
+    let thread = "thread/causal-successors";
+    let high = world.now() as u128 + 100_000;
+    world.nodes[0].store.set_write_clock_at(high).unwrap();
+    let (created, _) = apply(&world.nodes[0].store, person, thread, "causal-create", Edit::Create {
+        agent: "agent/sample/reviewer", title: "Initial title",
+    }).unwrap();
+    let created_revision = summary(&world.nodes[0].store, person, thread).unwrap().revision;
+    let (renamed, _) = apply(&world.nodes[0].store, person, thread, "fast-rename", Edit::Rename {
+        title: "Fast title", title_revision: &created.id, revision: &created_revision,
+    }).unwrap();
+    let renamed_revision = summary(&world.nodes[0].store, person, thread).unwrap().revision;
+    let (closed, _) = apply(&world.nodes[0].store, person, thread, "fast-close", Edit::Close {
+        revision: &renamed_revision,
+    }).unwrap();
+    let closed_revision = summary(&world.nodes[0].store, person, thread).unwrap().revision;
+    assert!(world.exchange(0, 1, true) > 0);
+    world.nodes[1].store.set_write_clock_at(high - 10_000).unwrap();
+    let (reopened, _) = apply(&world.nodes[1].store, person, thread, "slow-reopen", Edit::Reopen {
+        revision: &closed_revision,
+    }).unwrap();
+    let reopened_revision = summary(&world.nodes[1].store, person, thread).unwrap().revision;
+    let (retitled, _) = apply(&world.nodes[1].store, person, thread, "slow-rename", Edit::Rename {
+        title: "Causal title", title_revision: &renamed.id, revision: &reopened_revision,
+    }).unwrap();
+    let retitled_revision = summary(&world.nodes[1].store, person, thread).unwrap().revision;
+    assert!(reopened.accepted_at_unix_ms < closed.accepted_at_unix_ms);
+    assert!(retitled.accepted_at_unix_ms < renamed.accepted_at_unix_ms);
+    assert_eq!(reopened.predecessors, std::slice::from_ref(&closed.id));
+    assert_eq!(retitled.predecessors, std::slice::from_ref(&reopened.id));
+    assert!(world.exchange(1, 0, true) > 0);
+    for restarted in [false, true] {
+        if restarted { world.restart(0); world.restart(1); }
+        assert!(world.failures.is_empty(), "{:?}", world.failures);
+        for node in &world.nodes[..2] {
+            let current = summary(&node.store, person, thread).unwrap();
+            assert_eq!(current.state, "open");
+            assert_eq!(current.title, "Causal title");
+            assert_eq!(current.title_revision, retitled.id);
+            assert_eq!(current.revision, retitled_revision);
+            assert!(summary(&node.store, "person/other", thread).is_err());
+            assert_eq!(apply(&node.store, person, thread, "stale-close", Edit::Close {
+                revision: &closed_revision,
+            }).unwrap_err().code, "stale-subject");
+            let (retry, appended) = apply(&node.store, person, thread, "slow-reopen", Edit::Reopen {
+                revision: &closed_revision,
+            }).unwrap();
+            assert_eq!(retry.id, reopened.id);
+            assert!(!appended);
+        }
+    }
+}
+
+#[test]
+fn concurrent_thread_metadata_is_fenced_and_merged_by_the_next_edit() {
+    use fractal_daemon::store::thread_metadata::{Edit, apply, summary};
+    let mut world = World::new(1, Sabotage::None);
+    let person = "person/robin";
+    let thread = "thread/causal-frontier";
+    let high = world.now() as u128 + 100_000;
+    world.nodes[0].store.set_write_clock_at(high).unwrap();
+    let (created, _) = apply(&world.nodes[0].store, person, thread, "frontier-create", Edit::Create {
+        agent: "agent/sample/reviewer", title: "Initial title",
+    }).unwrap();
+    let created_revision = summary(&world.nodes[0].store, person, thread).unwrap().revision;
+    assert!(world.exchange(0, 1, true) > 0);
+    world.nodes[1].store.set_write_clock_at(high - 10_000).unwrap();
+    let (renamed, _) = apply(&world.nodes[0].store, person, thread, "concurrent-rename", Edit::Rename {
+        title: "Concurrent title", title_revision: &created.id, revision: &created_revision,
+    }).unwrap();
+    let renamed_revision = summary(&world.nodes[0].store, person, thread).unwrap().revision;
+    let (fork_title, _) = apply(&world.nodes[1].store, person, thread, "concurrent-slow-rename", Edit::Rename {
+        title: "Slower concurrent title", title_revision: &created.id, revision: &created_revision,
+    }).unwrap();
+    let fork_title_revision = summary(&world.nodes[1].store, person, thread).unwrap().revision;
+    assert!(fork_title.accepted_at_unix_ms < renamed.accepted_at_unix_ms);
+    let (closed, _) = apply(&world.nodes[1].store, person, thread, "concurrent-close", Edit::Close {
+        revision: &fork_title_revision,
+    }).unwrap();
+    let closed_revision = summary(&world.nodes[1].store, person, thread).unwrap().revision;
+    assert!(world.exchange(0, 1, true) > 0);
+    assert!(world.exchange(1, 0, true) > 0);
+    let frontier = summary(&world.nodes[0].store, person, thread).unwrap().revision;
+    assert_ne!(frontier, renamed_revision);
+    assert_ne!(frontier, closed_revision);
+    for node in &world.nodes[..2] {
+        let current = summary(&node.store, person, thread).unwrap();
+        assert_eq!(current.revision, frontier);
+        assert_eq!(current.title_revision, renamed.id);
+        assert_eq!(current.state, "closed");
+        for stale in [&renamed_revision, &closed_revision] {
+            assert_eq!(apply(&node.store, person, thread, &format!("stale-{stale}"), Edit::Reopen {
+                revision: stale,
+            }).unwrap_err().code, "stale-subject");
+        }
+    }
+    let (merged, _) = apply(&world.nodes[1].store, person, thread, "merge-reopen", Edit::Reopen {
+        revision: &frontier,
+    }).unwrap();
+    let merged_revision = summary(&world.nodes[1].store, person, thread).unwrap().revision;
+    assert_eq!(merged.predecessors.iter().collect::<BTreeSet<_>>(), [&renamed.id, &closed.id].into_iter().collect());
+    assert!(world.exchange(1, 0, true) > 0);
+    for restarted in [false, true] {
+        if restarted { world.restart(0); world.restart(1); }
+        assert!(world.failures.is_empty(), "{:?}", world.failures);
+        for node in &world.nodes[..2] {
+            let current = summary(&node.store, person, thread).unwrap();
+            assert_eq!(current.revision, merged_revision);
+            assert_eq!(current.state, "open");
+            assert_eq!(current.title, "Concurrent title");
+            assert_eq!(current.title_revision, renamed.id);
+        }
     }
 }
 

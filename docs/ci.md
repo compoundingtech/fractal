@@ -506,6 +506,13 @@ older Git baselines. They are not Cargo aliases, and they do not permit extra wa
 The first rollout permits a base without the file. There is no new required check:
 `linux-gate` already requires `linux-clippy`.
 
+Mechanical lints are fixed in code rather than added to the warning baseline.
+Narrow `large_enum_variant` expectations on push authentication and TUI worker results
+keep owned values inline without extra request/result allocations. Argument-count
+allowances on signature verification and thread-window/editor helpers keep their
+existing boundaries explicit. These exceptions carry local reasons; they do not
+change protocol shapes or increase the baseline.
+
 To check locally and lower the baseline after fixing warnings:
 
 ```sh

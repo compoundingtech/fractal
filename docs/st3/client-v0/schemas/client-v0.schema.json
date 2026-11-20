@@ -778,6 +778,7 @@
     "TimelineStatus": {"anyOf": [{"enum": ["queued", "running", "waiting", "completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Run status reported in a timeline `status` entry."},
     "ErrorCode": {"anyOf": [{"enum": [
       "recipient-retired",
+      "recipient-unassigned",
       "agents-publication-row-too-large",
       "identity-cycle",
       "identity-occupied",
@@ -871,7 +872,7 @@
       "not-answerable",
       "attention-dismiss-unsupported",
       "internal"
-    ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
+    ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. recipient-unassigned is a non-retryable HTTP 409 when a source has no original responsible agent and no configured fallback; setup is blocked until a responsible agent is configured, not by a race, and details.reason is absent. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
     "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": [
       "attention",
       "message",
@@ -1263,7 +1264,7 @@
         "kind": { "const": "capabilities" },
         "machine_version": { "type": "string", "description": "Compile-time build identity of the responding daemon; absent on older servers." },
         "session_actor": { "$ref": "#/$defs/Id" },
-        "transport": { "enum": ["unix", "fabric-loopback"] },
+        "transport": { "enum": ["unix", "fabric-loopback", "local-web"] },
         "capabilities": { "type": "array", "items": { "$ref": "#/$defs/Capability" } },
         "limits": {
           "type": "object",
@@ -1383,7 +1384,12 @@
             "person_id": { "$ref": "#/$defs/Id" },
             "alert": { "type": "boolean", "description": "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." },
             "urgent": { "type": "boolean", "description": "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." },
+            "thread_unread": { "type": "boolean", "description": "True when the authenticated person has an unread incoming reply in a thread for this exact ask episode. Absent otherwise." },
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
+            "start_recipient": {
+              "$ref": "#/$defs/ThreadStartRecipient",
+              "description": "Exact daemon-selected first-Start recipient and basis. When present, conversation_id equals agent_id. Fallback requires terminal agent.retired evidence; absence grants no recipient inference."
+            },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
             "launch_id": { "$ref": "#/$defs/Id" },
@@ -1399,7 +1405,7 @@
             "mission_run_id": { "$ref": "#/$defs/Id" },
             "step_run_id": { "$ref": "#/$defs/Id" },
             "blocked": { "$ref": "#/$defs/AttentionBlocked", "description": "The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask." },
-            "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons." },
+            "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "Fractal's presentation of this row: its Now group and card, the responsible thread agent, who raised it, and the step it holds. Clients use the daemon's assignment (docs/clients/ui-contract.md, Attention row)." },
             "title": { "type": "string" },
             "detail": { "x-st-text": "markdown-block", "type": "string" },
             "priority": { "enum": ["critical", "high", "normal", "low"] },
@@ -2634,7 +2640,7 @@
           "fault",
           null
         ], "description": "The card; null for a row that is no card (an unread message stays in its conversation)." },
-        "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." },
+        "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "The daemon-assigned responsible agent for a thread: its originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent when needed. No chief-of-staff or other role is inferred. null means discussion is unassigned; clients must not infer another recipient." },
         "raised_by": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." },
         "waiting": { "oneOf": [{ "$ref": "#/$defs/AttentionWaiting" }, { "type": "null" }], "description": "The step it holds." },
         "revision": { "$ref": "#/$defs/AttentionRevision", "description": "On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision." },
@@ -3063,6 +3069,85 @@
         "reason": { "type": ["string", "null"] }
       }
     },
+    "ThreadStartRecipient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "basis"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/Id" },
+        "basis": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["_tag"],
+              "properties": { "_tag": { "const": "original" } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["_tag"],
+              "properties": { "_tag": { "const": "configured" } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["_tag", "original_agent_id", "retirement"],
+              "properties": {
+                "_tag": { "const": "fallback" },
+                "original_agent_id": { "$ref": "#/$defs/Id" },
+                "retirement": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["claim_id", "kind", "state"],
+                  "properties": {
+                    "claim_id": { "$ref": "#/$defs/Id" },
+                    "kind": { "const": "agent.retired" },
+                    "state": { "const": "retired" }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ThreadStartContext": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "source_id", "episode", "start_recipient"],
+      "properties": {
+        "kind": { "const": "thread-start-context" },
+        "source_id": { "$ref": "#/$defs/Id" },
+        "episode": { "$ref": "#/$defs/Revision" },
+        "start_recipient": { "$ref": "#/$defs/ThreadStartRecipient" }
+      }
+    },
+    "ThreadUnreadMark": {"type":"object","additionalProperties":false,"required":["mark_id","anchor_message_id"],"properties":{"mark_id":{"type":"string","description":"Opaque stable signed operation ID. Never a claim ID, timestamp, or local retry counter."},"anchor_message_id":{"$ref":"#/$defs/Id"}}},
+    "ThreadUnreadReminder": {"type":"object","additionalProperties":false,"required":["marks","anchor_message_id"],"properties":{"marks":{"type":"array","items":{"$ref":"#/$defs/ThreadUnreadMark"},"description":"All active marks, each with its own return anchor. Clear only captured mark IDs whose own anchor was deliberately viewed on a later visit; the current visit stays sticky."},"anchor_message_id":{"$ref":"#/$defs/Id","description":"Canonical primary return anchor."}}},
+    "ThreadSummary": {"type": "object", "additionalProperties": false, "required": ["id", "agent_id", "title", "title_revision", "revision", "state"], "properties": {"id": {"$ref": "#/$defs/Id"}, "agent_id": {"$ref": "#/$defs/Id", "description": "Canonical originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent. Clients must not infer a chief-of-staff or other role as fallback."}, "title": {"type": "string"}, "title_revision": {"$ref": "#/$defs/Revision"}, "revision": {"$ref": "#/$defs/Revision"}, "state": {"enum": ["open", "closed"]}, "message_count": {"type": "integer", "minimum": 0}, "unread": {"type": "boolean", "description":"Natural message unread; unaffected by reminders."}, "unread_reminder":{"oneOf":[{"$ref":"#/$defs/ThreadUnreadReminder"},{"type":"null"}]}}},
+    "ThreadSummaryPage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "ThreadRenamedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms", "previous_title", "title"], "properties": {"kind": {"const": "thread.renamed"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}, "previous_title": {"type": "string"}, "title": {"type": "string"}}},
+    "ThreadClosedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms"], "properties": {"kind": {"const": "thread.closed"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}}},
+    "ThreadReopenedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms"], "properties": {"kind": {"const": "thread.reopened"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}}},
+    "ThreadCollectionContext": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/AgentId"}}}, {"type": "object", "additionalProperties": false, "required": ["origin_source", "origin_episode"], "properties": {"origin_source": {"$ref": "#/$defs/Id"}, "origin_episode": {"$ref": "#/$defs/Revision"}}}, {"type": "object", "additionalProperties": false, "required": ["mission_id"], "properties": {"mission_id": {"$ref": "#/$defs/Id"}}}, {"type": "object", "additionalProperties": false, "required": ["recently_closed"], "properties": {"recently_closed": {"const": true}}}, {"type":"object","additionalProperties":false,"required":["marked_unread"],"properties":{"marked_unread":{"const":true}}}]},
+    "ThreadListQuery": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["origin_source", "origin_episode"], "properties": {"origin_source": {"$ref": "#/$defs/Id"}, "origin_episode": {"$ref": "#/$defs/Revision"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["mission_id"], "properties": {"mission_id": {"$ref": "#/$defs/Id"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["recently_closed"], "properties": {"recently_closed": {"const": true}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type":"object","additionalProperties":false,"required":["marked_unread"],"properties":{"marked_unread":{"const":true,"description":"Current person's threads with an active unread reminder, newest operation time first, then thread ID. Operation time is the earliest accepted_at among validated equivalent receipts for the stable operation ID; repaired, invalid and conflicting receipts are excluded."},"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}}}]},
+    "ThreadMessageEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms", "content", "thread_quote_id"], "properties": {"kind": {"const": "message"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}, "content": {"type": "string"}, "thread_quote_id": {"oneOf": [{"$ref": "#/$defs/Id"}, {"type": "null"}]}}},
+    "ThreadInboxOrigin": {"type":"object","additionalProperties":false,"required":["source_id","episode"],"properties":{"source_id":{"$ref":"#/$defs/Id"},"episode":{"$ref":"#/$defs/Revision"}}},
+    "ThreadStartParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "agent_id", "origin", "title", "content"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "agent_id": {"$ref": "#/$defs/Id", "description": "The daemon-assigned originating or assigned agent from the Inbox item, including the explicitly configured inboxFallbackAgent when needed. Clients must not infer another recipient."}, "origin":{"$ref":"#/$defs/ThreadInboxOrigin"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}, "content": {"type": "string", "minLength": 1, "maxLength": 8192}, "signature": {"$ref": "#/$defs/DeviceSignature"}}},
+    "ThreadReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "content"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "content": {"type": "string", "minLength": 1, "maxLength": 8192}, "thread_quote_id": {"$ref": "#/$defs/Id"}, "signature": {"$ref": "#/$defs/DeviceSignature"}}},
+    "ThreadTimelineEvent": {"oneOf": [{"$ref": "#/$defs/ThreadRenamedEvent"}, {"$ref": "#/$defs/ThreadClosedEvent"}, {"$ref": "#/$defs/ThreadReopenedEvent"}, {"$ref": "#/$defs/ThreadMessageEvent"}]},
+    "ThreadTimelineAnchor": {"type":"object","additionalProperties":false,"required":["message_id","state"],"properties":{"message_id":{"$ref":"#/$defs/Id"},"state":{"enum":["current","unavailable","pending"]}}},
+    "ThreadTimelinePage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "previous_cursor":{"type":"string","description":"Opaque cursor for newer items; absent when nothing is newer. Pages remain newest first."}, "anchor":{"$ref":"#/$defs/ThreadTimelineAnchor","description":"Present only for around reads. Unavailable requires retained signed routing proof for the same owner and thread. Pending requires an authenticated signed Mark intent of the same owner and thread whose observed-mark dependencies are all validated and resolved, and whose anchor is the only missing proof. Unknown observed references keep the operation inert and return thread-unavailable until dependencies arrive. Pending exposes no body, grants no new read authority and activates no badge before membership is known. Around never acknowledges anything."}}},
+    "SourceEpisode": {"type":"object","additionalProperties":false,"required":["source_id","episode"],"properties":{"source_id":{"type":"string"},"episode":{"type":"string"}}},
+    "PayloadUnavailable": {"enum":["retained-definition-unavailable","retained-step-unavailable","opening-unavailable","historical-interpolation-unavailable","boundary-unavailable","payload-unavailable","read-bound-exceeded"]},
+    "RequestProvenance": {"oneOf":[{"type":"object","additionalProperties":false,"required":["kind","asking_claim_id"],"properties":{"kind":{"const":"runtime-ask"},"asking_claim_id":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["kind","mission_revision","opening_claim_id"],"properties":{"kind":{"const":"authored-episode"},"mission_revision":{"type":"string"},"opening_claim_id":{"type":"string"}}}]},
+    "ReferenceSemantics": {"enum":["retained-reference","live-reference"]},
+    "HistoricalReference": {"type":"object","additionalProperties":false,"required":["target_id","revision","semantics"],"properties":{"target_id":{"type":"string"},"revision":{"oneOf":[{"type":"string"},{"type":"null"}]},"semantics":{"$ref":"#/$defs/ReferenceSemantics"}}},
+    "HistoricalPayload": {"oneOf":[{"type":"object","additionalProperties":false,"required":["availability","title","text","request","references","provenance"],"properties":{"availability":{"const":"available"},"title":{"oneOf":[{"type":"string"},{"type":"null"}]},"text":{"type":"string"},"request":{},"references":{"type":"array","items":{"$ref":"#/$defs/HistoricalReference"}},"provenance":{"$ref":"#/$defs/RequestProvenance"}}},{"type":"object","additionalProperties":false,"required":["availability","reason"],"properties":{"availability":{"const":"unavailable"},"reason":{"$ref":"#/$defs/PayloadUnavailable"}}}]},
+    "EpisodeState": {"oneOf":[{"type":"object","additionalProperties":false,"required":["availability","status","answers"],"properties":{"availability":{"const":"available"},"status":{"type":"string"},"answers":{"type":"array","items":{}}}},{"type":"object","additionalProperties":false,"required":["availability"],"properties":{"availability":{"const":"unavailable"}}}]},
+    "RequestHistoryItem": {"type":"object","additionalProperties":false,"required":["key","payload","state","complete"],"properties":{"key":{"$ref":"#/$defs/SourceEpisode"},"payload":{"$ref":"#/$defs/HistoricalPayload"},"state":{"$ref":"#/$defs/EpisodeState"},"complete":{"type":"boolean"}}},
+    "RequestHistoryRelation": {"type":"object","additionalProperties":false,"required":["predecessor","request","reason"],"properties":{"predecessor":{"$ref":"#/$defs/SourceEpisode"},"request":{"$ref":"#/$defs/SourceEpisode"},"reason":{"type":"string"}}},
+    "SourceEpisodeGroup": {"type":"object","additionalProperties":false,"required":["source_id","episodes"],"properties":{"source_id":{"type":"string"},"episodes":{"type":"array","items":{"$ref":"#/$defs/SourceEpisode"}}}},
+    "HistorySourceSupport": {"enum":["person-step","unsupported-source"]},
+    "RequestHistoryPage": {"type":"object","additionalProperties":false,"required":["items","relations","source_episodes","boundary_items","source_support","next_cursor","complete"],"properties":{"items":{"type":"array","items":{"$ref":"#/$defs/RequestHistoryItem"}},"relations":{"type":"array","items":{"$ref":"#/$defs/RequestHistoryRelation"}},"source_episodes":{"type":"array","items":{"$ref":"#/$defs/SourceEpisodeGroup"}},"boundary_items":{"type":"array","items":{"$ref":"#/$defs/RequestHistoryItem"}},"source_support":{"oneOf":[{"$ref":"#/$defs/HistorySourceSupport"},{"type":"null"}]},"next_cursor":{"oneOf":[{"type":"string"},{"type":"null"}],"description":"Opaque keyset cursor scoped to the person and thread. Each page reauthorizes its anchor and rows and reads status fresh; not a snapshot."},"complete":{"type":"boolean","description":"Completeness of authorized selection and retained evidence; hidden endpoints do not affect this indicator."}}},
+    "ThreadTargetParameters": {"type": "object", "additionalProperties": false, "required": ["target_id"], "properties": {"target_id": {"$ref": "#/$defs/Id"}}},
+    "ThreadRenameParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "title", "title_revision"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}, "title_revision": {"$ref": "#/$defs/Revision"}}},
     "AgentDeclaration": {
       "type": "object",
       "additionalProperties": false,
@@ -3994,6 +4079,34 @@
         "private_notes": { "$ref": "#/$defs/PrivateNotesFence" }
       }
     },
+    "ThreadMarkUnreadParameters": {
+      "description":"Mark unread with an idempotent operation key. After completion, read the thread summary to obtain opaque mark_id values. The generic action-result operation_id is not a mark ID.",
+      "type":"object","additionalProperties":false,
+      "required":["target_id","anchor_message_id","observed_marks"],
+      "properties":{
+        "target_id":{"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$"},
+        "anchor_message_id":{"type":"string","pattern":"^message/.+"},
+        "observed_marks":{"type":"array","items":{"type":"string"},"description":"Captured opaque stable mark operation IDs superseded by this mark. Unobserved concurrent marks and natural read history are preserved."}
+      }
+    },
+    "ThreadClearUnreadParameters": {
+      "description":"Clear exactly the opaque mark_id values captured from the thread summary. Do not substitute the generic action-result operation_id, claim IDs, timestamps or local retry counters.",
+      "type":"object","additionalProperties":false,
+      "required":["target_id","observed_marks"],
+      "properties":{
+        "target_id":{"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$"},
+        "observed_marks":{"type":"array","items":{"type":"string"},"description":"Only these captured opaque stable mark operation IDs are removed. Never derive IDs from returned claim records."}
+      }
+    },
+    "ThreadReadParameters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_id", "through_message_id", "seen_message_ids"],
+      "properties": {
+        "target_id": {"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$"},
+        "through_message_id": {"type":["string","null"],"pattern":"^message/.+","maxLength":512},
+        "seen_message_ids": {"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","pattern":"^message/.+","maxLength":512}}
+      }
+    },
     "ActionCommon": {
       "type": "object",
       "additionalProperties": false,
@@ -4007,6 +4120,11 @@
             "arrangement.edit",
             "arrangement.membership.edit",
             "read-position.advance",
+            "thread.rename",
+            "thread.start",
+            "thread.reply",
+            "thread.close",
+            "thread.reopen",
             "custom.reply",
             "private-notes.write",
             "prompt.respond",
@@ -4019,6 +4137,9 @@
             "review.request-changes",
             "message.send",
             "message.read",
+            "thread.read",
+            "thread.mark-unread",
+            "thread.clear-unread",
             "message.close",
             "launch.create",
             "launch.revise",
@@ -4231,6 +4352,11 @@
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "arrangement.membership.edit"}, "parameters": {"$ref": "#/$defs/ArrangementMembershipEditParameters"}}},
         {"properties": {"type": {"const": "read-position.advance"}, "parameters": {"$ref": "#/$defs/ReadPositionAdvanceParameters"}}},
+        {"properties": {"type": {"const": "thread.rename"},"parameters": {"$ref": "#/$defs/ThreadRenameParameters"}}},
+        {"properties": {"type": {"const": "thread.start"}, "parameters": {"$ref": "#/$defs/ThreadStartParameters"}}},
+        {"properties": {"type": {"const": "thread.reply"}, "parameters": {"$ref": "#/$defs/ThreadReplyParameters"}}},
+        {"properties": {"type": {"const": "thread.close"},"parameters": {"$ref": "#/$defs/ThreadTargetParameters"}}},
+        {"properties": {"type": {"const": "thread.reopen"},"parameters": {"$ref": "#/$defs/ThreadTargetParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
         {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
@@ -4267,6 +4393,9 @@
             }
           }
         },
+        { "properties": { "type": { "const": "thread.read" }, "parameters": { "$ref": "#/$defs/ThreadReadParameters" } } },
+        { "properties": { "type": { "const": "thread.mark-unread" }, "parameters": { "$ref": "#/$defs/ThreadMarkUnreadParameters" } } },
+        { "properties": { "type": { "const": "thread.clear-unread" }, "parameters": { "$ref": "#/$defs/ThreadClearUnreadParameters" } } },
         { "properties": { "type": { "enum": ["message.read", "message.close"] }, "parameters": { "$ref": "#/$defs/TargetParameters" } } },
         {
           "properties": {
@@ -4492,7 +4621,8 @@
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
         "membership_revision": { "$ref": "#/$defs/Revision" },
         "attention_control": { "$ref": "#/$defs/AttentionControlState" },
-        "read_position_at": { "$ref": "#/$defs/Timestamp", "description": "read-position.advance: the stored position after the merge, whether or not this advance moved it." }
+        "read_position_at": { "$ref": "#/$defs/Timestamp", "description": "read-position.advance: the stored position after the merge, whether or not this advance moved it." },
+        "metadata_claim_id": { "$ref": "#/$defs/Revision" }
       }
     },
     "AssistantPrincipal": { "enum": ["assistant/chatgpt", "assistant/mcp"] },
@@ -5166,7 +5296,9 @@
       "devices",
       "commands",
       "sessions",
-      "terminals"
+      "terminals",
+      "threads",
+      "thread-timeline"
     ] },
     "ResourceCollectionName": { "description": "Collections whose windows hold resources.", "enum": [
       "missions",
@@ -5237,6 +5369,9 @@
     "CollectionCommand": {
       "oneOf": [
         { "$ref": "#/$defs/AgentsPublicationSubscribe" },
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "thread-timeline"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "thread_context"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "thread_context": {"$ref": "#/$defs/ThreadCollectionContext"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "actor": {"type": ["string", "null"]}, "status": {"type": ["string", "null"]}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
@@ -5248,6 +5383,7 @@
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
             "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "collection": { "enum": ["missions", "attention", "work", "glasses", "summary"] },
+            "attention_thread_hints": { "type": "boolean", "description": "Opt into the owner thread hint on an attention subscription after collection.attention.thread-hints is granted." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             "person": { "type": ["string", "null"] },
             "actor": { "type": ["string", "null"] },
@@ -5445,6 +5581,10 @@
       "oneOf": [
         { "$ref": "#/$defs/AgentsSnapshotChunk" },
         { "$ref": "#/$defs/AgentsChanges" },
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "upserts", "order", "has_more", "removes"], "properties": {"kind": {"const": "changes"}, "id": {"type": "string"}, "collection": {"const": "thread-timeline"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "upserts": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}, "removes": {"type": "array", "items": {"$ref": "#/$defs/Id"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "items", "order", "has_more"], "properties": {"kind": {"const": "snapshot"}, "id": {"type": "string"}, "collection": {"const": "thread-timeline"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "upserts", "order", "has_more", "removes"], "properties": {"kind": {"const": "changes"}, "id": {"type": "string"}, "collection": {"const": "threads"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "upserts": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}, "removes": {"type": "array", "items": {"$ref": "#/$defs/Id"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "items", "order", "has_more"], "properties": {"kind": {"const": "snapshot"}, "id": {"type": "string"}, "collection": {"const": "threads"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "items": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}}},
         {
           "type": "object",
           "additionalProperties": false,

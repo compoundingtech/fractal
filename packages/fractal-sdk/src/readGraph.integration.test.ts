@@ -57,12 +57,14 @@ it('isolates SDK optional services while bounding the shared client dependency',
   // The transport client still includes read and mutation methods; generated schema modules
   // partition shared read codecs from optional validators without splitting that client class.
   // Only read validators and shared helpers may be constructed by the eager SDK graph.
+  // Delivery confirmation is shared by conversation and thread clients, so the transport
+  // client also eagerly reaches the common action-receipt and delivery policy helpers.
   const clientRoot = resolve(repoRoot, 'clients/typescript/fractal-client')
   expect(visited.has(resolve(clientRoot, 'Schema.generated.ts'))).toBe(false)
   expect([...visited].filter((path) => path.startsWith(`${clientRoot}/`))
     .map((path) => relative(clientRoot, path)).sort()).toEqual([
       'Client.generated.ts', 'Models.generated.ts', 'ReadSchema.generated.ts',
       'SchemaSupport.generated.ts',
-      'errors.ts', 'index.ts', 'subagent-drivers.ts',
+      'actionReceipt.ts', 'delivery.ts', 'errors.ts', 'index.ts', 'subagent-drivers.ts',
     ])
 })

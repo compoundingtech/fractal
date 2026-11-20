@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "summary": "Add private durable threads across Inbox, agent conversations, missions and clients",
+  "replay": {
+    "status": "changed",
+    "detail": "Stored thread history, historical ask origins and existing pairing records remain readable without rewriting immutable claims or predecessor links. Metadata projection follows causal successors before canonical concurrent ties and excludes repaired sources. Compatible readers retry signed marked messages held by older schema readers through the existing replication backlog."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Published storage version 20 advances directly to 23 on normal store open; private version-21/22 reader pilots also upgrade through the same path. Startup installs additive thread, Inbox-origin and operational-episode indexes. The causal metadata correction adds no claim field or table migration; its reader floor protects the corrected interpretation. Generic Inbox source/episode origins and generated Rust, TypeScript and Swift contracts share this boundary; the signed message envelope marker remains thread_reader_version 2.",
+    "transitions": [
+      [
+        20,
+        23
+      ],
+      [
+        21,
+        23
+      ],
+      [
+        22,
+        23
+      ]
+    ]
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Thread creation, titles, lifecycle and ask links are durable. Metadata CAS checks the opaque complete effective snapshot and appends its causal frontier atomically, retaining existing authority and idempotency checks. Existing message delivery and message.read receipts remain authoritative; thread quotes do not answer or settle an ask. Explicit read acknowledgements apply only to the exact shown message IDs. Existing checkpoint and replication signatures are preserved."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Current clients require threads-v1 version 2 and the exact summary feed. Every Inbox source can start an atomic first-message thread with its server-resolved responsible agent; historical source discovery remains readable after resolution. Rename, Close, Reopen, closed-thread replies, message quotes and explicit read progress use scoped actions. The existing Inbox row gains an opt-in unread hint without a new alert or count. MCP reads and authenticated bound delivery routing hints retain their existing owner, session and revocation boundaries. Bound native agents read structured history through their dedicated endpoint. Private thread contents stay out of ordinary conversations, generic graph/status/event reads and foreign-owner reads. Device-authenticated sends require their enrolled signature; trusted-local sends retain their existing authority; an approved browser can reuse its existing send grant only on its issuer, with writer-time revalidation. Lifecycle receipts require the immutable metadata_claim_id with no metadata_revision alias; subsequent CAS fences use the observed ThreadSummary.revision. The native alerts discuss convenience now starts a durable Inbox thread and returns the thread.start ActionResult (including thread and first-message IDs), rather than an ordinary message receipt. The obsolete --to recipient override is removed; immediate client upgrades are required."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "Normal startup advances the local floor and installs additive indexes on existing databases once. Deploy through the existing rolling restart and reconnection path, retaining a consistent pre-upgrade backup."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Deploy the complete reader build with thread_writes disabled, then directly verify current reader-readiness version 3 on every configured and active serving member and upgrade TUI, web, iOS and MCP clients before separately enabling thread_writes. The default stays disabled. Historical advertisements alone are insufficient readiness proof; keep fresh older readers out of the serving fleet. Where an Inbox source has no originating agent, use an explicitly configured inbox_fallback_agent (Home Manager inboxFallbackAgent); the server never guesses a recipient."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Version-20, version-21 and version-22 binaries refuse a version-23 database, and readers that do not understand the signed message marker quarantine those messages. Recover using a compatible version-23 build while preserving history and pairings. Do not lower user_version. A rollback requires a coordinated stopped restore of a consistent pre-upgrade backup with its matching binary and existing runtime/authority recovery requirements; it cannot retain later thread writes. Preserve the upgraded history and pairing evidence. The stateless alerts discuss convenience retries only while its current Inbox episode, title and responsible agent are unchanged. Resolved sources refuse locally; changed requests with the same explicit key conflict without appending a replacement. Use the durable thread ID to inspect retained history in a current thread client. Original-packet receipt recovery remains available to clients retaining that exact packet. Without an explicit key, the CLI retains its ordinary content-and-hour deduplication policy."
+  }
+}

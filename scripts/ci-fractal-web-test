@@ -8,6 +8,7 @@ import re
 import runpy
 import subprocess
 import tempfile
+import textwrap
 
 root = Path(__file__).resolve().parent.parent
 detector = root / "scripts/ci-fractal-web-changes"
@@ -181,6 +182,7 @@ print("passed: raw terminal runtime dependencies select kit lanes, unit tests do
 # state cell, transcript and workspace stories.
 # Some are declared ahead of the web changes that add them, so those changes select kit plays without touching CI paths.
 bundled_app_kit_inputs = (
+    "apps/fractal-web/src/data/agentName.ts",
     "apps/fractal-web/src/conversation/alerts/PromptAlert.tsx",
     "apps/fractal-web/src/conversation/alerts/alertAnswers.ts",
     "apps/fractal-web/src/conversation/alerts/alertChoices.ts",
@@ -438,6 +440,10 @@ for event in ("pull_request", "merge_group", "workflow_dispatch"):
     assert f"  {event}:" in header, event
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", jobs))
 changes, execution, gate_job = blocks["fractal-web-changes"], blocks["fractal-web-execution"], blocks["fractal-web"]
+embedded_detector = re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", changes)
+assert embedded_detector is not None, "the hosted detector must embed its Python source"
+# workspace-ci.ts's embeddedPython adds a newline before the closing heredoc delimiter.
+assert textwrap.dedent(embedded_detector.group(1)) == detector.read_text() + "\n", "regenerate workflows: the embedded detector must equal the tested source, including KIT_PATTERNS"
 
 # A relevant, sharded merge group covered by evidence produces no execution or receipts.
 conditions = [
@@ -557,6 +563,7 @@ assert "'src/**/*.perf.test.ts'" in (sdk / "vitest.config.ts").read_text()
 assert "include: ['src/**/*.perf.test.ts']" in (sdk / "vitest.perf.config.ts").read_text()
 print("passed: deterministic SDK tests and isolated frame CPU budgets have separate lanes")
 assert lanes.index('lane "CSS asset guard" node --test apps/fractal-web/scripts/vite-css-assets.node-test.mjs') < lanes.index('lane "App production build" production_build')
+assert lanes.index('lane "Preview instance config" node --test apps/fractal-web/scripts/threads-preview-config.node-test.mjs') < lanes.index('lane "App production build" production_build')
 assert "fractalCssAssets()" in (root / "apps/fractal-web/vite.config.ts").read_text()
 print("passed: the CSS asset guard proves its negatives before guarding the app production build")
 
@@ -758,15 +765,11 @@ usage_story = ["apps/fractal-web/src/monitor/UsagePane.stories.tsx", "apps/fract
 assert detector_kit_paths(usage_story) == usage_story, "the Usage story and its production data closure select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/web/subagentThreadFocus.ts", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
-browser_pairing_closure = [
-    "apps/fractal-web/src/data/browserPairing.ts",
-    "apps/fractal-web/src/web/BrowserPairing.tsx",
-    "apps/fractal-web/src/web/browserPairingState.ts",
-]
-assert detector_kit_paths(browser_pairing_closure) == browser_pairing_closure, "workspace stories bundle the browser pairing panel and its state/transport closure"
-assert not detector_kit_paths(["apps/fractal-web/src/web/BrowserPairing.integration.test.tsx"]), "pairing runtime coverage must not select its integration test"
 pins_closure = ["apps/fractal-web/src/data/pins.ts", "apps/fractal-web/src/data/sidebarPins.ts"]
 assert detector_kit_paths(pins_closure) == pins_closure, "the workspace sidebar bundles the ordered Pins binding"
+subject_read_fixture_closure = ["apps/fractal-web/src/data/subjectReadPort.gateway.fixtures.json"]
+assert detector_kit_paths(subject_read_fixture_closure) == subject_read_fixture_closure, "workspace stories bundle the subject-read gateway fixture"
+assert not detector_kit_paths(["apps/fractal-web/src/data/unrelated.gateway.fixtures.json"]), "subject-read fixture coverage must not select unrelated fixtures"
 lazy_schema_closure = [
     "apps/fractal-web/src/data/attachmentSchema.ts",
     "apps/fractal-web/src/folders/arrangementSchema.ts",
@@ -774,6 +777,30 @@ lazy_schema_closure = [
 ]
 assert detector_kit_paths(lazy_schema_closure) == lazy_schema_closure, "workspace stories bundle the lazy write schema adapters"
 assert not detector_kit_paths([path.replace(".ts", ".unit.test.ts") for path in lazy_schema_closure]), "adapter coverage must not select unrelated unit tests"
+threads_pairing_closure = [
+    "apps/fractal-web/src/data/browserPairing.ts",
+    "apps/fractal-web/src/data/conversationPort.ts",
+    "apps/fractal-web/src/threads/LiveThreads.tsx",
+    "apps/fractal-web/src/threads/MarkedUnreadThreads.tsx",
+    "apps/fractal-web/src/threads/markedUnreadPages.ts",
+    "apps/fractal-web/src/threads/meaningfulGeometry.ts",
+    "apps/fractal-web/src/threads/RelatedRequests.tsx",
+    "apps/fractal-web/src/threads/requestHistoryPages.ts",
+    "apps/fractal-web/src/threads/ThreadEditor.tsx",
+    "apps/fractal-web/src/threads/ThreadPanel.tsx",
+    "apps/fractal-web/src/threads/ThreadRefusalAlert.tsx",
+    "apps/fractal-web/src/threads/threadSource.ts",
+    "apps/fractal-web/src/threads/UnreadReminderControls.tsx",
+    "apps/fractal-web/src/threads/unread-action-port.ts",
+    "apps/fractal-web/src/threads/unreadVisit.ts",
+    "apps/fractal-web/src/threads/useForegroundVisibility.ts",
+    "apps/fractal-web/src/web/BrowserPairing.tsx",
+    "apps/fractal-web/src/web/browserPairingState.ts",
+]
+assert detector_kit_paths(threads_pairing_closure) == threads_pairing_closure, "workspace stories bundle thread UI and browser pairing dependencies"
+assert not detector_kit_paths([
+    path.rsplit(".", 1)[0] + ".integration.test." + path.rsplit(".", 1)[1] for path in threads_pairing_closure
+]), "thread and pairing dependency coverage must not select their unrelated integration tests"
 embed_closure = ["apps/fractal-web/src/embed/Embed.stories.tsx", "apps/fractal-web/src/embed/Embed.tsx", "apps/fractal-web/src/embed/captures/provenance.json", "apps/fractal-web/src/state/storageAdapter.ts"]
 assert detector_kit_paths(embed_closure) == embed_closure, "the product embed story and its nested fixtures select kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
@@ -788,10 +815,11 @@ with tempfile.TemporaryDirectory() as scratch:
                     "./../../apps/fractal-web/src/web/ComposerImages.stories.tsx",
                     "./../../apps/fractal-web/src/web/NativeTranscript.stories.tsx",
                     *[f"./../../{path}" for path in lazy_schema_closure],
+                    *[f"./../../{path}" for path in subject_read_fixture_closure],
                     "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
-    assert covered.returncode == 0 and "10 repository files, 0 outside" in covered.stdout, covered
-    pairing = graph(*[f"./../../{path}" for path in browser_pairing_closure])
-    assert pairing.returncode == 0 and "3 repository files, 0 outside" in pairing.stdout, pairing
+    assert covered.returncode == 0 and "11 repository files, 0 outside" in covered.stdout, covered
+    threads_pairing = graph(*[f"./../../{path}" for path in threads_pairing_closure])
+    assert threads_pairing.returncode == 0 and f"{len(threads_pairing_closure)} repository files, 0 outside" in threads_pairing.stdout, threads_pairing
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):

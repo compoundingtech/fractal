@@ -14,8 +14,8 @@ pub struct Prefs {
     /// Fractal TUI keeps opening agents the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_first: Option<bool>,
-    /// An agent's tab opens on its conversation rather than attaching its terminal. Attaching is
-    /// the default (2026-10-15); absent means this device never chose.
+    /// An agent's tab opens on its conversation rather than attaching its terminal.
+    /// Conversation is the default; absent means this device never chose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_first: Option<bool>,
     /// Use the daemon after a failed direct attachment; absence means enabled.
@@ -29,11 +29,10 @@ pub struct Prefs {
     pub sidebar_width: Option<u16>,
 }
 
-/// Whether this device opens agents on their conversation: its own choice, else no. Before the
-/// setting existed every file carried `terminal_first`, true only when the person turned it on
-/// and false otherwise, so false is no choice and both mean attaching.
+/// This device's explicit choice, falling back to the older terminal-first opt-in.
+/// Legacy false was written for the default, not an explicit conversation choice.
 pub fn conversation_first(prefs: &Prefs) -> Option<bool> {
-    prefs.conversation_first
+    prefs.conversation_first.or_else(|| (prefs.terminal_first == Some(true)).then_some(false))
 }
 
 /// Preferences below the selected product state directory.
@@ -131,7 +130,7 @@ mod tests {
         assert_eq!(load(&path).agent_details, Some(false));
         assert_eq!(load(&path).sidebar_width, Some(36));
         assert_eq!(conversation_first(&load(&path)), Some(true));
-        // A file from before the setting is no choice: the terminal attaches.
+        // A file from before the setting is no choice: the conversation opens.
         std::fs::write(&path, br#"{"simple": false}"#).unwrap();
         assert_eq!(conversation_first(&load(&path)), None);
         assert_eq!(load(&path).agent_details, None);
@@ -139,11 +138,14 @@ mod tests {
 
     #[test]
     fn an_old_terminal_first_choice_still_attaches_and_its_default_is_no_choice() {
-        // Before 2026-10-15 every saved file carried terminal_first; true was a choice to attach,
-        // false only the default of the day. Neither turns into conversation first.
-        for old in [r#"{"terminal_first": true}"#, r#"{"simple": true, "terminal_first": false}"#] {
+        for (old, expected) in [
+            (r#"{"terminal_first": true}"#, Some(false)),
+            (r#"{"simple": true, "terminal_first": false}"#, None),
+            (r#"{"conversation_first": false}"#, Some(false)),
+            (r#"{"conversation_first": true, "terminal_first": true}"#, Some(true)),
+        ] {
             let prefs: Prefs = serde_json::from_str(old).unwrap();
-            assert_eq!(conversation_first(&prefs), None, "{old}");
+            assert_eq!(conversation_first(&prefs), expected, "{old}");
         }
         // A newer file an older Fractal TUI reads keeps working there: unknown keys are ignored.
         let new = serde_json::to_string(&Prefs {

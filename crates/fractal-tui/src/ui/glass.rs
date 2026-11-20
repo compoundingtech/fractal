@@ -955,6 +955,13 @@ pub(crate) enum Open {
     Glass,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ThreadReading {
+    host: String,
+    id: String,
+    visible: HashSet<String>,
+}
+
 #[derive(Default)]
 struct Palette {
     query: String,
@@ -969,6 +976,8 @@ struct Palette {
     /// The palette is asking for a glass's name; the query is the name.
     naming: Option<Naming>,
     sidebar: Option<resource_sidebar::PaletteMode>,
+    /// Visible body evidence captured before the palette covers the active pane.
+    thread_reading: Option<ThreadReading>,
 }
 
 /// What a name typed into the palette is for.
@@ -1004,6 +1013,7 @@ enum Action {
     /// Agents open on their terminal, or on their conversation.
     ToggleConversationFirst,
     ToggleTerminalFallback,
+    ThreadReading { target: ThreadReading, unread: bool },
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -1156,7 +1166,7 @@ impl Ui {
                     .iter()
                     .find(|candidate| candidate.id == agent)
                     .map_or_else(
-                        || agent.trim_start_matches("agent/").to_owned(),
+                        || "an agent".to_owned(),
                         |found| found.name.clone(),
                     );
                 let excerpt =
@@ -1405,6 +1415,17 @@ impl Ui {
             search,
             action,
         };
+        if let Some(target) = self.glasses.palette.as_ref().and_then(|palette| palette.thread_reading.as_ref()) {
+            for (unread, allowed, label, detail) in [
+                (false, self.threads.can_mark_read(&target.id), "Mark read", "clear private reminders or mark visible thread replies read"),
+                (true, !target.visible.is_empty() && self.threads.can_mark_unread(&target.id), "Mark unread", "private reminder at a visible thread message"),
+            ] {
+                if allowed {
+                    choices.push(start(label.into(), detail, format!("{label} thread reminder"),
+                        Action::ThreadReading { target: target.clone(), unread }));
+                }
+            }
+        }
         choices.push(start(
             "New mission".into(),
             "describe it; a planner drafts it for you to approve",
@@ -1433,7 +1454,7 @@ impl Ui {
             } else {
                 "Conversation first: on".into()
             },
-            "this device; opening an agent attaches its terminal unless this is on",
+            "this device; conversation is the default; turn off to attach terminals",
             "conversation first terminal default view open agents attach tui setting".into(),
             Action::ToggleConversationFirst,
         ));
@@ -2574,7 +2595,7 @@ impl Ui {
 
     /// Home while another group has the focus: its list and card, from Home's own selection.
     fn draw_home(&self, buf: &mut Buffer, area: Rect) {
-        let selected = self.list_selection(0);
+        let selected = self.home_selection();
         let side = if area.width >= 70 {
             (area.width * 3 / 10).clamp(30, 46)
         } else {
@@ -3117,6 +3138,7 @@ impl Ui {
             }
             Pane::Machine(id) => find(id).trim_start_matches("machine/").to_owned(),
             Pane::Resource(id) => self.resource_sidebar.observations.iter().find(|row| &row.id == id).map(super::observed_resources::title).unwrap_or_else(|| id.clone()),
+            Pane::Thread(id) => self.threads.summary(id).map(|row| row.title.clone()).unwrap_or_else(|| "Thread".into()),
             Pane::Document(name) => document_title(name),
             Pane::Documents(None) => "Documents".into(),
             Pane::Documents(Some(prefix)) => format!("Documents · {}", prefix.trim_start_matches("doc/")),
@@ -3425,6 +3447,7 @@ impl Ui {
         // has the keys, whose own letters (b and p in Usage) must not type into a tab behind it.
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
+        let thread_editing = self.threads.editing_in(&self.main_pane());
         // A document page, the documents list and Availability act on plain letters; an open
         // Availability box takes the typing keys instead.
         if !sidebar_keys
@@ -3432,7 +3455,7 @@ impl Ui {
             && !self.editing
             && self.find.is_none()
             && !mission_form
-            && self.chat.as_ref().is_none_or(|chat| !chat.editing)
+            && !thread_editing
             && self.confirm.is_none()
             && self.popover.is_none()
             && (self.document_key(key) || self.availability_key(key))
@@ -3444,7 +3467,7 @@ impl Ui {
         if glasses.home
             && !self.editing
             && self.confirm.is_none()
-            && self.chat.as_ref().is_none_or(|chat| !chat.editing)
+            && !thread_editing
         {
             match key.code {
                 KeyCode::Esc => self.close_home(),
@@ -3454,12 +3477,27 @@ impl Ui {
             }
             return true;
         }
+        // Ctrl+↑/↓ walk a conversation's tools and thread headings from its message boxes too:
+        // the box lets go of the keys and keeps its draft, so Ctrl+Enter and the thread keys
+        // act on what is focused instead of typing.
+        if control
+            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            && conversation.is_some()
+            && self.find.is_none()
+            && !mission_form
+            && self.new_mission.is_none()
+            && self.confirm.is_none()
+            && self.popover.is_none()
+        {
+            self.focus_step(if key.code == KeyCode::Up { -1 } else { 1 });
+            return true;
+        }
         // While the person types, every editing key is the input's (Ctrl+W deletes a word);
         // Esc leaves the input and glasses keys work again.
         if self.editing
             || self.find.is_some()
             || mission_form
-            || self.chat.as_ref().is_some_and(|chat| chat.editing)
+            || thread_editing
         {
             return false;
         }
@@ -3476,7 +3514,7 @@ impl Ui {
         let tabs = glass.count(glass.focus).max(1);
         let current = glass.layout.groups()[glass.focus].current;
         let subject = glass.focused().is_some_and(|key| key != "list:home");
-        let quiet = !self.editing && self.new_mission.is_none() && self.chat.is_none();
+        let quiet = !self.editing && self.new_mission.is_none() && !thread_editing;
         // Letters type, chords command (Nathan, 2026-10-03): in a conversation tab a plain
         // printable key opens its message box and types itself, the first key included. Keys
         // that act are chords below, so a sentence never starts by running a command.
@@ -3517,9 +3555,7 @@ impl Ui {
             }
             // Ctrl chords, not Alt: on a Mac Option and a letter types a character (Nathan,
             // 2026-10-03).
-            KeyCode::Enter if control && quiet && conversation.is_some() => self.toggle_focused_tool(),
-            KeyCode::Up if control && quiet && conversation.is_some() => self.focus_tool(-1),
-            KeyCode::Down if control && quiet && conversation.is_some() => self.focus_tool(1),
+            KeyCode::Enter if control && quiet && conversation.is_some() => self.toggle_focused(),
             KeyCode::Char('u') if control && quiet && conversation.is_some() => self.toggle_focused_images(),
             KeyCode::Char('e') if control && conversation.is_some() => self.toggle_all_tools(),
             KeyCode::Char('p') if control && conversation.is_some() => self.toggle_simple(),
@@ -3684,9 +3720,17 @@ impl Ui {
     }
 
     pub(crate) fn open_palette(&mut self, section: Option<usize>, enter: Open) {
+        let thread_reading = self.focused_pane()
+            .and_then(|pane| {
+                let id = self.threads.reading_target(&pane)?;
+                let host = pane.key();
+                let visible = self.frame.borrow().visible_thread_messages(&host, &id);
+                Some(ThreadReading { host, id, visible })
+            });
         self.glasses.palette = Some(Palette {
             section,
             enter,
+            thread_reading,
             ..Palette::default()
         });
     }
@@ -3727,6 +3771,14 @@ impl Ui {
             Action::ToggleSimple => self.toggle_simple(),
             Action::ToggleConversationFirst => self.toggle_conversation_first(),
             Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
+            Action::ThreadReading { target, unread } => {
+                let sent = if unread {
+                    self.threads.mark_unread(&target.host, &target.id, &target.visible)
+                } else {
+                    self.threads.mark_visible_read(&target.host, target.id, &target.visible)
+                };
+                if !sent { self.flash_as(Severity::Info, "No visible message to mark"); }
+            }
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);
@@ -3861,7 +3913,7 @@ impl Ui {
                     .iter()
                     .find(|agent| agent.id == from)
                     .map(|agent| agent.name.clone())
-                    .unwrap_or_else(|| from.rsplit('/').next().unwrap_or(from).to_owned())
+                    .unwrap_or_else(|| "an agent".to_owned())
             })
             .unwrap_or_else(|| "A seat".into());
         // The name came from a file another process wrote: no control characters in the flash.
@@ -4164,6 +4216,7 @@ impl Ui {
         match self.focused_pane() {
             Some(pane) => self.focus_pane(&pane),
             None => {
+                self.threads.select_inbox_detail(None);
                 self.kdl = false;
                 self.note_focus();
             }
@@ -4264,7 +4317,7 @@ impl Ui {
             Some(group) if group != focus => {
                 // A click on another split's message box focuses the split and the box.
                 let composer = self.frame.borrow().hits.iter().rev().any(|(rect, hit)| {
-                    matches!(hit, Hit::Composer | Hit::ChatComposer) && contains(*rect, column, row)
+                    matches!(hit, Hit::Composer) && contains(*rect, column, row)
                 });
                 self.focus_group(group);
                 !composer
@@ -4864,6 +4917,14 @@ impl Ui {
                 self.selected[tab] = position;
             }
         }
+        match pane {
+            Pane::Home(Some(id)) => self.threads.select_inbox_detail(Some(id.clone())),
+            Pane::List(0) if self.threads.inbox_detail().is_none() => {
+                self.threads.select_inbox_detail(self.list_selection(0));
+            }
+            Pane::List(0) => {}
+            _ => self.threads.select_inbox_detail(None),
+        }
         self.note_focus();
     }
 
@@ -4876,7 +4937,6 @@ impl Ui {
         }
         self.focus_seen = now;
         self.editing = false;
-        self.chat = None;
         self.answering = None;
         self.confirm = None;
     }
@@ -6007,6 +6067,9 @@ mod tests {
         let _ = screen(&ui);
         assert!(ui.frame.borrow().panes.iter().any(|pane| pane.key == "chat:agent/b"), "the conversation shows");
         ui.read_presented_conversations(&timelines);
+        assert!(badge(&ui).unread, "unknown foreground is not presentation evidence");
+        ui.input_event(crossterm::event::Event::FocusGained);
+        ui.read_presented_conversations(&timelines);
         assert!(!badge(&ui).unread);
         assert!(ui.world.unread.is_empty());
     }
@@ -6035,6 +6098,7 @@ mod tests {
         let now = Instant::now();
         ui.show_tab(1);
         ui.effects.clear();
+        ui.input_event(crossterm::event::Event::FocusGained);
         for at in [60_000, 90_000] {
             let timelines = presented_read_timeline(&mut ui, at);
             let _ = screen(&ui);
@@ -6075,6 +6139,9 @@ mod tests {
         ui.set_world(next);
         ui.show_tab(1);
         let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)), "unknown foreground cannot advance reads");
+        ui.input_event(crossterm::event::Event::FocusGained);
         ui.read_presented_conversations(&timelines);
         assert!(ui.reads.unread("agent/b", Some(90_000)), "stale presented prose cannot consume the roster update");
 
@@ -6957,12 +7024,13 @@ mod tests {
     }
 
     #[test]
-    fn opening_an_agent_attaches_its_terminal_unless_this_device_chose_conversation_first() {
-        // 2026-10-15: attaching is the default and conversation first the setting; flicking
-        // through tabs attaches nothing.
+    fn opening_an_agent_respects_the_default_and_stored_terminal_choice() {
+        // Explicit terminal-first still attaches; flicking through tabs attaches nothing.
         let mut ui = glass();
         ui.live = true;
-        assert!(!ui.conversation_first(), "attaching is the default");
+        let stored: prefs::Prefs = serde_json::from_str(r#"{"conversation_first":false}"#).unwrap();
+        ui.conversation_first = prefs::conversation_first(&stored);
+        assert!(!ui.conversation_first());
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
             Open::Tab,
@@ -6997,11 +7065,40 @@ mod tests {
             ui.focused_pane(),
             Some(Pane::Terminal("agent/example/atlas/builder".into()))
         );
-        // Conversation first: the same agent opens on its conversation.
+        // No stored choice: the same agent opens on its conversation.
         let mut ui = glass();
         ui.live = true;
-        ui.toggle_conversation_first();
+        assert_eq!(ui.conversation_first, None);
         assert!(ui.conversation_first());
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
+        ui.effects.clear();
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
+        ui.step_default_view();
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        assert_eq!(
+            ui.focused_pane(),
+            Some(Pane::Agent(Some("agent/example/atlas/builder".into())))
+        );
+        // The existing toggle selects terminal-first, then returns to conversation-first.
+        ui.toggle_conversation_first();
+        assert_eq!(ui.conversation_first, Some(false));
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
+        ui.effects.clear();
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
+        ui.step_default_view();
+        assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::OpenTerminal { .. })));
+        assert_eq!(
+            ui.focused_pane(),
+            Some(Pane::Terminal("agent/example/atlas/builder".into()))
+        );
+        ui.toggle_conversation_first();
+        assert_eq!(ui.conversation_first, Some(true));
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
             Open::Tab,
@@ -10958,6 +11055,12 @@ mod tests {
     fn a_seat_opens_an_agent_in_a_split_and_the_person_follows_it() {
         let mut ui = glass();
         let (one, _) = others(&ui);
+        let mut requester = ui.world.agents.items()[0].clone();
+        requester.id = "agent/st/assistant".into();
+        requester.name = "Atlas Builder".into();
+        if let Load::Ready(agents) = &mut ui.world.agents {
+            agents.push(requester);
+        }
         let before = tabs(&ui);
         let answer = ui.open_requested(
             Pane::Agent(Some(one.clone())),
@@ -10972,7 +11075,7 @@ mod tests {
         assert_eq!(after.0, after.2.len() - 1, "the new split has the focus");
         assert_eq!(ui.focus(), (1, Some(one.clone())));
         assert_eq!(ui.live_conversations()[0], one);
-        assert!(ui.flash.as_ref().unwrap().0.contains("assistant opened"));
+        assert_eq!(ui.flash.as_ref().unwrap().0, "Atlas Builder opened Docs Writer");
     }
 
     #[test]

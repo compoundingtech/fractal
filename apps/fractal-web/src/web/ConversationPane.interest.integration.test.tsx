@@ -84,6 +84,7 @@ class Gateway {
   readonly commands: CollectionCommand[] = []
   grantSend = false
   failSend = false
+  ambiguousSend = false
   abortSend = false
   snapshotFailure: string | undefined
   sendGate: Promise<void> | undefined
@@ -102,9 +103,10 @@ class Gateway {
       this.echoId = this.sendMessageId ?? `message/${[...digest.slice(0, 8)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`
       await this.sendGate
       if (this.abortSend) throw new TypeError('Failed to fetch')
-      if (this.failSend) return new Response(JSON.stringify({
+      if (this.failSend || this.ambiguousSend) return new Response(JSON.stringify({
         api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'unavailable',
-        message: 'Forced send outage', retryable: true, request_id: 'request/forced', details: {},
+        message: 'Forced send outage', retryable: true, request_id: 'request/forced',
+        ...(this.failSend ? { details: { applied: 'none' } } : {}),
       }), { status: 503, headers: { 'content-type': 'application/json' } })
       return new Response(JSON.stringify({ api_version: 'st3.client.v0', snapshot, value: {
         kind: 'action-result', action_id: action.id, operation_id: 'operation/send',
@@ -654,7 +656,6 @@ describe('ConversationPane composer/send binding', () => {
   it.each([
     { echoFirst: false, affectedId: undefined },
     { echoFirst: true, affectedId: undefined },
-    { echoFirst: false, affectedId: 'message/gateway-assigned' },
   ])('keeps the own-send row and turn mounted through acknowledgement ($echoFirst, $affectedId)', async ({ echoFirst, affectedId }) => {
     // The real kit scroller runs against deterministic jsdom dimensions; browser replay
     // separately checks measured row geometry in a fully styled lane. Only the lane is
@@ -708,6 +709,31 @@ describe('ConversationPane composer/send binding', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps an acknowledgement for a different message unconfirmed on its original row', async () => {
+    await prepareSendPane()
+    gateway!.sendMessageId = 'message/gateway-assigned'
+    await submitDraft()
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
+    expect(userRows()).toHaveLength(1)
+    expect(userRows()[0]!.textContent).toContain('hello')
+    expect(container.querySelector('[data-testid="send-unconfirmed"]')!.textContent).toContain('Not confirmed yet')
+    expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
+    expect(gateway!.actions).toHaveLength(1)
+    const firstAction = gateway!.actions[0]!
+    const row = userRows()[0]!
+    gateway!.sendMessageId = undefined
+    const resend = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-unconfirmed"] button')]
+      .find(button => button.textContent === 'Send again')!
+    flushSync(() => resend.click())
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'sent')
+    expect(gateway!.actions).toHaveLength(2)
+    expect(gateway!.actions[1]).toMatchObject({
+      id: firstAction.id, idempotency_key: firstAction.idempotency_key, parameters: firstAction.parameters,
+    })
+    expect(userRows()).toHaveLength(1)
+    expect(userRows()[0]).toBe(row)
+  })
+
   it('keeps the Sent row across a newer read that omits it (Fractal #1977), with no resend', async () => {
     await prepareSendPane()
     const send = vi.spyOn(live!.source.attachments!, 'send')
@@ -724,21 +750,22 @@ describe('ConversationPane composer/send binding', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it('retries two network failures and then succeeds with exactly one action per retry and the original key', async () => {
+  it('retries unconfirmed sends with one action per user retry and the original key', async () => {
     await prepareSendPane()
     const send = vi.spyOn(live!.source.attachments!, 'send')
     gateway!.abortSend = true
     await submitDraft()
-    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
-    const firstKey = gateway!.actions[0]!.idempotency_key
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
+    const firstAction = gateway!.actions[0]!
+    const firstKey = firstAction.idempotency_key
     const rowId = userRows()[0]!.getAttribute('data-item-id')
     const sendRows = () => userRows().filter(row => row.getAttribute('data-item-id') === rowId)
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       gateway!.conversationFrame(scratchSeat, [prompt(10, 'Previous prompt'), entry(11, 'Unrelated response')])
       live!.registry.refresh(live!.source.grants)
       await settle()
-      const retry = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-failure"] button')]
-        .find(button => button.textContent === 'Retry')
+      const retry = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-unconfirmed"] button')]
+        .find(button => button.textContent === 'Send again')
       expect(retry).toBeDefined()
       expect(retry!.disabled).toBe(false)
       let resolve!: () => void
@@ -761,18 +788,23 @@ describe('ConversationPane composer/send binding', () => {
       await until(() => sendRows()[0]?.getAttribute('data-send-state') === 'pending')
       expect(sendRows()[0]!.getAttribute('data-item-id')).toBe(rowId)
       resolve()
-      await until(() => sendRows()[0]?.getAttribute('data-send-state') === (attempt < 3 ? 'failed' : 'sent'))
-      expect(gateway!.actions.map(action => action.idempotency_key)).toEqual(Array(attempt + 1).fill(firstKey))
+      await until(() => sendRows()[0]?.getAttribute('data-send-state') === (attempt < 3 ? 'unconfirmed' : 'sent'))
+      expect(gateway!.actions.map(action => ({
+        id: action.id, idempotency_key: action.idempotency_key, parameters: action.parameters,
+      }))).toEqual(Array(attempt + 1).fill({
+        id: firstAction.id, idempotency_key: firstKey, parameters: firstAction.parameters,
+      }))
       expect(sendRows()).toHaveLength(1)
     }
   })
 
-  it('keeps a server refusal on its row and retries it with the original key', async () => {
+  it('keeps an explicitly unapplied server refusal on its row and retries it with the original key', async () => {
     await prepareSendPane()
     gateway!.failSend = true
     await submitDraft()
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
-    const firstKey = gateway!.actions[0]!.idempotency_key
+    const firstAction = gateway!.actions[0]!
+    const firstKey = firstAction.idempotency_key
     const failure = container.querySelector('[data-testid="send-failure"]')!
     flushSync(() => failure.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click())
     expect(failure.textContent).toContain('The message could not be sent. Check your connection and retry.')
@@ -782,20 +814,39 @@ describe('ConversationPane composer/send binding', () => {
     flushSync(() => retry.click())
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'sent')
     expect(gateway!.actions.map(action => action.idempotency_key)).toEqual([firstKey, firstKey])
+    expect(gateway!.actions[1]).toMatchObject({ id: firstAction.id, parameters: firstAction.parameters })
     expect(userRows()).toHaveLength(1)
   })
 
-  it('keeps network failure on the row, never in composer footer or status text', async () => {
+  it('keeps an ambiguous server outage unconfirmed with Send again rather than failure feedback', async () => {
+    await prepareSendPane()
+    gateway!.ambiguousSend = true
+    await submitDraft()
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
+    expect(userRows()).toHaveLength(1)
+    const notice = container.querySelector('[data-testid="send-unconfirmed"]')!
+    expect(notice.textContent).toContain('Not confirmed yet')
+    const resend = [...notice.querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent === 'Send again')
+    expect(resend).toBeDefined()
+    expect(resend!.disabled).toBe(false)
+    expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
+    expect(gateway!.actions).toHaveLength(1)
+  })
+
+  it('keeps network ambiguity as a neutral row status with an available composer', async () => {
     await prepareSendPane()
     gateway!.abortSend = true
     await submitDraft()
-    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
     await settle()
-    expect(container.querySelector('[data-testid="send-failure"]')!.textContent).toContain("Couldn't send")
+    expect(container.querySelector('[data-testid="send-unconfirmed"]')!.textContent).toContain('Not confirmed yet')
+    expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
+    expect(container.querySelector('[data-testid="send-unconfirmed"]')!.getAttribute('role')).toBe('status')
     const footer = container.querySelector('textarea')!.closest('form')!
     expect(footer.textContent).not.toMatch(/failed|fetch|couldn't send/i)
     expect(container.querySelector('textarea')!.disabled).toBe(false)
-    const disclosure = container.querySelector<HTMLButtonElement>('[data-testid="send-failure"] button[aria-expanded]')!
+    const disclosure = container.querySelector<HTMLButtonElement>('[data-testid="send-unconfirmed"] button[aria-expanded]')!
     flushSync(() => disclosure.click())
     expect(paneText()).not.toContain('Failed to fetch')
     expect([...container.querySelectorAll('[role="status"]')].map(status => status.textContent).join(' '))

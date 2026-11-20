@@ -1,5 +1,5 @@
 /** HTTP-only mutation ports; no collections socket is opened. */
-import { ClientError, FractalClient, type ActionOf, type ErrorEnvelope } from '@fractal/client'
+import { actionReceiptCheck, ClientError, FractalClient, type ActionOf, type ErrorEnvelope } from '@fractal/client'
 import { ActionResult, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
 import * as Data from 'effect/Data'
 import * as Effect from 'effect/Effect'
@@ -107,12 +107,12 @@ export const makeMutations = (options: FractalOptions): MutationPort => {
         Effect.tryPromise({
           try: () => {
             const { tags, ...parameters } = request.parameters
-            return traced.messageSend({
+            return actionReceiptCheck({ kind: 'message', actionId: request.id }, 'transport')(() => traced.messageSend({
               id: request.id,
               idempotency_key: request.idempotency_key,
               fence: request.fence,
               parameters: { ...parameters, ...(tags === undefined ? {} : { tags: [...tags] }) },
-            })
+            }))
           },
           catch: actionFailure,
         }).pipe(

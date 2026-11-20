@@ -143,6 +143,7 @@ mod tests {
     fn projection_moves_a_closed_message_to_the_archive() {
         let directory = tempdir().unwrap();
         let mut message = MessageView {
+            delivery_thread: None,
             subject: "message/abc".into(),
             from: "agent/sender".into(),
             to: "agent/receiver".into(),
@@ -188,6 +189,7 @@ mod tests {
     fn projection_encodes_a_nested_message_id_as_one_file() {
         let directory = tempdir().unwrap();
         let message = MessageView {
+            delivery_thread: None,
             subject: "message/kickoff/run-1".into(),
             from: "agent/sender".into(),
             to: "agent/receiver".into(),
@@ -218,6 +220,7 @@ mod tests {
     fn projection_carries_trusted_assistant_provenance_lines() {
         let directory = tempdir().unwrap();
         let mut message = MessageView {
+            delivery_thread: None,
             subject: "message/abc".into(),
             from: "assistant/example".into(),
             to: "agent/receiver".into(),

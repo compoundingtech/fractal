@@ -66,7 +66,7 @@ function SystemStatesStory({ scheme, connection: initial, failure, ticking = fal
   const [terminal, setTerminal] = React.useState<'ended' | 'loading'>('ended')
   const countdownText = useCountdown(ticking && connection === 'reconnecting')
   const reconnect = () => setConnection('reconnecting')
-  const text = connection === 'failed' ? failure : countdownText
+  const text = connection === 'failed' || connection === 'revoked' ? failure : countdownText
   return <main aria-label="Workspace" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'dark' && darkTheme, liveAccentTheme, scheme === 'light' && lightTheme)}>
     <aside aria-label="Agents" {...stylex.props(styles.sidebar)}>
       <header {...stylex.props(styles.brand)}><strong>Fractal</strong></header>
@@ -77,7 +77,8 @@ function SystemStatesStory({ scheme, connection: initial, failure, ticking = fal
     </aside>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
       {active === undefined ? null : <ThreadHeader folder={active.host} title={active.title} status={active.status} statusLabel={active.statusLabel} statusSince={active.statusSince} freshness="stale" now={observedAt} terminalAvailable panelOpen terminalOpen onTogglePanel={() => {}} onToggleTerminal={() => {}} />}
-      <ConnectionStatus state={connection} {...(text === undefined ? {} : { text })} {...(connection === 'offline' || connection === 'reconnecting' ? { onReconnect: reconnect } : {})} />
+      {/* Revoked receives a Reconnect handler too, so the plays prove the band withholds it. */}
+      <ConnectionStatus state={connection} {...(text === undefined ? {} : { text })} {...(connection === 'offline' || connection === 'reconnecting' || connection === 'revoked' ? { onReconnect: reconnect } : {})} />
       <div {...stylex.props(styles.body)}>
         <section aria-label="Missions" {...stylex.props(styles.missions)}>
           <header {...stylex.props(styles.paneHeader)}>Missions</header>
@@ -150,7 +151,7 @@ const meta = {
   component: SystemStatesStory,
   parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['roster'] } },
   args: { scheme: 'dark', connection: 'offline' },
-  argTypes: { ...scenarioArgTypes(['roster']), scheme: { options: ['dark', 'light'], control: 'radio' }, connection: { options: ['live', 'offline', 'reconnecting', 'stale', 'failed'], control: 'radio' }, failure: { control: 'text' }, ticking: { control: 'boolean' } },
+  argTypes: { ...scenarioArgTypes(['roster']), scheme: { options: ['dark', 'light'], control: 'radio' }, connection: { options: ['live', 'offline', 'reconnecting', 'stale', 'failed', 'revoked'], control: 'radio' }, failure: { control: 'text' }, ticking: { control: 'boolean' } },
 } satisfies Meta<SystemStatesArgs>
 export default meta
 type Story = StoryObj<SystemStatesArgs>
@@ -214,6 +215,15 @@ export const ConnectionUnavailable: Story = { args: { connection: 'failed', fail
 export const ConnectionFailedNoReason: Story = { args: { connection: 'failed' }, play: async context => {
   await oneBand('failed')(context)
   await expect(band(context.canvasElement)[0]!.querySelector('[data-connection-detail]')).toHaveTextContent('Showing what was last observed')
+} }
+/** Revoked: the credential, not the network, ended access. The band names it and how to recover, with no Reconnect to press. */
+const revokedSentence = "This browser's access to Fractal expired or was revoked. Pair it again."
+export const AccessRevoked: Story = { args: { connection: 'revoked', failure: revokedSentence }, play: async context => {
+  await oneBand('revoked')(context)
+  const revoked = band(context.canvasElement)[0]!
+  await expect(revoked.querySelector('[role="status"]')).toHaveTextContent(/^Access revoked$/)
+  await expect(revoked.querySelector('[data-connection-detail]')).toHaveTextContent(revokedSentence)
+  await expect(within(revoked as HTMLElement).queryByRole('button')).toBeNull()
 } }
 /** Live: no band at all; the panes' own rows stay. */
 export const Live: Story = { args: { connection: 'live' }, play: async ({ canvasElement }) => {

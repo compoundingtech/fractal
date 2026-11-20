@@ -74,6 +74,8 @@ export interface TranscriptProps {
   readonly observedAt: number
   /** Optional host ownership of the final rendered turn; no additional DOM or rendering policy. */
   readonly tailRef?: React.Ref<HTMLElement>
+  /** Host-owned content after the turns, inside the same scroll viewport and reading column. */
+  readonly afterTranscript?: React.ReactNode
   /** Open output in the host's detail surface. No split/controller is hidden in the kit. */
   readonly onOpenTool?: (call: WorkLogCall) => void
   /** Host-owned semantic detail for one recorded tool call, given the source item and its projected call. It replaces only the summary line; the raw input/output disclosure always remains. */
@@ -479,7 +481,7 @@ function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHist
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
+export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef, afterTranscript }: TranscriptProps) {
   const scrollId = React.useId()
   const [reveal] = React.useState(createTranscriptRevealStore)
   const [findMemory] = React.useState<TranscriptFindMemory>(() => new Map())
@@ -587,6 +589,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
           {committed.length === 0 ? empty : <TranscriptSearch turns={committed} rowIds={rowIds} startIndex={bound.start} revealRow={revealRow} {...stylex.props(styles.timeline)}>
             <MountedTurns turns={committed} sourceTurns={sourceTurns} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
           </TranscriptSearch>}
+          {afterTranscript}
         </>
       }}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>

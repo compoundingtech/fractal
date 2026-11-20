@@ -25,6 +25,50 @@ are explicitly unavailable because the kit does not model them (the live graph a
 has no worktree collection). Clients and Usage remain loading: these screens do not
 yet have a scenario-backed projection.
 
+### Durable thread preview (fixture/preliminary)
+
+`fractal tui --demo` also hydrates the existing world's optional attention
+`topic_threads` inventory into the ordinary native thread windows. Open Inbox's
+**Worker typecheck fails after the rename** item to see several threads on one
+item. Expand a thread's row or use its **Open in tab** action to inspect the
+same durable resource. The inventory includes open and closed history, a
+read-only discussion, and replies whose authoritative server order differs
+from timestamp order. The renderer never sorts those replies by clock.
+
+These are **fixture/preliminary**, not connected-daemon evidence. The whole
+demo uses `ThreadAccess::default()`, so histories and navigation work but no
+thread mutations are enabled or sent. The writable composer, reply and
+lifecycle controls are deliberately not demonstrated: those require the live
+client's mutation receipt driver. Closed history remains readable.
+
+Live threads mark incoming replies read only after meaningful message content stays unchanged
+for 500 ms in the active pane of a terminal confirmed focused by a foreground signal. The final
+two nonblank body lines (or the only line of a one-line body) must be fully visible across their
+width. Content, scroll or layout changes restart the dwell; unknown focus, scrolling past,
+hovering a list, cached history and background tabs do not count. **Mark read** (`v`, or `alt+v`
+where letters type) explicitly clears all currently observed private reminders, including
+offscreen or unavailable anchors; without reminders it reads only visible replies.
+**Mark unread** (`u` / `alt+u`) keeps a private reminder and return anchor without undoing natural
+read history. It stays unread during this visit; on a later visit, each captured reminder clears
+only when its own anchor is viewed. Concurrent marks at other anchors remain.
+The marked-unread list and anchor return require `threads-v1` version 3; older members show
+the existing upgrade-required state without requesting these endpoints.
+Moving a thread between an embedded panel and its tab does not start a new visit. Reminders
+that arrive after an unknown entry stay sticky until a later visit. Both mark actions also
+appear in `Ctrl+K`. Inbox's **Marked unread** section uses a distinct private reminder marker,
+not the natural unread badge or count. Opening a marked row seeks its return anchor.
+The open Inbox thread stays keyed by its identity when a reminder clears and the marked row
+leaves the list. Its body, composer and scroll remain until explicit navigation or collapse;
+connection/owner changes and read revocation still clear protected thread state.
+Thread evidence uses the same resolved detail pane and host as rendering, including an Inbox
+thread opened from its list. A focused reply composer or saved draft does not exclude reading.
+Read-only connections show neither action. Pending or refused anchor seeks show no message
+body or unread badge; unavailable anchors get a neutral note rather than invented content.
+
+Thread summaries and timeline events share the attention slice's existing
+strict decoding and timestamp-pointer rebasing. No separate runtime world or
+feature-specific renderer is used.
+
 `fixtures/clients/demo-world.json` is only a derived client contract, not demo input.
 Regenerate it and the text capture `tests/fixtures/scenario-demo.golden` with
 `FRACTAL_TUI_UPDATE_CONTRACT=1 cargo test --locked -p fractal-tui contract`.
@@ -32,6 +76,13 @@ The contract uses the kit anchor clock and omits local conversation clock labels
 normal demo mode rebases to the current clock. Without the update flag, contract
 and rendered-frame tests fail on scenario/adapter drift. Invented per-feature inputs
 remain test-only fixtures, never a second runtime demo world.
+
+For a color reference capture, launch the paired client with
+`env -u NO_COLOR TERM=xterm-256color fractal tui --client`, using the intended
+private profile. Agent shells may export `NO_COLOR`; inheriting it makes
+selection/background captures monochrome even inside a color-capable tmux pane.
+Capture with `tmux capture-pane -p -e` to preserve SGR styling. Also inspect a
+separate `NO_COLOR=1` run: selection must remain identifiable without color.
 
 The TUI library connects through the generated Rust `st3.client.v0` client, the same typed data boundary
 used by the CLI. Its subscriptions, reconnects, snapshot model and cache come from
@@ -143,11 +194,12 @@ Details focus also blocks program mouse motion and wheel input, and cancels a pe
 terminal key. If resizing hides the details, focus returns to the program and stays there
 when the pane widens again.
 
-Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
-conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
-its conversation. **Conversation first**, in `Ctrl+K`, makes this device open agents on their
-conversation instead; it is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced. A
-device that saved the older `terminal_first` keeps attaching. An alert for the agent shows on top
+Opening an agent shows its conversation by default. Turn off **Conversation first** in `Ctrl+K`
+to attach its terminal once its tab stays in front for a moment instead; `Ctrl+\` then `c` shows
+its conversation again. The choice is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced.
+Explicit terminal-first choices, including the older `terminal_first: true`, keep attaching;
+agents without terminals still show their conversation. Saved terminal tabs still restore as terminals.
+An alert for the agent shows on top
 of its attached terminal: click it to show it, click an answer to send it, or click
 "open in Inbox". A request's recommended answer comes first among its at most three answer buttons,
 green and starred (`★`), under a single `★ recommended: <reason>` line. Long reasons end in `…`;
@@ -170,6 +222,10 @@ answers, the row says `sending your answer…` and `o` offers no second answer. 
 once Fractal no longer takes an override or the ask has no other answer. The list is read when
 Inbox opens, when the alerts change and after an override is accepted, never on a timer; a read
 that stopped at its limit says so, even when it found none.
+The override chooser and an embedded thread never share the keyboard: opening the chooser
+puts the thread input away without losing its draft, and choosing thread Compose or Reply
+closes the chooser while keeping unsent override words. In the override's words box,
+`t`, `n` and `z` are text, not thread shortcuts. Esc keeps both drafts.
 
 On a request card, `c` writes a note on the highlighted answer; every answer with a note shows
 `✎ note`, and notes stay with their answers as the highlight moves. Sending an answer also sends
@@ -229,7 +285,7 @@ latency, also against a deliberately stalled getter, plus alternate-screen resto
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
 binary, pass its path followed by `--ui --no-panic`; the release build has no debug panic hook. The two
 `attach_default_probe` (run by `cargo test -p fractal-tui --lib`, beside `terminal_tab_protocols`) drives a
-real terminal tab in PTYs through the default attach, conversation first, an alert over the
+real terminal tab in PTYs through the conversation default, terminal-first opt-in, an alert over the
 terminal and a dropped link. The two
 QA scripts need a live daemon and the `pty` executable: one opens an agent from `Ctrl+K`, scrolls
 it and drags to copy; the other attaches the agent's terminal and leaves it by `Ctrl+\` then `c` and by a

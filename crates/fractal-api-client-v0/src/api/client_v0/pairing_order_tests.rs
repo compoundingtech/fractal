@@ -396,12 +396,61 @@ async fn legacy_person_pairing_requires_an_unexpired_bounded_lifetime() {
             - begun.accepted_at_unix_ms as i64, expiry_delta);
         let result = finish_person(&state, &json!({"pairing_id":pairing_id}), "ABCDEFGH").await;
         if accepted {
-            assert_eq!(result.unwrap().0["kind"], "paired-session");
+            let paired = result.unwrap().0;
+            assert_eq!(paired["kind"], "paired-session");
+            assert_eq!(paired["scopes"], json!(LIMITED_PAIRING_SCOPES));
+            let request = Request::builder().uri("/v1/client/capabilities")
+                .header(AUTHORIZATION, format!("Bearer {}", paired["credential"].as_str().unwrap()))
+                .body(Body::empty()).unwrap();
+            let authenticated = authenticate(&state, &request, "fabric-loopback").unwrap();
+            assert!(!authenticated.scopes.contains("control.messages"));
+            assert!(!authenticated.scopes.contains("control.work"));
         } else {
             let error = result.unwrap_err();
             assert_eq!(error.code, "pairing-restart-required");
             assert_eq!(error.message, "start pairing again");
         }
+    }
+}
+
+#[tokio::test]
+async fn legacy_pairing_scope_defaults_do_not_allow_escalation_or_stale_completion() {
+    for explicit in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::test_state_named(root.path(), "legacy-scope-fence");
+        let pairing_id = "pairing/legacy-scopes";
+        let mut fields = serde_json::from_value::<BTreeMap<String, Value>>(json!({
+            "pairing_id": pairing_id, "device_name": "Phone", "person_id": PERSON,
+            "code_hash": credential_digest("ABCDEFGH"),
+            "expires_at_unix_ms": client_now_ms() + 299_000,
+        })).unwrap();
+        if explicit { fields.insert("scopes".into(), json!(["read.projections"])); }
+        let begun = state.store.append_client_operation_claim(&ClaimInput {
+            subject: "custom/client/pairing-legacy-scopes".into(),
+            kind: "custom.client.pairing-begun".into(), actor: Some(PERSON.into()), fields,
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let expected = if explicit { json!(["read.projections"]) } else { json!(LIMITED_PAIRING_SCOPES) };
+        for (scopes, selected) in [
+            (json!(["control.messages"]), begun.id.as_str()),
+            (Value::Null, begun.id.as_str()),
+            (expected.clone(), "claim/stale-challenge"),
+        ] {
+            let refused = state.store.complete_client_pairing(&ClaimInput {
+                subject: begun.subject.clone(), kind: "custom.client.pairing-completed".into(),
+                actor: Some(PERSON.into()), fields: BTreeMap::from([
+                    ("pairing_id".into(), json!(pairing_id)), ("person_id".into(), json!(PERSON)),
+                    ("scopes".into(), scopes),
+                ]),
+                evidence: vec![selected.into()], expected_subject: None, idempotency_key: None,
+            }, selected).unwrap_err();
+            assert_eq!(refused.code, "stale-subject");
+        }
+        assert!(state.store.newest_admitted_pairing_completion(&begun.subject, client_now_ms()).unwrap().is_none());
+        let paired = finish_person(&state, &json!({"pairing_id":pairing_id}), "ABCDEFGH").await.unwrap().0;
+        assert_eq!(paired["scopes"], expected);
+        assert!(finish_person(&state, &json!({"pairing_id":pairing_id}), "ABCDEFGH").await.is_err(),
+            "the legacy code is still single-use");
     }
 }
 

@@ -33,7 +33,7 @@ describe('gatewayAvailability.read', () => {
     expect(await refusing(forbidden('the authenticated client session is not granted `read.projections`')).read())
       .toEqual({ _tag: 'Unavailable', detail: 'Reading availability has not been granted to this device.' })
     expect(await refusing(forbidden('rejected', { reason: 'credential-rejected' })).read())
-      .toMatchObject({ _tag: 'Unavailable', detail: expect.stringContaining('Pair the device again') })
+      .toEqual({ _tag: 'Unavailable', detail: "This browser's access to Fractal expired or was revoked. Pair it again." })
   })
 })
 
@@ -57,7 +57,7 @@ describe('gatewayAvailability writes', () => {
       .toEqual({ _tag: 'Refused', detail: "This device's pairing does not allow changing your availability. Pair it again to change it here." })
     expect(await scope.setNote({ text: null })).toMatchObject({ _tag: 'Refused', detail: expect.stringContaining('changing your note') })
     expect(await failing(forbidden('rejected', { reason: 'credential-rejected' })).set({ status: { value: null } }))
-      .toMatchObject({ _tag: 'Refused', detail: expect.stringContaining('Pair the device again') })
+      .toEqual({ _tag: 'Refused', detail: "This browser's access to Fractal expired or was revoked. Pair it again." })
     expect(await failing(new TypeError('Failed to fetch')).set({ status: { value: null } }))
       .toEqual({ _tag: 'Refused', detail: 'Your availability was not changed: the connection to Fractal broke (Failed to fetch).' })
   })

@@ -18,6 +18,8 @@ import type {
   SloList,
   SyncPeer,
   TerminalScreen,
+  ThreadSummary,
+  ThreadTimelineEvent,
   TimelineEntry,
   UsagePeriod,
   Work,
@@ -68,10 +70,20 @@ export interface DetailsState {
   readonly launch_variants: LaunchVariant[]
 }
 
+/** Durable topic-thread preview inventory, separate from agent conversation windows. */
+export interface TopicThread {
+  readonly origin_attention_id: string
+  readonly summary: ThreadSummary
+  /** Authoritative newest-first server order; never sort by accepted timestamps. */
+  readonly events: ThreadTimelineEvent[]
+}
+
 export interface AttentionState {
   readonly resources?: RawResource[]
   readonly attention: Attention[]
   readonly messages: Message[]
+  /** Omitted inventories are empty, preserving existing worlds. */
+  readonly topic_threads?: TopicThread[]
 }
 
 /** Portable description of the uncommitted prefix; only TypeScript replay synthesizes it. */

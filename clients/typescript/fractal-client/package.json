@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --test contract.test.cjs schema.test.cjs fabric.test.cjs",
+    "test": "node --test contract.test.cjs schema.test.cjs fabric.test.cjs && node --experimental-transform-types --test delivery.test.mjs actionReceipt.test.mjs",
     "test:contract": "node --test contract.test.cjs",
     "test:schema": "node --test schema.test.cjs",
     "typecheck": "pnpm run typecheck:client && pnpm run typecheck:schema",

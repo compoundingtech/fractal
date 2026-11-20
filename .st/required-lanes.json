@@ -28,7 +28,6 @@
         "packages/fractal-ui/package.json",
         "packages/fractal-ui/scripts",
         "pnpm-lock.yaml",
-        "pnpm-source-inputs.json",
         "pnpm-workspace.yaml",
         "scripts/check-public-repo",
         "scripts/ci-fractal-web",
@@ -207,6 +206,7 @@
         ".github/clippy-splits.json",
         ".github/fleet-compat-baseline.json",
         ".github/messaging-compat-baseline.json",
+        ".github/thread-floor-v22-compat-baseline.json",
         "flake.lock",
         "flake.nix",
         "nix/hm-module.nix",
@@ -413,6 +413,7 @@
       ],
       "definition_paths": [
         "apps/ios/package.json",
+        "apps/macos/Fractal/design/package.json",
         "clients/typescript/fractal-client/package.json",
         "clients/typescript/fractal-declarations/package.json",
         "clients/typescript/fractal-views/package.json",
@@ -429,6 +430,7 @@
         "pnpm-workspace.yaml",
         "scripts/ci-nix-fixed-outputs",
         "scripts/ci-typescript-client",
+        "scripts/nix-typescript-client-deps-hash",
         "scripts/prepare-pnpm-source-inputs.py"
       ],
       "tree_inputs": [
@@ -666,6 +668,7 @@
         ".cargo/config.toml",
         ".config/nextest.toml",
         ".github/fleet-compat-baseline.json",
+        ".github/thread-floor-v22-compat-baseline.json",
         "flake.lock",
         "flake.nix",
         "scripts/build-stamp-watch-test",
@@ -726,6 +729,7 @@
         ".cargo",
         ".config/nextest.toml",
         ".github/fleet-compat-baseline.json",
+        ".github/thread-floor-v22-compat-baseline.json",
         "Cargo.lock",
         "Cargo.toml",
         "apps/ios/fixtures/observation-minute.json",

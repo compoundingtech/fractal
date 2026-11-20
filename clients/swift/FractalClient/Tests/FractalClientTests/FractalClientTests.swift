@@ -580,6 +580,25 @@ final class FractalClientTests: XCTestCase {
         }
     }
 
+    func testRecipientUnassignedErrorDecodesAsTypedVariantAndPreservesFutureCodes() throws {
+        let wire = Data("""
+        {"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/unassigned","code":"recipient-unassigned","message":"this Inbox source has no responsible agent or configured fallback","retryable":false,"details":{}}
+        """.utf8)
+        let envelope = try JSONDecoder().decode(ErrorEnvelope.self, from: wire)
+        XCTAssertEqual(envelope.code, .recipientUnassigned)
+        XCTAssertFalse(envelope.retryable)
+        XCTAssertNil(envelope.details["reason"])
+        let encoded = try JSONEncoder().encode(envelope)
+        XCTAssertEqual(try JSONDecoder().decode(ErrorEnvelope.self, from: encoded).code, .recipientUnassigned)
+
+        let futureWire = Data(String(decoding: wire, as: UTF8.self)
+            .replacingOccurrences(of: "recipient-unassigned", with: "future-recipient-error").utf8)
+        let future = try JSONDecoder().decode(ErrorEnvelope.self, from: futureWire)
+        XCTAssertEqual(future.code, .unknown("future-recipient-error"))
+        let futureEncoded = try JSONEncoder().encode(future)
+        XCTAssertEqual(try JSONDecoder().decode(ErrorEnvelope.self, from: futureEncoded).code, .unknown("future-recipient-error"))
+    }
+
     func testAuthorityErrorCodesAreTypedAndRoundTrip() throws {
         for (raw, expected) in [
             ("runtime-not-local", ErrorCode.runtimeNotLocal),

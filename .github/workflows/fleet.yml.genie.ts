@@ -707,7 +707,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       name: 'linux-fleet-compat',
       stage: 'fleet-compat',
       setup: commonSetupSteps,
-      description: 'Run fleet compatibility against the pinned older st3',
+      description: 'Run fleet compatibility and the pinned v20/v22 thread storage floors',
       // linux-fleet-compat's own run checks what its compile reads against its input key (scripts/dep-info-check); linux-gate's local
       // run of the same stage does not, so linux-gate never depends on the policy file.
       // arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve the checkout layout at execution, not generation.

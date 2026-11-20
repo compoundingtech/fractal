@@ -102,7 +102,18 @@ test('the conversation follows the system appearance live instead of a fixed Moc
   assert.ok(screen);
   assert.match(screen.getText(), /<SchemeScreen>/, 'the screen opts into the scheme-following palette scope');
   // Fills and edges come from the scope's palette (or are repainted by it), never straight from Mocha.
-  assert.doesNotMatch(text, /(backgroundColor|border\w*Color|color):\s*(theme\.|c\()/);
+  const inspectPaint = node => {
+    if (ts.isPropertyAssignment(node) && /^(backgroundColor|border\w*Color|color)$/.test(node.name.getText(source))) {
+      // Semantic presentation props (e.g. recovery.color) are repainted by T/Button, not native styles.
+      let attribute = node.parent;
+      while (attribute && !ts.isJsxAttribute(attribute) && !ts.isStatement(attribute)) attribute = attribute.parent;
+      if (!attribute || !ts.isJsxAttribute(attribute) || attribute.name.getText(source) === 'style') {
+        assert.doesNotMatch(node.initializer.getText(source), /^(theme\.|c\()/, node.getText(source));
+      }
+    }
+    ts.forEachChild(node, inspectPaint);
+  };
+  inspectPaint(source);
   assert.doesNotMatch(text, /tokenColor\([^,()]+\)\s*\}/, 'a fill names the palette it is drawn in');
   // Quiet tool rows dim with opacity only on Mocha; light rows keep their AA colour.
   assert.match(text, /quiet && palette === theme && \{ opacity: 0\.7 \}/);

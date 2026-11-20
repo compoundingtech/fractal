@@ -42,13 +42,13 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-const mount = async (port: BrowserPairingPort, messageSend: 'granted' | 'ungranted' = 'ungranted') => {
+const mount = async (port: BrowserPairingPort, messageSend: 'granted' | 'ungranted' = 'ungranted', context: 'workspace' | 'settings' = 'workspace') => {
   const credentialChanged = vi.fn()
   const store = createPairingStore({ port, deviceLabel: () => 'Firefox on Linux', credentialChanged, pollMs })
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
-  await act(async () => root!.render(<BrowserPairing store={store} messageSend={messageSend} />))
+  await act(async () => root!.render(<BrowserPairing store={store} messageSend={messageSend} context={context} />))
   await flush()
   return { credentialChanged, store }
 }
@@ -81,8 +81,8 @@ describe('BrowserPairing', () => {
   it('asks an unpaired browser that cannot send, and stays out of the way when sending is already granted', async () => {
     const ungranted = fakePort({ status: 'unpaired' })
     await mount(ungranted.port)
-    expect(text()).toContain('This browser can read but not send.')
-    expect(container!.querySelector('button')?.textContent).toBe('Enable sending on this browser')
+    expect(text()).toContain('Pair this browser to request access.')
+    expect(container!.querySelector('button')?.textContent).toBe('Pair this browser')
     act(() => root!.unmount())
     container!.remove()
 
@@ -108,7 +108,7 @@ describe('BrowserPairing', () => {
   it('shows the code to approve, polls while pending and reloads once approved', async () => {
     const { port, next } = fakePort({ status: 'unpaired' })
     const { credentialChanged } = await mount(port)
-    await press('Enable sending on this browser')
+    await press('Pair this browser')
     expect(port.start).toHaveBeenCalledWith('Firefox on Linux')
     expect(text()).toContain('Approve in Fractal')
     expect(container!.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('K7Q-4MX')
@@ -137,7 +137,7 @@ describe('BrowserPairing', () => {
     const { port, next } = fakePort({ status: 'paired' })
     // Grants read at load still say the browser can send; its credential no longer can.
     const { store } = await mount(port, 'granted')
-    expect(text()).toBe('This browser is paired.')
+    expect(notice()).toBeNull()
     const forbidden = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'forbidden', message: 'refused', retryable: false, details: {} }, 403)
     const client = { capabilities: vi.fn(async () => { throw forbidden }) } as unknown as FractalClient
     const setRefusal = vi.fn()
@@ -159,7 +159,7 @@ describe('BrowserPairing', () => {
     expect(port.status).toHaveBeenCalledTimes(2)
     expect(text()).toContain('Fractal did not accept sending from this browser.')
     expect(drafts.read(seat)?.text).toBe('hello')
-    await press('Enable sending on this browser')
+    await press('Pair this browser')
     expect(container!.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('K7Q-4MX')
     draft.close()
   })
@@ -167,7 +167,7 @@ describe('BrowserPairing', () => {
   it('names a refusal and lets the person request a new code', async () => {
     const { port, next } = fakePort({ status: 'unpaired' })
     const { credentialChanged } = await mount(port)
-    await press('Enable sending on this browser')
+    await press('Pair this browser')
     next({ status: 'denied' })
     await poll()
     expect(text()).toContain('Fractal declined this browser.')
@@ -202,16 +202,16 @@ describe('BrowserPairing', () => {
     const { port } = fakePort({ status: 'unpaired' })
     port.start.mockRejectedValueOnce(new PairingHttpError(503))
     await mount(port)
-    await press('Enable sending on this browser')
+    await press('Pair this browser')
     expect(text()).toBe('Could not request a pairing code (HTTP 503). Try again.')
-    await press('Enable sending on this browser')
+    await press('Pair this browser')
     expect(container!.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('K7Q-4MX')
   })
 
   it('forgets a paired browser and reloads without its credential', async () => {
     const { port } = fakePort({ status: 'paired' })
     port.forget.mockRejectedValueOnce(new TypeError('Failed to fetch'))
-    const { credentialChanged } = await mount(port, 'granted')
+    const { credentialChanged } = await mount(port, 'granted', 'settings')
     await press('Forget this browser')
     expect(text()).toBe('Could not reach Fractal to forget this browser. Check the connection and try again.')
     expect(credentialChanged).not.toHaveBeenCalled()
@@ -220,7 +220,38 @@ describe('BrowserPairing', () => {
     expect(credentialChanged).toHaveBeenCalledTimes(1)
   })
 
-  it('stops polling when the last composer unmounts', async () => {
+  it('shares one pending request and poll between workspace and Settings, keeping Forget in Settings', async () => {
+    const { port, next } = fakePort({ status: 'unpaired' })
+    const { store } = await mount(port)
+    await press('Pair this browser')
+    await act(async () => root!.render(<>
+      <BrowserPairing store={store} messageSend="ungranted" />
+      <BrowserPairing store={store} messageSend="ungranted" context="settings" />
+    </>))
+    expect(container!.querySelectorAll('[data-testid="pairing-code"]')).toHaveLength(2)
+    next({ status: 'pending', displayCode: 'K7Q-4MX' })
+    await poll()
+    expect(port.status).toHaveBeenCalledTimes(2)
+    expect(port.start).toHaveBeenCalledOnce()
+    await act(async () => root!.render(<BrowserPairing store={store} messageSend="ungranted" />))
+    next({ status: 'pending', displayCode: 'K7Q-4MX' })
+    await poll()
+    expect(port.status).toHaveBeenCalledTimes(3)
+    next({ status: 'paired' })
+    await poll()
+    expect(port.status).toHaveBeenCalledTimes(4)
+  })
+
+  it('shows paired management only in Settings, including a browser without sending permission', async () => {
+    const { port } = fakePort({ status: 'paired' })
+    const { store } = await mount(port)
+    expect(notice()).toBeNull()
+    await act(async () => root!.render(<BrowserPairing store={store} messageSend="ungranted" context="settings" />))
+    expect(text()).toBe('This browser is paired.')
+    expect(container!.querySelector('button')?.textContent).toBe('Forget this browser')
+  })
+
+  it('stops polling when the last pairing surface unmounts', async () => {
     const { port } = fakePort({ status: 'pending', displayCode: 'ABC-123' })
     await mount(port)
     act(() => root!.unmount())

@@ -11,7 +11,7 @@ import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import { Schema } from 'effect'
 import { ConversationItem, type RunStatus, type SendState } from '../conversation/model.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
-import { credentialExpiredMessage, type ConversationPage, type Feed } from '../data/source.ts'
+import { credentialExpiredMessage, credentialExpiredTitle, type ConversationPage, type Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
 import { toolKindFor } from '../conversation/toolClassification.ts'
 import { isHiddenSystemRecord } from '../conversation/systemRecords.ts'
@@ -326,7 +326,7 @@ export type UnavailableClassification = 'unauthorized' | 'ungranted' | 'unsuppor
 
 /** Fixed copy only: feed.detail carries source diagnostics and never reaches rendered or accessible text. */
 const unavailableCopy: Readonly<Record<UnavailableClassification, { readonly reason: string; readonly detail: string }>> = {
-  unauthorized: { reason: 'Credential expired', detail: credentialExpiredMessage },
+  unauthorized: { reason: credentialExpiredTitle, detail: credentialExpiredMessage },
   ungranted: { reason: 'Conversation access not granted', detail: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
   unsupported: { reason: 'Conversation not supported', detail: 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.' },
   'not-found': { reason: 'Conversation not found', detail: 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },

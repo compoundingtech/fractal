@@ -10,6 +10,294 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::Value;
 
+use super::{Connection, FractalError, MissionSpec, canonical_sql, flatten_steps, internal, params};
+use rusqlite::OptionalExtension as _;
+use sha2::{Digest as _, Sha256};
+use fractal_store::store::thread_metadata::request_history::{
+    EpisodeState, HistoricalPayload, PayloadUnavailable, RequestHistoryItem, RequestProvenance,
+    SourceEpisode,
+};
+
+// Bound bytes in SQLite, before transferring or decoding retained bodies.
+const RETAINED_BODY_BYTES: usize = 256 * 1024;
+const RETAINED_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+const PERSON_HISTORY_KINDS: &str =
+    "'step-run.state','step-run.carried','step-run.retried','work.released','work.handoff-returned','work.person-done','work.person-cancelled'";
+
+struct RetainedEvent {
+    id: String,
+    kind: String,
+    body: Value,
+    at: u128,
+}
+
+fn episode_parts(episode: &str) -> Option<(&str, u64, u64)> {
+    let (prefix, epoch) = episode.rsplit_once(':')?;
+    let (generation, attempt) = prefix.rsplit_once(':')?;
+    Some((generation, attempt.parse().ok()?, epoch.parse().ok()?))
+}
+
+/// Read the admitted lifecycle in canonical order, retaining IDs and sparse kind boundaries.
+fn retained_events(
+    conn: &Connection, source: &str, cut: u64,
+) -> Result<(Vec<RetainedEvent>, bool), FractalError> {
+    let cut = i64::try_from(cut).unwrap_or(i64::MAX);
+    let kinds = PERSON_HISTORY_KINDS.split(',').map(|kind| format!("({kind})"))
+        .collect::<Vec<_>>().join(",");
+    let sql = canonical_sql(&format!(
+        "WITH kinds(kind) AS (VALUES {kinds})
+         SELECT claims.id, claims.kind,
+                CASE WHEN length(CAST(claims.body AS BLOB))<={RETAINED_BODY_BYTES}
+                     THEN claims.body END, claims.accepted_at_unix_ms
+         FROM kinds CROSS JOIN claims ON claims.store_index IN (
+             SELECT recent.store_index FROM claims recent INDEXED BY claims_subject_kind_accepted_index
+             WHERE recent.subject=?1 AND recent.kind=kinds.kind AND recent.store_index<=?2
+             ORDER BY length(recent.accepted_at_unix_ms) DESC, recent.accepted_at_unix_ms DESC
+             LIMIT {})
+         JOIN batches ON batches.id=claims.batch_id ORDER BY CANONICAL_ASC(claims)",
+        CLAIMS_PER_KIND_LIMIT + 1,
+    ));
+    let mut statement = conn.prepare(
+        /* sqlite-large-value: allow-for-now lv-h4563bdfd1a41 owner=fractal_missions::store::missions::step_history TODO=trace-statement-and-value-representation */
+        &sql
+    ).map_err(internal)?;
+    let mut rows = statement.query(params![source, cut]).map_err(internal)?;
+    let mut events = Vec::new();
+    let mut counts = BTreeMap::<String, usize>::new();
+    let mut bytes = 0;
+    let mut complete = true;
+    while let Some(row) = rows.next().map_err(internal)? {
+        let kind: String = row.get(1).map_err(internal)?;
+        let count = counts.entry(kind.clone()).or_default();
+        *count += 1;
+        complete &= *count <= CLAIMS_PER_KIND_LIMIT;
+        let body: Option<String> = row.get(2).map_err(internal)?;
+        let Some(body) = body else { complete = false; continue };
+        bytes += body.len();
+        if bytes > RETAINED_TOTAL_BYTES { complete = false; continue; }
+        let Ok(body) = serde_json::from_str(&body) else { complete = false; continue };
+        let at: String = row.get(3).map_err(internal)?;
+        let Ok(at) = at.parse() else { complete = false; continue };
+        events.push(RetainedEvent { id: row.get(0).map_err(internal)?, kind, body, at });
+    }
+    Ok((events, complete))
+}
+
+fn lifecycle_attempt(kind: &str, fields: &Value, current: &mut u64) -> u64 {
+    let explicit = fields.get("attempt").and_then(Value::as_u64);
+    if matches!(kind, "step-run.state" | "step-run.carried" | "step-run.retried")
+        && let Some(attempt) = explicit
+    {
+        *current = attempt;
+    }
+    explicit.unwrap_or(*current)
+}
+
+fn opening_epoch(event: &RetainedEvent) -> Option<u64> {
+    let fields = &event.body["fields"];
+    let handoff = matches!(event.kind.as_str(), "work.released" | "work.handoff-returned")
+        && fields["attempt"].as_u64().is_some() && fields["handoff_to"].as_str().is_some();
+    if !(matches!(event.kind.as_str(), "step-run.state" | "step-run.carried") || handoff)
+        || fields["status"] != "ready"
+    { return None; }
+    event.body.pointer("/fields/readiness_epoch").and_then(Value::as_u64)
+}
+
+/// Enumerate bounded exact openings, qualifying every episode against shared source authority.
+pub fn retained_episode_keys(
+    conn: &Connection, person: &str, seed: &SourceEpisode, cut: u64,
+) -> Result<(Vec<SourceEpisode>, bool), FractalError> {
+    let Some(source) = fractal_store::store::discussion_source::qualify(
+        conn, person, seed, crate::store::now_ms(),
+    )? else { return Ok((Vec::new(), true)); };
+    if source.authored_evidence().is_none() {
+        return Ok((if source.item().kind == "person-step" { vec![seed.clone()] } else { Vec::new() }, true));
+    }
+    let Some((generation, _, _)) = episode_parts(&seed.episode) else {
+        return Ok((Vec::new(), false));
+    };
+    let (events, mut complete) = retained_events(conn, &seed.source_id, cut)?;
+    let mut attempt = 1;
+    let mut keys = BTreeSet::new();
+    let mut openings = BTreeSet::new();
+    for event in &events {
+        let fields = &event.body["fields"];
+        let attempt = lifecycle_attempt(&event.kind, fields, &mut attempt);
+        if let Some(epoch) = opening_epoch(event) {
+            let key = SourceEpisode { source_id: seed.source_id.clone(),
+                episode: format!("{generation}:{attempt}:{epoch}") };
+            openings.insert(key.clone());
+            keys.insert(key);
+        } else if event.kind.starts_with("work.person-")
+            && let Some(episode) = fields.get("episode").and_then(Value::as_str)
+            && episode_parts(episode).is_some_and(|(g, a, _)| g == generation && a == attempt)
+        {
+            keys.insert(SourceEpisode { source_id: seed.source_id.clone(), episode: episode.into() });
+        } else if event.kind == "step-run.carried" {
+            if let Some(episode) = fractal_store::store::discussion_source::carried_episode(
+                conn, &seed.source_id, &event.id,
+            )? {
+                let key = SourceEpisode { source_id: seed.source_id.clone(), episode };
+                openings.insert(key.clone());
+                keys.insert(key);
+            } else { complete = false; }
+        }
+    }
+    complete &= openings.contains(seed) && keys.iter().all(|key| openings.contains(key));
+    let keys = keys.into_iter().collect::<Vec<_>>();
+    let qualified = fractal_store::store::discussion_source::qualify_batch(
+        conn, person, &keys, crate::store::now_ms(),
+    )?;
+    Ok((keys.into_iter().zip(qualified).filter_map(|(key, source)|
+        source.filter(|source| source.authored_evidence().is_some()).map(|_| key)
+    ).collect(), complete))
+}
+
+/// Immutable authored request text at an exact proven opening. Current step text is never read.
+pub fn retained_person_episode(
+    conn: &Connection, person: &str, key: &SourceEpisode, cut: u64,
+) -> Result<Option<RequestHistoryItem>, FractalError> {
+    let Some(source) = fractal_store::store::discussion_source::qualify(
+        conn, person, key, crate::store::now_ms(),
+    )? else { return Ok(None); };
+    let Some(proof) = source.authored_evidence() else { return Ok(None); };
+    let unavailable = |reason| Some(RequestHistoryItem {
+        key: key.clone(), payload: HistoricalPayload::Unavailable { reason },
+        state: EpisodeState::Unavailable, complete: false,
+    });
+    let Some((generation, wanted_attempt, epoch)) = episode_parts(&key.episode) else {
+        return Ok(unavailable(PayloadUnavailable::BoundaryUnavailable));
+    };
+    let Some((source_generation, path)) = key.source_id.strip_prefix("step-run/")
+        .and_then(|source| source.split_once('/')) else {
+        return Ok(unavailable(PayloadUnavailable::BoundaryUnavailable));
+    };
+    if generation.strip_prefix("run-generation/") != Some(source_generation) {
+        return Ok(unavailable(PayloadUnavailable::BoundaryUnavailable));
+    }
+    if proof.generation != generation || proof.attempt != wanted_attempt
+        || proof.readiness_epoch != epoch
+    { return Ok(None); }
+    let definition: Option<(String, Option<String>)> = conn.query_row(
+        "SELECT g.revision, CASE WHEN length(CAST(r.body AS BLOB))<=?3 THEN r.body END
+         FROM run_generations g JOIN mission_runs m ON m.id=g.run_id
+         LEFT JOIN mission_revisions r ON r.mission_id=m.mission_id AND r.revision=g.revision
+           AND r.created_index<=?2
+         WHERE g.id=?1",
+        params![source_generation, i64::try_from(cut).unwrap_or(i64::MAX), RETAINED_TOTAL_BYTES],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(internal)?;
+    let Some((revision, Some(body))) = definition else {
+        return Ok(unavailable(PayloadUnavailable::RetainedDefinitionUnavailable));
+    };
+    if proof.revision != revision {
+        return Ok(unavailable(PayloadUnavailable::RetainedDefinitionUnavailable));
+    }
+    let Ok(mission) = serde_json::from_str::<MissionSpec>(&body) else {
+        return Ok(unavailable(PayloadUnavailable::RetainedDefinitionUnavailable));
+    };
+    if mission.revision != revision {
+        return Ok(unavailable(PayloadUnavailable::RetainedDefinitionUnavailable));
+    }
+    let mut unhashed = mission.clone();
+    unhashed.revision.clear();
+    let expected = hex::encode(Sha256::digest(
+        serde_json::to_vec(&unhashed).map_err(internal)?,
+    ));
+    if revision != expected {
+        return Ok(unavailable(PayloadUnavailable::RetainedDefinitionUnavailable));
+    }
+    let mut steps = Vec::new();
+    flatten_steps(&mission, None, &[], &mut steps);
+    let Some((step, _, _)) = steps.into_iter().find(|(step, _, _)| step.path == path) else {
+        return Ok(unavailable(PayloadUnavailable::RetainedStepUnavailable));
+    };
+    let (events, bounded) = retained_events(conn, &key.source_id, cut)?;
+    if !bounded { return Ok(unavailable(PayloadUnavailable::ReadBoundExceeded)); }
+    let mut attempt = 1;
+    let mut goals = step.goals.clone();
+    let mut goals_materialized = false;
+    let mut opening = None;
+    for (index, event) in events.iter().enumerate() {
+        let fields = &event.body["fields"];
+        let attempt = lifecycle_attempt(&event.kind, fields, &mut attempt);
+        if event.kind == "step-run.retried" && let Some(retained) = fields.get("goals") {
+            let Ok(retained) = serde_json::from_value::<Vec<String>>(retained.clone()) else {
+                return Ok(unavailable(PayloadUnavailable::PayloadUnavailable));
+            };
+            goals = retained;
+            goals_materialized = true;
+        }
+        if attempt == wanted_attempt && event.id == proof.opening_claim_id
+        {
+            opening = Some(index);
+            break;
+        }
+    }
+    let Some(opening) = opening else {
+        return Ok(unavailable(PayloadUnavailable::OpeningUnavailable));
+    };
+    // The lower proof supplies bounded immutable materialization variables. Retry
+    // goals are already materialized, while the title retains its creation attempt.
+    let variables = &proof.materialization_variables;
+    let title = step.title.as_deref().map(|text| crate::mission::interpolate(text, variables)).transpose();
+    // Retry goals are already materialized; interpolating again would corrupt literal templates.
+    let text = if goals_materialized {
+        Ok(goals)
+    } else {
+        goals.iter().map(|goal| crate::mission::interpolate(goal, variables))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let (Ok(title), Ok(text)) = (title, text) else {
+        return Ok(unavailable(PayloadUnavailable::HistoricalInterpolationUnavailable));
+    };
+    let mut exact = Vec::new();
+    let mut answers = Vec::new();
+    for event in &events[opening..] {
+        let fields = &event.body["fields"];
+        if matches!(event.kind.as_str(), "work.person-done" | "work.person-cancelled")
+            && fields.get("episode").and_then(Value::as_str) == Some(key.episode.as_str())
+            && fields.get("attempt").and_then(Value::as_u64) == Some(wanted_attempt)
+        {
+            exact.push((event.kind.clone(), event.body.clone(), event.at));
+            answers.push(event.body.clone());
+        }
+    }
+    let history = fold_step_history(&exact, &[], u128::MAX);
+    let state = if let Some(transition) = history.transitions.last() {
+        EpisodeState::Available { status: transition.status.clone(), answers }
+    } else {
+        // Today's exact ready projection is status proof only, never historical request content.
+        let ready: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM step_runs s
+             JOIN mission_runs m ON m.id=s.run_id
+             JOIN run_generations g ON g.id=s.generation_id
+             WHERE s.subject=?1 AND s.attempt=?2 AND s.readiness_epoch=?3
+               AND s.status='ready' AND m.current_generation_id=g.id
+               AND m.status='running' AND m.phase='normal' AND g.status='running')",
+            params![key.source_id, wanted_attempt, epoch], |row| row.get(0),
+        ).map_err(internal)?;
+        if ready {
+            EpisodeState::Available { status: client_state("ready"), answers: Vec::new() }
+        } else {
+            EpisodeState::Unavailable
+        }
+    };
+    let complete = matches!(&state, EpisodeState::Available { .. });
+    Ok(Some(RequestHistoryItem {
+        key: key.clone(), payload: HistoricalPayload::Available {
+            title, text: text.join("\n"), request: None, references: Vec::new(),
+            provenance: RequestProvenance::AuthoredEpisode {
+                mission_revision: revision, opening_claim_id: events[opening].id.clone(),
+            },
+        }, state, complete,
+    }))
+}
+
+#[cfg(test)]
+#[path = "retained_person_history_tests.rs"]
+mod retained_person_history_tests;
+
 /// The newest attempts a step's history keeps.
 pub const ATTEMPTS_LIMIT: usize = 20;
 /// The newest waits a step's history keeps.
@@ -199,15 +487,7 @@ pub fn fold_step_history(
     for (kind, body, at) in events {
         let at = *at;
         let fields = body.get("fields").unwrap_or(body);
-        let field_attempt = fields.get("attempt").and_then(Value::as_u64);
-        if matches!(
-            kind.as_str(),
-            "step-run.state" | "step-run.carried" | "step-run.retried"
-        ) && let Some(value) = field_attempt
-        {
-            current_attempt = value;
-        }
-        let attempt = field_attempt.unwrap_or(current_attempt);
+        let attempt = lifecycle_attempt(kind, fields, &mut current_attempt);
         let reason = text(fields, &["reason", "summary"]);
 
         // A late reconciliation or claim must not extend the declared retry backoff.

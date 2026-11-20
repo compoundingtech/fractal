@@ -32,11 +32,13 @@ type RowState =
 const NONE: readonly AutoResolvedAsk[] = []
 
 /** The section, from a read: nothing while unread, refused to a non-person, or empty; a failed read says so. */
-export const AutoResolvedSection = ({ read, now, onOverride }: {
+export const AutoResolvedSection = ({ read, now, onOverride, onSelect }: {
   readonly read: AutoResolvedRead | undefined
   readonly now: number
   /** Absent on a device without control access: rows still show what the default was. */
   readonly onOverride?: Override
+  /** Opens the exact resolved source for an independent discussion. */
+  readonly onSelect?: (id: string) => void
 }): React.ReactNode => {
   const id = React.useId()
   const heading = React.useRef<HTMLHeadingElement>(null)
@@ -90,6 +92,7 @@ export const AutoResolvedSection = ({ read, now, onOverride }: {
                   now={now}
                   state={states.get(ask.resolution_id)}
                   onFocusWithin={() => { focused.current = ask.resolution_id }}
+                  {...(onSelect === undefined ? {} : { onSelect: () => onSelect(`auto-resolved:${ask.resolution_id}`) })}
                   {...(onOverride === undefined ? {} : { onOverride: (answer, label) => override(ask, answer, label) })}
                 />
               ))}
@@ -100,12 +103,13 @@ export const AutoResolvedSection = ({ read, now, onOverride }: {
   )
 }
 
-const AutoResolvedRow = ({ ask, now, state, onFocusWithin, onOverride }: {
+const AutoResolvedRow = ({ ask, now, state, onFocusWithin, onOverride, onSelect }: {
   readonly ask: AutoResolvedAsk
   readonly now: number
   readonly state: RowState | undefined
   readonly onFocusWithin: () => void
   readonly onOverride?: (answer: OverrideAction['answer'], label: string) => void
+  readonly onSelect?: () => void
 }): React.ReactNode => {
   const touch = React.useContext(NarrowLayoutContext)
   const copyId = React.useId()
@@ -125,7 +129,8 @@ const AutoResolvedRow = ({ ask, now, state, onFocusWithin, onOverride }: {
   return (
     <li data-auto-resolved-id={ask.resolution_id} data-override-state={state?._tag.toLowerCase()} onFocus={onFocusWithin} {...stylex.props(styles.row)}>
       <span {...stylex.props(styles.line)}>
-        <span {...stylex.props(styles.title)}>{ask.title}</span>{' '}
+        {onSelect === undefined ? <span {...stylex.props(styles.title)}>{ask.title}</span>
+          : <Aria.Button onPress={onSelect} {...stylex.props(styles.title, styles.open)}>{ask.title}</Aria.Button>}{' '}
         <span aria-label={`resolved ${age} ago`} {...stylex.props(styles.metric)}>{age}</span>
       </span>
       <span {...stylex.props(styles.meta)}>{applied} · {asker}</span>
@@ -183,6 +188,7 @@ const styles = stylex.create({
   row: { display: 'flex', flexDirection: 'column', gap: s.xs, paddingBlock: s.sm, paddingInline: s.row, borderRadius: 4, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, color: c.fg },
   line: { display: 'flex', alignItems: 'baseline', gap: s.sm, minWidth: 0 },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  open: { borderWidth: 0, padding: 0, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ...focus },
   metric: { flexShrink: 0, color: c.fgSoft, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums' },
   meta: { color: c.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   answers: { display: 'flex', flexWrap: 'wrap', gap: s.xs },

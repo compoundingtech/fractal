@@ -1,25 +1,32 @@
+import type { ReactNode } from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
 import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
+import type { AgentStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { accentVars as accent, borderVars as border, geometryVars, radiusVars as r, spaceVars, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { readingColumnStyles } from '../../../../packages/fractal-ui/src/assistant-ui/reading-column.stylex.ts'
 import { ObservedAge, useConversationLastObservedAt } from './lastObserved.tsx'
 import type { LastSeenActivity } from './conversationTranscript.ts'
 
-export { ThreadUnavailable, LastSeen }
+export { ThreadUnavailable, LastSeen, SeatAtRest }
 /**
  * The conversation read failed or was refused. Fixed copy only, inline in the reading lane: the reason (danger tone
  * only for a failure), its consequence on its own line, and Retry only where the source can re-acquire the follow.
+ * Content that still reads without the conversation (the agent's threads) follows in the shared reading column.
  */
-function ThreadUnavailable({ classification, reason, detail, onRetry }: { readonly classification: string; readonly reason: string; readonly detail: string | undefined; readonly onRetry: (() => void) | undefined }) {
-  return <div data-thread-unavailable {...stylex.props(styles.lane, styles.notice)}>
-    <section aria-label={reason} data-testid="transcript-unavailable" data-system-state="error" {...stylex.props(styles.unavailable)}>
-      <p role="status" {...stylex.props(styles.unavailableText)}>
-        <span {...stylex.props(styles.unavailableTitle, classification === 'failed' && styles.dangerTitle)}>{reason}</span>
-        {detail === undefined ? null : <span {...stylex.props(styles.unavailableDetail)}>{detail}</span>}
-      </p>
-      {onRetry === undefined ? null : <Button aria-label={`Retry: ${reason}`} onPress={onRetry} {...stylex.props(styles.actionButton)}>Retry</Button>}
-    </section>
-  </div>
+function ThreadUnavailable({ classification, reason, detail, onRetry, children }: { readonly classification: string; readonly reason: string; readonly detail: string | undefined; readonly onRetry: (() => void) | undefined; readonly children?: ReactNode }) {
+  return <>
+    <div data-thread-unavailable {...stylex.props(styles.lane, styles.notice)}>
+      <section aria-label={reason} data-testid="transcript-unavailable" data-system-state="error" {...stylex.props(styles.unavailable)}>
+        <p role="status" {...stylex.props(styles.unavailableText)}>
+          <span {...stylex.props(styles.unavailableTitle, classification === 'failed' && styles.dangerTitle)}>{reason}</span>
+          {detail === undefined ? null : <span {...stylex.props(styles.unavailableDetail)}>{detail}</span>}
+        </p>
+        {onRetry === undefined ? null : <Button aria-label={`Retry: ${reason}`} onPress={onRetry} {...stylex.props(styles.actionButton)}>Retry</Button>}
+      </section>
+    </div>
+    {children == null ? null : <div {...stylex.props(readingColumnStyles.column)}>{children}</div>}
+  </>
 }
 
 /**
@@ -35,6 +42,19 @@ function LastSeen({ agentRef, lastSeen }: { readonly agentRef: string; readonly 
       <span aria-hidden="true" {...stylex.props(styles.glyph)}><SidebarStatus status="stale" statusLabel="Last seen" freshness="stale" iconOnly /></span>
       <span>{observedAt === undefined ? sentence : <ObservedAge prefix={`${sentence} · `} at={observedAt} />}</span>
       {lastSeen.detail === undefined ? null : <><span aria-hidden="true">·</span><code {...stylex.props(styles.code)}>{lastSeen.detail}</code></>}
+    </p>
+  </div>
+}
+
+/**
+ * The seat reports no turn in progress while its transcript still holds an open run: the seat's own observed state,
+ * as its roster row names it, with no spinner and no elapsed counter.
+ */
+function SeatAtRest({ status, label }: { readonly status: AgentStatus; readonly label: string }) {
+  return <div {...stylex.props(styles.lane)}>
+    <p role="status" data-seat-at-rest={status} {...stylex.props(styles.lastSeen)}>
+      <span aria-hidden="true" {...stylex.props(styles.glyph)}><SidebarStatus status={status} statusLabel={label} freshness="live" iconOnly /></span>
+      <span>{label}</span>
     </p>
   </div>
 }

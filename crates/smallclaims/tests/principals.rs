@@ -68,9 +68,48 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 }
 
 #[test]
+fn storage_version_follows_the_reviewed_migration_order() {
+    // The graph's reader-first default remains independent of application privacy.
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
+    assert_eq!(fractal_storage_version::THREAD_PRIVACY_STORAGE_VERSION, 23);
+}
+
+#[test]
+fn activated_storage_versions_retain_their_header_and_history() {
+    for previous in [20_u32, 21, 22, 23] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let store = Store::open(&path, "node", Arc::new(Plain)).unwrap();
+        let original = note(&store, None, "pre-thread-reader history");
+        drop(store);
+
+        // Plain graph stores preserve explicit format/privacy headers; only the
+        // application runtime raises its privacy floor.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.pragma_update(None, "user_version", previous).unwrap();
+        drop(connection);
+
+        let reopened = Store::open(&path, "node", Arc::new(Plain)).unwrap();
+        let version: u32 = reopened
+            .readers
+            .get()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, previous, "opening explicit version {previous}");
+        let retained = reopened
+            .latest_claim(&original.subject, Some(&original.kind))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.id, original.id);
+        assert_eq!(retained.body, original.body);
+        assert_eq!(retained.predecessors, original.predecessors);
+    }
+}
+
+#[test]
 fn signature_reference_reader_precedes_the_default_writer_format() {
     assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
-    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 22);
+    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 23);
 }
 
 #[test]
@@ -95,8 +134,8 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     }
     assert!(!store.signature_migration().unwrap().references_pending);
     drop(store);
-    // A later writer release activates v21. This earlier reader must preserve that
-    // marker, convert the old text losslessly and continue reading/writing authority.
+    // An explicitly activated v21 fixture keeps its marker and converts text
+    // losslessly. Application privacy stores also activate it, fenced at v23.
     rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 21).unwrap();
     let reader = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -121,7 +160,7 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     assert_eq!(reopened.connection.write().pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 21);
     assert_eq!(verdict(&reopened, &claim), Verdict::Verified);
     drop(reopened);
-    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 23).unwrap();
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 24).unwrap();
     assert!(Store::open(&path, "studio", Arc::new(Plain)).is_err());
 }
 

@@ -374,6 +374,15 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/conversations", "requires a paired assistant bearer and per-read grant approval, absent from the person-client cost fixture; assistant API tests cover exact-envelope byte budgets and keyset progress, not populated cost"),
     ("GET /v1/client/assistant/conversation-detail", "requires a grant-bound handle returned by assistant discovery and per-read approval, absent from the static cost fixture; assistant API tests cover detail-to-timeline continuation, not populated cost"),
     ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
+    // Thread authorization coverage lives in assistant/authorization_tests.rs:
+    // thread_detail_requires_conversation_grant_and_owner_visible_thread and
+    // thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revisions.
+    // The shared receipt-slot path is covered by
+    // assistant_caller_bound_rechecks_authorization_after_queue_backpressure.
+    ("GET /v1/client/assistant/threads", "requires a paired assistant, a grant-bound conversation/session and per-read approval, absent from the person-client cost fixture; assistant authorization tests cover scoped discovery pagination and revocation, not populated SQLite cost"),
+    ("GET /v1/client/assistant/thread-detail", "requires a paired assistant and an owner-visible thread in its granted conversation/session, absent from the person-client cost fixture; assistant authorization tests cover exact ownership, grant denial and response byte budgets, not populated SQLite cost"),
+    ("GET /v1/client/assistant/thread-timeline", "requires a paired assistant and grant/session/thread-bound continuation, absent from the person-client cost fixture; assistant tests cover cursor isolation, bounded content chunks and shared receipt-slot authorization under backpressure, not populated SQLite cost"),
+    ("GET /v1/client/assistant/thread-request-history", "requires an MCP conversation grant, selected current session and an owner-visible thread with retained requests, absent from the static cost fixture; assistant authorization tests cover scope, owner and source checks, not populated SQLite cost"),
     ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("GET /v1/client/assistant/slo", "requires a paired assistant granted read.assistant.slo and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the bounded objective/budget projection"),
@@ -807,6 +816,14 @@ const PROBES: &[Probe] = &[
             "preview_hash": fixture.items["continuity_hash"],
         }),
     ),
+    get(
+        "GET /v1/client/threads/start-context",
+        "/v1/client/threads/start-context?source_id={start_source}&episode={start_episode}",
+    ),
+    get(
+        "GET /v1/client/assistant/thread-start-context",
+        "/v1/client/assistant/thread-start-context?agent_id={start_agent}&session_id={start_session}&source_id={start_source}&episode={start_episode}&max_response_bytes=16384",
+    ),
     get("GET /v1/effects/by-key", "/v1/effects/by-key?key={effect_key}"),
     post("POST /v1/effects/{*subject}", "/v1/effects/{effect_subject}/resolve", |_, attempt| json!({
         "actor": "person/bench-operator",
@@ -1156,6 +1173,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/lanes", "/v1/client/lanes"),
     get("GET /v1/client/lanes/{*id}", "/v1/client/lanes/{lane}"),
     get("GET /v1/client/history", "/v1/client/history"),
+    get("GET /v1/client/threads", "/v1/client/threads?agent_id={seat}"),
+    get("GET /v1/client/threads/{id}", "/v1/client/threads/{thread}"),
+    get("GET /v1/client/threads/{id}/timeline", "/v1/client/threads/{thread}/timeline"),
+    get("GET /v1/client/threads/{id}/request-history", "/v1/client/threads/{thread}/request-history"),
     get(
         "GET /v1/client/history/{*id}",
         "/v1/client/history/{history}",
@@ -3584,6 +3605,99 @@ async fn paired_push(
     Ok(response)
 }
 
+/// Exercise the real bearer middleware, conversation fence and bounded metadata projection.
+/// Exact answers are required on every sample: an auth refusal must never become a cheap probe.
+async fn assistant_start_context(
+    app: &Router,
+    credential: &str,
+    path: &str,
+    expected: &Value,
+) -> Value {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let response = app.clone().oneshot(Request::builder().uri(path)
+        .header("authorization", format!("Bearer {credential}"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 16384).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(status.is_success(), "seeded assistant start context failed: {status}: {envelope}");
+    assert_eq!(&envelope["value"], expected);
+    envelope
+}
+
+/// One real ask and one current runtime keep the answer fixed while the surrounding store grows.
+async fn prepare_start_context(
+    state: &AppState,
+    fixture: &mut Fixture,
+    root: &Path,
+) -> (String, Value) {
+    use fractal_daemon::PersonWorkStore as _;
+    use fractal_daemon::api::client_v0::{ClientSession, assistant};
+
+    const AGENT: &str = "agent/bench/cost/start-context";
+    const OWNER: &str = "person/bench-operator";
+    const INCARNATION: &str = "cost-start-context-runtime";
+    let kdl = format!(
+        "version 2\nagent \"bench/cost/start-context\" {{ workspace {:?}; command \"true\"; restart always; }}\n",
+        root.to_str().unwrap(),
+    );
+    let intent = fractal_daemon::parse_intent(&kdl, NODE).unwrap();
+    state.store.apply_internal(&intent, "cost-start-context-agent").unwrap();
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running", "runtime_id":"cost-start-context",
+            "incarnation_id":INCARNATION, "terminal":true})),
+        ("harness.observed", json!({"state":"working", "driver":"codex",
+            "incarnation_id":INCARNATION, "evidence_incarnation":"cost-start-context-provider"})),
+    ] {
+        state.store.append_claim(&ClaimInput {
+            subject: AGENT.into(), kind: kind.into(), actor: Some(AGENT.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    state.store.ask_person(&serde_json::from_value(json!({
+        "person":OWNER, "actor":AGENT, "title":"Cost start-context source",
+        "reason":"A finite native ask for recipient preview.",
+        "new_run":"cost-start-context", "idempotency_key":"cost-start-context-ask",
+    })).unwrap()).unwrap();
+    let item = state.store.attention_items(Some(OWNER)).unwrap().into_iter()
+        .find(|item| item.title == "Cost start-context source")
+        .expect("the native ask must expose its exact source episode");
+    let session = fractal_daemon::api::managed_session_id(AGENT, INCARNATION);
+    for (name, value) in [
+        ("start_agent", AGENT), ("start_session", session.as_str()),
+        ("start_source", item.subject.as_str()), ("start_episode", item.episode.as_str()),
+    ] {
+        fixture.items.insert(name, urlencoding::encode(value).into_owned());
+    }
+    // The four minimal scopes are mandatory at issuance; conversation enables this MCP read.
+    // Caller-bound allow is a real supported policy, not a reused single-use approval.
+    let axum::Json(challenge) = assistant::begin(
+        state.clone(), ClientSession::local(Some(OWNER)).unwrap(),
+        serde_json::from_value(json!({
+            "api_version":"st3.client.v0", "device_name":"Cost start-context assistant",
+            "assistant_id":"assistant/mcp",
+            "scopes":["read.assistant.summary", "read.assistant.attention",
+                "read.assistant.missions", "read.assistant.agents", "read.assistant.conversation"],
+            "expires_in_seconds":3600, "disclosure_consent":true,
+            "consent_evidence":"Disposable cost fixture owner consent",
+            "minimal_read_mode":"caller-bound-allow",
+        })).unwrap(),
+    ).await.unwrap();
+    let id = challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let axum::Json(paired) = assistant::complete(state, id, &serde_json::from_value(json!({
+        "api_version":"st3.client.v0", "code":challenge["code"],
+        "device_public_key":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+        "key_storage":"software",
+    })).unwrap(), "fabric-loopback").await.unwrap().unwrap();
+    (paired["credential"].as_str().unwrap().into(), json!({
+        "kind":"thread-start-context", "source_id":item.subject, "episode":item.episode,
+        "start_recipient":{"agent_id":AGENT, "basis":{"_tag":"original"}},
+    }))
+}
+
 /// Keep both series answers fixed while same-kind timestamp history outside the window grows.
 fn seed_series_reads(store: &Store, scale: f64) {
     let intent = fractal_daemon::parse_intent(r#"version 2
@@ -3772,7 +3886,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let mut service_state = state.clone();
     service_state.owning_person = Some("person/bench-operator".into());
     let capture_router = fractal_daemon::api::router(service_state.clone());
-    let service_router = fractal_daemon::api::fabric_router(service_state);
+    let service_router = fractal_daemon::api::fabric_router(service_state.clone());
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
     tokio::time::timeout(Duration::from_secs(120),
@@ -3838,8 +3952,24 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .insert("incarnation_id".into(), json!(SEAT_RUNTIME));
         store.append_claim(&running).unwrap();
     }
+    let (thread, _) = fractal_daemon::store::thread_metadata::apply(
+        &store, "person/bench-operator", "thread/cost", "cost-thread-create",
+        fractal_daemon::store::thread_metadata::Edit::Create {
+            agent: &subjects.seats[0], title: "Cost fixture",
+        },
+    ).unwrap();
+    let observed_revision = fractal_daemon::store::thread_metadata::summary(
+        &store, "person/bench-operator", &thread.subject,
+    ).unwrap().revision;
+    fractal_daemon::store::thread_metadata::apply(
+        &store, "person/bench-operator", &thread.subject, "cost-thread-close",
+        fractal_daemon::store::thread_metadata::Edit::Close { revision: &observed_revision },
+    ).unwrap();
     let mut fixture = fixture(&person, &client, subjects).await;
+    let (start_credential, expected_start_context) =
+        prepare_start_context(&service_state, &mut fixture, root).await;
     fixture.items.insert("service_claim",service_claim);
+    fixture.items.insert("thread", thread.subject.trim_start_matches("thread/").into());
     fixture.items.insert(
         "harness_question",
         urlencoding::encode(&harness_question.id).into_owned(),
@@ -4167,6 +4297,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
+            } else if probe.route == "GET /v1/client/assistant/thread-start-context" {
+                let path = fixture.fill(probe.path, attempt);
+                counted(|| async {
+                    Ok(assistant_start_context(
+                        &service_router, &start_credential, &path, &expected_start_context,
+                    ).await)
+                }).await
             } else if probe.route.contains("/plugins/github/capture/v1/") {
                 let path = fixture.fill(probe.path, attempt);
                 let body = probe.body.map(|body| body(&fixture, attempt));
@@ -4229,6 +4366,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 };
                 let expected_publication = &publication;
                 let expected_retry_source = fixture.items.get("retry_subject");
+                let expected_start_context = &expected_start_context;
                 counted(|| async move {
                     let answer = match &body {
                         None => client.get::<Value>(&path).await,
@@ -4237,6 +4375,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                             client.request::<_, Value>(method, &path, Some(body)).await
                         }
                     };
+                    if probe.route == "GET /v1/client/threads/start-context" {
+                        assert!(answer.is_ok(), "seeded person start context failed: {answer:?}");
+                    }
                     if probe.route == "GET /v1/client/publication-definition" {
                         assert_eq!(
                             answer.as_ref().expect("the measured publication read must succeed"),
@@ -4245,6 +4386,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                         );
                     }
                     answer
+                        .inspect(|value| {
+                            if probe.route == "GET /v1/client/threads/start-context" {
+                                assert_eq!(value, expected_start_context,
+                                    "the person probe must preview the exact seeded recipient");
+                            }
+                        })
                         .and_then(|value| {
                             if probe.route == "GET /v1/mission-runs/continuity/startup-preview" {
                                 anyhow::ensure!(value["runs"].is_array(), "startup preview must return its candidate inventory");

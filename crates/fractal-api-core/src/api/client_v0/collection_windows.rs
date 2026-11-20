@@ -13,7 +13,8 @@ const STORES: usize = 64;
 pub const WINDOWS: usize = 64;
 pub const SESSION_WINDOWS: usize = 16;
 const KIND_LIMIT: usize = 10_000;
-pub const COLLECTIONS: [&str; 16] = [
+pub const ATTENTION_THREAD_HINTS: &str = "attention-thread-hints";
+pub const COLLECTIONS: [&str; 19] = [
     "missions",
     "attention",
     "agents",
@@ -25,6 +26,7 @@ pub const COLLECTIONS: [&str; 16] = [
     "summary",
     "summary-missions",
     "clients", "usage", "machines", "devices", "sessions", "terminals",
+    "threads", "thread-timeline", ATTENTION_THREAD_HINTS,
 ];
 
 #[derive(Default)]
@@ -248,12 +250,17 @@ impl Windows {
             let memberships = store.ordered_memberships_changed(revisions.index, index)?;
             let read_positions = store.read_positions_changed(revisions.index, index)?;
             for (position, name) in COLLECTIONS.iter().enumerate() {
-                if all
-                    || (*name == "arrangements" && arrangements)
-                    || (*name == "ordered-memberships" && memberships)
-                    || (*name == "read-positions" && read_positions)
-                    || kinds.iter().any(|kind| !collection_ignores(name, kind))
-                {
+                let changed = if *name == ATTENTION_THREAD_HINTS {
+                    !all && crate::store::thread_metadata::attention_unread_changed(
+                        store, revisions.index, index,
+                    )?
+                } else {
+                    (*name == "arrangements" && arrangements)
+                        || (*name == "ordered-memberships" && memberships)
+                        || (*name == "read-positions" && read_positions)
+                        || kinds.iter().any(|kind| !collection_ignores(name, kind))
+                };
+                if all || changed {
                     revisions.values[position] = revisions.values[position].wrapping_add(1);
                 }
             }

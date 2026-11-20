@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose related retained request history through client-v0 and MCP",
+  "replay": {"status": "none", "detail": "Read adapters reuse the existing retained request-history projection without changing replay or writers."},
+  "schema": {"status": "changed", "detail": "Add GET /v1/client/threads/{id}/request-history with optional opaque cursor and limit, returning RequestHistoryPage. Add the MCP-only assistant thread-request-history projection and fractal_thread_request_history tool. Thread detail and timeline responses are unchanged."},
+  "rules": {"status": "changed", "detail": "Person-client history uses the existing thread read authorization. Assistant history requires assistant/mcp with the existing read.assistant.conversation scope, current agent/session selection and thread ownership. Every page reauthorizes sources. History relations grant no write or answer authority."},
+  "compatibility": {"status": "changed", "detail": "Generated clients expose the additive history read and request-history DTOs. Cursors pass through unchanged. Person-client limits follow the store's existing 1..50 clamping convention; assistant and MCP limits are bounded to 1..50."},
+  "downtime": {"status": "none", "detail": "No API-specific migration."},
+  "manual": {"status": "none", "detail": "No new scope or grant kind; existing MCP conversation grants apply."},
+  "recovery": {"status": "none", "detail": "No API-specific recovery changes."}
+}

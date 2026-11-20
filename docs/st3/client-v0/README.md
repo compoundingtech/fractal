@@ -20,6 +20,12 @@ crates/fractal-client/src/generated.rs`), and run the generator again; never edi
 hand.
 Generated Effect string length checks count Unicode code points, matching JSON Schema
 `minLength`/`maxLength`, not UTF-16 code units. Separate admission byte limits still apply.
+
+`thread.start-context` reads the exact known `(source_id, episode)` before a first
+Start. All generated clients expose this read and the shared `ThreadStartRecipient`
+basis (`original`, `configured`, or retirement-proven `fallback`); current Attention
+rows optionally carry the same recipient. The preview grants no send authority and
+does not change existing thread participants or request-history pagination.
 URI-reference format checks validate RFC3986 syntax, including relative references,
 without URL-constructor normalization of malformed input.
 
@@ -940,6 +946,16 @@ The following resources have list and detail routes. List routes accept `limit` 
 documented filters. The server clamps `limit` to `capabilities.limits.max_page_items`. Empty values
 sort after present values, strings compare as Unicode scalar sequences, and the final key is always
 the stable `id` ascending. No locale-sensitive ordering is permitted.
+
+Unread reminders require granted `threads-v1` version 3: `thread.mark-unread`,
+`thread.clear-unread`, timeline `around` seeks, and the `marked_unread` list selector.
+Older versions do not advertise this unread contract; natural unread remains independent.
+
+The owner-wide unread-reminder list, `GET /v1/client/threads?marked_unread=true`,
+uses bounded candidate pages. A page can return `items: []` with a non-null
+`next_cursor`; this does **not** mean the collection is empty. Continue with the
+same selector and each returned cursor until `next_cursor` is null before
+presenting an empty collection.
 
 | Resource | List and detail routes | Deterministic list order |
 |---|---|---|
@@ -3813,6 +3829,16 @@ The optional claim field changes the registry digest. Older members keep new-fie
 as waiting records until upgrade; see [rolling upgrades](../replication.md#rolling-upgrades-and-waiting-claims).
 
 `agent.retire` permanently retires the identity at its declaring host. It requires `{ "agent": "agent/example/worker", "reason": "Work finished" }`, a selected desired claim ID in `fence.runtime_desired_revision`, and a stable idempotency key. Optional `runtime_incarnation` fences a selected process. Rust provides `agent_retire`; Swift and TypeScript provide `agentRetire`. See [terminal retirement](../agent-retirement.md) for the coordinated registry rollout and locally known retirement rule. Fresh sends to a known retired agent return 409 `recipient-retired` with `applied: "none"` and a typed `details.refusal.variant: "Retired"`. Exact accepted retries return their receipt; a lost reply remains unconfirmed. `lifecycle-unavailable` concerns incomplete/conflicting local evidence, never an offline owner alone.
+
+When a source has no original responsible agent and no configured fallback, thread
+preview and Start return HTTP 409 `recipient-unassigned` with `retryable: false`,
+`applied: "none"` (also in `details.applied`), and no `details.reason`.
+This definitive pre-write refusal appends nothing. Setup remains blocked until a responsible agent is
+configured; this is not a race reported as `stale-fence` and does not change
+`recipient-retired` behavior.
+The router's serialized refusal examples are in
+[`fixtures/thread-start-refusals.json`](fixtures/thread-start-refusals.json);
+only the per-request `request_id` is normalized to `request/normalized`.
 
 `agent.retire.parameters.successor` optionally names an existing eligible agent. It is recorded in the signed retirement claim after the all-member registry gate. The successor's read and close claims carry `acting_for` and the retirement claim as evidence; `Agent.mail_custody` reports `{ successor, state: "pending" }` for OLD. Numeric unread counts and completion are not available in this increment.
 

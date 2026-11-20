@@ -10,6 +10,7 @@ import * as Aria from 'react-aria-components'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useMissionsDecode, useNow } from '../data/react.tsx'
+import { LiveMissionThreads } from '../threads/LiveThreads.tsx'
 import { DecodeNotice } from '../web/LiveRoster.tsx'
 import { MissionFeedNotice, missionsTruncatedText } from './MissionFeedNotice.tsx'
 import { hiddenByDefault, missionEta, missionReaderTitle, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
@@ -25,8 +26,10 @@ import { DeclarationDialog, type DeclarationTarget } from '../web/DeclarationDia
 const STEP_GLYPH: Record<StepWord, string> = { needs_you: '◆', done: '✓', working: '⠋', ready: '◇', waiting: '◐', cancelled: '⊘', failed: '✕', pending: '○' }
 const STEP_NAME: Record<StepWord, string> = { needs_you: 'needs you', done: 'done', working: 'working', ready: 'ready', waiting: 'waiting', cancelled: 'cancelled', failed: 'failed', pending: 'pending' }
 
-export const MissionsPane = ({ onOpenAgent, focusedMission, onFocusMission }: {
+export const MissionsPane = ({ onOpenAgent, onOpenThread, focusedMission, onFocusMission }: {
   readonly onOpenAgent?: (ref: string) => void
+  /** Opens one of a mission's threads in its own tab. */
+  readonly onOpenThread?: ((ref: string) => void) | undefined
   /** The URL's mission: opened and scrolled to. Without a host this screen keeps its own open row. */
   readonly focusedMission?: string
   readonly onFocusMission?: (ref: string | undefined) => void
@@ -84,7 +87,7 @@ export const MissionsPane = ({ onOpenAgent, focusedMission, onFocusMission }: {
                           </span>
                         </Aria.Button>
                         {presentation.last_progress && !expanded ? <div {...stylex.props(styles.progress)}><InlineMarkdown text={markdownInline(presentation.last_progress)} /></div> : null}
-                        {expanded ? <MissionDetail mission={mission} presentation={presentation} onOpenAgent={onOpenAgent} onOpenSource={setSource} /> : null}
+                        {expanded ? <MissionDetail mission={mission} presentation={presentation} onOpenAgent={onOpenAgent} onOpenThread={onOpenThread} onOpenSource={setSource} /> : null}
                       </li>
                     )
                   })}
@@ -97,7 +100,7 @@ export const MissionsPane = ({ onOpenAgent, focusedMission, onFocusMission }: {
   )
 }
 
-const MissionDetail = ({ mission, presentation, onOpenAgent, onOpenSource }: { readonly mission: Fractal.Mission; readonly presentation: MissionPresentation; readonly onOpenAgent?: (ref: string) => void; readonly onOpenSource: (target: DeclarationTarget) => void }): React.ReactNode => {
+const MissionDetail = ({ mission, presentation, onOpenAgent, onOpenThread, onOpenSource }: { readonly mission: Fractal.Mission; readonly presentation: MissionPresentation; readonly onOpenAgent?: (ref: string) => void; readonly onOpenThread?: ((ref: string) => void) | undefined; readonly onOpenSource: (target: DeclarationTarget) => void }): React.ReactNode => {
   const word = missionWord(presentation.word)
   return (
     <div {...stylex.props(styles.detail)} aria-label={`${missionReaderTitle(mission)} steps`}>
@@ -113,6 +116,7 @@ const MissionDetail = ({ mission, presentation, onOpenAgent, onOpenSource }: { r
           {presentation.steps.map((step) => <StepRow key={step.id} mission={mission.id} step={step} onOpenAgent={onOpenAgent} onOpenSource={onOpenSource} />)}
         </ol>
       )}
+      <LiveMissionThreads missionId={mission.id} onOpenThread={onOpenThread} />
     </div>
   )
 }
@@ -153,7 +157,7 @@ const styles = stylex.create({
   steps: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 },
   step: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: s.md, fontSize: t.metaSize },
   stepWord: { color: c.fgMuted, minWidth: '5.5rem' },
-  link: { padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.primary, fontSize: t.denseSize, cursor: 'pointer', textDecoration: 'underline' },
+  link: { padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.primaryFg, fontSize: t.denseSize, cursor: 'pointer', textDecoration: 'underline' },
   note: { flexBasis: '100%', paddingInlineStart: 'calc(1.25rem + 5.5rem + 24px)', color: c.fgMuted, fontSize: t.denseSize },
   notice: { color: c.fgMuted, fontSize: t.metaSize, padding: s.md },
 })

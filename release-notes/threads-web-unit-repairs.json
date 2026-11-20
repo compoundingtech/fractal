@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Repair thread-summary test extraction and availability copy expectations, and keep unavailable-thread styling in the conversation presentation boundary.",
+  "replay": { "status": "none", "detail": "No replay or projection changes. The native summary harness includes the production ThreadReadIssue helper while retaining expanded live-subscription coverage." },
+  "schema": { "status": "none", "detail": "No stored schema changes." },
+  "rules": { "status": "none", "detail": "No permission or checkpoint rule changes. Availability tests retain missing-grant and rejected-credential distinctions and assert the current browser pairing guidance." },
+  "compatibility": { "status": "none", "detail": "No API or protocol changes. ConversationStates owns the existing unavailable-thread reading-column styling; ConversationPane retains structural composition without adding a scroll host or duplicating the composer." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "No data migration or recovery action required." }
+}

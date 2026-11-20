@@ -1217,6 +1217,8 @@ fn paired_session() -> ClientSession {
         actor: "person/avery/session/phone".into(),
         authority_actor: "person/avery".into(),
         pairing_grant: None,
+        pairing_completion: None,
+        bound_agent: None,
         pairing_issued_here: false,
         grant_expires_at: None,
         assistant_write: None,

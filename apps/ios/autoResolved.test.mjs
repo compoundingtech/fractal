@@ -188,7 +188,10 @@ test('the store reads auto-resolved asks without a timer and re-reads after an o
 test('Now lists the section below what waits and offers the override on matching closed rows', () => {
   const now = source('./screens/Now.tsx');
   assert.equal(nodes(now, node => ts.isJsxSelfClosingElement(node) && node.tagName.getText() === 'AutoResolvedSection').length, 1);
-  assert.equal(calls(now, 'useFocusEffect').length, 1, 're-read when Now comes into view');
+  const home = nodes(now, node => ts.isFunctionDeclaration(node) && node.name?.text === 'NowScreen')[0];
+  assert.ok(home);
+  assert.equal(calls(home, 'useFocusEffect').length, 1, 're-read when Now comes into view');
+  assert.equal(nodes(home, node => ts.isJsxSelfClosingElement(node) && node.tagName.getText() === 'PendingInboxThreads').length, 1, 'thread recovery remains alongside auto-resolved asks');
   assert.ok(calls(now, 'closedOverride').length >= 2, 'context menu and closed detail both offer it');
   const section = source('./screens/AutoResolved.tsx');
   assert.equal(calls(section, 'overrideCopy')[0].arguments[0].getText(), 'row.asker');

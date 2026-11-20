@@ -6,6 +6,8 @@ Status, compatibility and connection notices call the daemon Fractal. An “olde
 
 The TypeScript human error helpers match Rust's explicit `human()` / `human_message()` renderers through `fixtures/clients/plain-errors-v1.json`. Rust's legacy `plain()` / `plain_message()` wording is retained for gate reports, because those report strings also enter durable claims and gate-check JSON. The CLI resolves one presentation mode per process: native drivers and exec-gate subprocesses keep stable error and stream-resync wording; other CLI output uses human wording. Neither human path mutates the original error envelope.
 
+The opt-in `thread-actions` demo fixture follows the f468b660 thread contract: metadata actions require the current target revision and a same-host, nonfuture snapshot; redundant lifecycle changes are stale fences. Timeline continuations are thread/person-scoped and pinned to their initial append position (40 events by default, at most 50). Collection deltas remove threads leaving a window and admit replacement rows. Refusal envelopes retain the live server's empty details without adding an `applied` disposition. These checks make the fixture useful for UI previews, not a replacement for live-server conformance testing.
+
 ## Connect
 
 1. On a trusted Fractal machine, begin device pairing for the intended person with `fractal devices pair --as person/ada --full-control "iPhone"` if this trusted device should send messages and use mission/work, runtime, and terminal controls. Without `--full-control`, pairing intentionally grants the limited default projection, glasses, arrangement, terminal-output, attention, and launch scopes; an existing limited device must be re-paired to gain controls.
@@ -56,6 +58,161 @@ Minute reports retain the existing observation endpoint and wire shape. Preparin
 `observations.test.mjs` uses a controlled clock and a temporary disk journal to assert that actual persisted producer output equals `fixtures/observation-minute.json`, including all seven objectives and 40 seconds of disconnected foreground time. The native ingestion/evaluation test consumes that same fixture; no simulator, running gateway, or live phone is required.
 
 ## Layout
+
+Ordinary conversations and thread placements use `conversationComposer.tsx` for the controlled
+text field, focus/reveal hooks, Send/Cancel and disabled presentation. Ordinary image selection,
+image tray and dictation occupy capability slots; threads supply quote/removal and validation slots
+while retaining their canonical recipient policy. The shared component does not add thread
+attachments or choose send authority.
+
+`conversationAttempts.ts` owns process-lifetime draft snapshots, send/result phases and guarded
+original-retry ownership for both contexts. Ordinary rows adapt its results to image restoration,
+the warned Send as new action and transcript reconciliation; thread deliveries project the same
+controller into the existing client-scoped ledger, retaining independent Start attempt keys and
+Start/Reply completion fences. `conversationPresentation.tsx` supplies common recovery feedback;
+wording and available recovery actions remain context capabilities. Signed packet/member retention,
+receipt checks and prior-unknown dominance still come from the existing fractal-client delivery
+helpers and the stricter `sendStart` adapter, not from a new transport or certainty policy.
+Draft text/quote formats remain separate. There is no durable packet/outbox or original retry after
+process restart; saved Start discovery metadata remains only a warning and saved-copy capability.
+
+The common conversation frame owns keyboard avoidance and the composer dock; it accepts each
+context's existing history viewport unchanged. Common message heading/body presentation retains
+the exact uncollapsed Markdown measurement target and line reports. Ordinary mail folding measures
+the full body inside its clamp; rich tools, sessions, images and native in-place copying remain
+ordinary renderers. Thread quote/return-marker/metadata/reminder controls remain thread slots.
+Ordinary inverted paging/image visibility and thread around-anchor paging, stable selection and
+500 ms meaningful-body dwell are deliberately different adapters, not one scrolling algorithm.
+Static composer layout coverage checks that width flex belongs to the wrapper and the inner
+multiline Field retains intrinsic height; this is not native multiline-height proof.
+
+Thread close, reopen and rename update every visible thread surface immediately, without a confirmation dialog. Rename uses an inline title field. A four-second, screen-reader-announced confirmation appears only after the server accepts the change: `Closed "Title"` (with a Reopen thread hint), `Reopened "Title"`, or `Renamed to "Title"`. A refused change restores the authoritative title/state and shows the server error. An unconfirmed delivery keeps the optimistic value and the existing original-request retry; it never announces success until a receipt confirms acceptance. These local overlays are connection-scoped and never change the authoritative summary or action fence. A closed thread still accepts replies: above its composer, `Closed · replying keeps it closed` sits beside Reopen thread. Without the reply grant, `Replies aren't available on this connection.` replaces the composer. A thread row shows only an unread dot, the title and a trailing `Closed`; its message count, state and unread status are in the VoiceOver label. The Threads header shows its count with Show/Hide. Rows, headers and buttons are at least 44pt tall. The thread screen's navigation bar carries the thread title and follows renames. Every timeline message and lifecycle event shows a relative age beside its sender (`0s ago`, `5m ago`, and the existing shared web `ago()` units), refreshed by one shared second tick while timelines are mounted. There are no day headings. Each row's accessibility label retains its exact localized date and time, also shown as the title of an existing long-press action sheet when available. Followed lists and timelines drop the manual Refresh buttons. Pull to refresh on the thread screen, agent conversation, mission detail, Now and Inbox items reloads them; Refresh buttons remain only for readers without a live feed. Threads, on their own screen and embedded in a conversation, mission or Inbox item, use system text with Dynamic Type's natural line heights; thread titles wrap instead of truncating at accessibility text sizes. An embedded thread group scrolls within half the screen above a conversation and three quarters inside a scrolling mission or Inbox screen. The thread screen docks the confirmation, closed hint and composer (or the no-grant line) below its scrolling history, lifted by the keyboard; embedded threads keep the composer inline.
+Inline thread read and timeline errors offer an in-place Retry button; a successful re-read clears the error. A revoked thread read grant reads `You no longer have access to this thread.` followed by the server's reason, without an error-code prefix. A refused close, reopen or rename instead shows `Couldn't close this thread.`, `Couldn't reopen this thread.` or `Couldn't rename this thread.`, with the server reason on a separate text line; it does not imply loss of read access. Standalone initial-load errors retain Refresh thread.
+Thread action failures, validation issues, changed read errors and quote selection are explicitly announced to VoiceOver; revoked read access moves focus to the error. Expandable thread rows and the Threads header expose expanded/collapsed values and hints. Embedded composers name their thread in the message and Send labels; Retry names the failed thread or thread list. Standalone composers keep their existing Message thread and Send labels. Thread action hints identify the affected title without changing the visible button text.
+Timeline relative ages are visual-only: message and lifecycle accessibility labels use the stable sender, exact date/time and content, so the shared second tick does not repeatedly change VoiceOver's focused label.
+
+First Starts are independent, even for the same Inbox source and episode. Each
+attempt owns its thread UUID, action key and delivery slot; only its own retry
+recovers that result. Unconfirmed starts appear separately in Inbox recovery,
+including when their source remains listed. They never replace the current
+source/episode or disable a fresh Start. Listing existing discussions is navigation,
+not Start deduplication.
+Before a fresh send, the generated Start context selects the exact signed recipient.
+The preview says "To <name>" or "New discussion with <name>", reusing `agentName`
+only for an existing exact-ID roster match, otherwise showing the canonical ID.
+Display metadata never selects routing; accessibility retains the canonical identity.
+A source with neither an original agent nor a configured recipient remains visibly unavailable: no
+recipient is guessed, and the composer cannot submit. GET `recipient-unassigned`
+shows a blocked setup refusal with no Retry; GET `recipient-retired` is a distinct
+blocked retirement refusal. Both preserve the draft.
+A signed POST requires explicit `applied: none` under the shared application-certainty
+rules before a refusal can invalidate the recipient context and require a new Send.
+Absent proof remains unknown, even with `retryable: false`: retain the original signed
+packet, recipient and idempotency key, with no automatic resend or retarget. The golden
+`stale-fence` envelope still lacks that proof; `recipient-unassigned` and
+`recipient-retired` carry it. A definitive unassigned POST rereads context once,
+then the unavailable setup blocks further sends without Retry and keeps the draft.
+A later refusal cannot settle an earlier unknown send.
+Server message text is never parsed and `stale-fence` has no responsibility reason.
+Before releasing an unconfirmed first composer, the rendered draft used to build
+its submitted content and quote is serialized into the attempt's own durable key.
+Only a matching origin snapshot is removed: shared-cache edits before invocation
+or while the send is pending remain independent.
+Start completion captures the draft owner and cache generation at dispatch. If
+either changes while pending, it skips draft handoff, persistence and cleanup, even
+when the reset shared map contains identical text for the next owner.
+Minimal target/origin/title discovery metadata is saved beside the draft, never a
+bound action, operation key or signature. Inbox discovers these drafts after restart.
+With the live ledger, recovery retries the original signed request. Without it, the
+saved message explicitly has unknown delivery status and offers Copy message and
+Discard saved draft, never Retry or a send to its old target. The person may paste
+into a current Inbox Start to deliberately send a separate message with a fresh
+UUID/key and current recipient; the warning explains the original may have arrived.
+Recovery acceptance/discard touches only that attempt's draft, not later typing.
+
+Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
+measured message text stably visible for 500 ms in the focused, foreground view.
+The body must have full width, its trailing end visible, and visible height of at
+least min(actual body height, two rendered lines): a fully visible one-line body
+qualifies, but a clipped one-line body or one line of a longer body does not.
+Visibility, focus, AppState, occlusion and layout changes reset the timer. Owned
+action sheets/modals/menus suspend the lease until dismissal and a fresh full dwell;
+keyboard show/hide also invalidates measured geometry. Collapsed rows,
+background tabs, clipped edges and author labels never count. A mission screen's
+outer scroll view reports its scroll and layout too, so its clipping participates.
+Rerenders such as the shared second tick keep a message's laid-out lines; only new
+layout or the message leaving the timeline replaces them. Natural read history
+remains forward-only and separate from the private unread reminder.
+
+`unreadVisit.ts` owns visit capture and observed-remove intent logic. A reminder
+created or first observed during a visit is sticky until a later visit; automatic
+clear then includes only captured mark IDs whose own anchor was deliberately viewed.
+Manual clear and a new mark supersede all observed IDs, preserving unseen concurrent
+marks. IDs enter only through `Summary.unread_reminder`, never action receipts,
+timestamps or locally generated identifiers. Unavailable anchors keep their reminder;
+pending seek metadata shows no body and cannot activate a badge.
+Explicit Clear reminder is independent of seek, geometry and dwell: it clears only
+known IDs captured from the current authoritative summary, including when its
+anchor is loading, failed to load, pending, unavailable or offscreen. It never acknowledges natural messages.
+
+`unreadActions.ts` is the typed action boundary; `unreadClient.ts` binds canonical
+generated `threadMarkUnread`, `threadClearUnread`, `threadTimeline({around})`, and
+`threadList({marked_unread:true})`. Store delivery retains the existing bound request,
+fence refresh, receipt shim and original-request retry. A mark or clear whose receipt
+was lost stays held for its thread: a remounted body shows Retry original change for
+that exact request, ahead of a held rename/close/reopen, and new edits wait until it
+is confirmed. Action operation IDs never become reminder mark IDs. Read-only clients
+have no mark controls. Reminders are canonically decoded from the summary; seek
+metadata cannot create a badge.
+Unread delivery verifies the unread receipt shape (action ID, operation ID, snapshot
+and exact target); unlike metadata edits, it does not require a metadata claim ID.
+The new reminder list, around reads and mark/clear writes require a granted
+`threads-v1 >= 3`. Version 2 keeps the existing thread and natural-read experience
+but hides reminder UI and sends none of the new queries or actions. An already-open
+menu or retained retry also re-checks the negotiated version, exact mark/clear grant
+and current online status before sending. Revocation or going offline preserves
+the original unknown-outcome ledger, request identity and signed fields; restoration
+allows that same request to resolve through legitimate receipt verification. An
+explicit unsupported read reports Upgrade required locally, never a fetch failure.
+Generic `thread-unavailable` seek refusal maps to unavailable, not Pending. Only an
+explicit Pending response can show that state; neither exposes an unrelated body.
+Seeking itself never acknowledges a message.
+
+The owner-wide Marked unread section uses `readMarkedUnread` in `unreadPaging.ts`.
+Empty pages may still have a continuation; only cursor exhaustion permits an empty
+state. Repeated cursors, fetch failures, and the 20-page default bound return typed
+errors (with partial rows), never a misleading empty/complete list. Only rows whose
+summary carries an authoritative reminder are listed; natural unread alone never is.
+Its private reminder marker is distinct from natural unread and does not change the
+count, and the section header adds no count of its own (visually or for VoiceOver).
+Opening a marked row seeks its return anchor. The section sits on Now above Recently
+closed threads and is read on focus and refresh, not followed. A current anchor opens
+the shared thread body on that page (older history continues from it; Open thread
+shows the latest); unavailable and pending anchors show their notice and, with the
+current write grant, an explicit Clear reminder. Visible evidence counts whole
+rendered Markdown lines (up to two, including the last), never paragraph spacing.
+Every expanded contextual row owns its open reading context independently of filter
+membership. Automatic, explicit and remote reminder clears remove the real marker
+and marked membership; reopening removes Recently closed membership. None removes
+the open body, composer, draft, focus or scroll. Counts describe current filter
+members, never retained placements. Selected rows keep their ordering while open.
+The shared selection boundary applies to all contextual thread collections. Collapsing the row
+or section, switching tabs or pushing another screen releases it; refocus cannot
+restore a cleared row from the previous visit. Owner, pairing/session, client and
+read-grant changes still remove the protected context. A current exact-thread denial
+removes that body; a collection denial releases every selection in that collection.
+A later authorized live window supersedes an earlier HTTP refusal even with unchanged
+membership. It restores the readable collection, not the selections released on denial.
+An accepted inline Start is labeled “Started here”, visibly and for VoiceOver, to
+distinguish it from an existing contextual thread with the same generated title and
+message count. The two placements keep independent collapse controls.
+Loading wrappers (detail, Inbox start, expanded rows) start the
+visit entry with the same placement key before the body mounts, so a reminder that
+loads after entry is never captured. Focused node coverage lives beside the visit
+reducer, native lifecycle, client adapter, list UI and paging helper; a mounted shared
+thread body (`threadBodyMount.test.mjs`) covers rerendered line evidence and recovered
+unread deliveries through the store's own delivery code.
+
 
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
 
@@ -484,6 +641,31 @@ It completes the phone's real device-key verification read-only: the unauthentic
 Like the real gateway, its collections socket sends a WebSocket protocol ping every eight seconds, keeping an idle native client inside its twenty-four-second receive deadline.
 The capture flow waits for **Review the loadUser rename** on Now and opens **Atlas Builder** (`agent/example/atlas/builder`) for the conversation. Pairing uses the world's first person and an invented host authority; only pairing preflight/completion and phone observation acknowledgement sit outside replay. The gateway decode test exercises real HTTP and WebSocket responses through the app's `FractalClient` and `Feed`, covering all three Now windows and the builder conversation without duplicating the scenario.
 For deterministic screenshots, `EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1` also loads the world at the kit anchor and uses a frozen `manualClock`, so neither wall-clock time nor timed replay events change the captured product state. The landing script already exports this flag. Ordinary manual demo launches retain the advancing real clock.
+
+For a **fixture/preliminary** native thread preview, add the final argument `clock-skew`:
+`EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1 node --experimental-transform-types demoGateway.mjs 8792 clock-skew`.
+Use an independently coordinated Metro port, pair only a disposable simulator with the invented
+demo grant, and open Atlas Builder (`agent/example/atlas/builder`), then its Threads group.
+`thread/worker-tests` is read-only and stays Open: Close at 12:59 is followed authoritatively by
+Reopen at 12:58. Native REST and live windows use the generated thread schemas and the same
+clock-skew event factory as the web story. Timestamp ordering is unchanged; no thread mutation
+capabilities are granted. This fixture endpoint is not simulator, connected-runtime, or final
+approval evidence. The ordinary landing capture remains unchanged without this argument.
+The builder's context also includes closed `thread/rollout-notes` and open
+`thread/cancellation`. The existing **Review the loadUser rename** Inbox item gets
+an explicit fixture episode and a read-only `thread/review-rename`, bound to that
+item's original requester and source. Wrong origin episodes return no threads;
+reading any fixture thread neither answers nor marks the Inbox request read.
+
+Preliminary tap flows live in `scripts/threads-preview-{pair,list,open,closed,inbox}.yaml`.
+`list` covers the agent context and multiple threads; `open` covers dedicated
+Open/read-only/clock-skew; `closed` covers Closed; `inbox` leaves the real Inbox
+detail's inline thread visible. `pair` requires the exact task gateway URL on
+port 8792 and invented demo pairing. Run only on the task-owned simulator after
+separate native/tool admission. These flows are source-only until exercised:
+capture screenshots/recording independently with `simctl`, and never present an
+unexecuted selector or the fixture HTTP endpoint as native UI evidence.
+Focused fixture check: `node --experimental-transform-types --import ./testHooks.mjs --test --test-name-pattern='clock-skew' demoGateway.test.mjs`.
 
 `apps/ios/scripts/landing-screenshots --gateway-host LAN_IPV4 --output DIR` automates this on a disposable simulator. It sets `EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1`, which disables only the Debug LogBox overlay; warnings still reach `metro.log`. Normal Debug launches and Release builds do not apply this capture-only policy. The flow requires the unpinned-pairing confirmation, allows at most three presses while that confirmation is absent and its enabled button remains visible, and submits pairing only once. Alongside the four PNGs, `pairing-simulator.log` retains simulator unified logs from app launch through pairing, including on failure. Treat these diagnostic logs as private and review them before sharing.
 

@@ -13,6 +13,27 @@ pub use run_review::{
     validate_run_reviewer_assignment,
 };
 
+/// Retained request history with current source authorization, without current-work admission.
+pub fn thread_request_history(
+    store: &Store,
+    person: &str,
+    thread: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<fractal_store::store::thread_metadata::request_history::RequestHistoryPage, FractalError> {
+    use fractal_store::store::{person_work, thread_metadata::request_history};
+    request_history::read_with(
+        store, person, thread, cursor, limit,
+        |conn, person, key, cut| {
+            if let Some(item) = person_work::retained_request_history(conn, person, key, cut)? {
+                return Ok(Some(item));
+            }
+            step_history::retained_person_episode(conn, person, key, cut)
+        },
+        step_history::retained_episode_keys,
+    )
+}
+
 /// The batches one resource observation seals its claims in. A claim whose retention class
 /// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
 /// class: an envelope is signed and deleted whole, so a durable message in an observer's batch

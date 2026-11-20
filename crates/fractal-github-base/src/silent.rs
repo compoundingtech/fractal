@@ -192,6 +192,7 @@ mod tests {
 
     fn message(subject: &str, from: &str, status: &str, tags: &[&str]) -> MessageView {
         MessageView {
+            delivery_thread: None,
             subject: subject.into(),
             from: from.into(),
             to: "agent/example/reader".into(),

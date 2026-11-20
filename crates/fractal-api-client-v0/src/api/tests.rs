@@ -435,6 +435,214 @@ async fn series_counts_repeatable_claim_kinds_and_typed_field_groups() {
     }
 }
 
+fn series_privacy_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().try_into().unwrap()
+}
+
+fn series_privacy_claim(state: &AppState, subject: &str, kind: &str, mut fields: Value) -> ClaimRecord {
+    if kind == "message.sent" {
+        fields["from"] = json!("agent/reviewer");
+        fields["to"] = json!("person/owner");
+        // message.sent has no time field; numeric content supplies a parseable count event time.
+        fields["content"] = json!(series_privacy_now().to_string());
+        fields["status"] = json!("sent");
+    } else if kind.starts_with("custom.") {
+        fields["at"] = json!(series_privacy_now());
+    }
+    let input = ClaimInput {
+        subject: subject.into(), kind: kind.into(), actor: Some("agent/reviewer".into()),
+        fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+        expected_subject: None, idempotency_key: Some(format!("{subject}:{kind}")),
+    };
+    if input.fields.contains_key("thread_id") {
+        crate::store::thread_delivery::append_reply(&state.store, &input,
+            crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: "agent/reviewer" }, None).unwrap().0
+    } else if kind.starts_with("custom.attention.") || subject.starts_with("custom/attention/") {
+        // Reserved notice history uses the same admitting transaction as the notice writer.
+        let claim = state.store.connection.batched(|tx| crate::store::append_claim_tx(
+            tx, state.store.origin(), subject, kind, None,
+            &json!({"fields": input.fields}), &[], None,
+        )).unwrap().unwrap();
+        state.store.committed_index.fetch_max(claim.store_index, std::sync::atomic::Ordering::Release);
+        claim
+    } else {
+        state.store.append_claim(&input).unwrap()
+    }
+}
+
+async fn assert_series_privacy_counts(state: &AppState, selection: &str, claims: &[ClaimRecord], count: u64) {
+    let mut times = Vec::new();
+    for claim in claims {
+        times.push(u64::try_from(claim.accepted_at_unix_ms).unwrap());
+        for field in ["at", "content", "title"] {
+            if let Some(time) = claim.body["fields"][field].as_u64().or_else(|| {
+                claim.body["fields"][field].as_str().and_then(|text| text.parse().ok())
+            }) {
+                times.push(time);
+            }
+        }
+    }
+    let from = *times.iter().min().unwrap();
+    let to = times.iter().max().unwrap() + 1;
+    let bucket_seconds = (to - from).div_ceil(1000);
+    let query = format!("{selection}&from={from}&to={to}&bucket_seconds={bucket_seconds}");
+    let expected = json!({
+        "from": from, "to": to, "bucket_seconds": bucket_seconds,
+        "buckets": [{"start": from, "end": to, "count": count}],
+    });
+    // This paired reader is not a participant in the private thread.
+    let Json(paired) = client_v0::series_read(
+        State(state.clone()),
+        Extension(client_v0::ClientSession::for_tests_scoped(
+            "person/outsider", "person/outsider", &["read.projections"],
+        )),
+        Query(vec![
+            {
+                let (key, value) = selection.split_once('=').unwrap();
+                (key.to_owned(), value.replace("%2F", "/"))
+            },
+            ("from".into(), from.to_string()), ("to".into(), to.to_string()),
+            ("bucket_seconds".into(), bucket_seconds.to_string()),
+        ]),
+    ).await.unwrap();
+    assert_eq!(paired, expected, "paired reader: {selection}");
+    let (status, local) = get_request(router(state.clone()), &format!("/v1/series?{query}")).await;
+    assert_eq!(status, StatusCode::OK, "{local}");
+    assert_eq!(local, expected, "local reader: {selection}");
+}
+
+fn series_privacy_thread(state: &AppState) -> ClaimRecord {
+    state.store.configure_thread_write_rollout([]);
+    // thread.created has no time field; use a numeric title and prove its indexed candidacy below.
+    crate::store::thread_metadata::apply(
+        &state.store, "person/owner", "thread/series-private", "series-private-thread",
+        crate::store::thread_metadata::Edit::Create {
+            agent: "agent/reviewer", title: &series_privacy_now().to_string(),
+        },
+    ).unwrap().0
+}
+
+#[tokio::test]
+async fn series_kinds_hide_private_thread_messages_from_nonparticipants() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    series_privacy_thread(&state);
+    let claims = [
+        series_privacy_claim(&state, "message/private-series", "message.sent", json!({"thread_id": "thread/series-private"})),
+        series_privacy_claim(&state, "message/public-series", "message.sent", json!({})),
+    ];
+    assert_series_privacy_counts(&state, "kind=message.sent", &claims, 1).await;
+}
+
+#[tokio::test]
+async fn series_count_objective_hides_private_thread_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    series_privacy_thread(&state);
+    let intent = parse_intent(r#"version 2
+objective "privacy/messages" {
+  about "Ordinary messages"
+  indicator "count" {
+    subject-prefix "message/"
+    event "message.sent" at="content"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, "node").unwrap();
+    state.store.apply_internal(&intent, "series-private-messages").unwrap();
+    let claims = [
+        series_privacy_claim(&state, "message/private-series", "message.sent", json!({"thread_id": "thread/series-private"})),
+        series_privacy_claim(&state, "message/public-series", "message.sent", json!({})),
+    ];
+    let times = claims.each_ref().map(|claim| claim.body["fields"]["content"].as_str().unwrap().parse::<u64>().unwrap());
+    let candidates = state.store.objective_series_claims(
+        &[("message.sent", Some("content"))], &["message.sent"], "message/",
+        *times.iter().min().unwrap(), times.iter().max().unwrap() + 1,
+    ).unwrap();
+    assert_eq!(candidates.len(), 2, "both message events must reach the visibility filter");
+    assert_series_privacy_counts(&state, "objective=privacy%2Fmessages", &claims, 1).await;
+}
+
+#[tokio::test]
+async fn series_count_objectives_hide_reserved_thread_and_notice_records() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let thread = series_privacy_thread(&state);
+    assert!(fractal_schema::threads::is_reserved_record(&thread.subject, &thread.kind));
+    for (name, prefix, kind, at) in [
+        ("threads", "thread/", "thread.created", "title"),
+        ("notice-subjects", "custom/", "custom.acme.series-event", "at"),
+        ("notice-kinds", "custom/", "custom.attention.notice-created", "at"),
+    ] {
+        let intent = parse_intent(&format!(r#"version 2
+objective "privacy/{name}" {{
+  about "Only public events"
+  indicator "count" {{
+    subject-prefix "{prefix}"
+    event "{kind}" at="{at}"
+  }}
+  window "1h"
+  target "per-hour" min=1
+}}
+"#), "node").unwrap();
+        state.store.apply_internal(&intent, &format!("series-private-{name}")).unwrap();
+    }
+    let claims = [
+        thread,
+        series_privacy_claim(&state, "custom/attention/source/series-private", "custom.acme.series-event", json!({})),
+        series_privacy_claim(&state, "custom/acme/series-notice", "custom.attention.notice-created", json!({})),
+        series_privacy_claim(&state, "custom/acme/series-public", "custom.acme.series-event", json!({})),
+    ];
+    // Every thread subject and every reserved notice kind is private, so no public
+    // counterpart can match those declarations. Prove their raw candidates exist instead.
+    for (index, kind, field, prefix) in [
+        (0, "thread.created", "title", "thread/"),
+        (2, "custom.attention.notice-created", "at", "custom/"),
+    ] {
+        let value = &claims[index].body["fields"][field];
+        let at = value.as_u64().or_else(|| value.as_str().and_then(|text| text.parse().ok())).unwrap();
+        let candidates = state.store.objective_series_claims(
+            &[(kind, Some(field))], &[kind], prefix, at, at + 1,
+        ).unwrap();
+        assert_eq!(candidates.len(), 1, "{kind} must reach the visibility filter");
+    }
+    assert_series_privacy_counts(&state, "objective=privacy%2Fthreads", &claims, 0).await;
+    assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-subjects", &claims, 1).await;
+    assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-kinds", &claims, 0).await;
+}
+
+#[tokio::test]
+async fn series_interval_objective_does_not_complete_on_private_thread_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    series_privacy_thread(&state);
+    let intent = parse_intent(r#"version 2
+objective "privacy/interval" {
+  about "Public message completion"
+  indicator "interval" {
+    subject-prefix "message/"
+    start "publication.operation"
+    stop "message.sent"
+  }
+  window "1h"
+  target "p50" within="5m"
+}
+"#, "node").unwrap();
+    state.store.apply_internal(&intent, "series-private-interval").unwrap();
+    // The ordinary publication receipts start two samples; only one stop is public.
+    let mut claims = Vec::new();
+    for subject in ["message/private-series", "message/public-series"] {
+        claims.push(series_privacy_claim(&state, subject, "publication.operation",
+            json!({"operation": "series-start", "action": "start", "status": "accepted"})));
+    }
+    claims.push(series_privacy_claim(&state, "message/private-series", "message.sent",
+        json!({"thread_id": "thread/series-private"})));
+    claims.push(series_privacy_claim(&state, "message/public-series", "message.sent", json!({})));
+    // A single bucket avoids timing assumptions: one public completion, never two.
+    assert_series_privacy_counts(&state, "objective=privacy%2Finterval", &claims, 1).await;
+}
+
 #[tokio::test]
 async fn isolated_daemon_exposes_only_rollups_in_the_fleet_usage_endpoint() {
     let root = tempfile::tempdir().unwrap();

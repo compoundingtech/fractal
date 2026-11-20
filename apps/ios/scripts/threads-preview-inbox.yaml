@@ -1,0 +1,36 @@
+# Fixture/preliminary only. NOT RUN; never answer, acknowledge or mark read.
+# The selected fixture adds an explicit episode to the existing review attention
+# and keeps the thread's agent equal to that attention's original requester.
+appId: com.compoundingtech.fractal.starter
+---
+- openLink:
+    link: "com.compoundingtech.fractal.starter://tab/Now"
+- runFlow:
+    when:
+      visible: "Open in.*Fractal Dev.*"
+    commands:
+      - tapOn: "Open"
+- extendedWaitUntil:
+    visible: ".*Review the loadUser rename.*"
+    timeout: 30000
+- tapOn: ".*Review the loadUser rename.*"
+- scrollUntilVisible:
+    element:
+      text: "^Threads, [0-9]+( or more)?$"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "^Threads, [0-9]+( or more)?$"
+- extendedWaitUntil:
+    visible: "Review rename — Inbox thread fixture, 1 message.*open.*unread"
+    timeout: 30000
+- tapOn: "Review rename — Inbox thread fixture, 1 message.*open.*unread"
+- scrollUntilVisible:
+    element:
+      text: ".*Fixture/preliminary: discuss this exact Inbox review origin.*"
+    direction: DOWN
+    timeout: 30000
+# PREVIEW_FINAL_ASSERTIONS
+- assertVisible: ".*Fixture/preliminary: discuss this exact Inbox review origin.*"
+- assertNotVisible: "Thread context is unavailable for this Inbox item."
+- assertNotVisible: "^Mark visible replies read$"
+# Leave the real Inbox detail and inline thread visible for an external simctl capture.

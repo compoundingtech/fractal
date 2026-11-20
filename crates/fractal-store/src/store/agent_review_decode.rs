@@ -360,7 +360,7 @@ mod tests {
         let tx = connection.transaction().unwrap();
         assert_eq!(smallclaims::store::current_index_tx(&tx).unwrap(), before);
         let operation = identities::claim_operation(&input).unwrap();
-        let outcome = claim_operation_outcome_tx(&tx, operation.as_ref()).unwrap();
+        let outcome = claim_operation_outcome_tx(&tx, operation.as_ref().map(|(id, digest)| (id.as_str(), digest.as_str()))).unwrap();
         assert!(outcome.is_none());
     }
     #[test]
