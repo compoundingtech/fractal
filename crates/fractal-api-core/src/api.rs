@@ -4321,7 +4321,7 @@ fn client_agent_cards_presented(
             let declared_model = subject.desired.as_ref()
                 .and_then(crate::store::model_drift::declared_harness_model);
             let model_state = crate::store::model_drift::model_drift_state(
-                declared_model, model_observation.as_ref(), now_ms(),
+                declared_model, model_observation.as_ref(), client_now_ms(),
                 HARNESS_OBSERVATION_FRESHNESS.as_millis(),
             );
             let drift_since = match (incarnation_id.as_deref(), declared_model, model_observation.as_ref()) {
@@ -4416,7 +4416,7 @@ fn client_agent_cards_presented(
             value["model_drift"] = json!({
                 "state": model_state,
                 "drift_since": drift_since.map(client_timestamp),
-                "drift_age_seconds": drift_since.map(|since| now_ms().saturating_sub(since) / 1000),
+                "drift_age_seconds": drift_since.map(|since| client_now_ms().saturating_sub(since) / 1000),
                 "observed_at": model_observation.as_ref().and_then(|observation| observation.observed_at_ms).map(client_timestamp),
                 "fallback_reason": fallback.as_ref().map(|fallback| &fallback.cause),
                 "return_attempts": return_attempts,
