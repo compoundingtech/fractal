@@ -57,3 +57,50 @@ pub(super) fn expand_tx(connection: &Connection, claim_id: &str) -> Result<bool>
         .execute(/* sqlite-large-value: allow-for-now lv-hfddd7253665c owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ params![claim_id, text, writer])?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claim::ClaimInput;
+    use crate::fleet::MemberKey;
+
+    #[test]
+    fn forgetting_a_compacted_claim_leaves_no_count_behind() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+        let claim = store
+            .append_claim(&ClaimInput {
+                subject: "note/plans".into(),
+                kind: "example.note".into(),
+                actor: None,
+                fields: serde_json::from_value(serde_json::json!({"text": "forgotten"})).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        store.replication_snapshot().unwrap();
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+        }
+        let signature = store.claim_signature(&claim.id).unwrap().unwrap();
+        let count = |connection: &Connection| -> i64 {
+            connection
+                .query_row("SELECT COUNT(*) FROM claim_signature_counts WHERE claim_id=?1", [&claim.id], |row| row.get(0))
+                .unwrap()
+        };
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        // Compacted as the version 24 writer leaves it: the count at 1, no candidate or source.
+        tx.execute("DELETE FROM claim_signature_candidates WHERE claim_id=?1", [&claim.id]).unwrap();
+        tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,1)", [&claim.id]).unwrap();
+        assert!(facade(&tx, &claim.id).unwrap().is_some());
+
+        forget_claim_tx(&tx, &claim.id).unwrap();
+        assert_eq!(count(&tx), 0, "a forgotten compacted claim keeps no count");
+        // Should it come back, its one candidate counts once.
+        store_claim_signature_tx(&tx, &claim.id, &signature).unwrap();
+        assert_eq!(count(&tx), 1);
+        tx.commit().unwrap();
+    }
+}
