@@ -3068,17 +3068,16 @@ impl Store {
             // The claim's own batch names its envelopes, whether or not its valid record is
             // stored (`record_bytes`); a claim with a record in any other state, such as one a
             // repair replaced, is not an accepted copy.
-            "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
+            /* sqlite-large-value: allow-for-now lv-h920ade08c738 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &format!("SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
              FROM claims
              JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
              JOIN replica_envelope_signatures AS signatures
                ON signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
                   AND signatures.envelope_hash=envelopes.envelope_hash
-             WHERE claims.id=?1
-               AND NOT EXISTS (SELECT 1 FROM replica_records
-                               WHERE claim_id=claims.id AND state<>'valid')
+             WHERE claims.id=?1 AND NOT {}
                AND envelopes.receipt_state='validated'
                AND envelopes.writer=?2 AND signatures.member_key=?3",
+                record_bytes::claim_record_not_valid_sql("claims")),
         )?;
         let rows = statement.query_map(params![claim_id, self.origin, key], |row| {
             Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))

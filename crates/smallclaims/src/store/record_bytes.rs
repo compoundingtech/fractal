@@ -160,13 +160,20 @@ mod tests {
     }
 }
 
-/// Whether the claim `alias` was sealed or admitted and holds no record in another state: what
-/// an `EXISTS(... replica_records WHERE claim_id=... AND state='valid')` asked while every valid
-/// claim kept a record. The claim's batch names its envelope; a record that a repair replaced,
-/// or that was marked invalid with its envelope, is kept and excludes the claim.
+/// Whether the claim `alias` has a record in a state other than valid: a record a repair
+/// replaced, or one marked invalid with its envelope. Such a claim is not an accepted copy.
+pub fn claim_record_not_valid_sql(alias: &str) -> String {
+    format!("EXISTS(SELECT 1 FROM replica_records WHERE claim_id={alias}.id AND state<>'valid')")
+}
+
+/// Whether the claim `alias` was sealed or admitted and is an accepted copy: its batch names its
+/// envelope, and it has no record in another state ([`claim_record_not_valid_sql`]). It asks
+/// what `EXISTS(... replica_records WHERE claim_id=... AND state='valid')` asked, whether or not
+/// the claim's valid record is stored.
 pub fn admitted_claim_sql(alias: &str) -> String {
     format!(
         "(EXISTS(SELECT 1 FROM replica_envelopes WHERE batch_id={alias}.batch_id)
-          AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id={alias}.id AND state<>'valid'))"
+          AND NOT {})",
+        claim_record_not_valid_sql(alias)
     )
 }

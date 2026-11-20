@@ -86,12 +86,12 @@ pub fn operation_is_trusted(
         )?;
         if local { return Ok(true); }
         let mut signatures = connection.prepare_cached(
-            "SELECT envelopes.writer,envelopes.sequence,signatures.member_key FROM claims
+            /* sqlite-large-value: allow-for-now lv-h03b40b8ae1cc owner=fractal_store::pairing TODO=trace-statement-and-value-representation */ &format!("SELECT envelopes.writer,envelopes.sequence,signatures.member_key FROM claims
                  JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
                  JOIN replica_envelope_signatures AS signatures ON signatures.writer=envelopes.writer
                      AND signatures.sequence=envelopes.sequence AND signatures.envelope_hash=envelopes.envelope_hash
-                 WHERE claims.id=?1 AND envelopes.writer=?2
-                   AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state<>'valid')",
+                 WHERE claims.id=?1 AND envelopes.writer=?2 AND NOT {}",
+                smallclaims::store::record_bytes::claim_record_not_valid_sql("claims")),
         )?;
         let mut signers = signatures.query(params![receipt, origin])?;
         while let Some(signer) = signers.next()? {
