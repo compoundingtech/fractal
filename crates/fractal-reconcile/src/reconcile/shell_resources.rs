@@ -356,6 +356,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .context("helperUnavailable: requested Darwin custody lane has no authorized helper")?;
             let slot = helper.select_slot(&request.name, Path::new(&execution.command.cwd))?;
             let workspace = slot.root().join(&execution.command.id);
+            // Normalize before any filesystem mutation so result placement and cleanup
+            // retain the selected root even when setup subsequently refuses launch.
+            execution.command.cwd = if execution.command.cwd.is_empty() {
+                workspace.clone()
+            } else {
+                Path::new(&execution.command.cwd).canonicalize().context("darwin-custody-cwd: normalize admitted cwd")?
+            }.to_string_lossy().into_owned();
             fs::create_dir_all(&workspace).context("create Darwin job workspace")?;
             anyhow::ensure!(!fs::symlink_metadata(&workspace)?.file_type().is_symlink()
                 && workspace.canonicalize()?.starts_with(slot.root().canonicalize()?),
@@ -367,9 +374,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .context("grant admitted UID access to its job workspace")?;
             anyhow::ensure!(permission.status.success(), "darwin-custody-workspace: cannot grant slot access: {}",
                 String::from_utf8_lossy(&permission.stderr));
-            if execution.command.cwd.is_empty() {
-                execution.command.cwd = workspace.to_string_lossy().into_owned();
-            }
             execution.command.environment.insert("FRACTAL_JOB_WORKSPACE".into(), workspace.to_string_lossy().into_owned());
             execution.command.environment.insert(fractal_runtime::darwin_slot::HELPER_ENV.into(),
                 helper.path().to_string_lossy().into_owned());
