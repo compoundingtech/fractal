@@ -38,6 +38,7 @@ fn open_installs_each_domain_in_order() {
             "gate-runners",
             "wake-lookup",
             "objective-times",
+            "escalation-clocks",
         ]
     );
 }
@@ -64,13 +65,14 @@ fn append_projects_each_claim_kind_in_order() {
         ("work.claimed", &["custom", "resource-preparation", "ordered-membership-flush"]),
         ("message.read", &["custom", "resource-preparation", "ordered-membership-flush"]),
     ] {
-        let mut expected_with_times = vec!["objective-times"];
+        let mut expected_with_times = vec!["escalation-clocks", "objective-times"];
         expected_with_times.extend_from_slice(expected);
         assert_eq!(taking(projectors::APPEND, kind), expected_with_times, "append order for {kind}");
     }
     assert_eq!(
         projectors::APPEND.iter().map(|projector| projector.name).collect::<Vec<_>>(),
         [
+            "escalation-clocks",
             "objective-times",
             "identities",
             "custom",
@@ -112,7 +114,7 @@ fn replicated_claims_project_arrangements_read_positions_and_ordered_memberships
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["objective-times", "custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "wake-demand", "limits", "arrangements", "run-eta", "ordered-membership"]
+        ["objective-times", "escalation-clocks", "custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "wake-demand", "limits", "arrangements", "run-eta", "ordered-membership"]
     );
 }
 
@@ -120,7 +122,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "attention-controls", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "attention-controls", "run-eta", "gate-runners", "wake-lookup", "escalation-clocks", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -137,6 +139,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/attention-controls",
             "full-replay/run-eta",
             "full-replay/wake-lookup",
+            "full-replay/escalation-clocks",
             "full-replay/ordered-membership",
             "full-replay/flush",
         ]

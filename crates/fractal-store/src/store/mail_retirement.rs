@@ -3,7 +3,8 @@
 //! A graph thread (a `message/...` subject's `message.*` claims) retires when its
 //! `message.closed` was accepted at least `RETAIN_AFTER_CLOSE_MS` ago, neither its `from` nor its
 //! `to` is a person, and no claim outside the thread cites any of its claims. Person threads and
-//! anything cited stay for good. The rule reads only the claims, so every member that applies it
+//! anything cited stay for good. Escalation delivery receipts also stay: they are permanent
+//! episode-stage deduplication authority, not disposable inbox history. The rule reads only the claims, so every member that applies it
 //! to the same claims retires the same threads, with no coordination: each deleted ID enters
 //! `retired_claim_ids` in the deleting transaction, peers compare the retired set beside the
 //! retained one, and admission refuses a retired ID, so no peer sends it back. A thread judged
@@ -274,7 +275,7 @@ fn warm(connection: &Connection, judged: &[(Option<i64>, String, Judgement)]) {
 
 /// One of a thread's claims as judging reads it: id, operation id, kind, `from`, `to` and when
 /// it was accepted.
-type ThreadClaim = (String, Option<String>, String, Option<String>, Option<String>, String);
+type ThreadClaim = (String, Option<String>, String, Option<String>, Option<String>, String, bool);
 
 /// How many threads deep a chain of mail citing mail is followed; past it the thread stays.
 const CITATION_DEPTH: usize = 8;
@@ -301,24 +302,25 @@ fn judge(
     let claims: Vec<ThreadClaim> = connection
         .prepare_cached(
             "SELECT id, json_extract(body,'$._operation.id'), kind,
-                    json_extract(body,'$.fields.from'), json_extract(body,'$.fields.to'), accepted_at_unix_ms
+                    json_extract(body,'$.fields.from'), json_extract(body,'$.fields.to'), accepted_at_unix_ms,
+                    EXISTS(SELECT 1 FROM json_each(body, '$.fields.tags') WHERE value='mission-escalation-v1')
              FROM claims INDEXED BY claims_subject_kind_index
              WHERE subject=?1 AND kind>='message.' AND kind<'message/' ORDER BY store_index",
         )?
-        .query_map([subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?
+        .query_map([subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)))?
         .collect::<rusqlite::Result<_>>()?;
     if claims.is_empty() {
         return Ok(Judgement::Keep);
     }
     // Without its sent claim a thread's people are unknown: wait for it.
-    let Some((_, _, _, from, to, _)) = claims.iter().find(|(_, _, kind, ..)| kind == "message.sent") else {
+    let Some((_, _, _, from, to, _, escalation)) = claims.iter().find(|(_, _, kind, ..)| kind == "message.sent") else {
         return Ok(Judgement::Defer);
     };
     let person = |party: &Option<String>| party.as_deref().is_some_and(|party| party.starts_with("person/"));
-    if person(from) || person(to) {
+    if person(from) || person(to) || *escalation {
         return Ok(Judgement::Keep);
     }
-    let old_enough = claims.iter().any(|(_, _, kind, _, _, accepted)| {
+    let old_enough = claims.iter().any(|(_, _, kind, _, _, accepted, _)| {
         kind == "message.closed" && accepted.parse::<u64>().is_ok_and(|accepted| accepted <= cutoff)
     });
     if depth > 0 && !old_enough {

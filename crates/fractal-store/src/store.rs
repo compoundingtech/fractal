@@ -420,6 +420,7 @@ pub mod published_views;
 pub mod published_list;
 pub mod mission_list;
 pub mod work_list;
+pub mod escalation;
 pub mod runtime_list;
 #[cfg(test)]
 pub mod tombstones_tests;
@@ -858,7 +859,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfecc739717ae owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc9d1b1deb0cb owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1283,6 +1284,10 @@ BEGIN
     DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
 END;
 
+CREATE TABLE IF NOT EXISTS local_escalation_runs_v1 (
+    run_id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS capabilities (
     secret_hash TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -5769,7 +5774,7 @@ impl Store {
             let overflow = populated && connection.prepare_cached(
                 "SELECT count(*) FROM (SELECT 1 FROM claims WHERE store_index>?1
                  AND store_index<=?2 LIMIT ?3)",
-            )?.query_row(params![cache.through, store_index, SUBJECT_CACHE_DELTA_ROWS + 1],
+            )?.query_row(/* sqlite-large-value: allow-for-now lv-hc80bf6e28816 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![cache.through, store_index, SUBJECT_CACHE_DELTA_ROWS + 1],
                 |row| row.get::<_, usize>(0))? > SUBJECT_CACHE_DELTA_ROWS;
             if conflicts != cache.conflicts || overflow {
                 cache.views.clear();

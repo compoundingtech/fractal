@@ -64,6 +64,8 @@ Retirement and free-page commits run at `synchronous=NORMAL` with no checkpoint 
 and put both back afterwards, on error too: on a busy host the fsync took most of a hold, and a
 crash before the writer's next ordinary commit loses only steps the next pass redoes. Before each
 hold a reader reads the signature and replica rows the hold will delete, so it finds them cached.
+Escalation notifications tagged `mission-escalation-v1` also stay: their native delivery receipts
+are permanent episode-stage deduplication authority, including after later ladder deadlines or restarts.
 Mail in the messages shard is not touched.
 
 ## Where writes go

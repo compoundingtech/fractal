@@ -98,6 +98,39 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Roster paging and read-budget probe inventory repair
+
+The `fractal_api_core::api` maintainer owns `lv-hc92b1baa7e5f`; the
+`fractal_api_core::api::roster_assembly` maintainer owns `lv-h168a03df0009` and
+`lv-h540d1ea0b50f`; the `fractal_seats::store::seats` maintainer owns
+`lv-h25806c4c9d67`. These prepare the shared `AGENT_ROSTER_SUBJECT_PAGE_SQL`,
+which appends a bound `LIMIT ?4` to `RANGE_SUBJECTS`. The recursive range query
+seeks the claims subject index at the snapshot frontier and returns subject
+strings for warm, initial assembly, membership rebuild, and bounded publication
+pages. The row limit bounds page cardinality, not subject/key bytes. Existing
+inline subjects remain transitional debt: trace these dynamic SQL callers to
+the subject representation, then establish bounded physical subject/index units
+or references without changing membership or snapshot semantics.
+
+The surviving unpaged `RANGE_SUBJECTS` calls in `fractal_seats::store::seats`
+use their current source identities `lv-hb0a36171e464` and `lv-h19fe7faeaaf7`;
+the removed earlier call's `lv-hc5cb621b4eae` marker must not remain attached.
+
+The `fractal_store::store` maintainer owns `lv-hc80bf6e28816`, the subject-cache
+overflow probe. It binds integer frontiers and a row limit, reads only the
+store-index B-tree, and returns one integer count before any claim bodies are
+folded. Its unresolved bind sink is registered separately from the SQL template;
+the next representation review must preserve this bounded probe and connect the
+bind sink to that template, not infer that arbitrary claim values are bounded.
+
+The `fractal_api_core::api::tests::roster_fresh` maintainer owns
+`lv-ha365a159e859`. This test-only recursive query produces integers through
+100000 and one integer sum, with no external value input or writes. It
+deliberately exercises reader cancellation after clock expiry. Its conservative
+unresolved-query registration records this exact test flow, not permission for
+new production sinks; trace it to its fixed integer-only statement when refining
+the lexical catalog.
+
 ### Native fleet roll receipt source
 
 The `fractal_api_core::roll_completion` maintainer owns signed-reference schema
@@ -1019,6 +1052,30 @@ generation on a causally backed late effect conflict. Run identity and timestamp
 TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
+
+
+### Escalation restart scheduling
+
+`fractal_store::store::escalation` owns the restart index writes
+`lv-h0003f1ad06a3` and `lv-ha65878244411`, and the clock projection schema
+`lv-h6232d25a79e0`. The restart index stores only run and origin identifiers,
+never policy text, messages, or ask bodies. Its key is removed when the terminal
+ladder has no remaining deadline.
+
+Clock metadata is rebuildable from canonical receipts: subject and claim IDs,
+canonical sortable key, normalized state, accepted time and explicit wait deadline.
+Change capture stores only local integer arrival indexes and drains transactionally.
+Each receipt changes at most its own and its next status's transition bit.
+The three indexed `LIMIT 1` clock lookups avoid history replay during evaluation.
+Startup backfills existing clock-bearing receipts once; explicit replay rebuilds
+the projection. Deletion and correction repair neighboring transition boundaries.
+These are work bounds, not byte-size proofs: variable identifiers and sortable
+keys remain inline. The owner's `chunk-or-reference-variable-columns`,
+`bound-or-reference-values-and-reclamation`, `prepare-body-and-predecessor-values`
+and `trace-statement-and-value-representation` obligations cover those values,
+one-time backfill/rebuild and reclamation. A reference conversion must preserve
+canonical episode identity, paused-clock anchors and terminal restart scheduling.
+The parent schema site is `lv-hc9d1b1deb0cb`.
 
 ### Shell request identity and cancellation (#6762)
 
