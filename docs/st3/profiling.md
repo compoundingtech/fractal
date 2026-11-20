@@ -68,6 +68,16 @@ only, excluding the separately reported prelude and repairs. `project_ms` retain
 wall time. Handler `total_ms` also includes blocking admission/dispatch waits, but does not
 include response-envelope serialization or network delivery.
 
+`envelope_claims_bytes` samples `(decoded claim count, payload byte count)` for the first 32
+envelopes prepared during admission, including retries. `envelopes_prepared`,
+`envelope_claims` and `envelope_payload_bytes` retain aggregate preparation counts;
+`envelope_sizes_omitted` counts samples beyond the cap. `finalizer_resources_ms`,
+`finalizer_custom_ms`, `finalizer_completion_ms`, `finalizer_run_eta_ms` and
+`finalizer_client_messages_ms` attribute the runtime's before-COMMIT work. These are nested
+costs within the phase's writer hold, not additional elapsed time; shared group-finalizer
+costs retain their separate shared-event attribution.
+
+
 Writer waits are measured at actual acquisition, not inferred from phase wall time. Independent
 loans measure borrower ownership through transaction finalization and postcommit observer
 cleanup, before connection return. Batched callbacks measure their queue wait and exclusive
@@ -570,10 +580,12 @@ shows; a column with no reading is a dot, which means the daemon was down or not
 measured, not that a budget was spent. `GET /v1/slo/history?id=&since_ms=&until_ms=&steps=`
 serves the same columns. A node with a collector keeps the longer history there.
 
-`fractal doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
-over their target in the last five minutes. A p99 target is missed in a window when more than 1%
-of its samples are over. A max target is missed when any one sample is over. A miss is `info`,
-not `warn`, so `fractal doctor --strict` does not fail on a target.
+`fractal doctor` prints a `slo/ID` line for every native objective and account budget from the
+same projection as `fractal slo`, including declared objectives, retaining native status, tone,
+current reading, target and window. SLO verdicts describe, they do not gate: every row is
+informational, so a red or quiet objective never fails `fractal doctor --strict`, and no SLO row
+is a successful check. The ten routes with the highest recent p99 remain separate
+`request-latency/ROUTE` telemetry lines, not independent SLO verdicts.
 
 For a deployed latency receipt, retain the process/source identity and before/after count delta.
 A low-volume tail can include requests from before the measurement window, and a restart resets
@@ -628,7 +640,7 @@ Rotation discards the old predecessor and keeps complete records in chronologica
 Each append opens the active file under its output lock after any rotation, so concurrent
 slow writers cannot continue writing to a predecessor. On the next append, oversized
 files left by an older version or a reduced cap are removed. A record larger than the
-cap is dropped whole. These drops emit `st3: profile retention dropped ...` on stderr.
+cap is dropped whole. These drops emit `fractal: profile retention dropped ...` on stderr.
 Archive diagnostics before reducing the cap if older records must be kept.
 
 Work on a thread that runs no named operation appears as `(unlabeled THREAD)`.
@@ -1298,7 +1310,7 @@ accepting only after SQLite is ready.
 ### Startup phase durations
 
 Every successful daemon start emits one structured stderr line when both listeners are ready:
-`st3: startup phases {"configuration_ms":...,"install_hooks_ms":...,"open_store_ms":...,...,"total_ms":...}`.
+`fractal: startup phases {"configuration_ms":...,"install_hooks_ms":...,"open_store_ms":...,...,"total_ms":...}`.
 The service journal captures this line without enabling profiling. Durations use a monotonic
 clock and milliseconds; `total_ms` starts at entry to daemon initialization, not process execution.
 Failed starts that never reach listener readiness do not emit this summary.

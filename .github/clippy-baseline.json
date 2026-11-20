@@ -46,7 +46,6 @@
     },
     "fractal-seats": {
       "clippy::cloned_ref_to_slice_refs": 4,
-      "clippy::needless_question_mark": 1,
       "clippy::type_complexity": 2
     },
     "fractal-store": {
