@@ -391,6 +391,7 @@ mod tests {
             let proof = |unit| crate::ScopeRetirementProof {
                 version: 1, unit, load_state: "not-found".into(),
                 active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+                darwin: None,
             };
             let closure = ProducerClosure {
                 version: 1, reason: ClosureReason::RuntimeVanished, publication_pending: false,
@@ -426,6 +427,7 @@ mod tests {
             let proof = |unit| crate::ScopeRetirementProof {
                 version: 1, unit, load_state: "not-found".into(),
                 active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+                darwin: None,
             };
             let mut scopes = vec![proof(owner.scope.clone())];
             if include_server {
@@ -464,6 +466,7 @@ mod tests {
             let proof = |unit| crate::ScopeRetirementProof {
                 version: 1, unit, load_state: "not-found".into(),
                 active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+                darwin: None,
             };
             let mut closure = ProducerClosure {
                 version: 1, reason: ClosureReason::RuntimeVanished, publication_pending: false,
