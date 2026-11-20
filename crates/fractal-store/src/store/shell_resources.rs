@@ -305,7 +305,8 @@ impl Store {
     pub fn submit_shell_resource(&self, mut command: Command, now: u64) -> Result<Execution> {
         command.lane.class.ensure_supported()?;
         anyhow::ensure!(!command.id.is_empty() && !command.argv.is_empty(), "shell execution requires identity and argv");
-        anyhow::ensure!(command.cwd.starts_with('/'), "shell execution cwd must be absolute");
+        anyhow::ensure!(command.cwd.starts_with('/') || (cfg!(target_os = "macos") && command.cwd.is_empty()),
+            "shell execution cwd must be absolute (or omitted for a Darwin job workspace)");
         anyhow::ensure!(command.argv.iter().all(|argument| !argument.contains('\0')), "resource argv contains NUL");
         let submission_digest = submission_digest(&command)?;
         let root_exec_id = if let Some(parent) = &command.parent {
