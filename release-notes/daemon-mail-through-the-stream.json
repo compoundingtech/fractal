@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "No migration."
+    "detail": "No migration. Mail sent from inside a transaction waits in the outbox until right after its commit: measured p50 11 ms, p99 51 ms, max 241 ms (203 messages, debug build, loaded host)."
   },
   "manual": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Rolling back keeps working: the previous release drains whatever this one left in the outbox, and reads stream mail as before."
+    "detail": "Rolling back to any release from 4c-2b on (#5667, the first with the outbox drainer) keeps working: it drains whatever this one left in the outbox, and reads stream mail as before. A rollback below 4c-2b strands mail still queued in the outbox; drain first by letting this build run until the outbox is empty (it normally empties within a second of each commit)."
   }
 }
