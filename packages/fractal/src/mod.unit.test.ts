@@ -1101,7 +1101,7 @@ schedule "daily" {
     )
   })
   it.each(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const)(
-    'renders a weekly %s calendar using st DAY HH:MM syntax',
+    'renders a weekly %s calendar using fractal DAY HH:MM syntax',
     (day) => {
       expect(
         emit([
@@ -2744,18 +2744,18 @@ describe('native mission grammar', () => {
     ).toThrow()
   })
 })
-const stBin = process.env.ST_BIN
-const testWithSt = stBin !== undefined && stBin !== '' ? it : it.skip
+const fractalBin = process.env.ST_BIN
+const testWithFractal = fractalBin !== undefined && fractalBin !== '' ? it : it.skip
 
 // Explicitly opt in to upstream's separate test-support executable, never a production fallback.
 // It exercises gate semantics with synthetic person attribution, not production authentication.
-const stFixtureBin = process.env.ST_FIXTURE_BIN
-const testWithStFixture = stFixtureBin !== undefined && stFixtureBin !== '' ? it : it.skip
+const fractalFixtureBin = process.env.ST_FIXTURE_BIN
+const testWithFractalFixture = fractalFixtureBin !== undefined && fractalFixtureBin !== '' ? it : it.skip
 
 // This person exists only in each private scratch daemon's config, never in a live fleet.
 const gateReviewer = 'person/step-reviewer'
 
-type IsolatedSt = {
+type IsolatedFractal = {
   dir: string
   socket: string
   isolatedEnv: NodeJS.ProcessEnv
@@ -2768,7 +2768,7 @@ type IsolatedSt = {
  * Polls real daemon projections until a condition is observed. The isolated daemon has no
  * deterministic clock seam; the elapsed time never stands in for the asserted condition.
  */
-const pollSt = async <T>(
+const pollFractal = async <T>(
   read: () => Promise<T>,
   ready: (value: T) => boolean,
   description: string,
@@ -2786,11 +2786,11 @@ const pollSt = async <T>(
   throw new Error(`Timed out waiting for ${description}; last observation: ${JSON.stringify(last)}`)
 }
 
-const withIsolatedSt = async (
+const withIsolatedFractal = async (
   { kind, signal }: { kind: 'production' | 'fixture'; signal: AbortSignal },
-  run: (st: IsolatedSt) => Promise<void>,
+  run: (fractal: IsolatedFractal) => Promise<void>,
 ) => {
-  const binary = kind === 'fixture' ? stFixtureBin : stBin
+  const binary = kind === 'fixture' ? fractalFixtureBin : fractalBin
   if (binary === undefined || binary === '')
     throw new Error(
       `${kind === 'fixture' ? 'ST_FIXTURE_BIN' : 'ST_BIN'} is required for ${kind} mode`,
@@ -2859,8 +2859,8 @@ const withIsolatedSt = async (
   )
 }
 
-const stJson = <T>(st: IsolatedSt, ...args: string[]): T => {
-  const result = st.command(...args)
+const fractalJson = <T>(fractal: IsolatedFractal, ...args: string[]): T => {
+  const result = fractal.command(...args)
   expect(
     result.status,
     `${args.join(' ')}: ${result.error ?? ''}\n${result.stderr}\n${result.stdout}`,
@@ -2868,10 +2868,10 @@ const stJson = <T>(st: IsolatedSt, ...args: string[]): T => {
   return JSON.parse(result.stdout) as T
 }
 
-testWithSt(
+testWithFractal(
   'admits canonical task launches through native grammar and rejects invalid native options',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'production', signal }, async ({ dir, command }) => {
+    withIsolatedFractal({ kind: 'production', signal }, async ({ dir, command }) => {
       const taskLaunch = Launch.argv({
         argv: ['true'],
         cwd: dir,
@@ -2945,10 +2945,10 @@ testWithSt(
   30000,
 )
 
-testWithSt(
+testWithFractal(
   'plans native OMP role launch without a thinking override',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'production', signal }, async ({ dir, command, get }) => {
+    withIsolatedFractal({ kind: 'production', signal }, async ({ dir, command, get }) => {
       const source = join(dir, 'role.kdl')
       writeFileSync(
         source,
@@ -2978,10 +2978,10 @@ testWithSt(
   30000,
 )
 
-testWithSt(
-  'round-trips canonical mission and strict agent fields through isolated st daemon',
+testWithFractal(
+  'round-trips canonical mission and strict agent fields through isolated fractal daemon',
   async ({ signal }) =>
-    withIsolatedSt(
+    withIsolatedFractal(
       { kind: 'production', signal },
       async ({ dir, socket, isolatedEnv, runCommand }) => {
         const source = join(dir, 'mission.kdl')
@@ -2989,7 +2989,7 @@ testWithSt(
         writeFileSync(source, canonical())
         const publish = () =>
           spawnSync(
-            stBin!,
+            fractalBin!,
             [
               '--endpoint',
               `unix://${socket}`,
@@ -3026,7 +3026,7 @@ testWithSt(
         const applySeat = (declaration: string) => {
           writeFileSync(seatSource, declaration)
           return spawnSync(
-            stBin!,
+            fractalBin!,
             [
               '--endpoint',
               `unix://${socket}`,
@@ -3067,7 +3067,7 @@ testWithSt(
         )
         expect(xhigh.status, xhigh.stderr).toBe(0)
         const xhighShown = spawnSync(
-          stBin!,
+          fractalBin!,
           ['--endpoint', `unix://${socket}`, 'subject', 'show', 'agent/garden/xhigh', '--kdl'],
           { encoding: 'utf8', timeout: 30000, env: isolatedEnv },
         )
@@ -3141,7 +3141,7 @@ testWithSt(
         const documentFile = join(dir, 'guide.txt')
         writeFileSync(documentFile, guideText)
         const storedGuide = spawnSync(
-          stBin!,
+          fractalBin!,
           [
             '--endpoint',
             `unix://${socket}`,
@@ -3201,7 +3201,7 @@ testWithSt(
         expect(inputPublished.status, inputPublished.stderr).toBe(0)
         const observePr = (state: string) =>
           spawnSync(
-            stBin!,
+            fractalBin!,
             [
               '--endpoint',
               `unix://${socket}`,
@@ -3223,7 +3223,7 @@ testWithSt(
         const claimId = JSON.parse(observedPr.stdout).id
         const startLanding = (values: readonly string[], id = 'input-proof') =>
           spawnSync(
-            stBin!,
+            fractalBin!,
             [
               '--endpoint',
               `unix://${socket}`,
@@ -3275,7 +3275,7 @@ testWithSt(
         const laterObservation = observePr('closed')
         expect(laterObservation.status, laterObservation.stderr).toBe(0)
         const inputShown = spawnSync(
-          stBin!,
+          fractalBin!,
           [
             '--endpoint',
             `unix://${socket}`,
@@ -3348,7 +3348,7 @@ testWithSt(
         const watchPublished = publish()
         expect(watchPublished.status, watchPublished.stderr).toBe(0)
         const watchStarted = spawnSync(
-          stBin!,
+          fractalBin!,
           [
             '--endpoint',
             `unix://${socket}`,
@@ -3393,7 +3393,7 @@ testWithSt(
         })
         const showOwned = (subject: string) => {
           const result = spawnSync(
-            stBin!,
+            fractalBin!,
             ['--endpoint', `unix://${socket}`, '--json', 'subject', 'show', subject],
             { encoding: 'utf8', timeout: 30000, env: isolatedEnv },
           )
@@ -3401,7 +3401,7 @@ testWithSt(
           return Schema.decodeUnknownSync(OwnedProjection)(JSON.parse(result.stdout)).status
             .subjects[0]
         }
-        const ownedObserver = await pollSt(
+        const ownedObserver = await pollFractal(
           async () => showOwned(observerSubject),
           (value) => value?.desired != null,
           'run-scoped ref observer',
@@ -3420,7 +3420,7 @@ testWithSt(
             ]),
           },
         })
-        const ownedSubscription = await pollSt(
+        const ownedSubscription = await pollFractal(
           async () => showOwned(subscriptionSubject),
           (value) => value?.desired != null,
           'run-scoped ref subscription',
@@ -3457,7 +3457,7 @@ testWithSt(
             ]),
           )
           return spawnSync(
-            stBin!,
+            fractalBin!,
             ['--endpoint', `unix://${socket}`, 'missions', 'check', source, '--workspace', dir],
             { encoding: 'utf8', timeout: 30000, env: isolatedEnv },
           )
@@ -3525,13 +3525,13 @@ const nativeStep = (run: NativeRun, id: string) => {
   expect(found, `${run.subject} must contain step ${id}`).toBeDefined()
   return found!
 }
-const nativeRun = (st: IsolatedSt, subject: string) =>
-  stJson<NativeRun>(st, 'missions', 'show', subject)
-const nativeReviews = (st: IsolatedSt) =>
-  st.get<NativeReview[]>(`/v1/reviews?reviewer=${encodeURIComponent(gateReviewer)}`)
-const nativeCards = (st: IsolatedSt) => {
-  const page = stJson<{ value: { items: NativeCard[]; page: { has_more: boolean } } }>(
-    st,
+const nativeRun = (fractal: IsolatedFractal, subject: string) =>
+  fractalJson<NativeRun>(fractal, 'missions', 'show', subject)
+const nativeReviews = (fractal: IsolatedFractal) =>
+  fractal.get<NativeReview[]>(`/v1/reviews?reviewer=${encodeURIComponent(gateReviewer)}`)
+const nativeCards = (fractal: IsolatedFractal) => {
+  const page = fractalJson<{ value: { items: NativeCard[]; page: { has_more: boolean } } }>(
+    fractal,
     'alerts',
     'ls',
     '--as',
@@ -3543,8 +3543,8 @@ const nativeCards = (st: IsolatedSt) => {
   return page.value.items.filter((item) => item.kind === 'attention')
 }
 /** Every recorded answer bound to this exact native request episode. */
-const nativeResults = async (st: IsolatedSt, review: NativeReview) => {
-  const page = await st.get<{ claims: NativeClaim[]; next_cursor: number | null }>(
+const nativeResults = async (fractal: IsolatedFractal, review: NativeReview) => {
+  const page = await fractal.get<{ claims: NativeClaim[]; next_cursor: number | null }>(
     `/v1/claims?subject=${encodeURIComponent(review.operation)}&limit=500`,
   )
   expect(page.next_cursor).toBeNull()
@@ -3557,21 +3557,21 @@ const nativeResults = async (st: IsolatedSt, review: NativeReview) => {
  * Publishes an agentless critical approval checkpoint before a risky worker step.
  * Every mutation names the person explicitly; this is R1 attribution, not a person credential.
  */
-const publishHumanFixture = (st: IsolatedSt, id: string, checkpointTimeout?: string) => {
+const publishHumanFixture = (fractal: IsolatedFractal, id: string, checkpointTimeout?: string) => {
   const seat = (seatId: string) =>
     ({
       id: seatId,
       command: 'true',
-      workspace: st.dir,
+      workspace: fractal.dir,
       restart: 'never',
       rollout: 'manual',
     }) as const
   const worker = seat('acceptance/worker')
   const observer = seat('acceptance/observer')
-  const seats = join(st.dir, 'human-gate-agents.kdl')
+  const seats = join(fractal.dir, 'human-gate-agents.kdl')
   writeFileSync(seats, emit([agent(worker), agent(observer)]))
-  stJson(st, 'agents', 'apply', seats, '--as', gateReviewer)
-  const source = join(st.dir, `${id.replace('/', '-')}.kdl`)
+  fractalJson(fractal, 'agents', 'apply', seats, '--as', gateReviewer)
+  const source = join(fractal.dir, `${id.replace('/', '-')}.kdl`)
   writeFileSync(
     source,
     emit([
@@ -3605,29 +3605,29 @@ const publishHumanFixture = (st: IsolatedSt, id: string, checkpointTimeout?: str
       }),
     ]),
   )
-  stJson(st, 'missions', 'publish', source, '--as', gateReviewer)
+  fractalJson(fractal, 'missions', 'publish', source, '--as', gateReviewer)
   return () =>
-    stJson<{ mission_run: NativeRun }>(
-      st,
+    fractalJson<{ mission_run: NativeRun }>(
+      fractal,
       'missions',
       'start',
       `mission/${id}`,
       '--workspace',
-      st.dir,
+      fractal.dir,
       '--as',
       gateReviewer,
     ).mission_run
 }
 
 /** Captures the current native request, its exact binding, and its person attention card. */
-const pendingHumanEpisode = async (st: IsolatedSt, started: NativeRun) => {
-  const reviews = await pollSt(
-    () => nativeReviews(st),
+const pendingHumanEpisode = async (fractal: IsolatedFractal, started: NativeRun) => {
+  const reviews = await pollFractal(
+    () => nativeReviews(fractal),
     (items) => items.some((item) => item.mission_run === started.subject),
     `human request for ${started.subject}`,
   )
   const review = reviews.find((item) => item.mission_run === started.subject)!
-  const run = nativeRun(st, started.subject)
+  const run = nativeRun(fractal, started.subject)
   const checkpoint = nativeStep(run, 'authorize')
   expect(review).toMatchObject({
     owner: checkpoint.subject,
@@ -3644,7 +3644,7 @@ const pendingHumanEpisode = async (st: IsolatedSt, started: NativeRun) => {
     claimant: null,
     worker_reported: false,
   })
-  const requested = await st.get<NativeClaim>(
+  const requested = await fractal.get<NativeClaim>(
     `/v1/claims/by-id/${encodeURIComponent(review.request)}`,
   )
   expect(requested).toMatchObject({
@@ -3662,8 +3662,8 @@ const pendingHumanEpisode = async (st: IsolatedSt, started: NativeRun) => {
       },
     },
   })
-  const cards = await pollSt(
-    async () => nativeCards(st),
+  const cards = await pollFractal(
+    async () => nativeCards(fractal),
     (items) => items.some((item) => item.episode === review.request),
     `attention card for ${review.request}`,
   )
@@ -3678,24 +3678,24 @@ const pendingHumanEpisode = async (st: IsolatedSt, started: NativeRun) => {
   })
   expect(card.actions).toEqual(expect.arrayContaining(['review.approve', 'review.reject']))
   expect(card.actions).not.toContain('review.request-changes')
-  expect(stJson(st, 'alerts', 'show', card.id, '--as', gateReviewer)).toMatchObject({
+  expect(fractalJson(fractal, 'alerts', 'show', card.id, '--as', gateReviewer)).toMatchObject({
     episode: review.request,
     kind: 'human-gate',
     subject: checkpoint.subject,
     person: gateReviewer,
   })
-  expect(await nativeResults(st, review)).toEqual([])
+  expect(await nativeResults(fractal, review)).toEqual([])
   return { run, review, card }
 }
 
-const expectEpisodeClosed = async (st: IsolatedSt, review: NativeReview) => {
-  await pollSt(
-    () => nativeReviews(st),
+const expectEpisodeClosed = async (fractal: IsolatedFractal, review: NativeReview) => {
+  await pollFractal(
+    () => nativeReviews(fractal),
     (items) => items.every((item) => item.request !== review.request),
     `closed human request ${review.request}`,
   )
-  await pollSt(
-    async () => nativeCards(st),
+  await pollFractal(
+    async () => nativeCards(fractal),
     (items) => items.every((item) => item.episode !== review.request),
     `removed attention card for ${review.request}`,
   )
@@ -3706,24 +3706,24 @@ const expectRefused = (result: SpawnSyncReturns<string>, pattern: RegExp) => {
   expect(result.stderr).toMatch(pattern)
 }
 
-testWithStFixture(
+testWithFractalFixture(
   'isolated human gate: critical silence holds readiness until the named reviewer approves',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'fixture', signal }, async (st) => {
-      const start = publishHumanFixture(st, 'acceptance/critical')
-      const { run, review, card } = await pendingHumanEpisode(st, start())
+    withIsolatedFractal({ kind: 'fixture', signal }, async (fractal) => {
+      const start = publishHumanFixture(fractal, 'acceptance/critical')
+      const { run, review, card } = await pendingHumanEpisode(fractal, start())
       // Re-observe the same episode; unanswered critical review stays held, never approved.
       expect(
-        (await nativeReviews(st)).filter((item) => item.request === review.request),
+        (await nativeReviews(fractal)).filter((item) => item.request === review.request),
       ).toHaveLength(1)
-      expect(nativeStep(nativeRun(st, run.subject), 'risky').status).toBe('pending')
-      expect(await nativeResults(st, review)).toEqual([])
+      expect(nativeStep(nativeRun(fractal, run.subject), 'risky').status).toBe('pending')
+      expect(await nativeResults(fractal, review)).toEqual([])
       expectRefused(
-        st.command('alerts', 'approve', card.id, '--as', 'person/someone-else'),
+        fractal.command('alerts', 'approve', card.id, '--as', 'person/someone-else'),
         /wrong-reviewer|requires `person\/step-reviewer`/u,
       )
-      expect(await nativeResults(st, review)).toEqual([])
-      const result = stJson<NativeClaim>(st, 'alerts', 'approve', card.id, '--as', gateReviewer)
+      expect(await nativeResults(fractal, review)).toEqual([])
+      const result = fractalJson<NativeClaim>(fractal, 'alerts', 'approve', card.id, '--as', gateReviewer)
       expect(result).toMatchObject({
         subject: review.operation,
         kind: 'gate.result',
@@ -3733,8 +3733,8 @@ testWithStFixture(
           evidence: expect.arrayContaining([review.request]),
         },
       })
-      const admitted = await pollSt(
-        async () => nativeRun(st, run.subject),
+      const admitted = await pollFractal(
+        async () => nativeRun(fractal, run.subject),
         (value) => nativeStep(value, 'risky').status === 'ready',
         'approved dependent worker readiness',
       )
@@ -3743,9 +3743,9 @@ testWithStFixture(
         claimant: null,
         worker_reported: false,
       })
-      await expectEpisodeClosed(st, review)
+      await expectEpisodeClosed(fractal, review)
       expectRefused(
-        st.command(
+        fractal.command(
           'alerts',
           'reject',
           card.id,
@@ -3756,20 +3756,20 @@ testWithStFixture(
         ),
         closedReview,
       )
-      expect((await nativeResults(st, review)).map((claim) => claim.id)).toEqual([result.id])
-      expect(nativeStep(nativeRun(st, run.subject), 'risky').status).toBe('ready')
+      expect((await nativeResults(fractal, review)).map((claim) => claim.id)).toEqual([result.id])
+      expect(nativeStep(nativeRun(fractal, run.subject), 'risky').status).toBe('ready')
     }),
   120000,
 )
 
-testWithStFixture(
+testWithFractalFixture(
   'isolated human gate: an expired agentless checkpoint fails instead of approving',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'fixture', signal }, async (st) => {
-      const start = publishHumanFixture(st, 'acceptance/timeout', '2s')
-      const { run, review, card } = await pendingHumanEpisode(st, start())
-      const failed = await pollSt(
-        async () => nativeRun(st, run.subject),
+    withIsolatedFractal({ kind: 'fixture', signal }, async (fractal) => {
+      const start = publishHumanFixture(fractal, 'acceptance/timeout', '2s')
+      const { run, review, card } = await pendingHumanEpisode(fractal, start())
+      const failed = await pollFractal(
+        async () => nativeRun(fractal, run.subject),
         (value) => value.status === 'failed',
         'agentless checkpoint timeout failure',
         90000,
@@ -3780,28 +3780,28 @@ testWithStFixture(
         claimant: null,
         worker_reported: false,
       })
-      expect(await nativeResults(st, review)).toEqual([])
-      await expectEpisodeClosed(st, review)
-      expectRefused(st.command('alerts', 'approve', card.id, '--as', gateReviewer), closedReview)
-      expect(await nativeResults(st, review)).toEqual([])
-      expect(nativeRun(st, run.subject).status).toBe('failed')
+      expect(await nativeResults(fractal, review)).toEqual([])
+      await expectEpisodeClosed(fractal, review)
+      expectRefused(fractal.command('alerts', 'approve', card.id, '--as', gateReviewer), closedReview)
+      expect(await nativeResults(fractal, review)).toEqual([])
+      expect(nativeRun(fractal, run.subject).status).toBe('failed')
     }),
   150000,
 )
 
-testWithStFixture(
+testWithFractalFixture(
   'isolated human gate: rejection fails the checkpoint without admitting its dependent',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'fixture', signal }, async (st) => {
-      const start = publishHumanFixture(st, 'acceptance/rejected')
-      const { run, review, card } = await pendingHumanEpisode(st, start())
+    withIsolatedFractal({ kind: 'fixture', signal }, async (fractal) => {
+      const start = publishHumanFixture(fractal, 'acceptance/rejected')
+      const { run, review, card } = await pendingHumanEpisode(fractal, start())
       expectRefused(
-        st.command('alerts', 'reject', card.id, '--as', gateReviewer),
+        fractal.command('alerts', 'reject', card.id, '--as', gateReviewer),
         /missing-review-reason|needs a reason|--reason/u,
       )
       const reason = 'The isolated plan is not authorized.'
-      const result = stJson<NativeClaim>(
-        st,
+      const result = fractalJson<NativeClaim>(
+        fractal,
         'alerts',
         'reject',
         card.id,
@@ -3818,8 +3818,8 @@ testWithStFixture(
           evidence: expect.arrayContaining([review.request]),
         },
       })
-      const stopped = await pollSt(
-        async () => nativeRun(st, run.subject),
+      const stopped = await pollFractal(
+        async () => nativeRun(fractal, run.subject),
         (value) => value.status === 'failed',
         'rejected mission failure',
       )
@@ -3829,22 +3829,22 @@ testWithStFixture(
         claimant: null,
         worker_reported: false,
       })
-      await expectEpisodeClosed(st, review)
-      expectRefused(st.command('alerts', 'approve', card.id, '--as', gateReviewer), closedReview)
-      expect((await nativeResults(st, review)).map((claim) => claim.id)).toEqual([result.id])
-      expect(nativeRun(st, run.subject).status).toBe('failed')
+      await expectEpisodeClosed(fractal, review)
+      expectRefused(fractal.command('alerts', 'approve', card.id, '--as', gateReviewer), closedReview)
+      expect((await nativeResults(fractal, review)).map((claim) => claim.id)).toEqual([result.id])
+      expect(nativeRun(fractal, run.subject).status).toBe('failed')
     }),
   120000,
 )
 
-testWithStFixture(
+testWithFractalFixture(
   'isolated human gate: cancellation fences late decisions from a fresh run episode',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'fixture', signal }, async (st) => {
-      const start = publishHumanFixture(st, 'acceptance/stale')
-      const old = await pendingHumanEpisode(st, start())
-      stJson(
-        st,
+    withIsolatedFractal({ kind: 'fixture', signal }, async (fractal) => {
+      const start = publishHumanFixture(fractal, 'acceptance/stale')
+      const old = await pendingHumanEpisode(fractal, start())
+      fractalJson(
+        fractal,
         'missions',
         'cancel',
         old.run.subject,
@@ -3853,45 +3853,45 @@ testWithStFixture(
         '--as',
         gateReviewer,
       )
-      await pollSt(
-        async () => nativeRun(st, old.run.subject),
+      await pollFractal(
+        async () => nativeRun(fractal, old.run.subject),
         (value) => value.status === 'cancelled',
         'cancelled old run',
       )
-      await expectEpisodeClosed(st, old.review)
-      const fresh = await pendingHumanEpisode(st, start())
+      await expectEpisodeClosed(fractal, old.review)
+      const fresh = await pendingHumanEpisode(fractal, start())
       expect(fresh.run.subject).not.toBe(old.run.subject)
       expect(fresh.review.request).not.toBe(old.review.request)
       expect(fresh.review.operation).not.toBe(old.review.operation)
       expect(fresh.card.id).not.toBe(old.card.id)
       expectRefused(
-        st.command('alerts', 'approve', old.card.id, '--as', gateReviewer),
+        fractal.command('alerts', 'approve', old.card.id, '--as', gateReviewer),
         closedReview,
       )
-      expect(await nativeResults(st, old.review)).toEqual([])
-      expect(await nativeResults(st, fresh.review)).toEqual([])
-      expect(nativeRun(st, old.run.subject).status).toBe('cancelled')
-      expect(nativeStep(nativeRun(st, fresh.run.subject), 'risky').status).toBe('pending')
+      expect(await nativeResults(fractal, old.review)).toEqual([])
+      expect(await nativeResults(fractal, fresh.review)).toEqual([])
+      expect(nativeRun(fractal, old.run.subject).status).toBe('cancelled')
+      expect(nativeStep(nativeRun(fractal, fresh.run.subject), 'risky').status).toBe('pending')
       expect(
-        (await nativeReviews(st)).filter((item) => item.request === fresh.review.request),
+        (await nativeReviews(fractal)).filter((item) => item.request === fresh.review.request),
       ).toHaveLength(1)
-      const result = stJson<NativeClaim>(
-        st,
+      const result = fractalJson<NativeClaim>(
+        fractal,
         'alerts',
         'approve',
         fresh.card.id,
         '--as',
         gateReviewer,
       )
-      await pollSt(
-        async () => nativeRun(st, fresh.run.subject),
+      await pollFractal(
+        async () => nativeRun(fractal, fresh.run.subject),
         (value) => nativeStep(value, 'risky').status === 'ready',
         'fresh episode dependent readiness',
       )
-      await expectEpisodeClosed(st, fresh.review)
-      expect(await nativeResults(st, old.review)).toEqual([])
-      expect((await nativeResults(st, fresh.review)).map((claim) => claim.id)).toEqual([result.id])
-      expect(nativeRun(st, old.run.subject).status).toBe('cancelled')
+      await expectEpisodeClosed(fractal, fresh.review)
+      expect(await nativeResults(fractal, old.review)).toEqual([])
+      expect((await nativeResults(fractal, fresh.review)).map((claim) => claim.id)).toEqual([result.id])
+      expect(nativeRun(fractal, old.run.subject).status).toBe('cancelled')
     }),
   120000,
 )

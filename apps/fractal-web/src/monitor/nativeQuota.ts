@@ -125,11 +125,11 @@ export const projectNativeQuota = (input: unknown, now: number):
           },
         },
       }],
-      usage7d: { basis: 'not reported by st usage.period' },
+      usage7d: { basis: 'not reported by Fractal usage.period' },
     }
   }
   // Declared accounts first, in name order, whether or not they reported; then any reading no
-  // declaration claims, so nothing st recorded is dropped.
+  // declaration claims, so nothing Fractal recorded is dropped.
   const declared = period.accounts ?? []
   const claimed = new Set<UsageLimit>()
   const listed: QuotaAccount[] = declared.map((account) => {
@@ -149,7 +149,7 @@ export const projectNativeQuota = (input: unknown, now: number):
       retained: true,
       source: { authority: 'st3.usage.period', confidence: 'no harness observation' },
       limits: [],
-      usage7d: { basis: 'not reported by st usage.period' },
+      usage7d: { basis: 'not reported by Fractal usage.period' },
     }
   })
   const accounts: QuotaAccount[] = [

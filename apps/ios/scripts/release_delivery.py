@@ -562,7 +562,7 @@ class Delivery:
             # Notification errors must not discard an artifact or stop delivery.
             body = json.dumps({key: event[key] for key in NOTIFICATION_FIELDS if key in event})
             try:
-                run(["st", "--daemon-wait", "0", "conversations", "send",
+                run(["fractal", "--daemon-wait", "0", "conversations", "send",
                      "--from", self.args.notify_from, self.args.notify_to,
                      "--subject", "iOS Release delivery", "--body", body], timeout=10)
                 self.data[marker[0]] = marker[1]

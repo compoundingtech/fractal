@@ -14,7 +14,7 @@ const clock = Date.parse(at) + 12000
 const prompt = (id: string, body: string): TextItem & { role: 'user' } => ({ _tag: 'Text', id, role: 'user', text: body, attachments: [], streaming: false, at })
 const empty = { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false }
 const prompts = [
-  prompt('md/daemon', 'A mission step is ready: step-run/demo-1/work. Run `st work claim step-run/demo-1/work --as agent/demo/one` to read and claim it.'),
+  prompt('md/daemon', 'A mission step is ready: step-run/demo-1/work. Run `fractal work claim step-run/demo-1/work --as agent/demo/one` to read and claim it.'),
   prompt('md/lines', 'Please check these:\nthe **first** line\nand `Array<string>` next to a bare Array<string>\n\n- one item\n- [a link](https://example.test)'),
   prompt('md/long', Array.from({ length: 14 }, (_, index) => `Line ${index + 1} with \`code\` and **bold** that keeps its formatting when collapsed.`).join('\n')),
 ]
@@ -32,8 +32,8 @@ export const scenarioExemptions: readonly string[] = ['Dark:contract-fixture', '
 
 const rendersMarkdown = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
   const canvas = within(canvasElement)
-  await expect(canvas.getByText('st work claim step-run/demo-1/work --as agent/demo/one').tagName).toBe('CODE')
-  await expect(canvasElement.textContent).not.toContain('`st work')
+  await expect(canvas.getByText('fractal work claim step-run/demo-1/work --as agent/demo/one').tagName).toBe('CODE')
+  await expect(canvasElement.textContent).not.toContain('`fractal work')
   await expect(canvasElement.textContent).toContain('next to a bare Array<string>')
   await canvasElement.ownerDocument.fonts.ready
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))

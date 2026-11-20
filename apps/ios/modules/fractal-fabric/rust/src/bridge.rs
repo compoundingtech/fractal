@@ -703,8 +703,8 @@ mod tests {
         Ok(())
     }
 
-    /// Against a real isolated st member started by `proof-member.mjs`: the
-    /// paired-only gateway through an inbound-only grant, st's own refusal of an
+    /// Against a real isolated Fractal member started by `proof-member.mjs`: the
+    /// paired-only gateway through an inbound-only grant, Fractal's own refusal of an
     /// unpaired request, and fabric's typed refusals, Error frame and revocation
     /// as they arrive on the wire.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -727,7 +727,7 @@ mod tests {
             text("service")?,
         );
         assert!(
-            home.starts_with("/tmp/st-fabric-proof-"),
+            home.starts_with("/tmp/fractal-fabric-proof-"),
             "not an isolated proof member"
         );
         let fabric = |arguments: &[&str]| -> Result<String> {
@@ -769,12 +769,12 @@ mod tests {
             "expose",
             "demo-gone/0",
             "--socket",
-            "/tmp/st-fabric-proof-missing.sock",
+            "/tmp/fractal-fabric-proof-missing.sock",
             "--ephemeral",
         ])?;
         grant(&format!("{service},demo-gone/0"))?;
 
-        // The st gateway through the bridge: capabilities, then st refusing an
+        // The Fractal gateway through the bridge: capabilities, then Fractal refusing an
         // unpaired request for a protected route.
         let bridge = Bridge::start(phone.clone(), addr.clone(), service.clone()).await?;
         for path in ["/v1/client/capabilities", "/v1/client/agents"] {

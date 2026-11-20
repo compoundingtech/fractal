@@ -220,7 +220,7 @@ export function alertsIn<T extends AlertRow>(items: readonly T[], agentId: strin
 export type PromptAnswers = {
   target_id: string; episode: string; answers: string[];
   /**
-   * The exact call the prompt asks about (a tool use or Codex item id), or null when st names
+   * The exact call the prompt asks about (a tool use or Codex item id), or null when Fractal names
    * none. A prompt that names none is only denied from here: no unanswered call is guessed at.
    */
   call_id?: string | null;
@@ -251,7 +251,7 @@ export function promptAlertKey(item: { readonly id: string; readonly revision: s
 
 /**
  * The call a harness recorded before it asked: its tool and each input, lines intact. `complete`
- * is false when st cut its input to its bound, and then nobody allows it from a client.
+ * is false when Fractal cut its input to its bound, and then nobody allows it from a client.
  */
 export type PendingCall = { id: string; tool: string; lines: string[]; input?: unknown; complete?: boolean };
 
@@ -275,16 +275,16 @@ function parsedInput(args: unknown): unknown {
 }
 
 /**
- * A prompt as st serves it beside its card (`presentation.prompt`): the calls without a result in
+ * A prompt as Fractal serves it beside its card (`presentation.prompt`): the calls without a result in
  * the seat's conversation, each as a person reads it, and whether a client may allow or answer the
- * call it asks about; or why st serves none (it cannot read the conversation, or it is older).
+ * call it asks about; or why Fractal serves none (it cannot read the conversation, or it is older).
  */
 export type ServedPrompt = { calls: PendingCall[]; allow: boolean } | { calls: null; allow: false; why: string };
 export type ServedPromptInput = Pick<AttentionPrompt, 'allow' | 'unknown_reason'> & { readonly calls: readonly AttentionPromptCall[] | null };
 export function servedPrompt(item: { readonly presentation?: { readonly prompt?: ServedPromptInput } | null }): ServedPrompt {
   const prompt = item.presentation?.prompt;
-  if (!prompt) return { calls: null, allow: false, why: "This host's st is older and does not say which call the prompt asks about." };
-  if (!prompt.calls) return { calls: null, allow: false, why: prompt.unknown_reason ?? "st cannot read the agent's conversation." };
+  if (!prompt) return { calls: null, allow: false, why: "This host's Fractal is older and does not say which call the prompt asks about." };
+  if (!prompt.calls) return { calls: null, allow: false, why: prompt.unknown_reason ?? "Fractal cannot read the agent's conversation." };
   return {
     calls: prompt.calls.map(call => ({
       id: call.call_id, tool: call.tool || 'tool', lines: inputLines(call.input),
@@ -295,8 +295,8 @@ export function servedPrompt(item: { readonly presentation?: { readonly prompt?:
 }
 
 /**
- * The answers a client offers beside a prompt st serves. `allow` and `approve` only where st
- * allows them, beside the one call shown; `answer` only where st allows it and that call's
+ * The answers a client offers beside a prompt Fractal serves. `allow` and `approve` only where Fractal
+ * allows them, beside the one call shown; `answer` only where Fractal allows it and that call's
  * questions can be shown and chosen from; every other answer (deny, and a screen prompt's or
  * denial's own answers) always.
  */
@@ -372,7 +372,7 @@ export function answerLabel(answer: string): string {
 }
 
 /**
- * The call to show beside a prompt's answers: the exact call it asks about, when st names it and
+ * The call to show beside a prompt's answers: the exact call it asks about, when Fractal names it and
  * it is pending. A prompt that names none has none beside it.
  */
 export function promptCalls(prompt: PromptAnswers, calls: readonly PendingCall[]): PendingCall[] {

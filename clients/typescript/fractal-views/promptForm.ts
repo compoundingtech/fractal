@@ -5,7 +5,7 @@
  * The Rust twin is `crates/fractal-ui-model/src/prompts.rs` (Fractal TUI). Both are checked against
  * `tests/fixtures/prompt-forms.json`, so web, tui and ios offer the same answers with the same
  * words. Only answers the daemon lists are ever shown, and what an answer means is the daemon's:
- * a label says it in the harness's words and never more. Choices the harness's dialog has and st
+ * a label says it in the harness's words and never more. Choices the harness's dialog has and Fractal
  * cannot send stay in its terminal, and the form says so.
  */
 
@@ -111,7 +111,7 @@ function questionLine(harness: PromptHarness, kind: PromptKind, prompt: string, 
   return first;
 }
 
-/** The harness's words for an answer st sends on a prompt of `kind`. */
+/** The harness's words for an answer Fractal sends on a prompt of `kind`. */
 export function promptAnswerLabel(harness: PromptHarness, kind: PromptKind, tool: string | null, answer: string): string {
   const read = tool !== null && READS.has(tool);
   if (kind === 'permission') {

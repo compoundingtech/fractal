@@ -125,7 +125,7 @@ if name == "pnpm":
 if name == "codesign":
     assert args[:3] == ["--verify", "--deep", "--strict"], args
     sys.exit(control.get("codesign_exit", 0))
-if name == "st":
+if name == "fractal":
     assert args[:4] == ["--daemon-wait", "0", "conversations", "send"], args
     assert args[args.index("--from") + 1] == "fixture.actor", args
     assert "fixture.recipient" in args, args
@@ -409,7 +409,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.control_path = self.root / "control.json"
         self.control_path.write_text("{}")
         self.command_log = self.root / "commands.jsonl"
-        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "st", "node", "nix", "fabric-build", "nm"):
+        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "fractal", "node", "nix", "fabric-build", "nm"):
             executable = self.tools / name
             executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent(COMMAND_FIXTURE))
             executable.chmod(0o755)
@@ -700,7 +700,7 @@ fetch_local(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3])
 
     def notifications(self):
         return [json.loads(entry["args"][entry["args"].index("--body") + 1])
-                for entry in self.commands("st")]
+                for entry in self.commands("fractal")]
 
     def age_unavailability(self):
         # Advance the persisted wall-clock deadline without a one-hour sleep or
@@ -1935,7 +1935,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.invoke()
         self.age_unavailability()
         self.invoke()
-        bodies = [entry["args"][entry["args"].index("--body") + 1] for entry in self.commands("st")]
+        bodies = [entry["args"][entry["args"].index("--body") + 1] for entry in self.commands("fractal")]
         self.assertEqual([json.loads(body)["outcome"] for body in bodies], ["build_failed", "install_failed"])
         for body in bodies:
             self.assertLessEqual(set(json.loads(body)), {"at", "outcome", "commit", "build_version", "exit", "retry_at"})

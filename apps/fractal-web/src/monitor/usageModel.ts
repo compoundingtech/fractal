@@ -1,5 +1,5 @@
 // Objectives and budgets as the phone (apps/ios/slo.ts) and the terminal UI
-// (crates/fractal-tui/src/ui/objectives.rs) word them, over the decoded native rows. st serves
+// (crates/fractal-tui/src/ui/objectives.rs) word them, over the decoded native rows. Fractal serves
 // each row's tone and forecast; nothing here decides what is red.
 import type * as Native from '@fractal/client/schema'
 import * as Option from 'effect/Option'
@@ -44,7 +44,7 @@ export const secondLine = (row: Native.SloRow, now: number): { readonly text: st
   return forecast ? { text: `${row.current} · `, forecast } : { text: `${row.current} · target ${row.target} · ${row.window}`, forecast: null }
 }
 
-/** Budgets before objectives, each in the order st lists them. */
+/** Budgets before objectives, each in the order Fractal lists them. */
 export const sloGroups = (rows: readonly Native.SloRow[]) =>
   (['budget', 'objective'] as const)
     .map(kind => ({ kind, title: `${kind}s`, rows: rows.filter(row => row.kind === kind) }))

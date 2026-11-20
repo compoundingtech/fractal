@@ -63,7 +63,7 @@ const noChart: { open: string | null; history: Record<string, SloHistory | strin
 type SloRead = { list: SloList | null; issue: string };
 const noSlo: SloRead = { list: null, issue: '' };
 
-/** Objectives and budgets from st's `slo.list`, read on focus and on pull, as the rest of this screen is on older members. What was read belongs to the client that read it. */
+/** Objectives and budgets from Fractal's `slo.list`, read on focus and on pull, as the rest of this screen is on older members. What was read belongs to the client that read it. */
 export function useSlo() {
   const { client } = useStore();
   const current = useRef(client);

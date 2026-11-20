@@ -1,7 +1,7 @@
 /**
  * The Usage pane's data source over the scenario `objectives` slice: the served `slo`, `slo/history`
  * and `usage` reads, decoded like the gateway source decodes them, at the scenario clock. Tone and
- * forecast are what st served, never derived here. `read` is the client's read outcome, not served
+ * forecast are what Fractal served, never derived here. `read` is the client's read outcome, not served
  * data, so stories take it as an argument rather than a scenario variant.
  */
 import * as Native from '@fractal/client/schema/read'
