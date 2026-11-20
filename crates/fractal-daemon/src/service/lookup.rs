@@ -35,6 +35,7 @@ fn check_conflicts<'a>(statuses: impl IntoIterator<Item = &'a ServiceStatus>) ->
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn select(mut statuses: Vec<ServiceStatus>) -> Result<ServiceStatus> {
     check_conflicts(&statuses)?;
     // Candidate order retains the original CLI target when legacy installs coexist.
