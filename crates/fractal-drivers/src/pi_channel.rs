@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::{harness_context, harness_state};
 
-/// Record the managed channel's observations in its st-owned outbox.
+/// Record the managed channel's observations in its Fractal-owned outbox.
 pub struct EventObserver {
     state: harness_state::Writer,
     context: harness_context::Writer,

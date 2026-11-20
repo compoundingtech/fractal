@@ -345,7 +345,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
                          "sys.stdin.readline()\n"
                          "sys.exit(2)\n")
         child.chmod(0o700)
-        self.monitor.st3 = str(child)
+        self.monitor.fractal = str(child)
         self.monitor.api.socket = "/private-fixture/socket"
         self.monitor.api.agent.update(incarnation_id="fixture-incarnation", owner_run_id="fixture-run",
                                       host_id="amber", revision="fixture-revision",
@@ -430,7 +430,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
                          "sys.stderr.write('st: startup refused before hello\\n')\n"
                          "sys.exit(2)\n")
         child.chmod(0o700)
-        self.monitor.st3 = str(child)
+        self.monitor.fractal = str(child)
         self.monitor.api.socket = "/private-fixture/socket"
         self.monitor.api.agent = None
         loop = asyncio.get_running_loop()
@@ -479,7 +479,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
                          "sys.stdin.readline()\n"
                          "time.sleep(30)\n")
         child.chmod(0o700)
-        self.monitor.st3 = str(child)
+        self.monitor.fractal = str(child)
         self.monitor.api.socket = "/private-fixture/socket"
         async def waiting_monitor():
             await asyncio.Future()
@@ -578,7 +578,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(alert["to"], self.config["alert_agent"])
         for hint in (self.monitor.actor, self.target, original["nonce"], original["message"],
                      "Report this route, nonce, message, missed deadline",
-                     "Reporting does not require st doctor --json to return",
+                     "Reporting does not require fractal doctor --json to return",
                      "report that timeout; do not repeat the call",
                      "A Doctor timeout does not establish that the daemon stopped",
                      "Fresh probes continue; a real recipient read sends a recovery note"):
@@ -1122,7 +1122,7 @@ agent "probe/{node.name}" {{
                 alert = await nodes[0].api("/v1/messages/read/" + blocked["attention"])
                 self.assertEqual(alert["to"], "agent/operations/amber")
                 self.assertIn(blocked["nonce"], alert["content"])
-                self.assertIn("st doctor --json", alert["content"])
+                self.assertIn("fractal doctor --json", alert["content"])
                 alert_claims = await nodes[0].api("/v1/claims?" + probe.urlencode({"subject": blocked["attention"]}))
                 self.assertEqual(sum(claim["kind"] == "message.sent" for claim in alert_claims["claims"]), 1)
             else:

@@ -853,7 +853,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/claims", get(records::list_claims).post(records::post_claim))
         .route("/v1/usage", get(operations::get_usage))
-        .route("/v1/slo", get(operations::get_slo))
+        .route("/v1/slo", get(operations::get_slo).post(operations::ingest_roll))
+        .route("/v1/slo/observe", post(operations::observe_roll))
+        .route("/v1/slo/roll-intent", get(operations::roll_intent))
         .route("/v1/slo/history", get(operations::get_slo_history))
         .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
@@ -873,6 +875,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(records::withdraw_attention),
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
+        .route("/v1/messages/", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/recipient", get(messages::recipient))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
@@ -8498,7 +8501,9 @@ pub async fn guard_bound_request(
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
     }
-    if ![
+    let message_path = messages::is_message_path(path);
+    let message_send = matches!(path, "/v1/messages" | "/v1/messages/");
+    if !message_path && ![
         "/v1/intent/apply",
         "/v1/sets/",
         "/v1/agent-queue-moves",
@@ -8528,7 +8533,6 @@ pub async fn guard_bound_request(
         "/v1/subscription-requests/",
         "/v1/reviews/",
         "/v1/claims",
-        "/v1/messages/",
         "/v1/schema/registrations",
         "/v1/custom/reply",
         "/v1/diagnostic",
@@ -8557,10 +8561,16 @@ pub async fn guard_bound_request(
                 format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
             )));
         }
-        for key in ["actor", "requester"] {
+        let message_write = message_path
+            || parts.uri.path() == "/v1/claims" && value.get("kind").and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("message."));
+        for key in ["actor", "requester"].into_iter().chain(message_send.then_some("from")) {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
             {
+                if message_write {
+                    return Err(messages::attribution_error());
+                }
                 return Err(ApiError::bad(FractalError::new(
                     "foreign-agent-actor",
                     format!("this harness is `{bound_agent}` and cannot act as `{actor}`"),
@@ -8643,7 +8653,7 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2,"mission_run_follow_head":1},
+        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"mission_run_follow_head":1},
     });
     let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;
     health["replication"] = json!({
@@ -11876,6 +11886,7 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, domain_rows));
+    rows.insert(budgets, crate::roll_completion::row(store, now));
     let admission = crate::admission_objectives::rows(store, now)?;
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, admission));

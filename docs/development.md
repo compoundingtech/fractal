@@ -55,6 +55,14 @@ name in `documents put --as` and the ignored compatibility flags on reads.
 `ignores_actor` identifies those ignored flags. Do not use this contract as an
 authorization decision.
 
+The native rollout helpers deliberately have `actor: none`: `slo ingest-roll`
+admits an existing signed claim by id, and `slo roll-intent` resolves authenticated
+native creation and pinned resource evidence. Neither accepts `--as` or uses a
+configured person as receipt authority. Admission checks the referenced claim's
+signer and declared roll-authority binding; an argv identity cannot replace that
+proof. Their CLI integration coverage admits a signed source, resolves a pinned
+run, and replays both operations after reopening the disk-backed daemon.
+
 Add `--effective` to include only the selected `instance`, `config_path` and
 `state_dir` metadata; no config values are printed. Instance activation and the
 existing config loader determine the state directory. **`config_path` always

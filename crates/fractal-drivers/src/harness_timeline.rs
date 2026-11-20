@@ -1,8 +1,8 @@
 //! Durable, harness-neutral conversation events produced by native drivers.
 //!
-//! The harness adapters see richer protocol events than st3's supervisor. They normalize those
-//! events here into append/replace/finalize operations. Fresh st seats commit each operation to
-//! the st-owned event outbox; legacy adopted providers and st2 retain a bounded record log. Both
+//! The harness adapters see richer protocol events than Fractal's supervisor. They normalize those
+//! events here into append/replace/finalize operations. Fresh Fractal seats commit each operation to
+//! the Fractal-owned event outbox; legacy adopted providers and st2 retain a bounded record log. Both
 //! transports preserve reported events across daemon restarts and keep provider transcript
 //! formats out of the client API.
 
@@ -436,7 +436,7 @@ pub fn observe_codex(writer: &mut Writer, message: &Value, thread_id: &str) -> R
             EntryType::Usage,
             {
                 // Codex counts cached and cache-written input inside `inputTokens` and reasoning
-                // inside `outputTokens`. st's buckets are disjoint, as Claude reports them:
+                // inside `outputTokens`. Fractal's buckets are disjoint, as Claude reports them:
                 // `input_tokens` is the uncached remainder, so the buckets sum to the total and
                 // each one is priced once.
                 let field = |key| usage.get(key).and_then(Value::as_u64);
@@ -1489,7 +1489,7 @@ mod claim_socket_tests {
             let emit = |writer: &mut Writer| {
                 match driver {
                     "codex" => observe_codex(writer, &json!({"method":"item/completed","params":{"item":{
-                        "type":"commandExecution","id":"claim-call","command":"st work claim",
+                        "type":"commandExecution","id":"claim-call","command":"fractal work claim",
                         "exitCode":5,"status":"completed","aggregatedOutput":output,
                     }}}), "thread-current"),
                     "claude" => observe_claude(writer, "PostToolUseFailure", &json!({

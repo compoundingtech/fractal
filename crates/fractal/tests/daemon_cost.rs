@@ -601,6 +601,9 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "a Fractal TUI layout, outside the graph",
     ),
     ("POST /v1/intent/mission", "plans a mission from KDL"),
+    ("POST /v1/slo", "verifies signed source authority and durably admits a claim reference; signed admission/replay and spoof refusal are covered by roll_completion_tests; maintained SLO row SQL independence is measured below"),
+    ("POST /v1/slo/observe", "collects actual host profile/readiness evidence and signs it, outside graph-only costs; covered by roll_observer and signed source regressions"),
+    ("GET /v1/slo/roll-intent", "prepares canonical native creation-envelope proof and authenticates pinned resource signatures; immediate proof, forged origin, missing input and deadline-derived clock regressions are covered by roll_source; maintained objective row SQL independence is measured below"),
     ("POST /v1/intent/apply", "applies a planned mission"),
     ("POST /v1/missions/{id}/retire", "retires a mission"),
     ("POST /v1/mission-runs/{run}/revision", "revises a run"),
@@ -1227,6 +1230,7 @@ const PROBES: &[Probe] = &[
         "/v1/subscription-requests?subscription=subscription/bench/missing",
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
+    get("GET /v1/messages/", "/v1/messages/?to={seat}"),
     get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
     get(
         "GET /v1/messages/by-key",
@@ -1367,6 +1371,15 @@ const PROBES: &[Probe] = &[
     post("POST /v1/messages", "/v1/messages", |fixture, attempt| {
         json!({
             "idempotency_key": format!("cost-message-{attempt}"),
+            "from": fixture.subjects.seats[0],
+            "to": fixture.subjects.seats[1],
+            "title": "An invented status note",
+            "content": "The invented build finished; the invented review can start.",
+        })
+    }),
+    post("POST /v1/messages/", "/v1/messages/", |fixture, attempt| {
+        json!({
+            "idempotency_key": format!("cost-message-slash-{attempt}"),
             "from": fixture.subjects.seats[0],
             "to": fixture.subjects.seats[1],
             "title": "An invented status note",
@@ -2631,6 +2644,107 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
     assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
 }
 
+/// Exercise the production one-loan requeue and public cold verdict read, not a
+/// copied SELECT. The signed result stays beyond the first page; synthetic edges
+/// grow retained history while every measured page still contains 1024 distinct IDs.
+#[test]
+fn cold_dependency_reads_and_invalidation_pages_are_history_bounded() {
+    use smallclaims::principal::Verdict;
+    for mixed in [false, true] {
+        let mut measurements = Vec::new();
+        for retained in [4096, 40_960] {
+            let store = smallclaims::store::Store::open_memory(
+                "cost-node", Arc::new(smallclaims::store::runtime::Plain),
+            ).unwrap();
+            store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+            let claim = store.append_claim(&smallclaims::claim::ClaimInput {
+                subject: "note/cost-dependencies".into(),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::from([("text".into(), json!("signed cold dependency cost fixture"))]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            store.replication_snapshot().unwrap();
+            store.judge_claims(true).unwrap();
+            assert_eq!(store.claim_verdict(&claim.id).unwrap(), Verdict::Verified);
+            {
+                let mut connection = store.connection.write();
+                assert!(connection.query_row(
+                    "SELECT complete=1 AND dirty=0 AND blocked=0 AND last_signature='' AND roots_digest='' FROM claim_signature_judging WHERE claim_id=?1",
+                    [&claim.id], |row| row.get::<_, bool>(0),
+                ).unwrap());
+                let tx = connection.transaction().unwrap();
+                tx.execute_batch(
+                    "INSERT INTO claim_verdict_dependency_keys(link) SELECT DISTINCT link FROM claim_verdict_links;
+                     INSERT INTO claim_verdict_dependency_edges(dependency_id,claim_id)
+                     SELECT k.id,l.claim_id FROM claim_verdict_links l JOIN claim_verdict_dependency_keys k ON k.link=l.link;
+                     DELETE FROM claim_verdict_links;",
+                ).unwrap();
+                let root: i64 = tx.query_row("SELECT id FROM claim_verdict_dependency_keys WHERE link='root'", [], |row| row.get(0)).unwrap();
+                for i in 0..retained {
+                    let id = format!("!dependency-cost/{i:08}");
+                    assert!(id < claim.id);
+                    tx.execute("INSERT INTO claim_verdict_dependency_edges(dependency_id,claim_id) VALUES (?1,?2)", rusqlite::params![root, id]).unwrap();
+                    // Unrelated dictionary/edge history tests the reverse claim index too.
+                    let link = format!("key:person/example|synthetic-{i:08}");
+                    tx.execute("INSERT INTO claim_verdict_dependency_keys(link) VALUES (?1)", [&link]).unwrap();
+                    tx.execute("INSERT INTO claim_verdict_dependency_edges(dependency_id,claim_id) VALUES (last_insert_rowid(),?1)", [&id]).unwrap();
+                }
+                if mixed {
+                    tx.execute_batch(
+                        "INSERT INTO claim_verdict_links(link,claim_id)
+                         SELECT k.link,e.claim_id FROM claim_verdict_dependency_edges e
+                         JOIN claim_verdict_dependency_keys k ON k.id=e.dependency_id;",
+                    ).unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            let mut reads = Vec::new();
+            let mut pages = Vec::new();
+            for _ in 0..4 {
+                {
+                    let connection = store.connection.write();
+                    connection.execute_batch(
+                        "DELETE FROM claim_verdict_queue;
+                         INSERT INTO meta(key,value) VALUES ('claim_candidate_requeue:root','')
+                         ON CONFLICT(key) DO UPDATE SET value='';",
+                    ).unwrap();
+                }
+                let scope = work::SqliteWorkScope::start();
+                let read = store.claim_verdict(&claim.id).unwrap();
+                reads.push(scope.finish());
+                assert!(matches!(read, Verdict::Held(_)), "cold compact-only result must be held before its page");
+                let scope = work::SqliteWorkScope::start();
+                store.judge_claim_page_for_test(false).unwrap();
+                pages.push(scope.finish());
+                let connection = store.readers.get();
+                let cursor: String = connection.query_row(
+                    "SELECT value FROM meta WHERE key='claim_candidate_requeue:root'", [], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(cursor, "!dependency-cost/00001023", "duplicate edges must not shorten the distinct-ID page");
+                assert!(!connection.query_row("SELECT EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id=?1)", [&claim.id], |row| row.get::<_, bool>(0)).unwrap());
+                assert!(matches!(store.claim_verdict(&claim.id).unwrap(), Verdict::Held(_)));
+            }
+            measurements.push((
+                reads.into_iter().skip(1).min_by_key(|spent| spent.vm_steps).unwrap(),
+                pages.into_iter().skip(1).min_by_key(|spent| spent.vm_steps).unwrap(),
+            ));
+        }
+        let (small, large) = (measurements[0], measurements[1]);
+        println!("cold dependencies 4096 -> 40960 retained edges (mixed={mixed}): reads {:?} -> {:?}; 1024-ID invalidation pages {:?} -> {:?}", small.0, large.0, small.1, large.1);
+        for (label, small, large) in [("cold read", small.0, large.0), ("invalidation page", small.1, large.1)] {
+            assert!(small.statements > 0, "{label} SQL work must be traced");
+            assert!(large.vm_steps <= small.vm_steps + SLACK, "{label} scanned retained dependency history: {small:?} -> {large:?}");
+            assert!(large.fullscan_steps <= small.fullscan_steps + 8, "{label} full-scanned retained dependency history: {small:?} -> {large:?}");
+            assert_eq!(large.sorts, 0, "{label} must use indexed order, not sort retained history");
+            assert_eq!(large.autoindex_rows, 0, "{label} must use persistent dependency indexes");
+            assert!(large.statements <= small.statements + 2, "{label} statement count grew with history");
+        }
+    }
+}
+
 /// Both the HTTP SLO route and main.rs's history tick call this same SLO fold.
 /// Repeated observations grow the durable log, not the projected credit inventory.
 #[test]
@@ -2708,6 +2822,57 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
             "SLO row work grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
         assert!(large.fullscan_steps <= small.fullscan_steps + 8,
             "SLO scanned durable credit history (configured={configured}): {small:?} -> {large:?}");
+    }
+}
+
+/// The roll source maintains signed graph receipt references; SLO reads must not scan history.
+#[test]
+fn slo_roll_source_reads_do_no_sql_independently_of_receipt_history() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_memory("cost-node").unwrap();
+    fractal_daemon::roll_completion::install(&store, root.path()).unwrap();
+    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    store.bind_fleet(FLEET).unwrap();
+    store.pin_fleet_anchor(key.public()).unwrap();
+    store.set_member_key(Some(key)).unwrap();
+    let source = r#"version 2
+agent "roll-authority" {
+  command "true"
+  host "cost-node"
+  resource "roll-authority" subject="resource/fleet/roll-completion" reason="Measure signed roll sources"
+}
+"#;
+    let intent = fractal_daemon::parse_intent(source, "cost-node").unwrap();
+    let preview = store.mission(&intent, fractal_daemon::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
+    store.ensure_principal_key("agent/roll-authority").unwrap();
+    let target = json!({
+        "dotfiles_revision": "1111111111111111111111111111111111111111",
+        "daemon_revision": "3333333333333333333333333333333333333333",
+    });
+    for index in 0..1000 {
+        let receipt = json!({
+            "version": 1, "kind": "roll-declared", "roll_id": format!("roll-{index}"),
+            "declared_at_ms": 1000, "targets": {"host-a": target},
+        });
+        let claim = store.append_claim(&ClaimInput {
+            subject: format!("resource/fleet/roll-completion/roll-{index}/declaration"),
+            kind: "resource.observed".into(), actor: Some("agent/roll-authority".into()),
+            fields: serde_json::from_value(json!({"kind":"custom.fractal.fleet-roll-receipt","state":"declared","facts":receipt})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.seal_local_batches().unwrap();
+        store.judge_claims(true).unwrap();
+        fractal_daemon::roll_completion::ingest(&store,
+            fractal_daemon::roll_completion::SignedReceipt { claim_id: claim.id }, 1000).unwrap();
+        if matches!(index, 99 | 999) {
+            let scope = work::SqliteWorkScope::start();
+            let row = fractal_daemon::roll_completion::row(&store, 2000);
+            let spent = scope.finish();
+            assert_eq!(row["measurement"]["accepted_declarations"], index + 1);
+            assert_eq!(spent.statements, 0, "native source reads must not query SQLite");
+            assert_eq!(spent.vm_steps, 0);
+        }
     }
 }
 
@@ -3582,6 +3747,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
     };
+    std::fs::create_dir_all(&state.state_dir).unwrap();
+    fractal_daemon::roll_completion::install(&store, &state.state_dir).unwrap();
     let harness_sink = Arc::new(CostHarnessQuestionSink(
         std::sync::atomic::AtomicBool::new(false),
     ));

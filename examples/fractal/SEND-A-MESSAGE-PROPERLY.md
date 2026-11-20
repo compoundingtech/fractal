@@ -12,7 +12,7 @@ react to steps, gates, and dependencies, so a result in a message is invisible t
 This command delivers a body, but it supplies neither a visible subject nor a thread parent:
 
 ```sh
-st conversations send agent/example/worker \
+fractal conversations send agent/example/worker \
   --from person/operator \
   --body 'Which catalog edition should I use?'
 ```
@@ -21,7 +21,7 @@ The missing title was not removed in transit; none was authored. Sending a later
 `--in-reply-to` creates another root message, so it cannot appear as a reply in the first thread.
 
 There is a second trap: `--body` is a shell argument. Unquoted command substitutions, dollar signs,
-and backticks in prose can be expanded before st sees them.
+and backticks in prose can be expanded before fractal sees them.
 
 ## Supported recovery: author the subject and parent explicitly
 
@@ -35,7 +35,7 @@ Treat `$edition` and `$(edition-command)` as literal examples.
 BODY
 )"
 
-request_message="$(st conversations send \
+request_message="$(fractal conversations send \
   agent/example/worker \
   --from person/operator \
   --subject 'Choose the catalog edition' \
@@ -50,14 +50,14 @@ Use the invented spring edition. I recorded the choice in the active work eviden
 BODY
 )"
 
-st conversations send agent/example/worker \
+fractal conversations send agent/example/worker \
   --from person/operator \
   --subject 'Re: Choose the catalog edition' \
   --in-reply-to "$request_message" \
   --body "$follow_up_body"
 ```
 
-`st conversations reply "$request_message" ...` is the shorter supported route when the sender
+`fractal conversations reply "$request_message" ...` is the shorter supported route when the sender
 has the original message: it derives the recipient and `in-reply-to`, and preserves or replaces the
 subject deliberately.
 
@@ -72,14 +72,14 @@ the person asked for.
 A message body can be up to 256 KiB of UTF-8. Send it as the body, however long:
 
 ```sh
-st conversations send agent/example/worker \
+fractal conversations send agent/example/worker \
   --from person/operator \
   --subject 'Catalog import context' \
   --body "$(cat catalog-context.md)"
 ```
 
 Past 8 KiB, the message holds the first kilobyte as a preview and the whole text stays on the
-machine that sent it; other members ask that machine when they read it. `st conversations read`
+machine that sent it; other members ask that machine when they read it. `fractal conversations read`
 prints the whole text, and a seat is shown a preview with the instruction to read the rest. If the
 sending machine cannot be reached, the reader sees the preview and which machine has the rest. Over
 256 KiB the send is refused with `message-too-large`, and nothing is written: shorten the text or
@@ -89,6 +89,6 @@ A pinned `doc/NAME@HASH` reference is still a valid body for a document of up to
 already exists:
 
 ```sh
-document_ref="$(st documents put catalog-context.md --as doc/example/catalog-context)"
-st conversations send agent/example/worker --from person/operator --body "$document_ref"
+document_ref="$(fractal documents put catalog-context.md --as doc/example/catalog-context)"
+fractal conversations send agent/example/worker --from person/operator --body "$document_ref"
 ```

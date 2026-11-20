@@ -8,10 +8,10 @@ This example starts after an invented archive import has stopped making progress
 Cancel the run and inspect it:
 
 ```sh
-st missions cancel mission-run/example/archive-import/first \
+fractal missions cancel mission-run/example/archive-import/first \
   --reason 'The input archive was withdrawn.' \
   --as person/operator
-st missions show mission-run/example/archive-import/first
+fractal missions show mission-run/example/archive-import/first
 ```
 
 Cancellation revokes ordinary work and enters the mission's `finally` graph. It does not declare
@@ -21,7 +21,7 @@ the run terminal before that final work settles. In this failure, `missions show
 The next tempting command appears to say that repair cannot help:
 
 ```sh
-st repair dry-run
+fractal repair dry-run
 ```
 
 If less than 60 seconds have elapsed since the run last changed, a `clean` result is expected. The
@@ -34,8 +34,8 @@ recover by itself.
 First confirm the exact shape rather than repairing an unrelated run:
 
 ```sh
-st missions show mission-run/example/archive-import/first
-st work ls --all
+fractal missions show mission-run/example/archive-import/first
+fractal work ls --all
 ```
 
 If final work is ready, claimed, working, or delayed until a future time, let that normal lifecycle
@@ -45,16 +45,16 @@ pending and unscheduled.
 Once the run has remained in that shape for a full minute, preview again:
 
 ```sh
-st repair dry-run
+fractal repair dry-run
 ```
 
 The plan should name class `cancelled-final-stall`, the exact mission run, its pending final steps,
 and an approval token. Check all of those fields. Then apply only that exact token:
 
 ```sh
-st repair apply orpv0:PREVIEW_TOKEN
-st missions show mission-run/example/archive-import/first
-st repair dry-run
+fractal repair apply orpv0:PREVIEW_TOKEN
+fractal missions show mission-run/example/archive-import/first
+fractal repair dry-run
 ```
 
 The repaired run is terminal and cancelled, its remaining final work is cancelled, and a second

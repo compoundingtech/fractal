@@ -1,6 +1,6 @@
 //! The clients connected to this member now, kept in memory only: each open collection or
 //! terminal stream, and each client seen in the last few minutes. A client names itself with
-//! the optional `x-st3-client` header ("stui 0.1.0+a0c135e3"); st shows that as reported and
+//! the optional `x-st3-client` header ("stui 0.1.0+a0c135e3"); Fractal shows that as reported and
 //! never treats it as identity or authority, and never refuses, slows or nags a client for it.
 
 use super::client_v0::ClientSession;
