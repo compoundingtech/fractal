@@ -637,6 +637,38 @@ async fn test_record_message_mark(
     Ok(Json(receipt))
 }
 
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestMailRetirement {
+    now_ms: u64,
+}
+
+/// Test support: retire closed graph mail as the daemon's hourly pass would at `now_ms`, so a
+/// test need not wait a week or an hour.
+#[cfg(feature = "test-support")]
+async fn test_retire_closed_mail(
+    State(state): State<AppState>,
+    Json(request): Json<TestMailRetirement>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let (threads, claims) = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, usize)> {
+        let (mut threads, mut claims) = (0, 0);
+        loop {
+            let step = store.retire_closed_mail_step(request.now_ms)?;
+            threads += step.threads;
+            claims += step.claims;
+            if !step.more {
+                return Ok((threads, claims));
+            }
+        }
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    signal_visible_change(&state);
+    Ok(Json(json!({"threads": threads, "claims": claims})))
+}
+
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
@@ -1118,7 +1150,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/test/messages-shard/copy", post(replication::test_shard_copy))
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
-        .route("/v1/internal/test/message-marks", post(test_record_message_mark));
+        .route("/v1/internal/test/message-marks", post(test_record_message_mark))
+        .route("/v1/internal/test/mail-retirement", post(test_retire_closed_mail));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(

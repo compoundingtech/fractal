@@ -365,7 +365,9 @@ impl CheckpointConfig {
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
 /// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
-/// that drops more goes on the next day where it stopped.
+/// that drops more goes on the next day where it stopped. `mail = false` keeps closed graph mail
+/// on a member that trims locally; otherwise such a member retires closed agent and daemon
+/// mail a week after it closes, at its own paced rate (`daily_claims` does not apply).
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
@@ -374,11 +376,19 @@ pub struct TrimConfig {
     pub notify: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_claims: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail: Option<bool>,
 }
 
 impl TrimConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    /// Whether this member retires closed graph mail: only one that trims locally, unless
+    /// `mail = false`.
+    pub fn retires_mail(&self) -> bool {
+        self.local && self.mail != Some(false)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -2383,6 +2393,10 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(config.trim.retires_mail(), "a member that trims locally retires closed mail");
+        let kept: Config = toml::from_str("[trim]\nlocal = true\nmail = false\n").unwrap();
+        assert!(!kept.trim.retires_mail());
+        assert!(!TrimConfig { mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 

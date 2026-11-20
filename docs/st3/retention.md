@@ -23,6 +23,15 @@ and the checkpoint waits for it, so no member drops a claim its peers keep. See
 
 A person's claim of any kind is durable, whatever its class: the planner never drops one.
 
+Graph mail is the exception to `durable` on a member that trims locally (`[trim] local`, and not
+`[trim] mail = false`). There, a closed agent or daemon thread retires a week after it closes: all
+its `message.*` claims are deleted and their IDs join the retired set
+(`crates/fractal-store/src/store/mail_retirement.rs`). Person threads (from or to a `person/`)
+and any thread another claim cites are kept forever. The rule reads only the claims, so every such
+member retires the same threads without coordination, and a retired ID is never sent back. Each
+writer hold deletes for at most 40 ms and rests four times as long; the pages go back as below.
+Mail in the messages shard is not touched.
+
 ## Where writes go
 
 `log` says where a kind's writes go. `fractal schema show KIND` prints it as `RETENTION` for every
@@ -128,7 +137,8 @@ UNKNOWN conflict states. Ordinary mission and active fix history retain their ow
 
 A trim or an expiry deletes rows, and SQLite keeps their pages as free pages inside the file. A
 store made with incremental auto-vacuum gives them back: the hourly retention pass releases free
-pages 512 at a time (2 MiB), one short write each, so other writes run between them. A new store
+pages 128 at a time (512 KiB), one short write each, so other writes run between them. On a
+57 GB member 512 at a time held the writer for up to 393 ms; 128 keeps each write near 25 ms. A new store
 is made that way.
 
 A store made before then has auto-vacuum off: the file never shrinks, whatever the trims free. One

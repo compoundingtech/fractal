@@ -324,6 +324,9 @@ pub mod wake_demand;
 pub mod message_marks;
 pub mod mail_input_acceptance;
 pub mod mail_delivery_source;
+pub mod mail_retirement;
+#[cfg(test)]
+mod mail_retirement_tests;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
