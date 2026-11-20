@@ -308,7 +308,7 @@ pub fn cleanup_replay_safe_tx(
 /// never passes the end.
 fn clamp_replay_safe_cursor(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute(
-        "UPDATE meta SET value=CAST(MIN(CAST(value AS INTEGER),
+        /* sqlite-large-value: allow-for-now lv-heb32ff33f08c owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=CAST(MIN(CAST(value AS INTEGER),
              (SELECT COALESCE(MAX(rowid),0) FROM idempotency)) AS TEXT) WHERE key=?1",
         [REPLAY_SAFE_CURSOR],
     )?;

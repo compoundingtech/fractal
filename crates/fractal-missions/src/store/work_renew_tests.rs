@@ -1273,6 +1273,14 @@ fn a_renewal_retried_after_its_receipt_expired_renews_again() {
     let replay_safe: bool = store.connection.write().query_row(
         "SELECT replay_safe FROM idempotency WHERE operation_id=?1", [&key], |row| row.get(0)).unwrap();
     assert!(replay_safe, "a renewal's receipt is replay-safe");
+    // The mission apply and the run's creation left receipts too, some replay-safe.
+    let others = |store: &Store| -> Vec<(String, bool)> {
+        let writer = store.connection.write();
+        let mut statement = writer.prepare("SELECT operation_id, replay_safe FROM idempotency WHERE operation_id<>?1 ORDER BY rowid").unwrap();
+        statement.query_map([&key], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    let before = others(store);
+    assert!(before.iter().any(|(_, safe)| *safe), "a run apply's replay-safe receipt: {before:?}");
     // As if every receipt completed two hours ago, then the hourly pass.
     let hour = smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS;
     store.connection.write().execute(
@@ -1288,6 +1296,7 @@ fn a_renewal_retried_after_its_receipt_expired_renews_again() {
     let gone: bool = store.connection.write().query_row(
         "SELECT NOT EXISTS(SELECT 1 FROM idempotency WHERE operation_id=?1)", [&key], |row| row.get(0)).unwrap();
     assert!(gone);
+    assert_eq!(others(store), before, "only the renewal's receipt went");
     std::thread::sleep(std::time::Duration::from_millis(2));
     // A run's other replay-safe receipts keep the in-use rule while the run is live.
     let reader = store.readers.get();
