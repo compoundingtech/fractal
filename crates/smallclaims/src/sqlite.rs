@@ -55,6 +55,7 @@ pub use writer_observer::WriterObserver;
 use crate::store::current_index;
 
 pub mod telemetry;
+pub mod census_files;
 
 /// Read connections a store keeps between reads; more open while more reads run at once.
 /// Each requests `read_cache_kib()` KiB of pages. Opening a connection also parses the database schema
@@ -1972,7 +1973,7 @@ impl ReadPool {
                     connection
                 }
                 Err(error) => {
-                    eprintln!("st3: open another read connection: {error:#}; waiting for one");
+                    eprintln!("fractal: open another read connection: {error:#}; waiting for one");
                     let wait_started = std::time::Instant::now();
                     let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
                     loop {
@@ -2098,6 +2099,7 @@ pub fn record_sqlite_time(statement: &str, duration: std::time::Duration) {
 /// Record every statement `connection` runs: its time in the profile, and with `test-support`,
 /// its work in [`work`].
 pub fn observe(connection: &mut Connection) {
+    census_files::register(connection);
     #[cfg(any(test, feature = "test-support"))]
     work::count(connection);
     connection.profile(Some(record_sqlite_time));

@@ -89,8 +89,8 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    text::{Line, Span},
 };
+use fractal_conversation_ui::text::{Line, Span};
 use screens::{Drafts, Item, ListState, Listing};
 use fractal_conversation_ui::pane::order;
 use fractal_conversation_ui::{PaneIntent, PaneState, Selection};
@@ -700,10 +700,6 @@ fn open_in_browser(url: &str) -> bool {
     }
 }
 
-/// Whether `c` can be part of a written-out web address.
-fn is_address_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)
-}
 
 impl Ui {
     /// Inspect the rendered viewport, without interpreting a loading/header line as content.
@@ -1450,136 +1446,12 @@ impl Ui {
         self.tab() == 1 && self.selected_id().as_deref() == Some(agent)
     }
 
-    /// Make the links drawn in `area` clickable: addresses written out, and markdown links by
-    /// the text they were drawn with. An address the renderer wrapped at the edge is one link on
-    /// every row it covers, so a click on any part of it opens or copies all of it.
-    fn links(&self, buf: &Buffer, area: Rect) {
-        let chars = |y: u16| -> Vec<(u16, char)> {
-            (area.x..area.x + area.width)
-                .map(|x| (x, buf[(x, y)].symbol().chars().next().unwrap_or(' ')))
-                .collect()
-        };
-        for y in area.y..area.y + area.height {
-            let cells = (area.x..area.x + area.width)
-                .map(|x| (x, &buf[(x, y)]))
-                .collect::<Vec<_>>();
-            let row = cells
-                .iter()
-                .map(|(_, cell)| cell.symbol().chars().next().unwrap_or(' '))
-                .collect::<Vec<_>>();
-            let text = row.iter().collect::<String>();
-            // Written-out addresses.
-            let mut from = 0;
-            while let Some(offset) = text[from..].find("http") {
-                let start = from + offset;
-                let tail = &text[start..];
-                if !(tail.starts_with("https://") || tail.starts_with("http://")) {
-                    from = start + 4;
-                    continue;
-                }
-                let token = tail.split(char::is_whitespace).next().unwrap_or("");
-                let column = text[..start].chars().count();
-                // Each part of the address: where it sits on its row, and how wide it is.
-                let mut parts = Vec::new();
-                let mut url = token.to_owned();
-                if let Some((x, _)) = cells.get(column) {
-                    parts.push((*x, y, token.chars().count()));
-                }
-                // An address that runs to the right edge goes on at the start of the next row.
-                let mut reaches_edge = token.len() == tail.trim_end().len()
-                    && column + token.chars().count() >= usize::from(area.width).saturating_sub(3);
-                let mut next = y + 1;
-                while reaches_edge && next < area.y + area.height {
-                    let below = chars(next);
-                    let indent = below.iter().take_while(|(_, c)| *c == ' ').count();
-                    let more = below[indent..]
-                        .iter()
-                        .take_while(|(_, c)| !c.is_whitespace())
-                        .collect::<Vec<_>>();
-                    if indent > 4
-                        || more.is_empty()
-                        || more.iter().any(|(_, c)| !is_address_char(*c))
-                    {
-                        break;
-                    }
-                    url.extend(more.iter().map(|(_, c)| *c));
-                    parts.push((below[indent].0, next, more.len()));
-                    reaches_edge = indent + more.len() >= below.len().saturating_sub(3)
-                        && below[indent + more.len()..].iter().all(|(_, c)| *c == ' ');
-                    next += 1;
-                }
-                let trimmed = url
-                    .trim_end_matches(['.', ',', ')', ']', ';', ':', '"', '\'', '>'])
-                    .to_owned();
-                // The last part loses whatever trailing punctuation the address lost.
-                let cut = url.chars().count() - trimmed.chars().count();
-                if let Some(last) = parts.last_mut() {
-                    last.2 = last.2.saturating_sub(cut);
-                }
-                for (x, row_y, width) in parts {
-                    if width > 0 {
-                        self.hit(
-                            Rect {
-                                x,
-                                y: row_y,
-                                width: width as u16,
-                                height: 1,
-                            },
-                            Hit::Link(trimmed.clone()),
-                        );
-                    }
-                }
-                from = start + token.len().max(1);
-            }
-            // Document references written out, `doc/NAME` or `doc/NAME@HASH`: in a message, a
-            // mission or a document, each opens that document.
-            for link in fractal_ui_model::documents::document_links(&text) {
-                let mut from = 0;
-                while let Some(offset) = text[from..].find(&link.reference) {
-                    let start = from + offset;
-                    from = start + link.reference.len();
-                    if documents::inside_word(&text[..start], &text[from..]) {
-                        continue;
-                    }
-                    if let Some((x, _)) = cells.get(text[..start].chars().count()) {
-                        self.hit(
-                            Rect {
-                                x: *x,
-                                y,
-                                width: link.reference.chars().count() as u16,
-                                height: 1,
-                            },
-                            Hit::Link(link.reference.clone()),
-                        );
-                    }
-                }
-            }
-            // Markdown links: underlined runs whose text names a link.
-            let mut index = 0;
-            while index < cells.len() {
-                if !cells[index].1.modifier.contains(Modifier::UNDERLINED) {
-                    index += 1;
-                    continue;
-                }
-                let start = index;
-                while index < cells.len() && cells[index].1.modifier.contains(Modifier::UNDERLINED)
-                {
-                    index += 1;
-                }
-                let words = row[start..index].iter().collect::<String>();
-                if let Some(url) = fractal_conversation_ui::text::link_for(&words) {
-                    self.hit(
-                        Rect {
-                            x: cells[start].0,
-                            y,
-                            width: (index - start) as u16,
-                            height: 1,
-                        },
-                        Hit::Link(url),
-                    );
-                }
-            }
-        }
+    /// Draw semantic spans and register the exact visible part of each link. Targets come from
+    /// the text model, never reconstructed from decorated, clipped or wrapped screen cells.
+    fn draw_line(&self, buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, width: u16) {
+        text::draw_line(buf, x, y, line, width, |rect, url| {
+            self.hit(rect, Hit::Link(url.to_owned()));
+        });
     }
 
     /// One attachment's thumbnail, encoded on first sight and kept.
@@ -2318,12 +2190,7 @@ impl Ui {
                 Style::default().fg(theme::SURFACE0).bg(theme::MANTLE),
             );
             for (index, line) in listing.legend.iter().enumerate() {
-                buf.set_line(
-                    area.x + 1,
-                    y + 1 + index as u16,
-                    line,
-                    area.width.saturating_sub(1),
-                );
+                self.draw_line(buf, area.x + 1, y + 1 + index as u16, line, area.width.saturating_sub(1));
             }
         }
         match &listing.state {
@@ -2359,7 +2226,7 @@ impl Ui {
                     None,
                 );
                 for (index, line) in lines.iter().enumerate().take(list.height as usize) {
-                    buf.set_line(list.x + 1, list.y + 1 + index as u16, line, width as u16);
+                    self.draw_line(buf, list.x + 1, list.y + 1 + index as u16, line, width as u16);
                 }
                 return;
             }
@@ -2495,7 +2362,7 @@ impl Ui {
                     .set_symbol("▌")
                     .set_style(Style::default().fg(theme::ACCENT).bg(theme::ROW_SELECTED));
             }
-            buf.set_line(list.x + 1, y, line, list.width.saturating_sub(1));
+            self.draw_line(buf, list.x + 1, y, line, list.width.saturating_sub(1));
             if let Some(index) = index {
                 self.hit(row, hit(*index));
                 if let Some(subject) = listing.ids.get(*index) {
@@ -2988,11 +2855,11 @@ impl Ui {
         self.pane(buf, &key, body, doc, true);
         for (offset, row) in band.iter().enumerate() {
             let y = body.y + body.height + offset as u16;
-            buf.set_line(area.x, y, &row.line, area.width);
+            self.draw_line(buf, area.x, y, &row.line, area.width);
             if let Some((column, edge)) = &row.edge
                 && *column < area.width
             {
-                buf.set_span(area.x + column, y, edge, area.width - column);
+                buf.set_stringn(area.x + column, y, edge.content.as_ref(), (area.width - column) as usize, edge.style);
             }
             for (column, width, hit) in &row.hits {
                 self.hit(
@@ -3073,12 +2940,7 @@ impl Ui {
                 let label = self.freshness(&agent.id);
                 let width = text::width(&label.content) as u16;
                 if width + 4 < area.width {
-                    buf.set_line(
-                        area.x + area.width - width - 2,
-                        y,
-                        &Line::from(vec![label]),
-                        width,
-                    );
+                    self.draw_line(buf, area.x + area.width - width - 2, y, &Line::from(vec![label]), width);
                 }
             }
             for (index, attachment) in thumbnails.iter().enumerate() {
@@ -3104,7 +2966,7 @@ impl Ui {
                 if row >= bottom {
                     break;
                 }
-                buf.set_line(area.x, row, line, area.width);
+                self.draw_line(buf, area.x, row, line, area.width);
             }
             self.hit(
                 Rect {
@@ -3253,21 +3115,8 @@ impl Ui {
         }
         let lines = Rc::new(doc.lines);
         for (offset, line) in lines.iter().skip(top).take(height).enumerate() {
-            buf.set_line(
-                area.x,
-                area.y + offset as u16,
-                line,
-                area.width.saturating_sub(1),
-            );
+            self.draw_line(buf, area.x, area.y + offset as u16, line, area.width.saturating_sub(1));
         }
-        self.links(
-            buf,
-            Rect {
-                height: (total.saturating_sub(top)).min(height) as u16,
-                width: area.width.saturating_sub(1),
-                ..area
-            },
-        );
         for target in &doc.targets {
             if target.line >= top && target.line < top + height {
                 let rect = Rect {
@@ -3409,11 +3258,10 @@ impl Ui {
         self.hit(area, Hit::Escape);
         self.cover(area);
         buf.set_style(rect, Style::default().bg(theme::MANTLE));
-        for (offset, line) in doc.lines.iter().take(height as usize).enumerate() {
-            buf.set_line(rect.x, rect.y + offset as u16, line, rect.width);
-        }
         self.hit(rect, Hit::Peek(subject.to_owned()));
-        self.links(buf, rect);
+        for (offset, line) in doc.lines.iter().take(height as usize).enumerate() {
+            self.draw_line(buf, rect.x, rect.y + offset as u16, line, rect.width);
+        }
         for target in &doc.targets {
             if (target.line as u16) < height {
                 self.hit(
@@ -3489,7 +3337,7 @@ impl Ui {
                     area.width.saturating_sub(1),
                     1,
                 );
-                buf.set_line(button.x, button.y, &doc.lines[0], button.width);
+                self.draw_line(buf, button.x, button.y, &doc.lines[0], button.width);
                 let target = &doc.targets[0];
                 self.hit(
                     Rect { width: target.width.min(button.width), ..button },
@@ -3547,7 +3395,7 @@ impl Ui {
                 ),
                 Span::styled(format!("   {status}"), theme::dim()),
             ]);
-            buf.set_line(area.x, area.y, &header, area.width);
+            self.draw_line(buf, area.x, area.y, &header, area.width);
             self.hit(Rect { height: 1, ..area }, Hit::Detach);
             // What waits on the person is on top of the terminal, never hidden by it.
             let band = self.terminal_alert_band(buf, area, agent);
@@ -3635,7 +3483,7 @@ impl Ui {
         let rows = area.height.saturating_sub(2) as usize;
         let skip = terminal_rows_skipped(view.lines.len(), rows, view.cursor);
         for (offset, line) in view.lines.iter().skip(skip).take(rows).enumerate() {
-            buf.set_line(area.x, area.y + 2 + offset as u16, line, area.width);
+            self.draw_line(buf, area.x, area.y + 2 + offset as u16, line, area.width);
         }
         // The cursor is drawn as an inverted cell where the screen says it is.
         if let Some((row, column)) = view.cursor
@@ -3668,7 +3516,7 @@ impl Ui {
                 Rect { y, height: 1, ..area },
                 Style::default().bg(theme::SURFACE0),
             );
-            buf.set_line(area.x, y, &row.line, area.width);
+            self.draw_line(buf, area.x, y, &row.line, area.width);
             for (column, width, hit) in &row.hits {
                 self.hit(
                     Rect {
@@ -4141,7 +3989,7 @@ impl Ui {
         };
         buf.set_style(rect, Style::default().bg(theme::MANTLE));
         for (offset, line) in doc.lines.iter().take(height as usize).enumerate() {
-            buf.set_line(rect.x, rect.y + offset as u16, line, rect.width);
+            self.draw_line(buf, rect.x, rect.y + offset as u16, line, rect.width);
         }
         self.hit(area, Hit::Help);
     }
@@ -7984,6 +7832,30 @@ mod tests {
         assert!(
             matches!(ui.effects.last(),Some(Effect::Attention{action,reason:Some(reason),..}) if action=="custom.reply" && reason=="keep")
         );
+    }
+
+    #[test]
+    fn composer_arrows_route_to_the_draft_without_navigating_the_list() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open("agent/example/atlas/builder");
+        ui.editing = true;
+        let input = ui.draft_key().unwrap();
+        ui.paste("abcdef\nx\nabcdef".into());
+        let selected = ui.selected;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        ui.key(key(KeyCode::Up));
+        assert_eq!(ui.cursor.at(&input, &ui.conversation_state.drafts[&input]), "abcdef\nx".len());
+        ui.key(key(KeyCode::Up));
+        assert_eq!(ui.cursor.at(&input, &ui.conversation_state.drafts[&input]), 6);
+        ui.key(key(KeyCode::Up));
+        assert_eq!(ui.selected, selected);
+        ui.key(key(KeyCode::Down));
+        ui.key(key(KeyCode::Down));
+        ui.key(key(KeyCode::Down));
+        assert_eq!(ui.cursor.at(&input, &ui.conversation_state.drafts[&input]), "abcdef\nx\nabcdef".len());
+        assert_eq!(ui.selected, selected);
+        assert!(ui.editing);
+        assert!(ui.effects.is_empty());
     }
 
     #[test]

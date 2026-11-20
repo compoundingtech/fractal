@@ -498,6 +498,8 @@ impl ApiError {
             | "stale-subject"
             | "stale-fence"
             | "idempotency-conflict"
+            | "resource-request-conflict"
+            | "resource-request-cancelled"
             | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -664,6 +666,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/resources/{id}", get(resources::show))
         .route("/v1/internal/resources/{id}/wait", post(resources::wait))
         .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
+        .route("/v1/internal/resources/{id}/member-scope", get(resources::member_scope))
+        .route("/v1/internal/resources/by-request/{request_id}", get(resources::show_request))
+        .route("/v1/internal/resources/by-request/{request_id}/cancel", post(resources::cancel_request))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -890,6 +895,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/effects/by-key", get(effects::by_key))
         .route("/v1/effects/{*subject}", post(effects::resolve))
         .route("/v1/status", get(operations::status))
+        .route("/v1/storage/status", get(operations::storage_status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
         .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
@@ -8607,7 +8613,7 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"mission_run_follow_head":1},
+        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"resource_profile_keys":1,"mission_run_follow_head":1},
     });
     let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;
     health["replication"] = json!({
@@ -10751,6 +10757,10 @@ mod replication_guard_tests;
 #[cfg(test)]
 #[path = "api/checkpoint_plan_tests.rs"]
 mod checkpoint_plan_tests;
+
+#[cfg(test)]
+#[path = "api/storage_census_tests.rs"]
+mod storage_census_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
