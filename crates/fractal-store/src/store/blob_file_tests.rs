@@ -128,18 +128,19 @@ fn a_restore_puts_every_byte_back_and_lowers_the_fence() {
 }
 
 #[test]
-fn a_spent_budget_still_moves_one_blob_a_step_and_the_cursor_survives_a_reopen() {
+fn a_spent_budget_still_copies_one_blob_a_step_and_the_cursors_survive_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claims.sqlite3");
     let store = Store::open(&path, "node").unwrap();
     let hashes: Vec<String> =
         (0..3).map(|n| document(&store, &format!("doc/example/{n}"), format!("bytes {n}").repeat(20).as_bytes())).collect();
     let later = start_window(&store) + WINDOW_MS;
+    // A spent budget still copies one blob a step; the rows let go of their bytes in later steps.
     let step = store.move_blob_bytes_step(later, WINDOW_MS, Duration::ZERO).unwrap();
-    assert_eq!((step.rows, step.more), (1, true));
+    assert_eq!((step.copied, step.rows, step.more), (1, 0, true));
     drop(store);
     let store = Store::open(&path, "node").unwrap();
-    let mut moved = 1;
+    let mut moved = 0;
     loop {
         let step = store.move_blob_bytes_step(later, WINDOW_MS, Duration::ZERO).unwrap();
         moved += step.rows;

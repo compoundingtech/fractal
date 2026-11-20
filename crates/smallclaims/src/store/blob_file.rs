@@ -36,12 +36,16 @@ pub const SINCE: &str = "blob_file_since";
 pub const CURSOR: &str = "blob_file_moved_through";
 /// `meta`: the storage version the store had before the first emptying raised it.
 pub const FENCED_FROM: &str = "blob_file_fenced_from";
+/// The blob file's own `meta`: the last `blobs` rowid whose bytes the blob file holds. It lives
+/// in the blob file, so it commits with the copies it counts.
+pub const COPIED: &str = "copied_through";
 
 /// Rows one step considers.
 const PAGE: i64 = 64;
 
 const BLOB_FILE_TABLE: &str = /* sqlite-large-value: allow-for-now lv-h8701f443162b owner=smallclaims::store::blob_file TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS blob_file.blobs (
-    hash TEXT PRIMARY KEY, bytes BLOB NOT NULL, size INTEGER NOT NULL)";
+    hash TEXT PRIMARY KEY, bytes BLOB NOT NULL, size INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS blob_file.meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)";
 
 /// The bytes of the `blobs` row aliased `$alias`: its own, or the blob file's once they moved.
 #[macro_export]
@@ -132,6 +136,8 @@ pub fn copy_beside(database: &Path, shared_memory: bool, copy: &Path) -> Result<
 pub struct BlobBytes {
     /// Rows whose bytes moved (or came back).
     pub rows: usize,
+    /// Rows whose bytes this step copied into the blob file, still also held by the row.
+    pub copied: usize,
     /// Their bytes.
     pub bytes: u64,
     /// The longest of the step's writer holds.
@@ -160,88 +166,129 @@ impl Store {
             .map_err(Into::into)
     }
 
-    /// Move one bounded page of blob bytes into the blob file, once `move_after_ms` has passed
-    /// since this member first ran a build that moves them. The copy commits durably in one
-    /// writer hold; a second empties the rows' own bytes, raises the storage version on the
-    /// first, and records the cursor. Call again while `more`.
+    /// Move blob bytes into the blob file, one bounded writer hold a step, once `move_after_ms`
+    /// has passed since this member first ran a build that moves them. A step either copies the
+    /// next rows' bytes into the blob file, or, once a checkpoint of the blob file (run off the
+    /// writer) has made those copies durable, empties the rows' own bytes, raising the storage
+    /// version on the first. Neither hold waits on the disk at commit. Call again while `more`.
     pub fn move_blob_bytes_step(&self, now_ms: u64, move_after_ms: u64, budget: Duration) -> Result<BlobBytes> {
         let since = self.blob_file_since(now_ms)?;
         if now_ms < since.saturating_add(move_after_ms) {
             return Ok(BlobBytes { waiting: true, ..BlobBytes::default() });
         }
-        let after: i64 = self.readers.get().query_row(
-            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1), 0)",
-            [CURSOR],
-            |row| row.get(0),
+        let (emptied, copied): (i64, i64) = self.readers.get().query_row(
+            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?1), 0),
+                    COALESCE((SELECT CAST(value AS INTEGER) FROM blob_file.meta WHERE key=?2), 0)",
+            params![CURSOR, COPIED],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        let page: Vec<(i64, i64)> = self
-            .readers
-            .get()
-            .prepare_cached("SELECT rowid, size FROM blobs WHERE rowid>?1 ORDER BY rowid LIMIT ?2")?
-            .query_map(params![after, PAGE], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        let Some(&(last, _)) = page.last() else {
-            return Ok(BlobBytes::default());
-        };
-        let mut done = BlobBytes { more: page.len() as i64 == PAGE, ..BlobBytes::default() };
-        // The copy, durable before the store lets go of anything. Rows already empty or of zero
-        // bytes copy nothing.
-        let mut copied = Vec::new();
-        {
+        let mut done = BlobBytes { more: true, ..BlobBytes::default() };
+        if copied > emptied {
+            // A row lets go of its bytes only once their copy is on disk.
+            if !self.blob_file_durable()? {
+                return Ok(done);
+            }
+            let page: Vec<(i64, i64)> = self
+                .readers
+                .get()
+                .prepare_cached("SELECT rowid, size FROM blobs WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT ?3")?
+                .query_map(params![emptied, copied, PAGE], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
             let connection = self.connection.write_background();
             let started = Instant::now();
-            let transaction = connection.unchecked_transaction()?;
-            for &(rowid, size) in &page {
-                if !copied.is_empty() && started.elapsed() >= budget {
-                    done.more = true;
-                    break;
+            super::durability::committing_without_fsync(&connection, || {
+                let transaction = connection.unchecked_transaction()?;
+                let mut through = page.last().map_or(copied, |(rowid, _)| *rowid);
+                {
+                    let mut emptying = transaction.prepare_cached(
+                        "UPDATE main.blobs SET bytes=x'' WHERE rowid=?1 AND size>0 AND length(bytes)>0
+                         AND EXISTS(SELECT 1 FROM blob_file.blobs AS moved
+                                    WHERE moved.hash=main.blobs.hash AND length(moved.bytes)=main.blobs.size)",
+                    )?;
+                    for (n, &(rowid, size)) in page.iter().enumerate() {
+                        if n > 0 && started.elapsed() >= budget {
+                            through = page[n - 1].0;
+                            break;
+                        }
+                        if emptying.execute([rowid])? > 0 {
+                            done.rows += 1;
+                            done.bytes += u64::try_from(size).unwrap_or(0);
+                        }
+                    }
+                }
+                if done.rows > 0 {
+                    let version: u32 = transaction.query_row("PRAGMA main.user_version", [], |row| row.get(0))?;
+                    if version < STORAGE_VERSION {
+                        transaction.execute(
+                            "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
+                            params![FENCED_FROM, version.to_string()],
+                        )?;
+                        transaction.pragma_update(Some(rusqlite::DatabaseName::Main), "user_version", STORAGE_VERSION)?;
+                    }
                 }
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hc916442f4a28 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blob_file.blobs(hash, bytes, size)
-                     SELECT hash, bytes, size FROM main.blobs WHERE rowid=?1 AND size>0 AND length(bytes)>0",
-                    [rowid],
+                    "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
+                    params![CURSOR, through.to_string()],
                 )?;
-                copied.push((rowid, size));
-            }
-            transaction.commit()?;
+                transaction.commit()?;
+                Ok(())
+            })?;
             done.hold = started.elapsed();
+            return Ok(done);
         }
-        let through = copied.last().map_or(last, |(rowid, _)| *rowid);
+        // Copy the next rows. Rows already empty or of zero bytes copy nothing.
+        let page: Vec<i64> = self
+            .readers
+            .get()
+            .prepare_cached("SELECT rowid FROM blobs WHERE rowid>?1 ORDER BY rowid LIMIT ?2")?
+            .query_map(params![copied, PAGE], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if page.is_empty() {
+            done.more = false;
+            return Ok(done);
+        }
         let connection = self.connection.write_background();
         let started = Instant::now();
         super::durability::committing_without_fsync(&connection, || {
             let transaction = connection.unchecked_transaction()?;
-            let mut emptying = transaction.prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h6157ace2f4b8 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "UPDATE main.blobs SET bytes=x'' WHERE rowid=?1 AND size>0 AND length(bytes)>0
-                 AND EXISTS(SELECT 1 FROM blob_file.blobs AS moved
-                            WHERE moved.hash=main.blobs.hash AND length(moved.bytes)=main.blobs.size)",
-            )?;
-            for &(rowid, size) in &copied {
-                if emptying.execute(/* sqlite-large-value: allow-for-now lv-h11e3ad89e964 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])? > 0 {
-                    done.rows += 1;
-                    done.bytes += u64::try_from(size).unwrap_or(0);
-                }
-            }
-            drop(emptying);
-            if done.rows > 0 {
-                let version: u32 = transaction.query_row("PRAGMA main.user_version", [], |row| row.get(0))?;
-                if version < STORAGE_VERSION {
-                    transaction.execute(
-                        /* sqlite-large-value: allow-for-now lv-h3b943e990626 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
-                        params![FENCED_FROM, version.to_string()],
-                    )?;
-                    transaction.pragma_update(Some(rusqlite::DatabaseName::Main), "user_version", STORAGE_VERSION)?;
+            let mut through = *page.last().unwrap_or(&copied);
+            {
+                let mut copying = transaction.prepare_cached(
+                    "INSERT OR IGNORE INTO blob_file.blobs(hash, bytes, size)
+                     SELECT hash, bytes, size FROM main.blobs WHERE rowid=?1 AND size>0 AND length(bytes)>0",
+                )?;
+                for (n, &rowid) in page.iter().enumerate() {
+                    if n > 0 && started.elapsed() >= budget {
+                        through = page[n - 1];
+                        break;
+                    }
+                    done.copied += copying.execute([rowid])?;
                 }
             }
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h2b7edfe7124e owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
-                params![CURSOR, through.to_string()],
+                "INSERT OR REPLACE INTO blob_file.meta(key, value) VALUES (?1, ?2)",
+                params![COPIED, through.to_string()],
             )?;
             transaction.commit()?;
             Ok(())
         })?;
-        done.hold = done.hold.max(started.elapsed());
+        done.hold = started.elapsed();
         Ok(done)
+    }
+
+    /// Whether everything committed to the blob file is on disk: a PASSIVE checkpoint, from a
+    /// connection of its own so the writer is not held, copied every frame of its WAL into the
+    /// file and synced it. A private in-memory store's blob file has no disk to wait on.
+    fn blob_file_durable(&self) -> Result<bool> {
+        let location = location(&self.path);
+        if location == ":memory:" || location.starts_with("file:") {
+            return Ok(true);
+        }
+        let connection = Connection::open_with_flags(&location, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        connection.busy_timeout(Duration::ZERO)?;
+        let (busy, frames, backfilled): (i64, i64, i64) =
+            connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        Ok(busy == 0 && frames == backfilled)
     }
 
     /// Copy one bounded page of moved bytes back into the store ([`restore_page`]). Call again
