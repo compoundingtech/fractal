@@ -1050,130 +1050,19 @@ impl Store {
             self.checkpoint_worker_phase(CheckpointPhase::CatchingUp);
             return Ok(actions);
         }
-        // A member that trims locally takes no part in checkpoints: it finishes a trim it had
-        // already committed, then trims its own due cut.
-        if self.trims_locally() {
-            self.checkpoint_worker_phase(CheckpointPhase::LocalTrim);
-            self.trim_day.store(
-                u64::try_from(context.now_unix_ms / super::checkpoint::DAY_MS)?,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            self.finish_interrupted_trims(&mut actions)?;
-            self.trim_local_cut(context, &mut actions)?;
+        // Every member trims on its own: it finishes a trim it had already committed, then trims
+        // its own due cut. No member agrees on a checkpoint with another or waits for one.
+        if !self.trims_locally() {
+            self.checkpoint_worker_phase(CheckpointPhase::Disabled);
             return Ok(actions);
         }
-        let claims = self.checkpoint_claims()?;
-        // Every node trims the same checkpoints in the same order, so the newest stable one is
-        // applied here before this node seals or verifies a newer one.
-        self.checkpoint_worker_phase(CheckpointPhase::ApplyStable);
-        if let Some(need) = self.apply_stable_checkpoints(&claims, &context.scratch, &mut actions)? {
-            self.checkpoint_worker_phase(CheckpointPhase::Manifest);
-            actions.push(CheckpointAction::ManifestNeeded {
-                checkpoint: need.checkpoint,
-                cut_unix_ms: need.cut_unix_ms,
-            });
-            return Ok(actions);
-        }
-        if self.checkpoint_halted()? {
-            self.checkpoint_worker_phase(CheckpointPhase::Halted);
-            return Ok(actions);
-        }
-        let stable = stable_checkpoints(&claims);
-        let newest_stable = stable.keys().next_back().copied();
-        let cut = newest_due_cut(context.now_unix_ms);
-        if cut == 0 || newest_stable.is_some_and(|stable| stable >= cut) {
-            self.checkpoint_worker_phase(CheckpointPhase::Idle);
-            // Nothing is left to capture, so no staged set is either.
-            self.remove_checkpoint_staging(&context.scratch)?;
-            return Ok(actions);
-        }
-        let checkpoint = checkpoint_name(cut);
-        let (participants, left) =
-            self.checkpoint_participants(&claims, &context.configured_peers)?;
-        if left.contains(&self.origin) {
-            self.checkpoint_worker_phase(CheckpointPhase::Left);
-            return Ok(actions);
-        }
-        // Sealing ends this node's own excusal, so it counts itself.
-        let mut participants = participants;
-        participants.insert(self.origin.clone());
-        let verified = first_verifications(&claims, &checkpoint);
-        let seals = newest_seals(&claims, &checkpoint);
-        // An envelope this node holds but has not validated is in its sealed identities without
-        // its claims, so its proof could not agree with a node that admitted them: sealing or
-        // proving now would only spend a proof on a checkpoint that cannot become stable.
-        if !verified.contains_key(&self.origin)
-            && let Some(held) = self.unvalidated_envelopes_before(cut)?
-        {
-            self.checkpoint_worker_phase(CheckpointPhase::HeldEnvelopes);
-            actions.push(CheckpointAction::HeldBack {
-                checkpoint,
-                pending: held.pending,
-                oldest_writer: held.oldest_writer,
-                oldest_sequence: held.oldest_sequence,
-            });
-            return Ok(actions);
-        }
-        self.checkpoint_worker_phase(CheckpointPhase::AwaitVerifications);
-        if !verified.contains_key(&self.origin) {
-            // Our first seal lets peers advance, but refreshing it cannot enable verification
-            // while a participant has no seal. Defer the identity walk even if history changed:
-            // once every seal exists we recompute and reseal before comparing terms to verify.
-            if seals.contains_key(&self.origin)
-                && participants.iter().any(|writer| !seals.contains_key(writer))
-            {
-                self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
-                return Ok(actions);
-            }
-            // Register the cut and seal row with the capture guard, as a capture does, so its
-            // triggers fence the history the seal reads and the next pass reuses the digest
-            // until that history changes. It writes only when a bound grows.
-            self.checkpoint_worker_phase(CheckpointPhase::Capture);
-            self.register_checkpoint_capture(cut, None)?;
-            let sealed = self.checkpoint_sealed_identities(cut, None)?;
-            let terms = SealTerms {
-                cut_unix_ms: cut,
-                participants,
-                sealed_digest: sealed.digest.clone(),
-                rules_digest: self.runtime.checkpoint_rules_digest(),
-            };
-            if seals.get(&self.origin) != Some(&terms) {
-                // The seal this one replaces. Terms can return to an earlier value, such as a
-                // participant leaving and coming back, and that must still be a new seal.
-                let replaces = claims
-                    .iter()
-                    .filter(|claim| {
-                        claim.subject == checkpoint
-                            && claim.writer == self.origin
-                            && claim.seal_terms().is_some()
-                    })
-                    .next_back()
-                    .map(|claim| claim.id.as_str());
-                self.checkpoint_worker_phase(CheckpointPhase::Seal);
-                self.publish_seal(&checkpoint, &terms, &sealed, replaces)?;
-                actions.push(CheckpointAction::Sealed {
-                    checkpoint: checkpoint.clone(),
-                    sealed_digest: terms.sealed_digest.clone(),
-                    participants: terms.participants.clone(),
-                });
-                self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
-            } else if terms
-                .participants
-                .iter()
-                .all(|writer| seals.get(writer) == Some(&terms))
-            {
-                self.checkpoint_worker_phase(CheckpointPhase::Verify);
-                self.verify_checkpoint(
-                    &checkpoint,
-                    &terms,
-                    sealed.seal_rowid,
-                    context,
-                    &mut actions,
-                )?;
-            } else {
-                self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
-            }
-        }
+        self.checkpoint_worker_phase(CheckpointPhase::LocalTrim);
+        self.trim_day.store(
+            u64::try_from(context.now_unix_ms / super::checkpoint::DAY_MS)?,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.finish_interrupted_trims(&mut actions)?;
+        self.trim_local_cut(context, &mut actions)?;
         Ok(actions)
     }
 

@@ -7702,7 +7702,9 @@ impl Store {
                     Vec::new()
                 },
                 accepts: Some(replication_accepts()),
-                checkpoint: self.trimmed_checkpoint()?,
+                // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                 claim_range_query: None,
             },
             envelopes: Vec::new(),
@@ -7833,7 +7835,9 @@ impl Store {
                     envelopes: listed,
                     buckets: buckets.to_vec(),
                     accepts: Some(replication_accepts()),
-                    checkpoint: self.trimmed_checkpoint()?,
+                    // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                     claim_range_query: None,
                 },
                 envelopes,
@@ -7884,7 +7888,9 @@ impl Store {
             projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 accepts: Some(replication_accepts()),
-                checkpoint: self.trimmed_checkpoint()?,
+                // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                 ..if same {
                     ReplicationInventory {
                         digest: inventory.digest.clone(),
