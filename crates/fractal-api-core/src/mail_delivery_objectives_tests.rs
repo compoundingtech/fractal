@@ -428,3 +428,43 @@ fn paged_capture_uses_mail_input_cut_not_unrelated_graph_index() {
     assert!(advanced);
     assert!(snapshot.unknown > 0, "relevant writes still fence a mixed paged capture");
 }
+
+#[test]
+fn paged_capture_resolves_committed_writer_loan_before_certifying() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("graph.db"), "example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-writer-resolution", json!([]));
+    let at = sent + 2;
+    frontier(&store, at - 1);
+    std::thread::scope(|scope| {
+        let (write, write_now) = std::sync::mpsc::channel();
+        let (committed, commit_done) = std::sync::mpsc::channel();
+        let (finished, capture_done) = std::sync::mpsc::channel();
+        let store = &store;
+        let writer = scope.spawn(move || {
+            write_now.recv().unwrap();
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            crate::store::mail_input_acceptance::record_frontier(&transaction,
+                "agent/example/worker", "incarnation-one", at, at).unwrap();
+            transaction.commit().unwrap();
+            committed.send(()).unwrap();
+            // Keep the already-committed loan alive. Its native generation has not
+            // published yet; certification must wait for resolution, not just COMMIT.
+            let returned_before_resolution = capture_done.recv_timeout(std::time::Duration::from_secs(1)).is_ok();
+            drop(writer);
+            returned_before_resolution
+        });
+        let mut requested = false;
+        let snapshot = capture_with_progress(store, at, || {
+            if requested { return; }
+            requested = true;
+            write.send(()).unwrap();
+            commit_done.recv().unwrap();
+        }).unwrap();
+        let _ = finished.send(());
+        assert!(!writer.join().unwrap(), "capture certified before the committed writer loan resolved");
+        assert!(snapshot.unknown > 0, "the resolved generation must fence the mixed paged read");
+    });
+}

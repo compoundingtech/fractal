@@ -390,6 +390,13 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
         }
         // Paged reads do not share a SQLite snapshot. Only a relevant input advance
         // fences this cut; unrelated graph claims cannot change these source facts.
+        // A writer publishes native generations when its loan ends, after COMMIT.
+        // Resolve every loan that could have committed between pages before certifying.
+        // All statements have been consumed; no SQLite read transaction is held here.
+        if let Some(shard) = crate::store::messages_shard::shard(store) {
+            drop(shard.connection.write());
+        }
+        drop(store.connection.write());
         if *changed.borrow() != generation || store.mail_objective_input_coverage_failed() {
             unknown += 1;
         }
