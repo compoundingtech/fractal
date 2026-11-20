@@ -78,10 +78,11 @@ pub(super) fn has_descriptor(pid: u32, transcript: &TranscriptEvidence) -> Resul
         ensure!(index < 65_536, "process descriptor limit exceeded");
         let entry = entry?;
         // Following the kernel fd link observes the opened object, not the reported path.
-        if let Ok(metadata) = fs::metadata(entry.path()) {
-            if metadata.is_file() && metadata.dev() == transcript.device && metadata.ino() == transcript.inode && metadata.uid() == transcript.uid {
-                return Ok(());
-            }
+        if let Ok(metadata) = fs::metadata(entry.path())
+            && metadata.is_file() && metadata.dev() == transcript.device
+            && metadata.ino() == transcript.inode && metadata.uid() == transcript.uid
+        {
+            return Ok(());
         }
     }
     anyhow::bail!("process does not hold the selected transcript open")

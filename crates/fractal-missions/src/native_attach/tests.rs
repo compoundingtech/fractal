@@ -40,7 +40,7 @@ impl Fixture {
             host:"host/test".into(), agent:"agent/external".into(), person:PERSON.into(), evidence, workspace:root,
         }, challenge }
     }
-    fn prepare(&self, store: &Store, key: &str) -> Preparation {
+    fn candidate_preparation(&self, store: &Store, key: &str) -> Preparation {
         store.prepare_native_attach(self.candidate.clone(), key, &self.challenge,
             smallclaims::store::now_ms() + 120_000, &self.witness).unwrap()
     }
@@ -71,8 +71,8 @@ fn approve(store: &Store, prepared: &Preparation, paired: &ClaimRecord) -> Strin
 fn exact_ask_commit_and_double_commit_preserve_external_ownership() {
     let fixture = Fixture::new();
     let store = Store::open_memory("host/test").unwrap();
-    let prepared = fixture.prepare(&store,"prepare");
-    assert_eq!(prepared.id,fixture.prepare(&store,"prepare").id);
+    let prepared = fixture.candidate_preparation(&store,"prepare");
+    assert_eq!(prepared.id,fixture.candidate_preparation(&store,"prepare").id);
     let answer = approve(&store,&prepared,&grant(&store,u64::MAX));
     let committed = store.commit_native_attach(&prepared.id,&prepared.candidate_digest,&answer,"commit",&fixture.witness).unwrap();
     let retried = store.commit_native_attach(&prepared.id,&prepared.candidate_digest,&answer,"commit",&fixture.witness).unwrap();
@@ -101,7 +101,7 @@ fn forged_identity_prefix_and_changed_native_id_cannot_rebind() {
         }
         assert!(store.prepare_native_attach(candidate,field,&fixture.challenge,smallclaims::store::now_ms()+120_000,&fixture.witness).is_err(),"{field}");
     }
-    let prepared = fixture.prepare(&store,"original");
+    let prepared = fixture.candidate_preparation(&store,"original");
     let answer = approve(&store,&prepared,&grant(&store,u64::MAX));
     let path = &fixture.candidate.evidence.transcript.path;
     fs::write(path,"{\"type\":\"session\",\"id\":\"another-native-session\"}\n").unwrap();
@@ -112,15 +112,15 @@ fn forged_identity_prefix_and_changed_native_id_cannot_rebind() {
 fn consumed_answer_and_candidate_reservations_are_atomic_under_competing_prepares() {
     let fixture = Fixture::new();
     let store = std::sync::Arc::new(Store::open_memory("host/test").unwrap());
-    let first = fixture.prepare(&store,"first");
-    let second = fixture.prepare(&store,"second");
+    let first = fixture.candidate_preparation(&store,"first");
+    let second = fixture.candidate_preparation(&store,"second");
     let paired = grant(&store,u64::MAX);
     let first_answer = approve(&store,&first,&paired);
     let second_answer = approve(&store,&second,&paired);
     assert!(store.commit_native_attach(&second.id,&second.candidate_digest,&first_answer,"stolen-answer",&fixture.witness).is_err());
     std::thread::scope(|scope| {
-        let left = scope.spawn(|| fixture.prepare(&store,"racing-prepare"));
-        let right = scope.spawn(|| fixture.prepare(&store,"racing-prepare"));
+        let left = scope.spawn(|| fixture.candidate_preparation(&store,"racing-prepare"));
+        let right = scope.spawn(|| fixture.candidate_preparation(&store,"racing-prepare"));
         assert_eq!(left.join().unwrap().id,right.join().unwrap().id);
     });
     let barrier = std::sync::Barrier::new(2);
@@ -143,7 +143,7 @@ fn expiry_and_generic_claim_forgery_never_authorize_attach() {
     forged_host.host = "host/forged".into();
     assert!(store.prepare_native_attach(forged_host,"forged-host",&fixture.challenge,smallclaims::store::now_ms()+120_000,&fixture.witness).is_err());
     assert!(store.prepare_native_attach(fixture.candidate.clone(),"forged-proof",&"0".repeat(64),smallclaims::store::now_ms()+120_000,&fixture.witness).is_err());
-    let prepared = fixture.prepare(&store,"prepare");
+    let prepared = fixture.candidate_preparation(&store,"prepare");
     let expired = grant(&store,1);
     let view = store.ask_native_attach(&prepared.id).unwrap();
     let ask = store.claims_for_subject_kind_at(&view.subject,"work.person-asked",None,true,1).unwrap().claims.remove(0);
@@ -164,7 +164,7 @@ fn expiry_and_generic_claim_forgery_never_authorize_attach() {
 fn paired_grant_must_still_be_live_at_commit() {
     let fixture = Fixture::new();
     let store = Store::open_memory("host/test").unwrap();
-    let prepared = fixture.prepare(&store,"prepare");
+    let prepared = fixture.candidate_preparation(&store,"prepare");
     let paired = grant(&store,u64::try_from(smallclaims::store::now_ms()).unwrap()+2_000);
     let answer = approve(&store,&prepared,&paired);
     std::thread::sleep(Duration::from_secs(2));
@@ -177,7 +177,7 @@ fn committed_external_incarnation_survives_store_reopen() {
     let fixture = Fixture::new();
     let database = fixture.candidate.workspace.join("store.db");
     let store = Store::open(&database,"host/test").unwrap();
-    let prepared = fixture.prepare(&store,"prepare");
+    let prepared = fixture.candidate_preparation(&store,"prepare");
     let answer = approve(&store,&prepared,&grant(&store,u64::MAX));
     let committed = store.commit_native_attach(&prepared.id,&prepared.candidate_digest,&answer,"commit",&fixture.witness).unwrap();
     drop(store);

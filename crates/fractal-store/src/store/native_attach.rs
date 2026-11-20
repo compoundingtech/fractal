@@ -3,6 +3,7 @@
 use super::*;
 use fractal_runtime::native_attach::{AttachEvidence, AttachWitness};
 use serde::{Deserialize, Serialize};
+use std::{fs, path::PathBuf};
 
 pub const REQUESTER: &str = "daemon/native-attach";
 pub const PREPARED: &str = "custom.native-attach.prepared";
@@ -17,7 +18,7 @@ pub fn writer_required() -> FractalError {
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        "CREATE INDEX IF NOT EXISTS native_attach_requests ON claims(origin,json_extract(body,'$.fields.request_key'))
+        /* sqlite-large-value: allow-for-now lv-h5d6244f528ee owner=fractal_store::store::native_attach TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS native_attach_requests ON claims(origin,json_extract(body,'$.fields.request_key'))
          WHERE kind='custom.native-attach.prepared';
          CREATE INDEX IF NOT EXISTS native_attach_agents ON claims(json_extract(body,'$.fields.candidate.agent'))
          WHERE kind='custom.native-attach.committed';
@@ -142,14 +143,13 @@ fn preparation(connection: &Connection, origin: &str, id: &str) -> Result<(Claim
     Ok((claim,value))
 }
 fn conflict(connection: &Connection, column: &str, value: &str) -> Result<bool, FractalError> {
-    let sql = match column {
-        "agent" => "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.candidate.agent')=?1)",
-        "answer" => "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.answer_id')=?1)",
-        "process" => "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.process_key')=?1)",
-        "native" => "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.native_key')=?1)",
+    match column {
+        "agent" => connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.candidate.agent')=?1)", [value], |row| row.get(0)),
+        "answer" => connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.answer_id')=?1)", [value], |row| row.get(0)),
+        "process" => connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.process_key')=?1)", [value], |row| row.get(0)),
+        "native" => connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.native_key')=?1)", [value], |row| row.get(0)),
         _ => unreachable!("closed native attach reservation columns"),
-    };
-    connection.query_row(sql,[value],|row|row.get(0)).map_err(internal)
+    }.map_err(internal)
 }
 
 impl Store {

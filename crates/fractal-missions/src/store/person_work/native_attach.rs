@@ -43,7 +43,7 @@ pub(super) fn admit(
     let (preparation, candidate_digest) = fields["key"].as_str().and_then(key_parts).ok_or_else(refused)?;
     let (grant_subject, session_actor) = device.ok_or_else(refused)?;
     let paired = tx.query_row(
-        &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='custom.client.pairing-completed' ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+        /* sqlite-large-value: allow-for-now lv-he31a6c0e2b9c owner=fractal_missions::store::person_work::native_attach TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='custom.client.pairing-completed' ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
         [grant_subject], claim_from_row,
     ).optional().map_err(internal)?.ok_or_else(refused)?;
     let grant = &paired.body["fields"];
