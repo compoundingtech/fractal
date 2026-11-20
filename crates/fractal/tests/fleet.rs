@@ -8476,13 +8476,22 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
         let refused = person(&o).get::<Value>(&changes_path(Some(&upgraded_cursor))).await.unwrap_err().to_string();
         assert!(refused.contains("410 cursor-gap"), "{refused}");
     }
-    let (reopened, reopened_messages) = changes(&o, None).await;
+    // A cursorless changes read initializes at the head; the timeline endpoint is the full read.
+    let reopened: Value = person(&o).get(&changes_path(None)).await.unwrap();
+    let session_id = reopened["session_id"].as_str().unwrap().trim_start_matches("session/");
+    let history: Value = person(&o).get(&format!(
+        "/v1/client/sessions/{}/timeline?limit=200", urlencoding::encode(session_id),
+    )).await.unwrap();
+    assert_eq!(history["page"]["has_more"], false, "{history}");
+    let reopened_messages = history["items"].as_array().unwrap();
+    let reopened = reopened["next_cursor"].as_str().unwrap().to_owned();
     let mut expected_reopened = BTreeSet::from([first.as_str(), graph_reply.as_str(), unseen.as_str()]);
     if release_reads_stream {
         expected_reopened.extend([stream, this_reply, release_reply]);
     }
     assert_eq!(
-        reopened_messages.iter().map(|(id, _)| id.as_str()).collect::<BTreeSet<_>>(),
+        reopened_messages.iter().filter(|item| item["type"] == "message")
+            .map(|item| item["body"]["message_id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
         expected_reopened,
         "the full read after rollback retains every message the release supports"
     );
