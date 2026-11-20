@@ -36,6 +36,21 @@ const DECISION = {
 }
 export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
+    if (ctx.payload.mode.startsWith('turn')) {
+      const resource = { key: 'turn', operation: 'agent.turn', payload: {
+        agent: ctx.payload.mode === 'turn-remote' ? 'agent/peer.remote' : 'agent/node.publisher', instructions: 'Produce ${literal} without interpolation.',
+        context: '{"input":"${ST_MISSION_RUN}"}',
+        products: [{ path: 'answer', kind: 'custom.st3.program-test', fields: { head: 'h1' } }],
+      } }
+      if (ctx.payload.mode === 'turn-cancel') {
+        const controller = new AbortController()
+        const pending = ctx.resource(resource, controller.signal)
+        await gate(ctx)
+        controller.abort()
+        return await pending
+      }
+      return await ctx.resource(resource)
+    }
     if (ctx.payload.mode === 'child') {
       const published = await wait(ctx, 'publish', () => ctx.child({ key: 'publish', mission: 'program-child', input: { head: 'h1' } }))
       if (published._tag === 'Failure') return published
@@ -84,6 +99,8 @@ fn fixture() -> Fixture {
         &format!(
             r#"version 2
 agent "publisher" {{ workspace "/tmp"; command "true"; restart "never" }}
+agent "other" {{ workspace "/tmp"; command "true"; restart "never" }}
+agent "remote" {{ host "peer"; workspace "/tmp"; command "true"; restart "never" }}
 mission "program-child" state="ready" {{
   goal "Publish one head at a time."
   concurrent-runs max=1
@@ -591,4 +608,359 @@ fn an_uncaught_ask_cancellation_fails_the_program_and_run_and_runs_cleanup() {
     assert_eq!(run.steps.iter().find(|step| step.step == "cleanup").unwrap().status, "completed");
     assert_eq!(fixture.status(&still_open), "cancelled");
     assert!(fixture.engine.requests(&parent.run).is_empty());
+}
+
+fn native_turn_request() -> crate::model::NativeTurn {
+    crate::model::NativeTurn {
+        agent: "agent/node.publisher".into(),
+        instructions: "Produce ${literal} without interpolation.".into(),
+        context: "{\"input\":\"${ST_MISSION_RUN}\"}".into(),
+        products: vec![crate::model::NativeTurnProduct {
+            path: "answer".into(), kind: "custom.st3.program-test".into(),
+            fields: BTreeMap::from([("head".into(), json!("h1"))]),
+        }],
+        fresh_context: false,
+    }
+}
+
+fn native_parent(fixture: &Fixture, name: &str) -> MissionRunView {
+    let parent = fixture.start(name, "turn");
+    fixture.store.set_step_state(&parent.step, "working", None).unwrap();
+    fixture.store.mission_run(&parent.run).unwrap().unwrap()
+}
+
+fn native_work(actor: &str, key: &str) -> crate::model::WorkRequest {
+    crate::model::WorkRequest {
+        actor: Some(actor.into()), incarnation: Some("current".into()), summary: Some("Actual worker summary".into()),
+        reason: None, evidence: vec![], wait_ms: None, idempotency_key: key.into(),
+    }
+}
+
+fn observe_native_product(fixture: &Fixture, run: &str, head: &str) {
+    fixture.store.append_claim(&ClaimInput {
+        subject: format!("resource/{run}/answer"), kind: "resource.observed".into(),
+        actor: Some("agent/node.publisher".into()),
+        fields: BTreeMap::from([("kind".into(), json!("custom.st3.program-test")), ("head".into(), json!(head))]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+#[test]
+fn native_turn_adopts_one_parent_owned_literal_leaf_and_preserves_worker_text() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let parent = native_parent(&fixture, "native-adopt");
+    let owner = &parent.steps[0];
+    let turn = native_turn_request();
+    let episode = fixture.store.create_native_turn(&parent, &owner.subject, owner.attempt, "native-adopt-key", &turn).unwrap();
+    fixture.store.fixture_replay_graph().unwrap().unwrap();
+    let again = fixture.store.create_native_turn(&parent, &owner.subject, owner.attempt, "native-adopt-key", &turn).unwrap();
+    assert_eq!(episode.subject, again.subject);
+    assert_eq!(fixture.children(&owner.subject).len(), 1);
+    assert_eq!(episode.parent_step_run.as_deref(), Some(owner.subject.as_str()));
+    assert_eq!(episode.workspace, parent.workspace);
+    assert_eq!(episode.requester, parent.requester);
+    let leaf = &episode.steps[0];
+    assert_eq!(leaf.assigned_to.as_deref(), Some(turn.agent.as_str()));
+    assert_eq!(leaf.goals, vec![turn.instructions.clone()]);
+    assert!(leaf.constraints.iter().any(|text| text.contains(&turn.context)));
+    assert!(leaf.constraints.iter().any(|text| text.contains(&format!("resource/{}/answer", episode.subject))));
+    assert!(!leaf.fresh_context);
+    let created = fixture.store.latest_claim(&episode.subject, Some("mission-run.created")).unwrap().unwrap();
+    assert_eq!(created.actor.as_deref(), Some(parent.subject.as_str()));
+    assert!(fixture.store.mission_spec("native-turn", None).unwrap().is_none(), "native work must not publish a graph mission");
+    let mut changed = turn;
+    changed.context.push('x');
+    assert_eq!(fixture.store.create_native_turn(&parent, &owner.subject, owner.attempt, "native-adopt-key", &changed).unwrap_err().code, "idempotency-conflict");
+    assert!(fixture.store.create_native_turn(&parent, &owner.subject, owner.attempt + 1, "native-other-key", &changed).is_err());
+}
+
+#[test]
+fn native_turn_requires_actual_literal_report_and_verified_products_before_success() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let parent = native_parent(&fixture, "native-products");
+    let episode = fixture.store.create_native_turn(&parent, &parent.steps[0].subject, 1, "native-products", &native_turn_request()).unwrap();
+    let step = &episode.steps[0].subject;
+    let wrong = fixture.store.work_action(step, "claim", &native_work("agent/node.other", "native-wrong-actor")).unwrap_err();
+    assert_eq!(wrong.code, "work-not-available");
+    assert!(!fixture.store.complete_native_turn(&episode.subject, &[]).unwrap());
+    fixture.store.work_action(step, "claim", &native_work("agent/node.publisher", "native-product-claim")).unwrap();
+    let receipt = fixture.store.step_executions(step).unwrap();
+    assert_eq!(receipt.len(), 1);
+    assert_eq!(receipt[0].agent, "agent/node.publisher");
+    assert_eq!(receipt[0].incarnation_id.as_deref(), Some("current"));
+    let submitted = fixture.store.work_action(step, "complete", &native_work("agent/node.publisher", "native-product-submit")).unwrap();
+    assert_eq!(submitted.status, "verifying");
+    assert!(submitted.worker_reported);
+    assert!(!fixture.store.complete_native_turn(&episode.subject, &receipt).unwrap());
+    observe_native_product(&fixture, &episode.subject, "wrong");
+    assert!(!fixture.store.complete_native_turn(&episode.subject, &receipt).unwrap());
+    observe_native_product(&fixture, &episode.subject, "h1");
+    assert!(fixture.store.complete_native_turn(&episode.subject, &receipt).unwrap());
+    let report = fixture.store.latest_claim(&episode.subject, Some("program.turn.report")).unwrap().unwrap();
+    assert_eq!(report.body["fields"]["report"]["summary"], "Actual worker summary");
+    assert_eq!(report.body["fields"]["report"]["products"]["answer"]["head"], "h1");
+    assert_eq!(report.body["fields"]["report"]["executions"], serde_json::to_value(receipt).unwrap());
+    assert_eq!(fixture.run_status(&episode.subject), "completed");
+}
+
+#[test]
+fn native_turn_cancellation_fences_late_worker_completion_without_stopping_the_seat() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let parent = native_parent(&fixture, "native-cancel");
+    let episode = fixture.store.create_native_turn(&parent, &parent.steps[0].subject, 1, "native-cancel", &native_turn_request()).unwrap();
+    let step = &episode.steps[0].subject;
+    fixture.store.work_action(step, "claim", &native_work("agent/node.publisher", "native-cancel-claim")).unwrap();
+    fixture.store.request_mission_run_cancellation(&parent.subject, "cancel parent with no host request map").unwrap();
+    assert_eq!(fixture.status(step), "cancelled");
+    finish_native_cancellation(&fixture, &episode.subject);
+    assert!(fixture.store.work_action(step, "complete", &native_work("agent/node.publisher", "native-late-submit")).is_err());
+    observe_native_product(&fixture, &episode.subject, "h1");
+    assert!(!fixture.store.complete_native_turn(&episode.subject, &[]).unwrap());
+    assert!(fixture.store.claims_for("agent/node.publisher", Some("runtime.action.requested")).unwrap().is_empty());
+    assert!(fixture.store.latest_claim(&episode.subject, Some("program.turn.report")).unwrap().is_none());
+}
+
+#[test]
+fn native_turn_freshness_is_opt_in_and_busy_seat_claims_remain_exclusive() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let parent = native_parent(&fixture, "native-freshness");
+    let first = fixture.store.create_native_turn(&parent, &parent.steps[0].subject, 1, "native-held", &native_turn_request()).unwrap();
+    fixture.store.work_action(&first.steps[0].subject, "claim", &native_work("agent/node.publisher", "native-held-claim")).unwrap();
+    let mut fresh = native_turn_request();
+    fresh.fresh_context = true;
+    let next = fixture.store.create_native_turn(&parent, &parent.steps[0].subject, 1, "native-fresh-next", &fresh).unwrap();
+    assert!(fixture.store.step_run(&next.steps[0].subject).unwrap().unwrap().fresh_context);
+    assert_eq!(fixture.store.work_action(&next.steps[0].subject, "claim", &native_work("agent/node.publisher", "native-busy-refused")).unwrap_err().code, "agent-capacity");
+    assert_eq!(fixture.status(&first.steps[0].subject), "claimed");
+    assert!(fixture.store.claims_for("agent/node.publisher", Some("runtime.action.requested")).unwrap().is_empty());
+    fixture.store.request_mission_run_cancellation(&first.subject, "release only the first native episode").unwrap();
+    assert_eq!(fixture.store.work_action(&next.steps[0].subject, "claim",
+        &native_work("agent/node.publisher", "native-idle-needs-freshness")).unwrap_err().code, "fresh-context-pending");
+}
+
+#[test]
+fn native_turn_resource_replays_after_host_loss_and_returns_actual_report() {
+    let fixture = fixture();
+    let parent = fixture.start("native-host-adoption", "turn");
+    let subject = crate::store::adhoc_work::native_turn_subject(&format!("program:{}:1:turn", parent.step));
+    fixture.until("a real native work episode starts", || fixture.store.mission_run(&subject).unwrap().is_some());
+    let old_host = fixture.kill_host();
+    fixture.until("host resumes the same native turn", || fixture.engine.host_pid().is_some_and(|pid| pid != old_host));
+    let episode = fixture.store.mission_run(&subject).unwrap().unwrap();
+    assert_eq!(fixture.children(&parent.step).len(), 1);
+    let step = &episode.steps[0].subject;
+    fixture.store.work_action(step, "claim", &native_work("agent/node.publisher", "native-host-claim")).unwrap();
+    fixture.store.work_action(step, "complete", &native_work("agent/node.publisher", "native-host-submit")).unwrap();
+    fixture.reconciler.evaluate_mission_runs().unwrap();
+    assert_eq!(fixture.status(step), "verifying");
+    assert!(fixture.result(&parent.step, RESULT_KEY, 1).is_none());
+    observe_native_product(&fixture, &subject, "h1");
+    fixture.until("native turn report returns through the program result", || fixture.result(&parent.step, RESULT_KEY, 1).is_some());
+    let (_, report) = fixture.result(&parent.step, RESULT_KEY, 1).unwrap();
+    assert_eq!(report["run"], subject);
+    assert_eq!(report["step"], *step);
+    assert_eq!(report["summary"], "Actual worker summary");
+    assert_eq!(report["products"]["answer"]["head"], "h1");
+    assert_eq!(report["executions"].as_array().unwrap().len(), 1);
+    fixture.until("parent native program run completes", || fixture.run_status(&parent.run) == "completed");
+    let child_exit = fixture.reconciler.program_child_exit(&parent.run, "completed").unwrap();
+    assert_eq!(child_exit["value"]["result"], report);
+    assert!(child_exit["value"].get("products").is_none(), "program results must not fabricate resource products");
+}
+
+fn native_scope(fixture: &Fixture, parent: &Started) -> crate::store::resource_membership::Membership {
+    use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+    fixture.reconciler.ensure_resource_authority().unwrap();
+    let lane = LaneRequest {
+        id: format!("native-scope:{}", parent.run), name: "native-workers".into(), host: "node".into(),
+        max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 * 1024 }),
+        coverage: Coverage::Logical, admission_timeout_ms: None, class: fractal_runtime::RequestClass::Agent,
+        disk: None, io: None,
+        owner: Owner { run: parent.run.clone(), step: parent.step.clone(), attempt: 1, invocation: None },
+    };
+    let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 4, memory: 1024 * 1024 * 1024 }), ..Fit::default() };
+    let Admission::Admitted(grant) = fixture.store.request_resource_membership(&lane, fit, 1).unwrap()
+        else { panic!("native fixture scope must admit"); };
+    fixture.store.attach_resource_child(&grant, &lane.owner, &parent.run).unwrap();
+    fixture.store.resource_membership_record(&lane.id, &lane.owner).unwrap()
+}
+
+#[test]
+fn native_turn_inherits_same_host_membership_without_reparenting_the_standing_seat() {
+    let fixture = fixture();
+    let parent = fixture.start("native-scoped", "turn");
+    let scope = native_scope(&fixture, &parent);
+    let episode = crate::store::adhoc_work::native_turn_subject(&format!("program:{}:1:turn", parent.step));
+    fixture.until("native same-host episode attaches", || fixture.store.mission_run(&episode).unwrap().is_some());
+    let inherited = fixture.store.resource_context_for_run(&episode).unwrap().unwrap();
+    assert_eq!(inherited.request, scope.request);
+    assert_eq!(inherited.grant, scope.grant);
+    assert!(inherited.child_runs.contains(&episode));
+    let leaf = fixture.store.mission_run(&episode).unwrap().unwrap().steps.remove(0);
+    fixture.store.work_action(&leaf.subject, "claim", &native_work("agent/node.publisher", "native-scoped-claim")).unwrap();
+    fixture.store.work_action(&leaf.subject, "complete", &native_work("agent/node.publisher", "native-scoped-submit")).unwrap();
+    observe_native_product(&fixture, &episode, "h1");
+    fixture.until("same-host native report returns", || fixture.result(&parent.step, RESULT_KEY, 1).is_some());
+    let (_, report) = fixture.result(&parent.step, RESULT_KEY, 1).unwrap();
+    assert_eq!(report["executions"][0]["agent"], "agent/node.publisher");
+    assert!(fixture.store.claims_for("agent/node.publisher", Some("runtime.action.requested")).unwrap().iter()
+        .all(|claim| claim.body["fields"]["action"] != "fresh-context"));
+}
+
+#[test]
+fn native_turn_refuses_cross_host_inherited_authority_without_claiming_custody() {
+    let fixture = fixture();
+    let parent = fixture.start("native-cross-host", "turn-remote");
+    let scope = native_scope(&fixture, &parent);
+    fixture.until("native cross-host refusal returns", || fixture.result(&parent.step, RESULT_KEY, 1).is_some());
+    let (status, error) = fixture.result(&parent.step, RESULT_KEY, 1).unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(error["_tag"], "ResourceError");
+    assert_eq!(error["code"], "resource-operation-refused");
+    assert!(error["message"].as_str().unwrap().contains("target host"));
+    let episode = crate::store::adhoc_work::native_turn_subject(&format!("program:{}:1:turn", parent.step));
+    assert!(fixture.store.mission_run(&episode).unwrap().is_none());
+    let current = fixture.store.resource_membership_record(&scope.request.id, &scope.request.owner).unwrap();
+    assert!(!current.child_runs.contains(&episode));
+    assert!(fixture.store.claims_for("agent/peer.remote", Some("runtime.action.requested")).unwrap().is_empty());
+}
+
+#[test]
+fn native_turn_product_payload_rejects_non_scalar_or_non_relative_requirements() {
+    for path in ["", "/absolute", "../escape", "a/../escape", "a@claim"] {
+        let mut turn = native_turn_request();
+        turn.products[0].path = path.into();
+        assert!(turn.validate().is_err(), "accepted invalid product path {path:?}");
+    }
+    for value in [json!([]), json!({"nested": true})] {
+        let mut turn = native_turn_request();
+        turn.products[0].fields.insert("value".into(), value);
+        assert!(turn.validate().is_err());
+    }
+}
+
+#[test]
+fn native_fresh_context_never_interrupts_an_unrelated_busy_harness_turn() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let parent = native_parent(&fixture, "native-busy-harness");
+    let mut turn = native_turn_request();
+    turn.fresh_context = true;
+    let episode = fixture.store.create_native_turn(&parent, &parent.steps[0].subject, 1, "native-busy-harness", &turn).unwrap();
+    let agent = "agent/node.publisher";
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running","runtime_id":"node.publisher","incarnation_id":"current"})),
+        ("harness.observed", json!({"state":"working","driver":"omp","incarnation_id":"current","ownership_sequence":1,"transition_sequence":1})),
+    ] {
+        fixture.store.append_claim(&ClaimInput {
+            subject: agent.into(), kind: kind.into(), actor: Some(agent.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    assert_eq!(fixture.store.current_harness(agent).unwrap().unwrap().state, "working");
+    let member = fixture.store.desired_subject_with_writer(agent).unwrap().unwrap().0.member.unwrap();
+    let leaf = fixture.store.step_run(&episode.steps[0].subject).unwrap().unwrap();
+    assert!(!fixture.reconciler.prepare_fresh_context(agent, "current", &leaf, &member).unwrap());
+    assert!(fixture.reconciler.runtime.stops.lock().unwrap().is_empty());
+    assert!(fixture.store.claims_for(agent, Some("runtime.action.requested")).unwrap().is_empty());
+}
+
+#[test]
+fn cancelling_a_native_parent_leaves_another_parents_held_seat_work_untouched() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let independent = native_parent(&fixture, "independent-seat-work");
+    let held = fixture.store.create_native_turn(&independent, &independent.steps[0].subject, 1,
+        "independent-native-turn", &native_turn_request()).unwrap();
+    fixture.store.work_action(&held.steps[0].subject, "claim",
+        &native_work("agent/node.publisher", "independent-native-claim")).unwrap();
+    let parent = native_parent(&fixture, "cancel-only-owned");
+    let queued = fixture.store.create_native_turn(&parent, &parent.steps[0].subject, 1,
+        "cancel-only-owned-turn", &native_turn_request()).unwrap();
+    fixture.store.request_mission_run_cancellation(&parent.subject, "cancel only this native parent").unwrap();
+    assert_eq!(fixture.status(&queued.steps[0].subject), "cancelled");
+    finish_native_cancellation(&fixture, &queued.subject);
+    let unchanged = fixture.store.step_run(&held.steps[0].subject).unwrap().unwrap();
+    assert_eq!(unchanged.status, "claimed");
+    assert_eq!(unchanged.claimant.as_deref(), Some("agent/node.publisher"));
+    assert_eq!(fixture.run_status(&held.subject), "running");
+    assert!(fixture.reconciler.runtime.stops.lock().unwrap().is_empty());
+}
+
+#[test]
+fn native_work_claim_is_fenced_immediately_when_its_parent_attempt_changes() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let parent = native_parent(&fixture, "native-parent-retry");
+    let owner = &parent.steps[0].subject;
+    let episode = fixture.store.create_native_turn(&parent, owner, 1, "native-old-attempt", &native_turn_request()).unwrap();
+    fixture.store.set_step_state(owner, "failed", Some("retry parent")).unwrap();
+    fixture.store.retry_step(owner, "retry parent", 0).unwrap();
+    let error = fixture.store.work_action(&episode.steps[0].subject, "claim",
+        &native_work("agent/node.publisher", "native-stale-parent-claim")).unwrap_err();
+    assert_eq!(error.code, "stale-native-turn-parent");
+    assert!(!fixture.store.complete_native_turn(&episode.subject, &[]).unwrap());
+    assert!(fixture.store.latest_claim(&episode.subject, Some("program.turn.report")).unwrap().is_none());
+    let current = fixture.store.mission_run(&episode.subject).unwrap().unwrap();
+    if current.phase == "normal" { fixture.reconciler.evaluate_native_turn(&current).unwrap(); }
+    finish_native_cancellation(&fixture, &episode.subject);
+}
+
+fn finish_native_cancellation(fixture: &Fixture, run: &str) {
+    let cancelling = fixture.store.mission_run(run).unwrap().unwrap();
+    assert_eq!(cancelling.phase, "cleanup-cancelled");
+    fixture.reconciler.evaluate_native_turn(&cancelling).unwrap();
+    let terminal = fixture.store.mission_run(run).unwrap().unwrap();
+    assert_eq!(terminal.status, "cancelled");
+    assert_eq!(terminal.phase, "terminal");
+    assert!(terminal.steps.iter().all(|step| step.status == "cancelled"));
+    assert!(fixture.store.mission_spec("native-turn", None).unwrap().is_none());
+}
+
+#[test]
+fn direct_native_turn_cancellation_reaches_terminal_without_a_graph_revision() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let parent = native_parent(&fixture, "native-direct-cancellation");
+    let episode = fixture.store.create_native_turn(&parent, &parent.steps[0].subject, 1,
+        "native-direct-cancellation", &native_turn_request()).unwrap();
+    let step = &episode.steps[0].subject;
+    fixture.store.work_action(step, "claim", &native_work("agent/node.publisher", "native-direct-cancel-claim")).unwrap();
+    fixture.store.request_mission_run_cancellation(&episode.subject, "cancel only the owned episode").unwrap();
+    finish_native_cancellation(&fixture, &episode.subject);
+    assert_eq!(fixture.run_status(&parent.subject), "running");
+    assert_eq!(fixture.status(&parent.steps[0].subject), "working");
+    assert!(fixture.store.work_action(step, "complete",
+        &native_work("agent/node.publisher", "native-direct-cancel-late-submit")).is_err());
+    assert!(fixture.reconciler.runtime.stops.lock().unwrap().is_empty());
+}
+
+#[test]
+fn native_turn_resource_scope_cancellation_returns_its_real_terminal_child_failure() {
+    let fixture = fixture();
+    let parent = fixture.start("native-resource-scope-cancellation", "turn-cancel");
+    let episode = crate::store::adhoc_work::native_turn_subject(&format!("program:{}:1:turn", parent.step));
+    fixture.until("native cancellable resource admits work", || fixture.store.mission_run(&episode).unwrap().is_some());
+    let leaf = fixture.store.mission_run(&episode).unwrap().unwrap().steps.remove(0);
+    fixture.store.work_action(&leaf.subject, "claim",
+        &native_work("agent/node.publisher", "native-resource-cancel-claim")).unwrap();
+    std::fs::write(&parent.gate, "").unwrap();
+    fixture.until("resource cancellation returns the terminal episode outcome",
+        || fixture.result(&parent.step, RESULT_KEY, 1).is_some());
+    let (status, error) = fixture.result(&parent.step, RESULT_KEY, 1).unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(error["_tag"], "ChildFailed");
+    assert_eq!(error["run"], episode);
+    assert_eq!(error["status"], "cancelled");
+    let terminal = fixture.store.mission_run(&episode).unwrap().unwrap();
+    assert_eq!(terminal.status, "cancelled");
+    assert_eq!(terminal.phase, "terminal");
+    assert!(fixture.store.work_action(&leaf.subject, "complete",
+        &native_work("agent/node.publisher", "native-resource-cancel-late-submit")).is_err());
+    assert!(fixture.store.latest_claim(&episode, Some("program.turn.report")).unwrap().is_none());
+    assert!(fixture.reconciler.runtime.stops.lock().unwrap().is_empty());
 }

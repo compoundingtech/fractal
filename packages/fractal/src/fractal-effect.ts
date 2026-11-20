@@ -4,7 +4,7 @@
  * `env`, `cwd` and `Worker`.
  */
 export * from './fractal.ts'
-export { ask, command, cwd, env, mission, review, run, step, Worker } from './program.ts'
+export { ask, command, cwd, env, mission, review, run, step, turn, seatTurn, Worker, WorkerReport, SeatTurnContext, TurnProduct, type TurnOptions } from './program.ts'
 export { resources } from './resources.ts'
 export { StepExecution, StepExecutionUsage } from './step-execution.ts'
 export {

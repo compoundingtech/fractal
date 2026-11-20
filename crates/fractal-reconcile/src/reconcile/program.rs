@@ -157,6 +157,29 @@ fn idempotency_key(step: &str, attempt: u32, key: &str) -> String {
     format!("program:{step}:{attempt}:{key}")
 }
 
+/// Project a completed native program return without confusing inner journal entries or a
+/// previous attempt's output with the current program. A null return is an actual result too.
+pub(super) fn completed_result(store: &Store, step: &str, attempt: u32, program: &str) -> Result<Option<Value>> {
+    let mut before = None;
+    loop {
+        let page = store.claims_for_subject_kind_at(step, JOURNAL_KIND, before, true, JOURNAL_PAGE)?;
+        for claim in page.claims {
+            let fields = &claim.body["fields"];
+            if fields["key"] == RESULT_KEY
+                && fields["attempt"].as_u64() == Some(u64::from(attempt))
+                && fields["program"].as_str() == Some(program)
+                && fields["status"] == "completed"
+            {
+                return Ok(Some(fields.get("value").cloned().unwrap_or(Value::Null)));
+            }
+        }
+        match page.next_cursor {
+            Some(cursor) => before = Some(cursor),
+            None => return Ok(None),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     host: Option<Host>,
