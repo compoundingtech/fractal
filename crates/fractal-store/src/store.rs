@@ -23743,24 +23743,24 @@ pub fn cancel_mission_run_tx(
         if let Some(claimant) = claimant {
             let stable = canonical_hash(&(run_id, &generation_id, &subject, "cancelled"))
                 .map_err(internal)?;
-            append_claim_tx(
-                transaction,
-                origin,
-                &format!("message/mission-cancelled-{}", &stable[..20]),
-                "message.sent",
-                None,
-                &json!({"fields": {
+            // The notice goes through the outbox: its route can't be read inside this batch.
+            message_routing::queue_tx(transaction, &ClaimInput {
+                subject: format!("message/mission-cancelled-{}", &stable[..20]),
+                kind: "message.sent".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({
                     "from": "daemon/runtime",
                     "to": claimant,
                     "title": "Mission work cancelled",
                     "content": format!("Mission run mission-run/{run_id} cancelled step {subject}. Stop this work. Reason: {reason}"),
                     "status": "sent",
                     "tags": [format!("mission-run:mission-run/{run_id}"), format!("step-run:{subject}")],
-                }}),
-                &[],
-                forced_batch,
-            )
-            .map_err(internal)?;
+                }))
+                .map_err(internal)?,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })?;
         }
         transaction
             .execute(
