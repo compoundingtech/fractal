@@ -193,8 +193,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::ops::Deref;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result};
@@ -242,18 +240,14 @@ use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
 pub use smallclaims::store::{
-    CHECKPOINT_SPACE_GATE_VERSION, CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
-    CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction,
-    CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest,
-    CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView, CheckpointProof,
-    CheckpointResumeRequest, CheckpointStatusView, ClaimTombstone, CreatedFleetInvite, DropCount,
-    DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue, FleetInviteView,
-    FleetRedemption, FleetRemoval, PendingCheckpointView, ReplicationAdmission, SealTerms,
-    SealedSet, TRIM_CHUNK_ENVELOPES, TrimFault, VerifiedTerms, certificates, checkpoint_build,
-    checkpoint_cut, checkpoint_name, checkpoint_participants, chosen_certificate,
-    configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
-    newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
+    CHECKPOINT_SPACE_GATE_VERSION, CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointAction,
+    CheckpointContext, CheckpointManifest, CheckpointManifestCursor, CheckpointManifestPage,
+    CheckpointManifestRequest, CheckpointResumeRequest, TrimStatusView, ClaimTombstone,
+    CreatedFleetInvite, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue,
+    FleetInviteView, FleetRedemption, FleetRemoval, ReplicationAdmission, SealedSet,
+    TRIM_CHUNK_ENVELOPES, TrimFault, checkpoint_build, checkpoint_cut, checkpoint_name,
+    configure_projection_writer, drop_digest, newest_due_cut, valid_fleet_node_name,
+    check_checkpoint_manifest,
 };
 use smallclaims::windows::holds;
 
@@ -288,7 +282,6 @@ pub mod backup_ledgers;
 pub mod backup_shards;
 pub mod checkpoint_rules;
 pub mod harness_questions;
-pub mod checkpoint_status;
 pub mod human_review_reassignment;
 pub mod mission_eligibility;
 pub use mission_eligibility::MISSING_AGENT_CONDITION;
@@ -351,19 +344,13 @@ pub use limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
-pub mod checkpoint_agreement_tests;
-#[cfg(test)]
 mod local_trim_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]
 pub mod checkpoint_tests;
 #[cfg(test)]
-pub mod checkpoint_identity_reuse_tests;
-#[cfg(test)]
 mod newest_claim_index_tests;
-#[cfg(test)]
-mod checkpoint_proof_span_tests;
 #[cfg(test)]
 pub mod provenance_tests;
 #[cfg(test)]
@@ -432,21 +419,6 @@ pub use smallclaims::sqlite::STATEMENTS_RUN;
 pub mod checkpoint {
     pub use super::checkpoint_rules::*;
     pub use smallclaims::store::checkpoint::*;
-
-    /// Prove a drop plan on a copy of the store with Fractal's projections and readers.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn prove_on_copy(
-        copy: &std::path::Path,
-        sealed: &SealedSet,
-        plan: &DropPlan,
-    ) -> anyhow::Result<CheckpointProof> {
-        smallclaims::store::checkpoint::prove_on_copy(
-            &super::FractalRuntime::default(),
-            copy,
-            sealed,
-            plan,
-        )
-    }
 }
 
 /// The graph's projection digests over Fractal's shared tables.
@@ -7074,7 +7046,6 @@ impl Store {
             items.push(fault.item);
         }
         items.extend(gates);
-        items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
         let dismissed = self.dismissed_faults()?;
@@ -9372,14 +9343,13 @@ pub fn desired_row_at(
     if subject.starts_with("message/") {
         if let Some(row) = current_desired_row(connection, subject)? {
             let unchanged: bool = connection.query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                /* sqlite-large-value: allow-for-now lv-hb1f5eb722a0b owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!("SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                  WHERE subject=?1 AND kind='intent.desired' AND store_index>?2)
                  AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                    WHERE subject=?1 AND kind='intent.desired'
                      AND store_index>COALESCE((SELECT last_good_store_index FROM projection_health
                        WHERE aggregate='graph' AND status='healthy'),0)
-                     AND EXISTS(SELECT 1 FROM replica_records
-                       WHERE claim_id=claims.id AND state='valid'))",
+                     AND {})", smallclaims::store::record_bytes::admitted_claim_sql("claims")),
                 params![subject,at_index], |row| row.get(0),
             )?;
             if unchanged { return Ok(Some(row)); }

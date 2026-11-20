@@ -79,105 +79,15 @@ pub async fn replication_record(
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }
 
-/// How long a dry-run plan waits for another checkpoint proof, such as the one a daemon runs as
-/// soon as it starts. Half the route's BULK deadline (120 s) leaves the other half for this
-/// plan's own capture and proof; a proof still running then is refused as retryable.
-const PLAN_PROOF_WAIT: Duration = Duration::from_secs(60);
-const PLAN_PROOF_POLL: Duration = Duration::from_millis(250);
-
-pub async fn checkpoint_plan(
-    State(state): State<AppState>,
-    Json(request): Json<crate::store::CheckpointPlanRequest>,
-) -> Result<Json<crate::store::CheckpointPlanView>, ApiError> {
-    let cut = match request.day.as_deref() {
-        Some(day) => crate::store::checkpoint_cut(day).map_err(ApiError::bad)?,
-        None => crate::store::newest_due_cut(client_now_ms()),
-    };
-    plan_waiting_for_proof(&state, cut, PLAN_PROOF_WAIT, || {}).await.map(Json)
-}
-
-/// Plan, and plan again while another proof owns the scratch lock, until `wait` has passed. The
-/// wait is here, on the plan route alone, so the daemon's scheduled proof never waits on a plan.
-/// `busy` runs at each refusal that is followed by another attempt.
-pub(super) async fn plan_waiting_for_proof(
-    state: &AppState,
-    cut: u128,
-    wait: Duration,
-    mut busy: impl FnMut(),
-) -> Result<crate::store::CheckpointPlanView, ApiError> {
-    // Use the timer's clock for the deadline too, so paused-time tests control the whole wait.
-    let deadline = tokio::time::Instant::now() + wait;
-    loop {
-        let error = match plan_once(state, cut).await? {
-            Ok(plan) => return Ok(plan),
-            Err(error) => error,
-        };
-        if error.downcast_ref::<smallclaims::store::checkpoint::CheckpointProofBusy>().is_none() {
-            return Err(ApiError::internal(error));
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(ApiError::bad(FractalError::new(
-                "checkpoint-proof-in-progress",
-                "a checkpoint proof is running; retry shortly",
-            )));
-        }
-        busy();
-        tokio::time::sleep(PLAN_PROOF_POLL.min(remaining)).await;
-    }
-}
-
-async fn plan_once(
-    state: &AppState,
-    cut: u128,
-) -> Result<anyhow::Result<crate::store::CheckpointPlanView>, ApiError> {
-    let scratch = state.state_dir.join("checkpoint");
-    let capture_dir = scratch.join("plan");
-    let capture = state.store.clone();
-    let staged = match blocking_store(move || Ok(capture.checkpoint_staged_set(cut, None, &capture_dir))).await? {
-        Ok(staged) => staged,
-        Err(error) => return Ok(Err(error)),
-    };
-    let store = state.store.clone();
-    // The capture may seal/register the live writer. Planning and proof on the
-    // scratch copy do not borrow it and must not occupy its worker capacity.
-    blocking_external(move || store.checkpoint_plan_view_from_staged(cut, staged, &scratch)).await
-}
-
-pub async fn checkpoint_status(
-    State(state): State<AppState>,
-) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
-    let store = state.store.clone();
-    let peers = state.configured_peers.clone();
-    blocking_store(move || store.checkpoint_status(client_now_ms(), &peers))
-        .await
-        .map(Json)
-}
-
-pub async fn checkpoint_excuse(
-    State(state): State<AppState>,
-    Json(request): Json<crate::store::CheckpointExcuseRequest>,
-) -> Result<Json<ClaimRecord>, ApiError> {
-    let claim = state
-        .store
-        .excuse_checkpoint_writer(&request)
-        .map_err(ApiError::bad)?;
-    signal_changed(&state);
-    Ok(Json(claim))
-}
-
 pub async fn checkpoint_resume(
     State(state): State<AppState>,
     Json(request): Json<crate::store::CheckpointResumeRequest>,
-) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
+) -> Result<Json<crate::store::TrimStatusView>, ApiError> {
     let store = state.store.clone();
     blocking_action(move || store.resume_stopped_trims(&request.actor, &request.reason)).await?;
     signal_changed(&state);
     let store = state.store.clone();
-    let peers = state.configured_peers.clone();
-    blocking_store(move || store.checkpoint_status(client_now_ms(), &peers))
-        .await
-        .map(Json)
+    blocking_store(move || store.trim_status()).await.map(Json)
 }
 
 /// A bound harness reaches this only as itself (`guard_bound_request`); the store allows a person
@@ -246,17 +156,6 @@ pub async fn replication_export(
     .await
 }
 
-/// One page of a checkpoint's manifest, for the replication worker to answer a peer with.
-pub async fn replication_checkpoint_manifest(
-    State(state): State<AppState>,
-    Json(request): Json<crate::store::CheckpointManifestRequest>,
-) -> Result<Json<crate::store::CheckpointManifestPage>, ApiError> {
-    let store = state.store.clone();
-    blocking_store(move || store.checkpoint_manifest_page(&request))
-        .await
-        .map(Json)
-}
-
 /// This node's answers per claim kind, for its replication worker and the peers it serves. They
 /// are computed off the request path and kept, so a request answers at once, `pending` until
 /// they exist.
@@ -277,29 +176,6 @@ pub async fn replication_answers_check(
     blocking_store(move || Ok(store.record_answers_check(&check)?))
         .await
         .map(|()| Json(serde_json::json!({})))
-}
-
-/// The newest stable checkpoint this node needs a peer's manifest for, if any.
-pub async fn replication_checkpoint_need(
-    State(state): State<AppState>,
-) -> Result<Json<Option<crate::store::CheckpointManifestNeed>>, ApiError> {
-    let store = state.store.clone();
-    blocking_store(move || store.checkpoint_manifest_need())
-        .await
-        .map(Json)
-}
-
-/// Adopt a checkpoint from the manifest the replication worker fetched from a peer.
-pub async fn replication_checkpoint_adopt(
-    State(state): State<AppState>,
-    Json(manifest): Json<crate::store::CheckpointManifest>,
-) -> Result<Json<Vec<crate::store::CheckpointAction>>, ApiError> {
-    let store = state.store.clone();
-    let actions = blocking_action(move || store.adopt_checkpoint(&manifest)).await?;
-    if !actions.is_empty() {
-        signal_changed(&state);
-    }
-    Ok(Json(actions))
 }
 
 pub(super) fn receive_correlation(headers: &axum::http::HeaderMap) -> uuid::Uuid {

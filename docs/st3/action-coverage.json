@@ -2185,36 +2185,12 @@
       "verification": "real CLI dispatch over a private disk-backed fixture with an unusable endpoint; both analysis-only windows are published without daemon discovery, source bytes stay unchanged, missing inputs and acknowledgement publish nothing"
     },
     {
-      "command": "st replication checkpoint excuse",
-      "description": "Stop waiting for an unreachable writer. It fences nothing: what the writer wrote while away still replicates when it returns, and its next seal ends the excusal",
-      "tests": [
-        "crates/fractal/tests/fleet.rs::action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts"
-      ],
-      "verification": "existing CLI integration"
-    },
-    {
-      "command": "st replication checkpoint plan",
-      "description": "Show what a checkpoint would drop from this node's store, proved on a copy. Changes nothing",
-      "tests": [
-        "crates/fractal/tests/fleet.rs::action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts"
-      ],
-      "verification": "existing CLI integration"
-    },
-    {
       "command": "st replication checkpoint resume",
-      "description": "Go on with checkpoints after a trim stopped because deleting would change the graph. The rows stay as they are; the next checkpoint proceeds",
+      "description": "Go on trimming after a trim stopped because deleting would change the graph. The rows stay as they are; the next day's cut proceeds",
       "tests": [
         "crates/fractal/tests/fleet.rs::action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts"
       ],
       "verification": "existing CLI integration"
-    },
-    {
-      "command": "st replication checkpoint status",
-      "description": "Show the newest stable checkpoint and who has sealed or verified the one being agreed",
-      "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
-      ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
       "command": "st replication diff",

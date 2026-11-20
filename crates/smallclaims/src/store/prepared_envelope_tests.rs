@@ -1057,14 +1057,6 @@ impl Runtime for ByKind {
         Plain.plan_checkpoint_drops(sealed)
     }
 
-    fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        Plain.clear_checkpoint_projections(transaction)
-    }
-
-    fn replay_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        Plain.replay_checkpoint_projections(transaction)
-    }
-
     fn checkpoint_subject_answers(
         &self,
         connection: &Connection,

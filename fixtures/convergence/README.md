@@ -553,3 +553,21 @@ The current v39 never-trim list is `[2, 34, 179]`, retaining the prior seed-179 
 and adding the two measured changes. This run does not establish a full dense-seed
 characterization. Exact per-seed equality, mandatory post-excusal trimming, the three-seed
 cap and majority trim coverage remain enforced; the v38 observations above are unchanged.
+
+## Local trim (2026-11-20)
+
+Shared checkpoint agreement is removed: members no longer seal, verify, excuse or adopt, and
+each trims its own cuts. The suite keeps the v39 corpus and its seeds, and the scheduler keeps
+partitions, offline days, clock skew, crashes at trim boundaries, restarts, new empty nodes and
+an old build, which is now a node with `[trim] local = false`. Each modern node's step is its
+own trim (`checkpoint_step` with trim on); the former excusal slot is another trim step, and
+`NEVER_TRIMS` and the old build's excusal continuation are gone. After quiescence the checks
+are: the same retained claims, outside those some node retired, on every trimming node; the
+oracle's projection digests and reader answers on every node; every claim no rule lets a node
+drop, and every person's claim, with the oracle's body; a lacked claim only of a
+`LOCAL_TRIM_KINDS` kind and retired; no invalid or pending record. Exact equality of retained
+and retired sets across trimming nodes, and a node retiring a claim another retired before it
+ever held it, wait for retired IDs to travel with an exchange (TODO: T-wins deletion,
+set-sync S2d); until then such a claim is allowed and that node's `claim_sources`,
+`operations` and graph digest are not compared. The sabotage check is a trim that forgets a
+claim it retired.

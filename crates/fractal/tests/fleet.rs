@@ -1334,16 +1334,11 @@ async fn a_populated_standalone_daemon_founds_a_fleet_with_verified_person_and_a
     let root = tempfile::tempdir().unwrap();
     let mut a = Node::new(root.path(), "studio");
     a.start().await;
-    wait_until(
-        "the initial standalone checkpoint is sealed",
-        30,
-        || async {
-            a.claims()
-                .await
-                .iter()
-                .any(|claim| claim["kind"] == "checkpoint.sealed")
-        },
-    )
+    // The first trim seals the local batches before its cut; wait for it, so the claims below
+    // are written after it.
+    wait_until("the initial trim ran", 30, || async {
+        a.logs().contains("\"action\":\"trimmed\"")
+    })
     .await;
     let agent = "agent/garden/worker";
     let mut claims = vec![
@@ -5542,19 +5537,7 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         assert!(!refused.status.success());
         assert!(String::from_utf8_lossy(&refused.stderr).contains("refused this code"));
     }
-    amber.st_json(&["replication", "checkpoint", "plan", "--cut", "2026-10-01"]);
-    amber.st_json(&[
-        "replication",
-        "checkpoint",
-        "excuse",
-        "fixture-cobalt",
-        "--as",
-        PERSON,
-        "--reason",
-        "The fixture writer may be offline.",
-    ]);
     amber.restart().await;
-    amber.st_json(&["replication", "checkpoint", "status"]);
     amber.st_json(&[
         "replication",
         "checkpoint",

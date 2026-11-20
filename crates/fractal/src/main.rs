@@ -2809,7 +2809,7 @@ enum ReplicationCommand {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
-    /// Plan checkpoints that trim replicated history.
+    /// This member's own trim of replicated history.
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
@@ -2838,28 +2838,8 @@ enum SignaturesCommand {
 
 #[derive(Subcommand)]
 enum CheckpointCommand {
-    /// Show what a checkpoint would drop from this node's store, proved on a copy. Changes nothing.
-    Plan {
-        /// The UTC day that names the checkpoint, such as 2026-09-27. Defaults to the newest due one.
-        #[arg(long)]
-        cut: Option<String>,
-    },
-    /// Show the newest stable checkpoint and who has sealed or verified the one being agreed.
-    Status,
-    /// Stop waiting for an unreachable writer. It fences nothing: what the writer wrote while
-    /// away still replicates when it returns, and its next seal ends the excusal.
-    Excuse {
-        /// The writer, as its node name.
-        writer: String,
-        #[arg(long)]
-        reason: String,
-        /// The person excusing it.
-        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-        #[arg(long = "as")]
-        actor: Option<String>,
-    },
-    /// Go on with checkpoints after a trim stopped because deleting would change the graph.
-    /// The rows stay as they are; the next checkpoint proceeds.
+    /// Go on trimming after a trim stopped because deleting would change the graph. The rows
+    /// stay as they are; the next day's cut proceeds.
     Resume {
         /// What the person found.
         #[arg(long)]
@@ -8291,23 +8271,19 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ));
             let activation_store = store.clone();
             use smallclaims::store::checkpoint_agreement::CheckpointPhase;
-            activation_store.checkpoint_worker_phase(if config.checkpoint.enabled || config.trim.local {
+            activation_store.checkpoint_worker_phase(if config.trim.local {
                 CheckpointPhase::Activation
             } else {
                 CheckpointPhase::Disabled
             });
-            // A member that trims locally still runs the pass, which only finishes a trim it had
-            // already committed.
-            let checkpoint_context = (config.checkpoint.enabled || config.trim.local)
-                .then(|| fractal_daemon::store::CheckpointContext {
-                    now_unix_ms: 0,
-                    configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
-                    scratch: config.state_dir.join("checkpoint"),
-                    reviewer: config
-                        .person
-                        .clone()
-                        .unwrap_or_else(|| "person/operator".into()),
-                });
+            // Every member trims on its own, unless `[trim] local = false` turns it off.
+            if !config.checkpoint.is_default() {
+                stderr_message("st", format_args!("[checkpoint] is ignored: every member trims on its own ([trim])"));
+            }
+            let checkpoint_context = config.trim.local.then(|| fractal_daemon::store::CheckpointContext {
+                now_unix_ms: 0,
+                scratch: config.state_dir.join("checkpoint"),
+            });
             tokio::spawn(fractal_daemon::task_cpu::account("replication.activate", async move {
                 match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
@@ -13892,77 +13868,6 @@ fn compared_ago(peer: &ReplicationPeerStatus, now: u128) -> String {
 /// The first 12 characters of a digest, enough to tell two apart in a status line.
 fn short_digest(digest: &str) -> &str {
     digest.get(..12).unwrap_or(digest)
-}
-
-fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView) -> String {
-    let names = |names: &std::collections::BTreeSet<String>| {
-        if names.is_empty() {
-            "none".to_owned()
-        } else {
-            names.iter().cloned().collect::<Vec<_>>().join(", ")
-        }
-    };
-    let mut output = format!("CHECKPOINTS  {}\n", status.node);
-    match &status.newest_stable {
-        Some(stable) => output.push_str(&format!(
-            "stable        {} · {} participants\n",
-            stable.checkpoint,
-            stable.terms.participants.len()
-        )),
-        None => output.push_str("stable        none\n"),
-    }
-    output.push_str(&format!(
-        "trimmed       {}\n",
-        status.trimmed.as_deref().unwrap_or("none")
-    ));
-    if status.halted {
-        output.push_str(
-            "halted        a trim found the graph would change; see daemon diagnostics, then \
-             `fractal replication checkpoint resume`\n",
-        );
-    }
-    output.push_str(&format!("participants  {}\n", names(&status.participants)));
-    output.push_str("last daemon start (advertised build)\n");
-    for member in &status.participants {
-        output.push_str(&format!(
-            "  machine_version  {member}: {}\n",
-            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
-        ));
-    }
-    if !status.excused.is_empty() {
-        output.push_str(&format!("excused       {}\n", names(&status.excused)));
-    }
-    if !status.left.is_empty() {
-        output.push_str(&format!("left          {}\n", names(&status.left)));
-    }
-    if let Some(pending) = &status.pending {
-        output.push_str(&format!("pending       {}\n", pending.checkpoint));
-        if pending.local_digest_state == "unavailable" {
-            output.push_str("  local digest unavailable\n");
-        }
-        for (member, build) in &pending.builds {
-            output.push_str(&format!("  seal build  {member}: {build}\n"));
-        }
-        output.push_str(&format!("  sealed      {}\n", names(&pending.sealed)));
-        output.push_str(&format!("  unsealed    {}\n", names(&pending.unsealed)));
-        for (writer, difference) in &pending.disagreeing {
-            output.push_str(&format!("  differs     {writer}: {difference}\n"));
-        }
-        output.push_str(&format!("  verified    {}\n", names(&pending.verified)));
-        for (writer, difference) in &pending.verifications_differ {
-            output.push_str(&format!("  verifies    {writer}: different {difference}\n"));
-        }
-        if !pending.verifications_agree {
-            output.push_str(
-                "  verifications disagree, so this checkpoint is not stable; the next due \
-                 checkpoint tries again\n",
-            );
-        }
-    }
-    if let Some(blocking) = status.blocking_summary() {
-        output.push_str(&format!("  blocking    {blocking}\n"));
-    }
-    output
 }
 
 fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
@@ -22984,21 +22889,10 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
     }
 }
 
-/// Seal and verify checkpoints every ten minutes. The proof copies the store and replays it, so
-/// it runs on a blocking thread, and an owned copy left by a crash is swept first.
+/// Trim this member's own due cut every ten minutes, on a blocking thread. A capture sweeps
+/// what an older build's checkpoint proof left in the scratch directory under its lock.
 async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
-    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
-    store.checkpoint_worker_phase(CheckpointPhase::ScratchCleanup);
-    // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
-    // proof or a cleanup error stays visible and prevents a later proof from consuming space.
-    let sweep_store = store.clone();
-    let sweep_dir = context.scratch.clone();
-    match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => stderr_message("fractal", format_args!("checkpoint proof startup cleanup failed: {error:#}")),
-        Err(error) => stderr_message("fractal", format_args!("checkpoint proof startup cleanup stopped: {error}")),
-    }
     loop {
         let store = store.clone();
         let context = fractal_daemon::store::CheckpointContext {
