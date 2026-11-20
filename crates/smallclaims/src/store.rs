@@ -1182,8 +1182,6 @@ impl Store {
         runtime: &dyn Runtime,
         defer_fresh_durability: bool,
     ) -> Result<bool> {
-        // Connection-local: apply on every open, including existing and admitted stores.
-        connection.pragma_update(None, "journal_size_limit", WAL_JOURNAL_SIZE_LIMIT)?;
         // Only an empty database can batch DDL without changing upgrade progress or locking
         // ordinary reopens. Determine this before any migration or schema hook creates objects.
         let fresh: bool = connection.query_row(
@@ -1269,6 +1267,8 @@ impl Store {
         shared_memory: bool,
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
+        // Connection-local: apply on every open, including existing and admitted stores.
+        connection.pragma_update(None, "journal_size_limit", WAL_JOURNAL_SIZE_LIMIT)?;
         let path = if readers.is_admitted() {
             path
         } else {
