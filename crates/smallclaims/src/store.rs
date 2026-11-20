@@ -10809,6 +10809,7 @@ impl Store {
             timings: self.replication_timings(),
             first_sync: self.first_sync()?,
             removed: None,
+            stream_fallbacks: None,
         })
     }
 
