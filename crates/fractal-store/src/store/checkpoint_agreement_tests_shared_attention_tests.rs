@@ -56,9 +56,7 @@ pub fn observe(store: &Store, n: usize) {
 pub fn context(scratch: &Path, days_later: u128) -> CheckpointContext {
     CheckpointContext {
         now_unix_ms: now_ms() + (3 + days_later) * DAY_MS,
-        configured_peers: Vec::new(),
         scratch: scratch.to_path_buf(),
-        reviewer: "person/operator".into(),
     }
 }
 
@@ -70,24 +68,11 @@ pub fn kinds(actions: &[CheckpointAction]) -> Vec<&'static str> {
     actions
         .iter()
         .map(|action| match action {
-            CheckpointAction::Sealed { .. } => "sealed",
-            CheckpointAction::Verified { .. } => "verified",
-            CheckpointAction::ProofFailed { .. } => "proof-failed",
-            CheckpointAction::AttentionRequested { .. } => "attention",
-            CheckpointAction::AttentionWithdrawn { .. } => "withdrawn",
             CheckpointAction::Trimmed { .. } => "trimmed",
-            CheckpointAction::ManifestNeeded { .. } => "manifest-needed",
             CheckpointAction::TrimGraphChanged { .. } => "graph-changed",
             CheckpointAction::TrimDeferred { .. } => "deferred",
             CheckpointAction::SweptTrimmedClaimRows { .. } => "swept",
-            CheckpointAction::HeldBack { .. } => "held-back",
         })
-        .collect()
-}
-
-pub fn stable_cuts(store: &Store) -> Vec<u128> {
-    stable_checkpoints(&store.checkpoint_claims().unwrap())
-        .into_keys()
         .collect()
 }
 

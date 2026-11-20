@@ -6,11 +6,10 @@ registered claim kind once, with its class, where its writes go and, for a trans
 It also holds the checkpoint rules, in order: which claims of a kind a checkpoint may drop.
 
 The daemon reads the policy when it builds the schema registry (`fractal_schema::retention`). It is
-compiled into the build rather than read from a node's configuration, because every member of a
-fleet must apply the same rules: the rules render the rules description, whose hash is the
-`rules_digest` in every checkpoint seal. A member that runs different rules seals different terms
-and the checkpoint waits for it, so no member drops a claim its peers keep. See
-[Checkpoints and trimming](checkpoints.md) for the agreement, the proof and the trim.
+compiled into the build rather than read from a node's configuration, so a rule changes only with
+an audited build. The rules render the rules description, whose hash is the `rules_digest`. Each
+member trims its own copy with its own build's rules. See
+[Checkpoints and trimming](checkpoints.md) for the rules, the checks and the trim.
 
 ## Classes
 
@@ -96,14 +95,15 @@ Changing a class, a window or a `pending` reason changes nothing a checkpoint do
 rule does, and changes the rules digest:
 
 1. List every reader of the kind and give each kept claim a reason in terms of a reader's answer.
-   If the checkpoint proof's reader answers (`subject_answers` in `checkpoint_rules.rs`) do not
-   cover the new reader, add it, so a rule that changes an answer fails the proof.
+   If the reader answers the daily answers check compares (`subject_answers` in
+   `checkpoint_rules.rs`) do not cover the new reader, add it, so a rule that changes an answer
+   shows as a difference between members. A kind is dropped only once it is in `LOCAL_TRIM_KINDS`
+   with a test that every reader answers the same from the full and the trimmed log.
 2. Bump `RULES_VERSION` and say why in its comment.
 3. Add a test in `crates/fractal-store/src/store/checkpoint_tests.rs` that names the dropped and the kept
    claims.
 4. Measure it on a copy of a real store (below), never on a live one.
-5. Deploy it to every member. Until every participant runs the same rules, checkpoints wait at
-   sealing; replication and ordinary work go on.
+5. Deploy it. Each member applies it from its next daily cut; members do not wait for each other.
 
 ## Measuring a change
 

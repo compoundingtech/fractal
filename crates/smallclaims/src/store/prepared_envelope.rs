@@ -298,26 +298,24 @@ pub fn admit_prepared_envelope_tx(
             .query_row(/* sqlite-large-value: allow-for-now lv-hd6a8db95b2e0 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ [record_ref], |row| row.get::<_, String>(0))
             .optional()
             .map_err(internal)?;
-        if *valid && !keep_valid {
-            let stored = transaction
-                .prepare_cached(
-                    /* sqlite-large-value: allow-for-now lv-h2f7c5050108a owner=smallclaims::store::prepared_envelope TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
-                )
-                .map_err(internal)?
-                .execute(/* sqlite-large-value: allow-for-now lv-h68968259fe58 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![hash, bytes, bytes.len() as u64])
-                .map_err(internal)?;
-            super::record_bytes::drop_kept_record_tx(transaction, record_ref, previous_state.as_deref())
-                .map_err(internal)?;
-            outcome.valid += 1;
-            outcome.changed |= stored != 0 || previous_state.as_deref().is_some_and(|state| state != "valid");
-        } else if *valid {
+        // A valid blob is stored whatever the store keeps of its record.
+        let stored = if *valid {
             transaction
                 .prepare_cached(
                     /* sqlite-large-value: allow-for-now lv-h2f7c5050108a owner=smallclaims::store::prepared_envelope TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
                 )
                 .map_err(internal)?
                 .execute(/* sqlite-large-value: allow-for-now lv-h68968259fe58 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![hash, bytes, bytes.len() as u64])
+                .map_err(internal)?
+        } else {
+            0
+        };
+        if *valid && !keep_valid {
+            super::record_bytes::drop_kept_record_tx(transaction, record_ref, previous_state.as_deref())
                 .map_err(internal)?;
+            outcome.valid += 1;
+            outcome.changed |= stored != 0 || previous_state.as_deref().is_some_and(|state| state != "valid");
+        } else if *valid {
             transaction
                 .prepare_cached(
                     /* sqlite-large-value: allow-for-now lv-h7a78994a2ddd owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(

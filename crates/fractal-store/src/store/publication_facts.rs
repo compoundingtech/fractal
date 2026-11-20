@@ -3,7 +3,7 @@
 use super::*;
 
 pub const PAGE: usize = 64;
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hca5f3097fccd owner=fractal_store::store::publication_facts TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h80e0c5f83966 owner=fractal_store::store::publication_facts TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_publication_claims (
     claim_id TEXT PRIMARY KEY,
     subject TEXT NOT NULL,

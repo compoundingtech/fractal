@@ -31,7 +31,7 @@ mod source_gap;
 /// Changes to local provenance/status bookkeeping require an explicit fenced installation.
 pub const LAYOUT: &str = "smallclaims.ivm.provenance-availability.v3";
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha879de4a84fc owner=smallclaims::ivm TODO=chunk-or-reference-variable-columns */ r#"
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3385c17a20c1 owner=smallclaims::ivm TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS ivm_source (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch INTEGER NOT NULL,
     admitted INTEGER NOT NULL, projected INTEGER NOT NULL, local_generation INTEGER NOT NULL

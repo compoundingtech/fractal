@@ -577,7 +577,7 @@ fn tombstones() -> CheckpointManifest {
 fn a_manifest_that_differs_in_any_tombstone_field_is_rejected() {
     let manifest = tombstones();
     let digest = drop_digest(&manifest.envelopes, &manifest.claims);
-    verify_checkpoint_manifest(&manifest, &digest).unwrap();
+    assert_eq!(check_checkpoint_manifest(&manifest).unwrap(), digest);
 
     type Change = fn(&mut CheckpointManifest);
     let changes: [(&str, Change); 25] = [
@@ -656,19 +656,11 @@ fn a_manifest_that_differs_in_any_tombstone_field_is_rejected() {
     for (name, change) in changes {
         let mut changed = manifest.clone();
         change(&mut changed);
-        let error = verify_checkpoint_manifest(&changed, &digest)
-            .expect_err(&format!("a manifest with a changed {name} passed"));
-        assert!(
-            matches!(
-                error.code,
-                "checkpoint-manifest-mismatch" | "checkpoint-manifest-invalid"
-            ),
-            "{name}: {error:?}"
-        );
+        match check_checkpoint_manifest(&changed) {
+            Ok(changed_digest) => assert_ne!(changed_digest, digest, "a changed {name} kept the digest"),
+            Err(error) => assert_eq!(error.code, "checkpoint-manifest-invalid", "{name}: {error:?}"),
+        }
     }
-    // A manifest whose drop differs from the one its participants verified.
-    let error = verify_checkpoint_manifest(&manifest, &"0".repeat(64)).unwrap_err();
-    assert_eq!(error.code, "checkpoint-manifest-mismatch");
     // A page for another checkpoint does not continue a manifest.
     let mut other = manifest.clone();
     assert!(
@@ -784,15 +776,27 @@ fn a_slow_trim_chunk_logs_what_it_deleted_and_where_its_hold_went() {
     let seen = std::sync::Arc::clone(&lines);
     *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
     // Recorded in one transaction, so only the first deletion chunk pays the cost.
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        smallclaims::store::checkpoint::record_checkpoint_tombstones_tx(
+            &transaction, CHECKPOINT, &plan.envelopes, &plan.claims,
+        )
+        .unwrap();
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h21d91b86073e owner=fractal_store::store::tombstones_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, updated_at_unix_ms)
+                 VALUES (?1, ?2, 'trimming', ?3, 0)",
+                rusqlite::params![CHECKPOINT, i64::try_from(cut).unwrap(), plan.drop_digest],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
     store.set_trim_row_cost(smallclaims::store::checkpoint_trim::LOGGED_TRIM_CHUNK);
     store.set_trim_pause(std::time::Duration::ZERO);
     store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
     let mut actions = Vec::new();
-    assert!(
-        store
-            .trim_checkpoint(CHECKPOINT, cut, &plan.drop_digest, &plan.envelopes, &plan.claims, true, &mut actions)
-            .is_err()
-    );
+    assert!(store.finish_trim(CHECKPOINT, &mut actions).is_err());
     let logged = slow_chunks(&lines);
     assert_eq!(logged.len(), 1, "{logged:?}");
     let line = &logged[0];
@@ -847,7 +851,6 @@ fn a_trim_never_makes_a_write_wait_long() {
                     &plan.drop_digest,
                     &plan.envelopes,
                     &plan.claims,
-                    false,
                     &mut actions,
                 )
                 .is_err()
@@ -899,7 +902,6 @@ fn a_trim_never_makes_a_write_wait_long() {
                     &plan.drop_digest,
                     &plan.envelopes,
                     &plan.claims,
-                    false,
                     &mut actions,
                 )
                 .unwrap();

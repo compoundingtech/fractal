@@ -1119,12 +1119,6 @@ fn a_replay_quarantines_claims_it_cannot_project_and_projects_the_rest() {
             .is_some_and(|claim| claim.id == later.id)
     );
     drop(connection);
-    // The proof replays the same claims after creating its temporary tables.
-    let scratch = tempfile::tempdir().unwrap();
-    let (_, _, proof) = target
-        .plan_checkpoint_through(now_ms() + 1_000, None, scratch.path())
-        .unwrap();
-    assert!(proof.passed, "{proof:?}");
 }
 
 /// Writes that arrive together share one transaction and one commit, and each caller hears

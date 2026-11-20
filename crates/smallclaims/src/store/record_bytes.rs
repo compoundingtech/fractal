@@ -176,7 +176,7 @@ pub fn admitted_claim_sql(alias: &str) -> String {
 /// and its claim. A valid claim needs no stored record (`record_bytes`), so a reader that asks
 /// which envelope holds a claim, or how many records an envelope holds, reads this view instead.
 /// It holds no data of its own.
-pub const VIEW_SCHEMA: &str = "
+pub const VIEW_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h8195fc71bd92 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS record_repair_lookups (record_ref TEXT PRIMARY KEY) WITHOUT ROWID;
 CREATE VIEW IF NOT EXISTS replica_record_rows(writer, sequence, envelope_hash, position, state, claim_id) AS
     SELECT writer, sequence, envelope_hash, position, state, claim_id FROM replica_records
@@ -213,7 +213,7 @@ pub fn replace_if_changed(connection: &Connection, kind: &str, name: &str, sql: 
         )
         .optional()?;
     if installed.as_deref().is_some_and(|installed| tokens(installed) != tokens(sql)) {
-        connection.execute_batch(&format!("DROP {kind} {name}"))?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb6e94116e7da owner=smallclaims::store::record_bytes TODO=trace-statement-and-value-representation */ &format!("DROP {kind} {name}"))?;
     }
     Ok(())
 }
@@ -222,7 +222,7 @@ pub fn replace_if_changed(connection: &Connection, kind: &str, name: &str, sql: 
 /// `CREATE TRIGGER IF NOT EXISTS name ... END;` statements, before the batch runs.
 pub fn replace_changed_triggers(connection: &Connection, schema: &str, names: &[&str]) -> Result<()> {
     for name in names {
-        let marker = format!("CREATE TRIGGER IF NOT EXISTS {name} ");
+        let marker = format!(/* sqlite-large-value: allow-for-now lv-h00a91f12b797 owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {name} ");
         let start = schema.find(&marker).with_context(|| format!("missing trigger {name}"))?;
         let length = schema[start..].find("\nEND;").with_context(|| format!("unterminated trigger {name}"))?;
         replace_if_changed(connection, "TRIGGER", name, &schema[start..start + length + "\nEND;".len()])?;
@@ -252,7 +252,7 @@ pub fn valid_records_kept(connection: &Connection) -> Result<bool> {
 pub(crate) fn drop_kept_record_tx(connection: &Connection, record_ref: &str, previous_state: Option<&str>) -> Result<()> {
     if previous_state.is_some_and(|state| state != "repaired") {
         connection.execute(
-            "DELETE FROM replica_records WHERE record_ref=?1 AND state<>'repaired'",
+            /* sqlite-large-value: allow-for-now lv-h6c76a8d11254 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE record_ref=?1 AND state<>'repaired'",
             [record_ref],
         )?;
     }
@@ -309,7 +309,7 @@ fn release_records_page(tx: &Connection, delete_after_ms: u64) -> Result<ValidRe
         Some(value) => value.parse::<u128>()?,
         None => {
             tx.execute(
-                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                /* sqlite-large-value: allow-for-now lv-heef38b6b9ef7 owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
                 params![FIRST_RUN, now.to_string()],
             )?;
             now
@@ -328,16 +328,16 @@ fn release_records_page(tx: &Connection, delete_after_ms: u64) -> Result<ValidRe
     let started = Instant::now();
     let mut report = ValidRecordsRelease::default();
     let page = tx
-        .prepare_cached(DELETE_PAGE_SQL)?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h357fd48bba84 owner=smallclaims::store::record_bytes TODO=trace-statement-and-value-representation */ DELETE_PAGE_SQL)?
         .query_map(params![after, PAGE], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut delete = tx.prepare_cached("DELETE FROM replica_records WHERE rowid=?1")?;
+    let mut delete = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h900de0bb74f9 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE rowid=?1")?;
     for (rowid, deletable) in &page {
         if *deletable {
             if report.deleted == 0 && valid_records_kept(tx)? {
                 tx.pragma_update(None, "user_version", VALID_RECORDS_GONE_VERSION)?;
             }
-            delete.execute([rowid])?;
+            delete.execute(/* sqlite-large-value: allow-for-now lv-h6fab9c5ca933 owner=smallclaims::store::record_bytes TODO=trace-statement-and-value-representation */ [rowid])?;
             report.deleted += 1;
         }
         after = *rowid;
@@ -350,7 +350,7 @@ fn release_records_page(tx: &Connection, delete_after_ms: u64) -> Result<ValidRe
     report.work = started.elapsed();
     if report.scanned > 0 {
         tx.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            /* sqlite-large-value: allow-for-now lv-h0348474f786c owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![RECORDS_CURSOR, after.to_string()],
         )?;
     }
@@ -364,7 +364,7 @@ const LOOKUP_CURSOR: &str = "record_repair_lookup_cursor";
 /// waits here until [`Store::resolve_record_repairs`] or admission puts the record back.
 pub(crate) fn await_repaired_record_tx(connection: &Connection, record_ref: &str) -> Result<()> {
     connection.execute(
-        "INSERT OR IGNORE INTO record_repair_lookups(record_ref) VALUES (?1)",
+        /* sqlite-large-value: allow-for-now lv-hfa5c35e151c6 owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO record_repair_lookups(record_ref) VALUES (?1)",
         [record_ref],
     )?;
     Ok(())
@@ -381,11 +381,11 @@ pub(crate) fn restore_awaited_record_tx(
     position: u64,
     claim_id: &str,
 ) -> Result<bool> {
-    if connection.execute("DELETE FROM record_repair_lookups WHERE record_ref=?1", [record_ref])? == 0 {
+    if connection.execute(/* sqlite-large-value: allow-for-now lv-hd6ff7b9acb84 owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM record_repair_lookups WHERE record_ref=?1", [record_ref])? == 0 {
         return Ok(false);
     }
     connection.execute(
-        "INSERT OR IGNORE INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw,
+        /* sqlite-large-value: allow-for-now lv-h210a8491b266 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw,
              state, claim_id, subject_hint, kind_hint, updated_at_unix_ms)
          SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'valid', id, subject, kind, ?7 FROM claims WHERE id=?8",
         params![record_ref, writer, sequence, envelope_hash, position, VALID_RECORD_RAW, now_ms().to_string(), claim_id],
@@ -463,7 +463,7 @@ fn resolve_page(tx: &Transaction<'_>) -> Result<RecordRepairResolution> {
     // A finished walk starts over: what still waits may arrive later.
     report.done = rows.is_empty();
     tx.execute(
-        "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-hce4ffb6fc1bd owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![LOOKUP_CURSOR, if report.done { "0".to_owned() } else { after.to_string() }],
     )?;
     Ok(report)

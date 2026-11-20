@@ -159,7 +159,7 @@ impl ClaimSource {
         for (name, event, condition, sources) in triggers {
             if name == "record_delete" {
                 // The bounded definition above replaces one that fired on every record deletion.
-                connection.execute_batch("DROP TRIGGER IF EXISTS ivm_install_claim_record_delete")?;
+                connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h82f7de3ee5cb owner=smallclaims::ivm::claim_source TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS ivm_install_claim_record_delete")?;
             }
             connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h0d17d2d43780 owner=smallclaims::ivm::claim_source TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS ivm_install_claim_{name} {event} WHEN {condition} BEGIN
                 UPDATE ivm_install_sources SET available=0 WHERE name IN ({sources});
