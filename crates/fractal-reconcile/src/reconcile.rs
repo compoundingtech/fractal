@@ -1343,6 +1343,12 @@ impl NativeRuntime {
                     require_enforced: request.coverage == Coverage::Enforced,
                 };
                 lane.coverage()?;
+                #[cfg(target_os = "macos")]
+                let darwin_slot = if member.environment.contains_key("FRACTAL_JOB_WORKSPACE") {
+                    Some(fractal_runtime::darwin_slot::Slot::for_lane(&request.name)?.iter().copied()
+                        .find(|slot| cwd.starts_with(slot.root()))
+                        .context("darwin-custody-cwd: shell cwd is outside its admitted slot")?)
+                } else { None };
                 store.prepare_resource_membership(&grant, &member.runtime_id)?;
                 let guarded = || -> Result<()> {
                     if let Some(guard) = guard { guard()?; }
@@ -1361,9 +1367,20 @@ impl NativeRuntime {
                         release()
                     })
                 };
-                let execution = match exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, fractal_runtime::FiniteExecutionAuthorization {
+                let authorization = fractal_runtime::FiniteExecutionAuthorization {
                     lane: &lane, binding: &binding, guard: &guarded, authorize: &authorize,
-                }) {
+                };
+                // Only shell resource callers opt into Darwin custody. Program lanes retain
+                // their existing logical contract; ambient execs and PTYs remain detached.
+                #[cfg(target_os = "macos")]
+                let started = if let Some(slot) = darwin_slot {
+                    exec.spawn_in_darwin_slot_authorized(&member.runtime_id, &launch, &cwd, &environment, authorization, slot)
+                } else {
+                    exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, authorization)
+                };
+                #[cfg(not(target_os = "macos"))]
+                let started = exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, authorization);
+                let execution = match started {
                     Ok(execution) => execution,
                     Err(error) => {
                         if let Some(proof) = error.downcast_ref::<fractal_runtime::StartRejected>() {

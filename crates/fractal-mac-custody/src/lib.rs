@@ -1,9 +1,9 @@
-//! Darwin custody v2. Invoke `sudo -n <helper> <verb> heavy1 [plan-file]`.
+//! Darwin custody v2. Invoke `sudo -n <helper> <verb> <slot> [plan-file]`.
 //! `run` alone takes a plan file and execs in place with inherited stdin/out/err:
 //! success emits no receipt, and slotBusy emits one receipt and exits 75.
 //! Other verbs and failures emit exactly one JSON [`Receipt`]. Sampled RSS is
 //! observational, never an enforcement or peak-memory claim.
-//! Cancellation requires `cancel heavy1 <jobId>` and compares the root binding
+//! Cancellation requires `cancel <slot> <jobId>` and compares the root binding
 //! before any bootout or signal. A bound slot is busy even with no live PIDs;
 //! only matching successful retirement removes the binding. The root lock stays
 //! held from empty-slot validation through exec, where CLOEXEC closes it.
@@ -17,9 +17,26 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::{Component, Path, PathBuf}};
 
 pub const SCHEMA: &str = "fractal.darwin-custody.v2";
-pub const SLOT: &str = "heavy1";
-pub const USER: &str = "_fractal-heavy1";
-pub const SLOT_ROOT: &str = "/Users/Shared/fractal-jobs/heavy1";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slot {
+    pub name: &'static str,
+    pub user: &'static str,
+    pub uid: u32,
+    pub root: &'static str,
+}
+
+/// Dedicated, disjoint account and filesystem custody for each admitted slot.
+pub const SLOTS: &[Slot] = &[
+    Slot { name: "heavy1", user: "_fractal-heavy1", uid: 471, root: "/Users/Shared/fractal-jobs/heavy1" },
+    Slot { name: "gate1", user: "_fractal-gate1", uid: 472, root: "/Users/Shared/fractal-jobs/gate1" },
+    Slot { name: "gate2", user: "_fractal-gate2", uid: 473, root: "/Users/Shared/fractal-jobs/gate2" },
+    Slot { name: "gate3", user: "_fractal-gate3", uid: 474, root: "/Users/Shared/fractal-jobs/gate3" },
+    Slot { name: "eval1", user: "_fractal-eval1", uid: 475, root: "/Users/Shared/fractal-jobs/eval1" },
+];
+
+pub fn slot(name: &str) -> Option<&'static Slot> {
+    SLOTS.iter().find(|slot| slot.name == name)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -62,8 +79,8 @@ pub struct ValidatedPlan {
 }
 impl Plan {
     pub fn validate(self, slot: &str) -> Result<ValidatedPlan, String> {
-        if slot != SLOT { return Err("only heavy1 is compiled into this helper".into()); }
-        self.validate_under(Path::new(SLOT_ROOT))
+        let selected = crate::slot(slot).ok_or("unknown compiled slot")?;
+        self.validate_under(Path::new(selected.root))
     }
 
     fn validate_under(mut self, root: &Path) -> Result<ValidatedPlan, String> {
@@ -144,10 +161,10 @@ pub struct Invocation { pub verb: String, pub slot: String, pub plan_file: Optio
 impl Invocation {
     pub fn parse(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, String> {
         let args: Vec<_> = args.into_iter().collect();
-        if args.len() < 2 { return Err("expected run heavy1 <plan-file>, cancel heavy1 <jobId>, leftovers heavy1, or sample heavy1".into()); }
+        if args.len() < 2 { return Err("expected run <slot> <plan-file>, cancel <slot> <jobId>, leftovers <slot>, or sample <slot>".into()); }
         let verb = args[0].to_str().ok_or("verb must be UTF-8")?;
         let slot = args[1].to_str().ok_or("slot must be UTF-8")?;
-        if slot != SLOT { return Err("only heavy1 is compiled into this helper".into()); }
+        if crate::slot(slot).is_none() { return Err("unknown compiled slot".into()); }
         if !matches!(verb, "run" | "cancel" | "leftovers" | "sample") || args.len() != if matches!(verb, "run" | "cancel") { 3 } else { 2 } {
             return Err("invalid verb or argument count".into());
         }
@@ -184,6 +201,41 @@ mod tests {
     }
     fn plan(root: &Path) -> Plan {
         Plan { job_id: "job-1".into(), argv: vec!["/bin/echo".into(), "<&>".into()], cwd: root.into(), env: BTreeMap::from([("A".into(), "<&>".into())]) }
+    }
+    #[test]
+    fn compiled_slots_and_all_verbs() {
+        let expected = [
+            ("heavy1", "_fractal-heavy1", 471),
+            ("gate1", "_fractal-gate1", 472),
+            ("gate2", "_fractal-gate2", 473),
+            ("gate3", "_fractal-gate3", 474),
+            ("eval1", "_fractal-eval1", 475),
+        ];
+        assert_eq!(SLOTS.len(), expected.len());
+        for (name, user, uid) in expected {
+            let selected = slot(name).unwrap();
+            assert_eq!((selected.name, selected.user, selected.uid), (name, user, uid));
+            assert_eq!(selected.root, format!("/Users/Shared/fractal-jobs/{name}"));
+            for verb in ["run", "cancel", "leftovers", "sample"] {
+                let mut args = vec![verb.into(), name.into()];
+                if verb == "run" { args.push("plan.json".into()); }
+                if verb == "cancel" { args.push("job-1".into()); }
+                assert_eq!(Invocation::parse(args).unwrap().slot, name);
+            }
+            for other in SLOTS.iter().filter(|other| other.name != name) {
+                assert_ne!(selected.user, other.user);
+                assert_ne!(selected.uid, other.uid);
+                assert_ne!(selected.root, other.root);
+                assert!(contained_path(Path::new(other.root), Path::new(selected.root)).is_err());
+            }
+        }
+        assert!(slot("unknown").is_none());
+        for verb in ["run", "cancel", "leftovers", "sample"] {
+            let mut args = vec![verb.into(), "unknown".into()];
+            if verb == "run" { args.push("plan.json".into()); }
+            if verb == "cancel" { args.push("job-1".into()); }
+            assert!(Invocation::parse(args).is_err());
+        }
     }
     #[test]
     fn plan_boundaries() {
@@ -261,10 +313,10 @@ mod tests {
         for args in [vec!["start", "heavy1"], vec!["start", "heavy1", "plan.json"], vec!["run", "heavy1"], vec!["sample", "heavy1", "extra"], vec!["cancel", "heavy2"], vec!["unknown", "heavy1"]] {
             assert!(Invocation::parse(args.into_iter().map(Into::into)).is_err());
         }
-        let invocation = Invocation::parse(["run".into(), SLOT.into(), "plan.json".into()]).unwrap();
+        let invocation = Invocation::parse(["run".into(), "heavy1".into(), "plan.json".into()]).unwrap();
         assert_eq!(invocation.plan_file.unwrap(), PathBuf::from("plan.json"));
-        assert!(Invocation::parse(["cancel".into(), SLOT.into()]).is_err());
-        let cancel = Invocation::parse(["cancel".into(), SLOT.into(), "job.1-a_b".into()]).unwrap();
+        assert!(Invocation::parse(["cancel".into(), "heavy1".into()]).is_err());
+        let cancel = Invocation::parse(["cancel".into(), "heavy1".into(), "job.1-a_b".into()]).unwrap();
         assert_eq!(cancel.job_id.as_deref(), Some("job.1-a_b"));
         for id in ["", "a/b", "a b", "é"] { assert!(validate_job_id(id).is_err()); }
         assert!(validate_job_id(&"a".repeat(128)).is_ok());
@@ -281,7 +333,9 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn unsupported_is_typed() {
-        let inv = Invocation::parse(["leftovers".into(), SLOT.into()]).unwrap();
-        assert!(matches!(execute(&inv).status, Status::Unsupported { .. }));
+        for slot in SLOTS {
+            let inv = Invocation::parse(["leftovers".into(), slot.name.into()]).unwrap();
+            assert!(matches!(execute(&inv).status, Status::Unsupported { .. }));
+        }
     }
 }
