@@ -1,7 +1,7 @@
 //! The mail delivery ledger's backfill runs once per file; its triggers keep it current after.
 use super::*;
 
-const BACKFILLED: &str = "mail_delivery_source_backfilled_v1";
+const BACKFILLED: &str = "mail_delivery_source_backfilled";
 
 /// A `message.sent` claim that no trigger saw: written with the send trigger dropped, as rows
 /// that predate the triggers are.
@@ -51,9 +51,47 @@ fn the_backfill_runs_once_per_file_and_the_triggers_carry_the_rest() {
     }).unwrap();
     assert!(in_ledger(&store, sent.subject.strip_prefix("message/").unwrap()));
     // A file without the marker, as one upgraded from a build that rescanned at every open,
-    // backfills once more and then records the marker.
+    // backfills once more and then records the ledger's shape.
     store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h564788ccf478 owner=fractal_store::store::mail_delivery_source_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [BACKFILLED]).unwrap();
     drop(store);
     let store = Store::open(&path, "fixture").unwrap();
     assert!(in_ledger(&store, "unseen"));
+}
+
+#[test]
+fn a_file_backfilled_for_another_ledger_shape_replaces_its_triggers_and_backfills_again() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    let store = Store::open(&path, "fixture").unwrap();
+    let shape = || -> String {
+        store.readers.get().query_row("SELECT value FROM meta WHERE key=?1", [BACKFILLED], |row| row.get(0)).unwrap()
+    };
+    let current = shape();
+    sent_behind_the_triggers(&store, "older");
+    {
+        // An older ledger: another shape recorded, and a send trigger whose body feeds nothing.
+        let connection = store.connection.write();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hc4f5cec69872 owner=fractal_store::store::mail_delivery_source_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='an-older-shape' WHERE key=?1", [BACKFILLED]).unwrap();
+        connection.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hd255af61d063 owner=fractal_store::store::mail_delivery_source_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER mail_delivery_send_v1 AFTER INSERT ON claims WHEN NEW.kind='message.sent' BEGIN
+                SELECT 1;
+            END;",
+        ).unwrap();
+    }
+    drop(store);
+    let store = Store::open(&path, "fixture").unwrap();
+    assert!(in_ledger(&store, "older"), "a new ledger shape backfills once more");
+    let recorded: String = store.readers.get().query_row("SELECT value FROM meta WHERE key=?1", [BACKFILLED], |row| row.get(0)).unwrap();
+    assert_eq!(recorded, current);
+    // The send trigger is this build's again: a send reaches the ledger at once.
+    let sent = store.append_claim(&ClaimInput {
+        subject: "message/after-shape".into(),
+        kind: "message.sent".into(),
+        actor: Some("agent/a".into()),
+        fields: serde_json::from_value(json!({"from": "agent/a", "to": "agent/b", "content": "hi", "status": "sent"})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert!(in_ledger(&store, sent.subject.strip_prefix("message/").unwrap()));
 }
