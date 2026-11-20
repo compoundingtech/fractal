@@ -1548,6 +1548,21 @@ mod schema_install_tests {
         // (#3777). Without the version it would be refused as an old store at version 0.
         use smallclaims::store::contents::{differences, each_in_parallel, scratch_root, stored};
         use std::sync::atomic::{AtomicUsize, Ordering};
+        // Each independent database owns a different nonce. Validate its representation,
+        // then compare its presence like the other per-open clock values; persistence and
+        // distinct identities are covered by the native source-fence reopen regression.
+        let comparable = |path: &std::path::Path| {
+            let mut contents = stored(path);
+            for row in &mut contents.1 {
+                if let Some(value) = row.strip_prefix("meta: Text(\"local_usage_source_v1_identity\"), Text(\"") {
+                    let nonce = value.strip_suffix("\")").expect("source nonce is a text value");
+                    assert_eq!(nonce.len(), 32);
+                    assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                    *row = "meta: Text(\"local_usage_source_v1_identity\"), Text(\"per-database nonce\")".into();
+                }
+            }
+            contents
+        };
         let directory = tempfile::tempdir_in(scratch_root()).unwrap();
         let whole = directory.path().join("whole.sqlite");
         let commits = Arc::new(AtomicUsize::new(0));
@@ -1563,7 +1578,7 @@ mod schema_install_tests {
         );
         let commits = commits.load(Ordering::Relaxed);
         drop(Store::open(&whole, "node").unwrap());
-        let expected = stored(&whole);
+        let expected = comparable(&whole);
         each_in_parallel(commits, |kept| {
             // Each cut's store goes once it is checked, so the scratch holds a few at a time.
             let cut = tempfile::tempdir_in(directory.path()).unwrap();
@@ -1578,7 +1593,7 @@ mod schema_install_tests {
             let reopened = Store::open(&path, "node")
                 .unwrap_or_else(|error| panic!("cut after {kept} of {commits}: {error:#}"));
             drop(reopened);
-            let difference = differences(&stored(&path), &expected);
+            let difference = differences(&comparable(&path), &expected);
             assert!(difference.is_empty(), "cut after {kept} of {commits}: {difference:#?}");
         });
     }
