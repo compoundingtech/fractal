@@ -305,7 +305,7 @@ impl AdhocWorkStore for Store {
                 return Err(FractalError::new("stale-program-attempt", "native turn parent left its exact live attempt"));
             }
             let existing = tx.query_row(
-                &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+                /* sqlite-large-value: allow-for-now lv-h343eb56d49a5 owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
                     FROM claims WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
                 [&run], claim_from_row,
             ).optional().map_err(internal)?;

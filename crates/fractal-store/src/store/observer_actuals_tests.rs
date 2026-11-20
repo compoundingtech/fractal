@@ -14,7 +14,19 @@ fn append(store: &Store, subject: &str, at: u128, fields: Value) -> String {
     claim.id
 }
 
+/// Let the writer finish the preparation a delivery deferred. Its paced turns run between
+/// writer loans (#6859), so one landing between the fence's seed and its check moves the cut,
+/// which the fence rightly refuses; on a loaded host that happens often enough to fail.
+fn settle(store: &Store) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while store.runtime.deferred_pending(&store.readers.get()).unwrap() {
+        assert!(std::time::Instant::now() < deadline, "deferred preparation must finish");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn read(store: &Store) -> (Option<Value>, u64) {
+    settle(store);
     let fence = resource_preparation::Fence::new(store);
     let prepared = fence.prepare_with_actuals(store, |connection, serial| {
         let work = smallclaims::sqlite::work::SqliteWorkScope::start();
