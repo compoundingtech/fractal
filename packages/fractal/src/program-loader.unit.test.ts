@@ -10,6 +10,7 @@ import { describe, expect, it } from '@effect/vitest'
 import { Effect } from 'effect'
 
 import landingProgram from '../fixtures/programs/factory/land-program/mission.ts'
+import seatTurnProgram from '../fixtures/programs/fractal/seat-turn/mission.ts'
 
 import { emit, mission, type MissionInput } from './mod.ts'
 import { bundleProgram } from './program-bundler.ts'
@@ -130,6 +131,30 @@ const refusal = (root: string, bundleDir: string | undefined) =>
 const scratch = () => mkdtempSync(join(tmpdir(), 'fractal-bundles-'))
 
 describe('program missions', () => {
+  it.effect('publishes the standard seat turn through the normal tree and standalone bundle paths', () =>
+    Effect.gen(function* () {
+      const bundleDir = scratch()
+      const subjects = yield* loadSubjectTree({ root: programs, context: undefined, bundleDir })
+      const loaded = subjects.find((subject) => subject.id === 'fractal/seat-turn')
+      if (loaded?.declaration._tag !== 'Module') return yield* Effect.die('standard seat-turn mission did not load')
+      const declaration = loaded.declaration.intent as MissionInput<string>
+      const kdl = emit([mission(declaration)])
+      expect(kdl).toContain('mission "fractal/seat-turn"')
+      for (const name of ['agent', 'instructions', 'context']) expect(kdl).toContain(`input "${name}" kind="text"`)
+      expect(declaration.steps).toHaveLength(1)
+      expect(kdl).not.toContain('assigned-to=')
+      const standalone = yield* programMission({
+        root: programs, file: join(programs, 'fractal/seat-turn/mission.ts'), definition: seatTurnProgram, bundleDir,
+      })
+      expect(standalone.kdl).toBe(kdl)
+      const hash = /sha256="([0-9a-f]{64})"/u.exec(kdl)?.[1]
+      expect(hash).toBeDefined()
+      const bundle = readFileSync(join(bundleDir, `${hash}.mjs`))
+      expect(createHash('sha256').update(bundle).digest('hex')).toBe(hash)
+      expect(bundle.toString()).toContain('agent.turn')
+    }).pipe(Effect.provide(NodeFileSystem.layer)), 120_000,
+  )
+
   it.effect('preserves program mission budgets and refuses retired authoring fields', () =>
     Effect.gen(function* () {
       const file = join(programs, 'factory/land-program/mission.ts')

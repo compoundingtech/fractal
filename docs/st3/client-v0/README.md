@@ -1807,8 +1807,11 @@ Stale generation, subject revision, incarnation, preview or terminal screen fenc
 `stale-fence` without a partial mutation.
 Multi-subject actions commit atomically or have no effect.
 
-New completed local response receipts last at least **7 days**. Clients must never reuse a
-key for another request. After reclamation, a late retry cannot execute the original effect
+New completed local response receipts last at least **7 days**, except a lease renewal's,
+which lasts **1 hour** unless the member's `[trim] replay_safe_receipts` sets another window
+(`0` keeps it the full 7 days). A renewal is replay-safe: one retried after its receipt is gone
+renews the lease again, or is refused as any renewal is if the lease has since ended, never
+`idempotency-key-expired`. Clients must never reuse a key for another request. After reclamation, a late retry cannot execute the original effect
 twice: the daemon seeks its primary effect claim through the existing operation index,
 including existing checkpoint operation tombstones. Document writes recover the original
 binding response, even if a retry supplies different bytes and a current binding token. Other

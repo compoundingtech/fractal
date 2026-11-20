@@ -88,6 +88,7 @@ pub mod prepared_seal;
 #[cfg(test)]
 mod prepared_seal_tests;
 mod binary_payloads;
+pub mod record_bytes;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -109,8 +110,10 @@ mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod wal_escalation;
+pub mod blob_file;
 pub mod document_index;
 mod document_pages;
+pub mod durability;
 pub mod claim_ranges;
 pub mod first_sync;
 pub mod principals;
@@ -1093,6 +1096,7 @@ impl Store {
             );
         }
         projection_digest::register(&connection)?;
+        blob_file::attach_writer(&connection, &path)?;
         crate::sqlite::observe(&mut connection);
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         // Keep the hot graph and replication index pages in SQLite's bounded
@@ -1155,6 +1159,7 @@ impl Store {
                 | OpenFlags::SQLITE_OPEN_URI,
         )?;
         projection_digest::register(&connection)?;
+        blob_file::attach_writer(&connection, &uri)?;
         crate::sqlite::observe(&mut connection);
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         Self::create_schema(&connection, &*runtime)?;
@@ -6389,7 +6394,7 @@ pub fn collect_referenced_blobs(
     }
     for hash in hashes {
         if let Some(bytes) = connection
-            .query_row("SELECT bytes FROM blobs WHERE hash=?1", [&hash], |row| {
+            .query_row(concat!("SELECT ", crate::blob_bytes!("b"), " FROM blobs AS b WHERE b.hash=?1"), [&hash], |row| {
                 row.get(0)
             })
             .optional()?
@@ -6810,6 +6815,30 @@ impl Store {
         idempotency::next_expiry(&self.readers.get())
     }
 
+    /// When the replay-safe pass next has a receipt to expire, for `window_ms`.
+    pub fn next_replay_safe_expiry(&self, window_ms: i64) -> Result<Option<i64>> {
+        idempotency::next_replay_safe_expiry(&self.readers.get(), window_ms)
+    }
+
+    /// Remove one chunk of replay-safe receipts older than `window_ms`, with the clock limit of
+    /// `cleanup_idempotency`. The runtime says which must still wait for the ordinary retention.
+    pub fn cleanup_replay_safe_idempotency(&self, now_unix_ms: i64, window_ms: i64) -> Result<idempotency::Cleanup> {
+        let mut writer = self.connection.write();
+        let transaction = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(clock_limit) = idempotency::clock_limit(&transaction)? else {
+            return Ok(idempotency::Cleanup::default());
+        };
+        let cleaned = idempotency::cleanup_replay_safe_tx(
+            &transaction,
+            now_unix_ms.min(clock_limit),
+            window_ms,
+            idempotency::CLEANUP_CHUNK,
+            |connection, response| self.runtime.replay_safe_response_pinned(connection, response),
+        )?;
+        transaction.commit()?;
+        Ok(cleaned)
+    }
+
     pub fn idempotency_clock_limit(&self) -> Result<Option<i64>> {
         idempotency::clock_limit(&self.readers.get())
     }
@@ -6971,7 +7000,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",
+                concat!("SELECT ", crate::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),
                 params![name, hash],
                 |row| row.get(0),
             )
@@ -7246,16 +7275,7 @@ impl Store {
     }
 
     pub fn get_blob(&self, hash: &str) -> Result<Option<Vec<u8>>> {
-        let connection = self.readers.get();
-        connection
-            .query_row(
-                "SELECT bytes FROM blobs WHERE hash=?1
-                        UNION ALL SELECT bytes FROM local_blobs WHERE hash=?1 LIMIT 1",
-                [hash],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Into::into)
+        self.blob_bytes(hash)
     }
 
     pub fn bind_fleet(&self, fleet_id: &str) -> Result<()> {
@@ -10809,6 +10829,7 @@ impl Store {
             timings: self.replication_timings(),
             first_sync: self.first_sync()?,
             removed: None,
+            stream_fallbacks: None,
         })
     }
 

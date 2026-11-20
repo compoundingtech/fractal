@@ -70,7 +70,7 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 #[test]
 fn signature_reference_reader_precedes_the_default_writer_format() {
     assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
-    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 22);
+    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 26);
 }
 
 #[test]
@@ -139,7 +139,9 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     assert_eq!(reopened.connection.write().pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 21);
     assert_eq!(verdict(&reopened, &claim), Verdict::Verified);
     drop(reopened);
-    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 23).unwrap();
+    // A version past the ceiling is refused. (A fixed 23 opened once the ceiling passed it.)
+    rusqlite::Connection::open(&path).unwrap()
+        .pragma_update(None, "user_version", fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION + 1).unwrap();
     assert!(Store::open(&path, "studio", Arc::new(Plain)).is_err());
 }
 

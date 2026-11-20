@@ -1058,9 +1058,25 @@ invariants; no growing receipt body is synthesized by this update.
 
 `fractal_store::store::escalation` owns the restart index writes
 `lv-h0003f1ad06a3` and `lv-ha65878244411`, and the clock projection schema
-`lv-h6232d25a79e0`. The restart index stores only run and origin identifiers,
+`lv-hfeeb5c6bf008` (replacing `lv-h6232d25a79e0`). The restart index stores only run and origin identifiers,
 never policy text, messages, or ask bodies. Its key is removed when the terminal
 ladder has no remaining deadline.
+
+The same maintainer owns registration write `lv-h799cf224d6de`, canonical
+creation-receipt lookup `lv-h1bb6598fab35`, and bootstrap completion marker
+`lv-hc79245b566e4`. Registration copies the run subject's identifier suffix and
+the first unrepaired canonical creation receipt's origin into the rebuildable
+run roster. It preserves receipt authority and schedules existing runs after a
+restart; run IDs and origin keys remain inline variable strings without a byte
+bound. The lookup's `LIMIT 1` bounds rows, not identifier size, and its dynamic
+`canonical_sql` sink must remain linked to the canonical ordering expansion.
+Registration must eventually use bounded physical identifiers/references with
+keyed reclamation while preserving original-creator authority. The meta write
+has fixed literal key/value strings and no external bind data; its transitional
+record tracks the once-only backfill and cleanup lifecycle rather than granting
+permission for arbitrary metadata values. The schema catalog includes
+`local_escalation_runs_v1(run_id TEXT PRIMARY KEY, origin TEXT NOT NULL)`;
+unchanged clock tables and index expressions retain their existing size debt.
 
 Clock metadata is rebuildable from canonical receipts: subject and claim IDs,
 canonical sortable key, normalized state, accepted time and explicit wait deadline.

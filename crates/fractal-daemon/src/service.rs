@@ -1758,6 +1758,7 @@ mod tests {
         changes: crate::changes::config::Config::default(),
         checkpoint: crate::config::CheckpointConfig::default(),
         trim: crate::config::TrimConfig::default(),
+        store: crate::config::StoreConfig::default(),
         limits: crate::config::LimitsConfig::default(),
         logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
