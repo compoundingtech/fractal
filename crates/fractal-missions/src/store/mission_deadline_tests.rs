@@ -879,12 +879,17 @@ fn deadline_definition_versions_skip_only_incompatible_tables() {
     target.begin_first_sync("source").unwrap();
     let mut legacy = source.export_replication_summary(TEST_FLEET).unwrap();
     assert_eq!(legacy.projection_versions["mission_run_deadlines"], 3);
+    assert_eq!(legacy.projection_versions["blobs"], 2);
+    assert!(!legacy.projection_digests.contains_key("blobs"));
+    let current_versions = legacy.projection_versions.clone();
     assert!(
         legacy
             .projection_digests
             .contains_key("mission_run_deadlines")
     );
     legacy.schema_digest = legacy.projection_registry_digest.take().unwrap();
+    // Missing metadata means definition 1 for every table, including blobs before
+    // their bytes moved out of the replicated projection digest.
     legacy.projection_versions.clear();
     legacy
         .projection_digests
@@ -899,7 +904,7 @@ fn deadline_definition_versions_skip_only_incompatible_tables() {
         .unwrap();
     assert_eq!(
         status.peers[0].incompatible_projection_tables,
-        ["mission_run_deadlines"]
+        ["blobs", "mission_run_deadlines"]
     );
     assert!(!status.peers[0].projection_comparison_waiting);
     assert!(
@@ -928,9 +933,7 @@ fn deadline_definition_versions_skip_only_incompatible_tables() {
             .projection_digests["mission_runs"]
             .clone(),
     );
-    legacy
-        .projection_versions
-        .insert("mission_run_deadlines".into(), 3);
+    legacy.projection_versions = current_versions;
     target
         .receive_replication_exchange_asking("source", TEST_FLEET, &legacy, true)
         .unwrap();

@@ -401,6 +401,11 @@ pub const FUTURE_SIGNATURE_MS: u64 = 60 * 60 * 1_000;
 /// rule applies it to the same claims.
 pub const FRESHNESS_FROM_UNIX_MS: u64 = 1_796_083_200_000; // 2026-12-01T00:00:00Z
 
+/// No path forgets a signed claim younger than this by its batch's time: the window plus a day.
+/// Within the window every member still holds every earlier use of a signature, so a copy of it
+/// reads the same everywhere; the window makes any later copy invalid on its own.
+pub const FORGET_SIGNED_AFTER_MS: u64 = FRESHNESS_WINDOW_MS + 24 * 60 * 60 * 1_000;
+
 /// The verdict reason for a claim whose batch is out of its writer's order.
 pub const BATCH_DISORDER: &str = "its batch is timed before a batch it follows";
 

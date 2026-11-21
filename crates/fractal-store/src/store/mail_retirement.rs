@@ -18,7 +18,7 @@
 //! a time inside a writer hold bounded by a time budget, and never touches envelopes,
 //! checkpoints or seals. Stream mail lives in the messages shard and is not touched here.
 use super::*;
-use smallclaims::store::checkpoint::{ClaimTombstone, delete_dropped_rows_tx};
+use smallclaims::store::checkpoint::{ClaimTombstone, delete_dropped_rows_tx, young_signed_claim_tx};
 use std::time::{Duration, Instant};
 
 /// A closed thread stays this long before it retires: 7 days.
@@ -67,7 +67,8 @@ enum Judgement {
     Retire(Vec<(String, Option<String>, String)>),
     /// A person's thread, a cited one, or one already gone.
     Keep,
-    /// Closed, but its sent claim has not arrived: judge it again later.
+    /// Closed, but its sent claim has not arrived, or a claim of it is younger than the cutoff:
+    /// judge it again later.
     Defer,
 }
 
@@ -83,7 +84,10 @@ impl Store {
         }
         // Citations live in claim bodies; the cache answers who cites a thread without reading them.
         self.catch_up_local_trim_citations()?;
-        let cutoff = now_ms.saturating_sub(RETAIN_AFTER_CLOSE_MS);
+        // A week after the close, and never inside the freshness window's forget bound. `judge`
+        // also waits for every claim of the thread to pass it; a claim is accepted no earlier
+        // than its batch.
+        let cutoff = now_ms.saturating_sub(RETAIN_AFTER_CLOSE_MS.max(smallclaims::principal::FORGET_SIGNED_AFTER_MS));
         let (after, mut deferred) = self.retirement_progress()?;
         // Deferred threads first, the oldest first; one still deferred goes to the back.
         let mut judged: Vec<(Option<i64>, String, Judgement)> = Vec::new();
@@ -113,6 +117,14 @@ impl Store {
                 // one waits behind the cursor for the next step.
                 let finished = !cut
                     && match judgement {
+                        // The forget bound still holds a claim of it: name it, defer the thread
+                        // and go on, rather than fail the step on it every time.
+                        Judgement::Retire(claims) if let Some(young) = young_signed_claim_tx(&transaction, &[],
+                            &claims.iter().map(|(id, operation, _)| tombstone(id, operation.clone())).collect::<Vec<_>>())? => {
+                            eprintln!("fractal: mail retirement deferred {subject}: signed claim {young} is inside the freshness window's forget bound");
+                            still_deferred.push(subject.clone());
+                            true
+                        }
                         Judgement::Retire(claims) => delete_thread(&transaction, claims, started, budget, &mut done)?,
                         Judgement::Keep => true,
                         Judgement::Defer => {
@@ -328,6 +340,13 @@ fn judge(
     });
     if depth > 0 && !old_enough {
         return Ok(Judgement::Keep);
+    }
+    // The close is not always the newest claim: a delivery or a read can be written or arrive
+    // after it. Every claim must be past the cutoff, which is never inside the freshness
+    // window's forget bound, or the deletion would refuse the thread on every step.
+    let all_old = claims.iter().all(|(_, _, _, _, _, accepted, _)| accepted.parse::<u64>().is_ok_and(|accepted| accepted <= cutoff));
+    if !all_old {
+        return Ok(if depth == 0 { Judgement::Defer } else { Judgement::Keep });
     }
     let own: std::collections::BTreeSet<&str> = claims.iter().map(|(id, ..)| id.as_str()).collect();
     for (id, ..) in &claims {
