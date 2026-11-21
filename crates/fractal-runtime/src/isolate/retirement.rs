@@ -346,7 +346,7 @@ pub fn end_scope_with_proof(
             proof.validate(unit)?;
             return Ok(Some(proof));
         }
-        let receipt = super::darwin_slot::current_helper()?.cancel(unit, guard)?;
+        let receipt = super::darwin_slot::current_helper()?.cancel(slot, unit, guard)?;
         let darwin = super::darwin_slot::RetirementProof::from_receipt(slot.name(), unit, &receipt)?;
         let proof = ScopeRetirementProof {
             version: 1, unit: unit.into(), load_state: "darwin-slot".into(),
