@@ -2729,6 +2729,14 @@
       "verification": "real offline CLI on a private store; cross-process daemon and SQLite writer locks refused, startup SQL byte-identical, second run byte-identical, invalid schema exits nonzero"
     },
     {
+      "command": "st store restore-blob-bytes",
+      "description": "Restore moved blob bytes to the store offline so a previous release can open it; stop the daemon first",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_rollback"
+      ],
+      "verification": "real offline CLI between fleet-member versions; previous release refuses the moved store and opens it after restoration (requires ST3_COMPAT_BIN)"
+    },
+    {
       "command": "st subject basis",
       "description": "Read the complete raw input-set token for a derived-state basis.",
       "tests": [

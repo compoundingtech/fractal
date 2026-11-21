@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refresh the generated CLI actor contract and action coverage inventory for offline blob-byte restoration.",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "No authorization or rule changes; the actor contract is regenerated from the live CLI graph."},
+  "compatibility": {"status": "none", "detail": "Existing CLI behavior is unchanged; the coverage inventory now records restore-blob-bytes and its mixed-version fleet test."},
+  "downtime": {"status": "none", "detail": "Documentation and generated inventory only."},
+  "manual": {"status": "none", "detail": "No new operator steps."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
