@@ -579,6 +579,31 @@ impl Store {
         // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
         let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(&local_trim_capture_kinds()))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
+        // The forget bound: nothing signed goes until its batch is older than the window and a day.
+        // A claim is accepted no earlier than its batch; a later day's cut takes what is kept here.
+        {
+            use crate::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS, FRESHNESS_WINDOW_MS};
+            let now = u64::try_from(context.now_unix_ms).unwrap_or(u64::MAX);
+            let young = staged.unprotected_younger_than(
+                now.saturating_sub(FORGET_SIGNED_AFTER_MS),
+                FRESHNESS_FROM_UNIX_MS.saturating_sub(FRESHNESS_WINDOW_MS),
+            )?;
+            if !young.is_empty() {
+                let reader = self.readers.get();
+                let mut signed = reader.prepare_cached("SELECT EXISTS(SELECT 1 FROM claim_signatures WHERE claim_id=?1)")?;
+                let keep = young
+                    .into_iter()
+                    .filter_map(|id| match signed.query_row(/* sqlite-large-value: allow-for-now lv-h599a6a02d7b4 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&id], |row| row.get::<_, bool>(0)) {
+                        Ok(true) => Some(Ok(id)),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(signed);
+                drop(reader);
+                staged.protect_ids(&keep)?;
+            }
+        }
         staged.split_envelopes()?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
         #[cfg(any(test, feature = "test-support"))]
@@ -1034,6 +1059,24 @@ impl Store {
                 };
                 body_bytes += stages.time("body_bytes", || claim_body_bytes(&transaction, &envelope_claims))?;
                 // The runtime's work around the delete is what the hook took beyond its statements.
+                // The forget bound holds a signed claim this cut would delete (a trim planned before
+                // the bound, resumed now): set the cut aside and name it, so the next day's cut,
+                // which keeps such claims, goes on instead of this one failing every step.
+                if let Some(young) = super::checkpoint::young_signed_claim_tx(&transaction, envelope.as_slice(), &envelope_claims)? {
+                    transaction.rollback()?;
+                    drop(connection);
+                    self.set_checkpoint_state(checkpoint, 0, "set-aside")?;
+                    self.checkpoint_diagnostic(
+                        "checkpoint-trim-young-signed-claim",
+                        &format!(
+                            "{checkpoint} would delete signed claim {young}, whose batch is inside the \
+                             freshness window's forget bound; the cut is set aside and the next day's \
+                             cut keeps such claims"
+                        ),
+                        checkpoint,
+                    )?;
+                    return Ok(());
+                }
                 let hooked = std::time::Instant::now();
                 let (deleted, deletes) = timing_deletes(|| {
                     self.runtime.delete_trimmed_claims_tx(&transaction, &envelope_claims, &mut || {

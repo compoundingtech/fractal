@@ -316,6 +316,8 @@ fn checkpoint_proof_trim_and_canonical_renumber_preserve_episode_fences() {
     let plan = checkpoint::plan_drops(&sealed);
     assert!(!plan.claims.is_empty(), "exercise an actual redundant receipt drop");
     let before = projection_digest::oracle(&source.readers.get()).unwrap();
+    // The trim runs past the forget bound of everything it drops.
+    source.set_write_clock_at(cut + 86_400_000).unwrap();
     let mut connection = source.connection.write();
     let tx = connection.transaction().unwrap();
     checkpoint::record_checkpoint_tombstones_tx(&tx, &checkpoint::checkpoint_name(cut), &plan.envelopes, &plan.claims).unwrap();
