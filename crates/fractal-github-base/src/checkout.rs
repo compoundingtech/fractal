@@ -287,8 +287,17 @@ pub mod test_support {
         assert!(status.success(), "git {arguments:?}");
     }
 
-    /// A bare origin, a store-shaped `.bare` container, and its main worktree.
+    /// An ordinary clone; its lease state is isolated in a sibling store.
     pub fn repository(root: &Path) -> PathBuf {
+        repository_fixture(root, false)
+    }
+
+    /// A real store container and main worktree, for container-admission tests.
+    pub fn store_repository(root: &Path) -> PathBuf {
+        repository_fixture(root, true)
+    }
+
+    fn repository_fixture(root: &Path, store_shaped: bool) -> PathBuf {
         let origin = root.join("origin.git");
         let seed = root.join("seed");
         let clone = root.join("repo");
@@ -304,22 +313,24 @@ pub mod test_support {
             &seed,
             &["push", "--quiet", &origin.to_string_lossy(), "main"],
         );
-        git(
-            root,
-            &["clone", "--quiet", "--bare", &origin.to_string_lossy(), ".bare"],
-        );
-        // TMPDIR may itself be inside the real mr store. Use its actual container
-        // topology rather than an ordinary clone that store admission must reject.
         let bare = root.join(".bare");
-        git(
-            &bare,
-            &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
-        );
-        git(&bare, &["fetch", "--quiet", "origin"]);
-        git(
-            &bare,
-            &["worktree", "add", "--quiet", &clone.to_string_lossy(), "main"],
-        );
+        if store_shaped {
+            git(
+                root,
+                &["clone", "--quiet", "--bare", &origin.to_string_lossy(), ".bare"],
+            );
+            git(
+                &bare,
+                &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+            );
+            git(&bare, &["fetch", "--quiet", "origin"]);
+            git(
+                &bare,
+                &["worktree", "add", "--quiet", &clone.to_string_lossy(), "main"],
+            );
+        } else {
+            git(root, &["clone", "--quiet", &origin.to_string_lossy(), "repo"]);
+        }
         // A commit that reaches origin after the clone is only visible after a fetch.
         std::fs::write(seed.join("README"), "second\n").unwrap();
         git(&seed, &["commit", "--quiet", "-am", "second"]);
@@ -327,9 +338,12 @@ pub mod test_support {
             &seed,
             &["push", "--quiet", &origin.to_string_lossy(), "main"],
         );
-        let store = std::fs::canonicalize(root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let store = if store_shaped { root } else { root.join("mr-store") };
         let mut stores = STORES.lock().unwrap();
-        stores.insert(std::fs::canonicalize(&bare).unwrap(), store.clone());
+        if store_shaped {
+            stores.insert(std::fs::canonicalize(&bare).unwrap(), store.clone());
+        }
         stores.insert(std::fs::canonicalize(&clone).unwrap(), store);
         clone
     }
@@ -373,22 +387,30 @@ mod tests {
 
     #[test]
     fn checkout_fixture_leases_use_only_their_own_store() {
-        let root = tempfile::tempdir().unwrap();
-        let repository = repository(root.path());
-        let store = std::fs::canonicalize(root.path()).unwrap();
-        let host_store = root.path().join("host-store-must-not-be-used");
-        let bare = root.path().join(".bare");
-        for source in [&repository, &bare] {
-            let mut command = std::process::Command::new("mr");
-            command.env("MEGAREPO_STORE", &host_store);
-            let command = test_support::lease_command(command, source);
-            assert!(command.get_envs().any(|(name, value)|
-                name == "MEGAREPO_STORE" && value == Some(store.as_os_str())));
-            let _lease = fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
-                command, &root.path().join("prospective"), source,
-            ).unwrap();
-            assert!(root.path().join(".state/deletion-leases").is_dir());
-            assert!(!host_store.exists());
+        for store_shaped in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let repository = if store_shaped {
+                test_support::store_repository(root.path())
+            } else {
+                repository(root.path())
+            };
+            let canonical = std::fs::canonicalize(root.path()).unwrap();
+            let store = if store_shaped { canonical } else { canonical.join("mr-store") };
+            let host_store = root.path().join("host-store-must-not-be-used");
+            let bare = root.path().join(".bare");
+            let sources = [Some(&repository), store_shaped.then_some(&bare)];
+            for source in sources.into_iter().flatten() {
+                let mut command = std::process::Command::new("mr");
+                command.env("MEGAREPO_STORE", &host_store);
+                let command = test_support::lease_command(command, source);
+                assert!(command.get_envs().any(|(name, value)|
+                    name == "MEGAREPO_STORE" && value == Some(store.as_os_str())));
+                let _lease = fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
+                    command, &root.path().join("prospective"), source,
+                ).unwrap();
+                assert!(store.join(".state/deletion-leases").is_dir());
+                assert!(!host_store.exists());
+            }
         }
     }
     #[test]
