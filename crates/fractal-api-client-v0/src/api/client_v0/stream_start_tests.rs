@@ -167,7 +167,7 @@ async fn terminal_follow_live_grant_changes_cancel_local_and_remote_reads() {
                 })
             };
             let follow = if remote {
-                TerminalFollow::Remote { id: subject.into(), owner: "owner".into(), incarnation: "one".into(), session }
+                TerminalFollow::Remote { id: subject.into(), owner: "host/owner".into(), incarnation: "one".into(), session }
             } else {
                 TerminalFollow::Local { id: subject.into(), incarnation: "one".into(), session }
             };

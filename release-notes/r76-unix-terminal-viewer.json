@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No replay changes."},
   "schema": {"status": "none", "detail": "No schema changes."},
   "rules": {"status": "none", "detail": "No rule changes."},
-  "compatibility": {"status": "none", "detail": "Trusted Unix sessions, including anonymous read-only viewers, do not require browser pairing grants. Live browser follower tests preserve the shared local screen watcher's reconnect linger while requiring cancellation of pending remote reads."},
+  "compatibility": {"status": "none", "detail": "Terminal authorization accepts trusted Unix viewers without browser pairing grants while preserving their existing read-only scopes. Other projections retain their acting-identity requirements. Live browser follower tests preserve the shared local screen watcher's reconnect linger while requiring cancellation of pending remote reads."},
   "downtime": {"status": "none", "detail": "No downtime."},
   "manual": {"status": "none", "detail": "No operator steps."},
   "recovery": {"status": "none", "detail": "No recovery changes."}

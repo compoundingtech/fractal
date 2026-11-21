@@ -6752,7 +6752,14 @@ async fn terminal_authorize(state: &AppState, session: &ClientSession) -> Result
     let state = state.clone();
     let session = session.clone();
     super::read_deadline::store_read(&store, move || {
-        let current = revalidate_session(&state, &session)?;
+        // Trusted Unix viewers consume read-only terminal capabilities without a
+        // browser grant. Keep this exemption terminal-specific: other projections
+        // may require a concrete acting identity even on the local transport.
+        let current = if session.transport == "unix" {
+            session
+        } else {
+            revalidate_session(&state, &session)?
+        };
         require_scope(&current, "terminal.read")?;
         Ok(current)
     }).await.unwrap_or_else(|_| Err(ApiError::internal("terminal session recheck failed")))
