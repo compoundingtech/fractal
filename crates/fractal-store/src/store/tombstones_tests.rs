@@ -39,10 +39,15 @@ fn store_with_drops(origin: &str) -> (Store, DropPlan) {
     (store, plan)
 }
 
+/// Trim as a member does once what it drops is past the freshness window's forget bound.
 fn trim(store: &Store, plan: &DropPlan) {
+    store
+        .set_write_clock_at(now_ms() + u128::from(smallclaims::principal::FORGET_SIGNED_AFTER_MS) + 86_400_000)
+        .unwrap();
     store
         .apply_checkpoint_drop(CHECKPOINT, &plan.envelopes, &plan.claims)
         .unwrap();
+    store.set_write_clock_offset(0).unwrap();
 }
 
 /// Send `to` what `from` holds and `to` lacks, as one exchange does. With `buckets`, `to`
@@ -1104,4 +1109,45 @@ fn trimmed_and_untrimmed_nodes_still_agree_after_the_sweep() {
     sync(&birch, "birch", &alder, true);
     sync(&alder, "alder", &birch, true);
     assert_eq!(authority(&alder), authority(&birch));
+}
+
+/// A trim that would forget signed claims inside the forget bound (planned before the bound, and
+/// resumed now) is set aside with a diagnostic naming the claim, deletes nothing, and does not
+/// fail the step.
+#[test]
+fn a_resumed_trim_holding_a_young_signed_claim_is_set_aside_and_named() {
+    use smallclaims::principal::FRESHNESS_FROM_UNIX_MS;
+    let store = Store::open_memory("alder").unwrap();
+    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    let at = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    store.set_write_clock_at(at).unwrap();
+    write_diagnostics(&store, "daemon/alder", 5);
+    let plan = plan_drops(&store.checkpoint_sealed_set(at + 1_000).unwrap());
+    assert!(!plan.claims.is_empty());
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        smallclaims::store::checkpoint::record_checkpoint_tombstones_tx(&transaction, CHECKPOINT, &plan.envelopes, &plan.claims).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h2499055bd4e4 owner=fractal_store::store::tombstones_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, updated_at_unix_ms) VALUES (?1, ?2, 'trimming', ?3, 0)",
+            rusqlite::params![CHECKPOINT, i64::try_from(at).unwrap(), plan.drop_digest],
+        ).unwrap();
+        transaction.commit().unwrap();
+    }
+    let held = |id: &str| -> bool {
+        store.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [id], |row| row.get(0)).unwrap()
+    };
+    let mut actions = Vec::new();
+    store.finish_trim(CHECKPOINT, &mut actions).unwrap();
+    assert!(plan.claims.iter().all(|claim| held(&claim.id)), "nothing inside the bound is deleted");
+    let state: String = store.readers.get()
+        .query_row("SELECT state FROM checkpoints WHERE id=?1", [CHECKPOINT], |row| row.get(0)).unwrap();
+    assert_eq!(state, "set-aside");
+    // Diagnostics stay in the node's local observation log.
+    let diagnostic = store.latest_observation("daemon/alder", "daemon.diagnostic").unwrap().unwrap();
+    let text = format!("{diagnostic:?}");
+    assert!(text.contains("checkpoint-trim-young-signed-claim"), "{text}");
+    assert!(plan.claims.iter().any(|claim| text.contains(&claim.id)), "the diagnostic names the claim: {text}");
+    assert!(actions.is_empty());
 }
