@@ -149,6 +149,7 @@ pub mod stop_deferral;
 pub mod stopping_seat;
 pub mod card_fold;
 mod card_actual;
+mod activity_summary;
 #[cfg(test)]
 pub mod card_fold_tests;
 #[cfg(test)]
@@ -2074,8 +2075,6 @@ pub enum ClaimsReduction {
     /// Only `status` and `incarnation_id` of the actual state, read newest first, and no claims or
     /// harness: what a driver or `st work` reads of a seat. Never kept, so never served as another.
     Incarnation,
-    /// GC ownership evidence without history, harness, or claim provenance.
-    Activity,
 }
 /// One subject's status at `at_index`, and the action it asks of its host when it is current and
 /// differs from what is declared. With `owner_filter`, a subject another run owns is skipped.
@@ -2093,7 +2092,6 @@ pub fn subject_status_at(
         ClaimsReduction::Runtime => "status/reduction-runtime",
         ClaimsReduction::AgentCard => "status/reduction-agent-card",
         ClaimsReduction::Incarnation => "status/reduction-incarnation",
-        ClaimsReduction::Activity => "status/reduction-activity",
     });
     #[cfg(any(test, feature = "test-support"))]
     SUBJECT_REDUCTIONS.with(|reductions| reductions.set(reductions.get() + 1));
@@ -2130,8 +2128,6 @@ pub fn subject_status_at(
         .and_then(|value| serde_json::from_str::<crate::model::MemberSpec>(value).ok());
     let actual = if matches!(claims, ClaimsReduction::Runtime) {
         latest_actual_fields_at(connection, subject, at_index, RUNTIME_PROJECTION_FIELDS)?
-    } else if matches!(claims, ClaimsReduction::Activity) {
-        latest_actual_fields_filtered_at(connection, subject, at_index, &["status", "workspace", "host"], true)?
     } else if matches!(claims, ClaimsReduction::Incarnation) {
         latest_actual_fields_filtered_at(connection, subject, at_index, INCARNATION_FIELDS, true)?
     } else {
@@ -2142,9 +2138,9 @@ pub fn subject_status_at(
         subject,
         at_index,
         member.as_ref().map(|member| member.host.as_str()),
-        matches!(claims, ClaimsReduction::Incarnation | ClaimsReduction::Activity),
+        matches!(claims, ClaimsReduction::Incarnation),
     )?;
-    let exclude_reserved = matches!(claims, ClaimsReduction::Incarnation | ClaimsReduction::Activity);
+    let exclude_reserved = matches!(claims, ClaimsReduction::Incarnation);
     let (harness, claims, claims_summary, conflicts) = match claims {
         ClaimsReduction::Full => (
             current_harness_at(connection, subject, at_index)?,
@@ -2175,7 +2171,7 @@ pub fn subject_status_at(
             desired_conflicts_at(connection, subject, desired.as_ref().map(|row| row.claim_id.as_str()), at_index)?,
         ),
         // The harness only passes through to the response, and these callers do not read it.
-        ClaimsReduction::Incarnation | ClaimsReduction::Activity => (
+        ClaimsReduction::Incarnation => (
             None,
             Vec::new(),
             ClaimsSummary::default(),
@@ -5624,15 +5620,6 @@ impl Store {
     /// `claims` and `claims_summary` empty. A full reduction folds every actual-state claim of
     /// the subject and lists every claim id, which reads each of a seat's claims in turn.
     pub fn status_summary_at(&self, selected: &str, at_index: Option<u64>) -> Result<StatusResponse> {
-        self.status_summary_reduction_at(selected, at_index, ClaimsReduction::Incarnation)
-    }
-
-    /// Same-snapshot runtime ownership fields, never declaration workspace/host substitutes.
-    pub fn status_activity_summary_at(&self, selected: &str, at_index: Option<u64>) -> Result<StatusResponse> {
-        self.status_summary_reduction_at(selected, at_index, ClaimsReduction::Activity)
-    }
-
-    fn status_summary_reduction_at(&self, selected: &str, at_index: Option<u64>, claims: ClaimsReduction) -> Result<StatusResponse> {
         self.read_snapshot(|_| {
             let connection = self.readers.get();
             let selected = identities::resolve_reference_conn(&connection, selected)?;
@@ -5644,7 +5631,7 @@ impl Store {
             }
             self.status_at_view_for_names_in_snapshot(
                 Some(&selected), None, Some(cut), false,
-                StatusSubjects { names: None, excluded: None }, claims,
+                StatusSubjects { names: None, excluded: None }, ClaimsReduction::Incarnation,
             )
         })
     }
@@ -5887,7 +5874,7 @@ impl Store {
             ClaimsReduction::Runtime => &cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
-            ClaimsReduction::Incarnation | ClaimsReduction::Activity | ClaimsReduction::Fields => return None,
+            ClaimsReduction::Incarnation | ClaimsReduction::Fields => return None,
         };
         entries.get(subject)
             .filter(|entry| {
@@ -5923,7 +5910,7 @@ impl Store {
             ClaimsReduction::Runtime => &mut cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &mut cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
-            ClaimsReduction::Incarnation | ClaimsReduction::Activity | ClaimsReduction::Fields => return,
+            ClaimsReduction::Incarnation | ClaimsReduction::Fields => return,
         };
         // At capacity, a cold summary remains correct and uncached. Invalidation
         // frees slots; no growing history map or full-status cache warming is needed.
@@ -6300,7 +6287,7 @@ impl Store {
         // Uncached field/incarnation reads must not
         // scan an unrelated backlog to maintain shared caches they never use.
         let newest = match at_index {
-            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation | ClaimsReduction::Activity | ClaimsReduction::Fields) => {
+            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation | ClaimsReduction::Fields) => {
                 Some(self.advance_subject_cache(&connection, store_index)?)
             }
             _ => None,

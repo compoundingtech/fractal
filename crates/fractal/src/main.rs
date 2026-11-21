@@ -12763,7 +12763,7 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
         SubjectCommand::Show(args) => {
             if args.activity_summary {
                 anyhow::ensure!(args.subject.starts_with("agent/"), "--activity-summary requires an agent subject");
-                let status: StatusResponse = client.get(&format!(
+                let status: Value = client.get(&format!(
                     "/v1/status?subject={}&activity_summary=true", urlencoding::encode(&args.subject)
                 )).await?;
                 return print_value(&json!({ "status": status }), json_output);

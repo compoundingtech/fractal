@@ -1038,9 +1038,14 @@ async fn activity_summary_keeps_observed_ownership_and_default_status_provenance
         "activity-summary-fixture",
     ).unwrap();
     state.store.append_claim(&crate::model::ClaimInput {
+        subject: "agent/eval/named".into(), kind: "workspace.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"workspace":"/observed", "host":"runtime-host"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    state.store.append_claim(&crate::model::ClaimInput {
         subject: "agent/eval/named".into(), kind: "runtime.observed".into(), actor: None,
         fields: serde_json::from_value(json!({
-            "status":"running", "workspace":"/observed", "host":"runtime-host",
+            "status":"running", "host":"runtime-host",
         })).unwrap(),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
@@ -1056,7 +1061,8 @@ async fn activity_summary_keeps_observed_ownership_and_default_status_provenance
     }
     assert_eq!(summary["subjects"][0]["actual"]["workspace"], "/observed");
     assert_eq!(summary["subjects"][0]["actual"]["host"], "runtime-host");
-    assert!(summary["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    assert_eq!(summary["complete"], true);
+    assert_eq!(summary["unresolved"], json!([]));
     let (code, after) = get_request(app, "/v1/status?subject=agent/eval/named").await;
     assert_eq!(code, StatusCode::OK, "{after}");
     assert_eq!(after, before, "opt-in summary must not alter default output");

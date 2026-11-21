@@ -880,17 +880,25 @@ pub async fn storage_status(State(state): State<AppState>) -> Result<Json<Value>
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
-) -> Result<Json<StatusResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let store = state.store.clone();
     let admission = state.seat_admission.clone();
+    if query.activity_summary {
+        let subject = query.subject.ok_or_else(|| ApiError::bad(FractalError::new(
+            "activity-summary-subject-required", "activity_summary requires one agent subject",
+        )))?;
+        if query.history || query.owner_run.is_some() || query.harness_only || query.summary {
+            return Err(ApiError::bad(FractalError::new(
+                "activity-summary-query", "activity_summary cannot be combined with other reductions",
+            )));
+        }
+        return blocking_store(move || store.status_activity_summary_at(&subject, query.at_index))
+            .await.map(|value| Json(value).into_response());
+    }
     blocking_store(move || {
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
-        if query.activity_summary && (query.history || query.owner_run.is_some()
-            || !subject.as_deref().is_some_and(|subject| subject.starts_with("agent/"))) {
-            anyhow::bail!("activity_summary requires one agent without history or owner_run");
-        }
         let mut response = if query.harness_only && !query.history && let Some(subject) = subject.as_deref() {
             // The harness shortcut reads current state even when a historical cut is supplied.
             if !store.generic_status_subject_visible_at(subject, store.index()?)? {
@@ -899,8 +907,6 @@ pub async fn status(
                 ).with_detail("reason", "notices-unavailable")));
             }
             store.status_harness_only(subject)?
-        } else if query.activity_summary {
-            store.status_activity_summary_at(subject.as_deref().expect("validated agent"), query.at_index)?
         } else if query.summary && !query.history && query.owner_run.is_none()
             && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
         {
@@ -934,7 +940,7 @@ pub async fn status(
         Ok(response)
     })
     .await
-    .map(Json)
+    .map(|response| Json(response).into_response())
 }
 
 pub async fn events(
