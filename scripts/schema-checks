@@ -24,7 +24,7 @@ CHECKS = [
 ]
 
 SCHEMA = re.compile(
-    r"\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+|UNIQUE\s+)*(?:TABLE|INDEX|TRIGGER|VIEW)|DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW))\b", re.I
+    r"\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+|UNIQUE\s+|VIRTUAL\s+)*(?:TABLE|INDEX|TRIGGER|VIEW)|DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW))\b", re.I
 )
 
 
@@ -58,8 +58,11 @@ def run(repo, base, head):
     for name, command in CHECKS:
         done = subprocess.run(command, cwd=repo, capture_output=True, text=True, env=os.environ)
         result = [line for line in (done.stdout + done.stderr).splitlines() if line.startswith("test result") or "passed" in line][-1:]
-        print(f"schema-checks: {name}: {'ok' if done.returncode == 0 else 'FAILED'} {' '.join(result)}")
-        if done.returncode != 0:
+        # A filter that no longer matches (a renamed module) runs no test and exits 0: that is not a pass.
+        ran_nothing = command[:2] == ["cargo", "test"] and not re.search(r"test result: ok\. [1-9]", done.stdout + done.stderr)
+        ok = done.returncode == 0 and not ran_nothing
+        print(f"schema-checks: {name}: {'ok' if ok else 'FAILED'} {' '.join(result)}{' (ran no test)' if ran_nothing else ''}")
+        if not ok:
             failed.append(name)
             tail = "\n".join((done.stdout + done.stderr).splitlines()[-25:])
             print(tail, file=sys.stderr)

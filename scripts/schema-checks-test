@@ -2,6 +2,7 @@
 """scripts/schema-checks runs its checks only for a change that adds or drops a schema object, and fails when one fails."""
 import importlib.machinery
 import importlib.util
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,8 +40,10 @@ with tempfile.TemporaryDirectory() as repo:
     assert sorted(path for path, _ in found) == ['crates/example/src/store.rs', 'crates/example/src/tests.rs'], found
     dropped = commit(repo, 'crates/example/src/store.rs', 'const S: &str = "DROP TRIGGER IF EXISTS old_v1";\n', 'a drop')
     assert module.schema_lines(repo, table, dropped), 'a dropped trigger counts'
+    virtual = commit(repo, 'crates/example/src/search.rs', 'const V: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS s USING fts5(x)";\n', 'fts')
+    assert module.schema_lines(repo, dropped, virtual), 'a virtual table counts'
     outside = commit(repo, 'docs/schema.md', 'CREATE TABLE in prose\n', 'docs')
-    assert module.schema_lines(repo, dropped, outside) == [], 'only crate sources count'
+    assert module.schema_lines(repo, virtual, outside) == [], 'only crate sources count'
 
     # Nothing to run: success without touching cargo.
     module.CHECKS = [('never', ['false'])]
@@ -49,6 +52,10 @@ with tempfile.TemporaryDirectory() as repo:
     assert module.run(repo, plain, outside) == 1
     module.CHECKS = [('passes', ['true'])]
     assert module.run(repo, plain, outside) == 0
+    # A cargo test filter that matches nothing ran no test: that fails, it does not pass.
+    if shutil.which('cargo'):
+        module.CHECKS = [('renamed', ['cargo', 'test', '--help'])]
+        assert module.run(repo, plain, outside) == 1
     # The checks run in the checkout, so it must be at the head.
     assert module.run(repo, plain, table) == 2
 print('schema-checks-test: ok')
