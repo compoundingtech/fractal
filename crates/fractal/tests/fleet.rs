@@ -8549,8 +8549,8 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
 /// one node upgraded in place and rolled back. The release's mail reads the same after the
 /// upgrade, a stream item joins the conversation behind the graph claim it arrived after, and a
 /// wait ends on a stream reply. A cursor the release gave out resumes on this build; one this
-/// build gave out asks an older release for a full read rather than skipping, and resumes on a
-/// release that reads stream items. A CLI of either build waits on a daemon of the other.
+/// build gave out asks a release with fewer cursor fields for a full read rather than skipping.
+/// A CLI of either build waits on a daemon of the other.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback() {
@@ -8673,13 +8673,14 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
         assert_eq!(release["reply"], false, "{release}");
     }
 
-    // Roll back. An older release asks for a full read on this build's cursor; one that reads
-    // stream items resumes it, with the stream and graph mail since. The release's mail and the
-    // graph reply read as before.
+    // Roll back. Stream support alone does not imply support for a newer cursor: #6948 added
+    // the stream-receipt position as a sixth field. An older format must request a full read.
+    let cursor_fields = |cursor: &str| cursor.rsplit('/').next().unwrap().split('.').count();
+    let release_accepts_cursor = cursor_fields(&upgraded_cursor) <= cursor_fields(&release_cursor);
     o.stop();
     o.binary = old.clone();
     o.start().await;
-    if release_reads_stream {
+    if release_accepts_cursor {
         let (_, resumed) = changes(&o, Some(upgraded_cursor.clone())).await;
         assert_eq!(
             resumed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
@@ -8688,9 +8689,27 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
         );
     } else {
         let refused = person(&o).get::<Value>(&changes_path(Some(&upgraded_cursor))).await.unwrap_err().to_string();
-        assert!(refused.contains("cursor-gap"), "{refused}");
+        assert!(refused.contains("410 cursor-gap"), "{refused}");
     }
-    let (reopened, _) = changes(&o, None).await;
+    // A cursorless changes read initializes at the head; the timeline endpoint is the full read.
+    let reopened: Value = person(&o).get(&changes_path(None)).await.unwrap();
+    let session_id = reopened["session_id"].as_str().unwrap().trim_start_matches("session/");
+    let history: Value = person(&o).get(&format!(
+        "/v1/client/sessions/{}/timeline?limit=200", urlencoding::encode(session_id),
+    )).await.unwrap();
+    assert_eq!(history["page"]["has_more"], false, "{history}");
+    let reopened_messages = history["items"].as_array().unwrap();
+    let reopened = reopened["next_cursor"].as_str().unwrap().to_owned();
+    let mut expected_reopened = BTreeSet::from([first.as_str(), graph_reply.as_str(), unseen.as_str()]);
+    if release_reads_stream {
+        expected_reopened.extend([stream, this_reply, release_reply]);
+    }
+    assert_eq!(
+        reopened_messages.iter().filter(|item| item["type"] == "message")
+            .map(|item| item["body"]["message_id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+        expected_reopened,
+        "the full read after rollback retains every message the release supports"
+    );
     let later = send(&o, "rolled-back", PERSON, reader).await;
     let (_, after_rollback) = changes(&o, Some(reopened)).await;
     assert_eq!(after_rollback.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [later]);
@@ -10479,7 +10498,7 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
 /// A work wake for a seat on this member is a stream item (4c-3, part b), beside the previous
 /// release, which replicates the stream as it already does. Rolled back, the member's release
 /// reconciler reads wakes from the graph alone, so it wakes the seat once more there; upgraded
-/// again, this build reads the step's wakes from both stores. Replication stays whole.
+/// again, this build reads both stores, with the graph winning for a shared subject.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_its_rollback() {
@@ -10555,11 +10574,11 @@ async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_
     let started = a.st_json(&["missions", "start", "wake/stream", "--id", "wake/first", "--as", PERSON]);
     let step = started["mission_run"]["steps"][0]["subject"].as_str().unwrap().to_owned();
     let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
-    // The step's wakes on `node`, as (subject, stream item).
+    // The step's wake history, including wakes the reconciler already closed after delivery.
     let wakes = |node: &Node| {
         let (node, step) = (node.client(), step.clone());
         async move {
-            let page: Value = node.get(&format!("/v1/messages?to={seat}")).await.unwrap();
+            let page: Value = node.get(&format!("/v1/messages?to={seat}&include_closed=true")).await.unwrap();
             page.as_array().into_iter().flatten()
                 .filter(|item| item["tags"].as_array().into_iter().flatten()
                     .any(|tag| tag.as_str().is_some_and(|tag| tag.starts_with(&format!("st3-work:{step}@")))))
@@ -10592,21 +10611,32 @@ async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_
         wakes(&a).await.iter().any(|(_, stream)| !stream)
     })
     .await;
+    // The release can reuse the first attempt's deterministic subject: it cannot see the
+    // stream attempt, and the harness incarnation can survive the daemon restart. Such a
+    // message is listed once, as the graph's, rather than once from each store.
+    let mut expected: BTreeMap<_, _> = first.iter().cloned().collect();
+    expected.extend(wakes(&a).await.into_iter().filter(|(_, stream)| !stream));
     for (subject, _) in &first {
         assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
     }
 
-    // Upgraded again, this build opens the store the release wrote and reads both kinds.
+    // Upgraded again, retain every wake, applying the shared-subject graph precedence.
     a.stop();
     a.binary = PathBuf::from(st3());
     a.start().await;
-    wait_until("the upgraded member shows the step's wakes from both stores", 90, || async {
+    wait_until("the upgraded member shows every wake with graph precedence", 90, || async {
         let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
+        let visible = wakes(&a).await;
         shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1
-            && wakes(&a).await.iter().any(|(_, stream)| *stream)
-            && wakes(&a).await.iter().any(|(_, stream)| !stream)
+            && expected.iter().all(|(subject, stream)| {
+                visible.iter().filter(|(candidate, _)| candidate == subject).count() == 1
+                    && visible.iter().any(|(candidate, stored_in_stream)| candidate == subject && stored_in_stream == stream)
+            })
     })
     .await;
+    for (subject, _) in &first {
+        assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
+    }
     for node in [&a, &o] {
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
