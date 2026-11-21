@@ -140,6 +140,7 @@ describe('program missions', () => {
       const declaration = loaded.declaration.intent as MissionInput<string>
       const kdl = emit([mission(declaration)])
       expect(kdl).toContain('mission "fractal/seat-turn"')
+      expect(kdl).toContain('start "native-turn"')
       for (const name of ['agent', 'instructions', 'context']) expect(kdl).toContain(`input "${name}" kind="text"`)
       expect(declaration.steps).toHaveLength(1)
       expect(kdl).not.toContain('assigned-to=')
