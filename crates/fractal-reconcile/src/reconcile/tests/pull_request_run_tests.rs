@@ -328,7 +328,7 @@ fn supersession_revokes_a_claimed_worker_and_runs_final_cleanup() {
             .is_err()
     );
     // This focused evaluation bypasses the reconcile pass's post-commit outbox drain.
-    fractal_store::store::message_outbox::drain(&store).unwrap();
+    crate::store::message_outbox::drain(&store).unwrap();
     let cancellation_message = store
         .messages(None, true)
         .unwrap()
