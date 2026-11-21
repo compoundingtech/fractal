@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Register the SQL sites the agent roster change (#6881) added in the large-value inventory, so main passes check-sqlite-large-values again",
+  "replay": {"status": "none", "detail": "No replay; inventory and source comments only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No rule change."},
+  "compatibility": {"status": "none", "detail": "No wire or API change."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No action."},
+  "recovery": {"status": "none", "detail": "Rollback is unaffected; nothing a build runs changes."}
+}

@@ -18,7 +18,7 @@
 //! a time inside a writer hold bounded by a time budget, and never touches envelopes,
 //! checkpoints or seals. Stream mail lives in the messages shard and is not touched here.
 use super::*;
-use smallclaims::store::checkpoint::{ClaimTombstone, delete_dropped_rows_tx};
+use smallclaims::store::checkpoint::{ClaimTombstone, delete_dropped_rows_tx, young_signed_claim_tx};
 use std::time::{Duration, Instant};
 
 /// A closed thread stays this long before it retires: 7 days.
@@ -67,7 +67,8 @@ enum Judgement {
     Retire(Vec<(String, Option<String>, String)>),
     /// A person's thread, a cited one, or one already gone.
     Keep,
-    /// Closed, but its sent claim has not arrived: judge it again later.
+    /// Closed, but its sent claim has not arrived, or a claim of it is younger than the cutoff:
+    /// judge it again later.
     Defer,
 }
 
@@ -83,7 +84,10 @@ impl Store {
         }
         // Citations live in claim bodies; the cache answers who cites a thread without reading them.
         self.catch_up_local_trim_citations()?;
-        let cutoff = now_ms.saturating_sub(RETAIN_AFTER_CLOSE_MS);
+        // A week after the close, and never inside the freshness window's forget bound. `judge`
+        // also waits for every claim of the thread to pass it; a claim is accepted no earlier
+        // than its batch.
+        let cutoff = now_ms.saturating_sub(RETAIN_AFTER_CLOSE_MS.max(smallclaims::principal::FORGET_SIGNED_AFTER_MS));
         let (after, mut deferred) = self.retirement_progress()?;
         // Deferred threads first, the oldest first; one still deferred goes to the back.
         let mut judged: Vec<(Option<i64>, String, Judgement)> = Vec::new();
@@ -113,6 +117,14 @@ impl Store {
                 // one waits behind the cursor for the next step.
                 let finished = !cut
                     && match judgement {
+                        // The forget bound still holds a claim of it: name it, defer the thread
+                        // and go on, rather than fail the step on it every time.
+                        Judgement::Retire(claims) if let Some(young) = young_signed_claim_tx(&transaction, &[],
+                            &claims.iter().map(|(id, operation, _)| tombstone(id, operation.clone())).collect::<Vec<_>>())? => {
+                            eprintln!("fractal: mail retirement deferred {subject}: signed claim {young} is inside the freshness window's forget bound");
+                            still_deferred.push(subject.clone());
+                            true
+                        }
                         Judgement::Retire(claims) => delete_thread(&transaction, claims, started, budget, &mut done)?,
                         Judgement::Keep => true,
                         Judgement::Defer => {
@@ -231,23 +243,26 @@ fn delete_thread(
 /// Claims a hold can reach, at about 4 ms each in a 40 ms budget, with room to spare.
 const WARM_CLAIMS: usize = 24;
 
+/// The tables `warm` reads by claim, each through an index that starts with claim_id. Not
+/// claim_verdict_links: a deletion leaves its links (they have no index by claim), so reading
+/// them by claim would scan the table.
+pub(super) const BY_CLAIM: [&str; 8] = [
+    "replica_records",
+    "claim_signatures",
+    "claim_signature_candidates",
+    "claim_signature_nonce_uses",
+    "claim_signature_judging",
+    "claim_verdicts",
+    "claim_verdict_dependency_edges",
+    "claim_signature_originals",
+];
+
 /// Read, before the writer hold, the rows that deleting the first claims judged will touch, so
 /// the hold finds their pages cached. On a 57 GB member most deletes took 3–8 ms, but the
 /// signature cleanup (`principals::forget_claim_tx`) sometimes took 100–390 ms for one claim:
 /// every plan is an index search, so it was waiting on cold pages across the signature tables.
 /// Only a hint: a table this build lacks, or any other error, is skipped.
 fn warm(connection: &Connection, judged: &[(Option<i64>, String, Judgement)]) {
-    const BY_CLAIM: [&str; 9] = [
-        "replica_records",
-        "claim_signatures",
-        "claim_signature_candidates",
-        "claim_signature_nonce_uses",
-        "claim_signature_judging",
-        "claim_verdicts",
-        "claim_verdict_links",
-        "claim_verdict_dependency_edges",
-        "claim_signature_originals",
-    ];
     let read = |sql: &str, id: &str| -> rusqlite::Result<()> {
         let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9fa486291dca owner=fractal_store::store::mail_retirement TODO=trace-statement-and-value-representation */ sql)?;
         let mut rows = statement.query([id])?;
@@ -325,6 +340,13 @@ fn judge(
     });
     if depth > 0 && !old_enough {
         return Ok(Judgement::Keep);
+    }
+    // The close is not always the newest claim: a delivery or a read can be written or arrive
+    // after it. Every claim must be past the cutoff, which is never inside the freshness
+    // window's forget bound, or the deletion would refuse the thread on every step.
+    let all_old = claims.iter().all(|(_, _, _, _, _, accepted, _)| accepted.parse::<u64>().is_ok_and(|accepted| accepted <= cutoff));
+    if !all_old {
+        return Ok(if depth == 0 { Judgement::Defer } else { Judgement::Keep });
     }
     let own: std::collections::BTreeSet<&str> = claims.iter().map(|(id, ..)| id.as_str()).collect();
     for (id, ..) in &claims {

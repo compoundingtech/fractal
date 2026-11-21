@@ -10,9 +10,12 @@
 //! [`ATTEMPTS`] tries it is appended to the graph as a legacy `message.sent` claim, as it would
 //! have been before the shard, and a member whose shard did not open drains to the graph at once.
 //!
-//! The table is local: it never replicates and is outside every digest. In this build nothing
-//! enqueues, so the outbox stays empty and the daemon's drainer is idle; a later release (4c-3)
-//! fills it, and a rollback from that release to this one still drains what it left.
+//! The table is local: it never replicates and is outside every digest. The daemon's senders that
+//! write from inside a graph transaction queue here (`message_routing::queue_tx`, 4c-3): mission
+//! cancellation, route-item, GitHub watch wakes, resource changes and workflow failures. What a
+//! method queues leaves when it returns ([`DrainOnReturn`]) or after a reconcile pass, and the
+//! daemon's drain task takes the rest, in the order they were queued. A rollback to a release
+//! whose senders don't queue still drains what this one left.
 
 use super::*;
 
@@ -42,7 +45,7 @@ CREATE INDEX IF NOT EXISTS local_message_outbox_order ON local_message_outbox(qu
 /// Queue the message `input` in the caller's graph transaction, so it commits or rolls back with
 /// the write that sends it. A sender calls this instead of appending to the shard while it holds
 /// a graph transaction; the daemon's drainer sees the row when the transaction commits. A repeat with the same
-/// subject changes nothing. Nothing calls this yet: the daemon's senders move to it in 4c-3.
+/// subject changes nothing. The daemon's transactional senders call it through `message_routing::queue_tx`.
 pub fn enqueue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<bool, FractalError> {
     if input.kind != "message.sent" {
         return Err(FractalError::new(
@@ -134,32 +137,78 @@ pub fn drain_fresh(graph: &Store) -> Result<usize> {
     drain_rows(graph, true)
 }
 
+/// Drain the mail queued since the last drain when it goes out of scope: a store method that
+/// queues messages from inside its transaction holds one, so what it queued leaves as soon as
+/// the method returns, after the commit, without waiting for the daemon's drain task. A failure
+/// is logged; the daemon's task retries.
+pub struct DrainOnReturn<'a>(pub &'a Store);
+
+impl Drop for DrainOnReturn<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = drain_fresh(self.0) {
+            tracing::warn!(error = %format!("{error:#}"), "message outbox drain after a send failed");
+        }
+    }
+}
+
+/// The most recent delivery delays kept in memory, in ms: a measurement reads them through
+/// [`recent_delays_ms`].
+const RECENT_DELAYS: usize = 4096;
+
+static RECENT: std::sync::Mutex<std::collections::VecDeque<u64>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// How long each of the most recent delivered messages waited in the outbox, in ms, oldest first.
+pub fn recent_delays_ms() -> Vec<u64> {
+    RECENT.lock().unwrap_or_else(PoisonError::into_inner).iter().copied().collect()
+}
+
+fn record_delay(graph: &Store, subject: &str, queued_at: i64) {
+    let waited = u64::try_from(now_ms() as i64 - queued_at).unwrap_or(0);
+    let to = if super::messages_shard::holds(graph, subject).unwrap_or(false) { "stream" } else { "graph" };
+    fractal_telemetry::otel::record_message_outbox_delay(to, std::time::Duration::from_millis(waited));
+    let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
+    if recent.len() == RECENT_DELAYS {
+        recent.pop_front();
+    }
+    recent.push_back(waited);
+}
+
 fn drain_rows(graph: &Store, fresh_only: bool) -> Result<usize> {
     let drainer = graph.extension::<Drainer>();
     let _running = drainer.0.lock().unwrap_or_else(PoisonError::into_inner);
     let shard = super::messages_shard::shard(graph);
     let mut drained = 0;
-    let mut after = (i64::MIN, String::new());
+    // In the order the messages were queued: a transaction that queued two sends them in order,
+    // however many share its millisecond.
+    let mut after = i64::MIN;
     loop {
         let rows = graph
             .readers
             .get()
             .prepare_cached(
-                "SELECT subject, claim, queued_at_unix_ms, attempts FROM local_message_outbox
-                 WHERE (queued_at_unix_ms, subject) > (?1, ?2) AND (NOT ?4 OR attempts=0)
-                 ORDER BY queued_at_unix_ms, subject LIMIT ?3",
+                "SELECT rowid, subject, claim, queued_at_unix_ms, attempts, last_error FROM local_message_outbox
+                 WHERE rowid > ?1 AND (NOT ?3 OR attempts=0)
+                 ORDER BY rowid LIMIT ?2",
             )?
-            .query_map(params![after.0, after.1, BATCH, fresh_only], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+            .query_map(params![after, BATCH, fresh_only], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let Some((subject, _, queued_at, _)) = rows.last() else {
+        let Some((last, ..)) = rows.last() else {
             return Ok(drained);
         };
-        after = (*queued_at, subject.clone());
+        after = *last;
         let full = rows.len() as i64 == BATCH;
-        for (subject, claim, _, attempts) in rows {
-            if drain_one(graph, shard.as_deref(), &subject, &claim, attempts)? {
+        for (_, subject, claim, queued_at, attempts, last_error) in rows {
+            if drain_one(graph, shard.as_deref(), &subject, &claim, attempts, last_error.as_deref())? {
+                record_delay(graph, &subject, queued_at);
                 drained += 1;
             }
         }
@@ -170,7 +219,14 @@ fn drain_rows(graph: &Store, fresh_only: bool) -> Result<usize> {
 }
 
 /// Drain one row; true when it left the outbox.
-fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &str, attempts: i64) -> Result<bool> {
+fn drain_one(
+    graph: &Store,
+    shard: Option<&GraphStore>,
+    subject: &str,
+    claim: &str,
+    attempts: i64,
+    last_error: Option<&str>,
+) -> Result<bool> {
     let graph_holds = || -> Result<bool> {
         Ok(graph.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent')",
@@ -202,6 +258,11 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
     };
     match appended {
         Ok(()) => {
+            // Refused too often: a fallback, counted under the shard's last refusal.
+            if shard.is_some() && routed && attempts >= ATTEMPTS {
+                let (code, message) = last_error.unwrap_or_default().split_once(": ").unwrap_or(("", ""));
+                super::message_routing::record_fallback(graph, "outbox", subject, code, message);
+            }
             mirrored_remove(graph, subject)?;
             Ok(true)
         }

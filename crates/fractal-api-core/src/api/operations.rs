@@ -792,6 +792,9 @@ pub struct StatusQuery {
     /// the full reduction.
     #[serde(default)]
     summary: bool,
+    /// Runtime ownership evidence only; leaves full status and client-v0 unchanged.
+    #[serde(default)]
+    activity_summary: bool,
 }
 
 pub async fn resource_referrers(
@@ -877,9 +880,21 @@ pub async fn storage_status(State(state): State<AppState>) -> Result<Json<Value>
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
-) -> Result<Json<StatusResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let store = state.store.clone();
     let admission = state.seat_admission.clone();
+    if query.activity_summary {
+        let subject = query.subject.ok_or_else(|| ApiError::bad(FractalError::new(
+            "activity-summary-subject-required", "activity_summary requires one agent subject",
+        )))?;
+        if query.history || query.owner_run.is_some() || query.harness_only || query.summary {
+            return Err(ApiError::bad(FractalError::new(
+                "activity-summary-query", "activity_summary cannot be combined with other reductions",
+            )));
+        }
+        return blocking_store(move || store.status_activity_summary_at(&subject, query.at_index))
+            .await.map(|value| Json(value).into_response());
+    }
     blocking_store(move || {
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
@@ -925,7 +940,7 @@ pub async fn status(
         Ok(response)
     })
     .await
-    .map(Json)
+    .map(|response| Json(response).into_response())
 }
 
 pub async fn events(
@@ -1109,7 +1124,9 @@ mod seat_admission_tests {
         assert!(!state.seat_admission.admit("agent/example/queued", None, None, false, admission_now()));
         for (query, live) in [(json!({}), true), (json!({"history":true}), false),
             (json!({"at_index":0}), false)] {
-            let Json(response) = status(State(state.clone()), Query(serde_json::from_value(query).unwrap())).await.unwrap();
+            let response = status(State(state.clone()), Query(serde_json::from_value(query).unwrap())).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response: StatusResponse = serde_json::from_slice(&body).unwrap();
             assert_eq!(response.seat_admission.is_some(), live);
             if let Some(admission) = response.seat_admission {
                 assert_eq!(admission["pendingCount"], 1);

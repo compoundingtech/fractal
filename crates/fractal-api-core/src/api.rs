@@ -522,7 +522,7 @@ impl ApiError {
             "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
-            | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
+            | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
@@ -670,6 +670,39 @@ async fn test_retire_closed_mail(
     .map_err(ApiError::internal)?;
     signal_visible_change(&state);
     Ok(Json(json!({"threads": threads, "claims": claims})))
+}
+
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestBlobMove {
+    now_ms: u64,
+    move_after_ms: u64,
+}
+
+/// Test support: move blob bytes into the blob file as the daemon's hourly pass would at
+/// `now_ms`, so a test need not wait three days or an hour.
+#[cfg(feature = "test-support")]
+async fn test_move_blob_bytes(
+    State(state): State<AppState>,
+    Json(request): Json<TestBlobMove>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let (rows, bytes, waiting) = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, u64, bool)> {
+        let (mut rows, mut bytes) = (0, 0);
+        loop {
+            let step = store.move_blob_bytes_step(request.now_ms, request.move_after_ms, std::time::Duration::from_millis(40))?;
+            rows += step.rows;
+            bytes += step.bytes;
+            if !step.more {
+                return Ok((rows, bytes, step.waiting));
+            }
+        }
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    signal_visible_change(&state);
+    Ok(Json(json!({"rows": rows, "bytes": bytes, "waiting": waiting})))
 }
 
 /// [`router`] with the route families of the crates above.
@@ -944,9 +977,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/replication/records/{*record}", get(replication::replication_record))
         .route("/v1/replication/repair", post(replication::repair_replication_record))
         .route("/v1/replication/replay", post(replication_replay::replay).layer(Extension(transport)))
-        .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
-        .route("/v1/checkpoint/status", get(replication::checkpoint_status))
-        .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
         .route("/v1/signatures/resume", post(replication::signature_resume))
         .route("/v1/faults/dismiss", post(records::dismiss_fault))
@@ -967,14 +997,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication_worker_status),
         )
         .route(
-            "/v1/internal/replication/checkpoint",
-            post(replication::replication_checkpoint_manifest),
-        )
-        .route(
-            "/v1/internal/replication/checkpoint-need",
-            post(replication::replication_checkpoint_need),
-        )
-        .route(
             "/v1/internal/replication/answers",
             post(replication::replication_answers),
         )
@@ -985,11 +1007,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
-        )
-        .route(
-            "/v1/internal/replication/checkpoint-adopt",
-            post(replication::replication_checkpoint_adopt)
-                .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
@@ -1161,7 +1178,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
         .route("/v1/internal/test/message-marks", post(test_record_message_mark))
-        .route("/v1/internal/test/mail-retirement", post(test_retire_closed_mail));
+        .route("/v1/internal/test/mail-retirement", post(test_retire_closed_mail))
+        .route("/v1/internal/test/blob-move", post(test_move_blob_bytes));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -9728,12 +9746,16 @@ pub(crate) fn doctor_workers(read_limit: usize) -> usize {
 
 type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
 
-fn checkpoint_doctor_check(status: &crate::store::CheckpointStatusView) -> DoctorCheck {
+fn trim_doctor_check(status: &crate::store::TrimStatusView) -> DoctorCheck {
     let blocking = status.blocking_summary();
     DoctorCheck {
-        name: "checkpoint".into(),
+        name: "trim".into(),
         status: if blocking.is_some() { "warn" } else { "pass" }.into(),
-        message: blocking.unwrap_or_else(|| "no checkpoint is pending".into()),
+        message: blocking.unwrap_or_else(|| match (&status.trimmed, status.trims) {
+            (_, false) => "trimming is off ([trim] local = false)".into(),
+            (Some(cut), true) => format!("trimming on its own; newest trimmed cut {cut}"),
+            (None, true) => "trimming on its own; no cut trimmed yet".into(),
+        }),
     }
 }
 
@@ -10601,13 +10623,10 @@ fn doctor_report_within(
         }
         Ok(checks)
     });
-    if state.fleet_id.is_some() {
-        checks.check("checkpoint", || {
-            let status = state.store.checkpoint_status(client_now_ms(), &replication_peer_names(state))
-                .map_err(ApiError::internal)?;
-            Ok(vec![checkpoint_doctor_check(&status)])
-        });
-    }
+    checks.check("trim", || {
+        let status = state.store.trim_status().map_err(ApiError::internal)?;
+        Ok(vec![trim_doctor_check(&status)])
+    });
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
     });
@@ -10790,9 +10809,6 @@ fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T
 #[path = "api/replication_guard_tests.rs"]
 mod replication_guard_tests;
 
-#[cfg(test)]
-#[path = "api/checkpoint_plan_tests.rs"]
-mod checkpoint_plan_tests;
 
 #[cfg(test)]
 #[path = "api/storage_census_tests.rs"]
@@ -10974,7 +10990,6 @@ async fn refuse_while_leaving(
                 | "/v1/internal/replication/receive"
                 | "/v1/internal/replication/peer-failure"
                 | "/v1/internal/replication/worker-status"
-                | "/v1/internal/replication/checkpoint"
                 | "/v1/internal/replication-wake"
         );
     if mutating && !allowed && state.store.fleet_leaving().unwrap_or(false) {

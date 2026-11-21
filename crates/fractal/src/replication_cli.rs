@@ -138,6 +138,9 @@ pub(super) async fn run_replication(
                 timings.commits,
                 timings.commit_ms
             );
+            if let Some(fallbacks) = &status.stream_fallbacks {
+                println!("stream-fallbacks\t{}", render_stream_fallbacks(fallbacks));
+            }
             print!(
                 "{}",
                 render_replication_peers(&status.peers, &status.graph_digest, now_ms())
@@ -293,56 +296,16 @@ pub(super) async fn run_replication(
             }
         }
         ReplicationCommand::Checkpoint {
-            command: CheckpointCommand::Plan { cut },
-        } => {
-            let request = fractal_daemon::store::CheckpointPlanRequest { day: cut };
-            let plan = checkpoint_plan_waiting_for_proof(client, &request).await?;
-            if json_output {
-                return print_value(&plan, true);
-            }
-            print!("{}", render_checkpoint_plan(&plan));
-            Ok(())
-        }
-        ReplicationCommand::Checkpoint {
-            command: CheckpointCommand::Status,
-        } => {
-            let status: fractal_daemon::store::CheckpointStatusView =
-                client.get("/v1/checkpoint/status").await?;
-            if json_output {
-                return print_value(&status, true);
-            }
-            print!("{}", render_checkpoint_status(&status));
-            Ok(())
-        }
-        ReplicationCommand::Checkpoint {
-            command:
-                CheckpointCommand::Excuse {
-                    writer,
-                    reason,
-                    actor,
-                },
-        } => {
-            let actor = fleet_person(actor, config)?;
-            let request = fractal_daemon::store::CheckpointExcuseRequest {
-                writer,
-                reason,
-                actor,
-            };
-            let claim: fractal_daemon::model::ClaimRecord =
-                client.post("/v1/checkpoint/excuse", &request).await?;
-            print_value(&claim, json_output)
-        }
-        ReplicationCommand::Checkpoint {
             command: CheckpointCommand::Resume { reason, actor },
         } => {
             let actor = fleet_person(actor, config)?;
             let request = fractal_daemon::store::CheckpointResumeRequest { reason, actor };
-            let status: fractal_daemon::store::CheckpointStatusView =
+            let status: fractal_daemon::store::TrimStatusView =
                 client.post("/v1/checkpoint/resume", &request).await?;
             if json_output {
                 return print_value(&status, true);
             }
-            print!("{}", render_checkpoint_status(&status));
+            print!("{}", render_trim_status(&status));
             Ok(())
         }
         ReplicationCommand::Signatures {
@@ -365,79 +328,27 @@ pub(super) async fn run_replication(
     }
 }
 
-/// How long `checkpoint plan` asks again while another checkpoint proof runs, as one does right
-/// after the daemon starts. The daemon waits up to a minute itself before it refuses a plan with
-/// `checkpoint-proof-in-progress`, so this adds a few minutes more.
-const CHECKPOINT_PLAN_PROOF_WAIT: Duration = Duration::from_secs(4 * 60);
-
-async fn checkpoint_plan_waiting_for_proof(
-    client: &Client,
-    request: &fractal_daemon::store::CheckpointPlanRequest,
-) -> Result<fractal_daemon::store::CheckpointPlanView> {
-    let started = std::time::Instant::now();
-    let mut announced = false;
-    loop {
-        match client.post("/v1/checkpoint/plan", request).await {
-            Err(error)
-                if fractal_daemon::client::api_error_code(&error) == Some("checkpoint-proof-in-progress")
-                    && started.elapsed() < CHECKPOINT_PLAN_PROOF_WAIT =>
-            {
-                if !announced {
-                    crate::stderr_message("st", format_args!("waiting for the running checkpoint proof to finish"));
-                    announced = true;
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            result => return result,
+/// What a member's trim is doing, after `replication checkpoint resume`.
+fn render_trim_status(status: &fractal_daemon::store::TrimStatusView) -> String {
+    let mut output = format!(
+        "TRIM  {} · {}\n",
+        status.node,
+        if status.trims { "on" } else { "off ([trim] local = false)" }
+    );
+    output.push_str(&format!(
+        "newest trimmed  {}\n",
+        status.trimmed.as_deref().unwrap_or("none")
+    ));
+    output.push_str(&format!(
+        "stopped         {}\n",
+        if status.halted { "yes, waiting for a person" } else { "no" }
+    ));
+    if let Some(worker) = &status.worker {
+        output.push_str(&format!("phase           {:?}\n", worker.phase));
+        if let Some(error) = &worker.error {
+            output.push_str(&format!("error           {error}\n"));
         }
     }
-}
-
-fn render_checkpoint_plan(plan: &fractal_daemon::store::CheckpointPlanView) -> String {
-    let mut output = String::new();
-    let percent = |part: usize, whole: usize| {
-        if whole == 0 {
-            0.0
-        } else {
-            part as f64 * 100.0 / whole as f64
-        }
-    };
-    output.push_str(&format!(
-        "CHECKPOINT  {} · dry run, nothing changed\n",
-        plan.checkpoint
-    ));
-    output.push_str(&format!(
-        "before the cut  {} envelopes · {} claims\n",
-        plan.sealed_envelopes, plan.sealed_claims
-    ));
-    output.push_str(&format!(
-        "would drop      {} envelopes · {} claims ({:.1}%)\n",
-        plan.dropped_envelopes,
-        plan.dropped_claims,
-        percent(plan.dropped_claims, plan.sealed_claims)
-    ));
-    for (kind, count) in &plan.by_kind {
-        output.push_str(&format!(
-            "  {kind}  {} of {}\n",
-            count.dropped, count.sealed
-        ));
-    }
-    let proof = &plan.proof;
-    if proof.passed {
-        output.push_str(&format!(
-            "proof           passed · graph and {} subjects' readers unchanged\n",
-            proof.subjects
-        ));
-    } else {
-        output.push_str(&format!(
-            "proof           FAILED · a checkpoint would not verify: {}\n",
-            proof.mismatches.join(", ")
-        ));
-    }
-    output.push_str(&format!("rules-digest    {}\n", plan.rules_digest));
-    output.push_str(&format!("sealed-digest   {}\n", plan.sealed_digest));
-    output.push_str(&format!("drop-digest     {}\n", plan.drop_digest));
-    output.push_str(&format!("graph-digest    {}\n", proof.graph_digest));
     output
 }
 

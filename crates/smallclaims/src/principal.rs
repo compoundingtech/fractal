@@ -387,9 +387,47 @@ pub struct Delegation {
     pub verdict: Verdict,
 }
 
+/// A signature counts only within this long after it was made, by the batch that carries it.
+/// A claim's ID covers its batch but its signature does not, so a writer can carry a signed
+/// claim's content again in a later batch; the window makes such a copy of anything old enough to
+/// be forgotten invalid from its own fields, on every member, whether or not it still holds the
+/// original. Forgets keep signed claims at least this long plus a day (see the forget bound).
+pub const FRESHNESS_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+/// A signature may be dated at most this long after the batch that carries it. A node signs at
+/// seal, up to about half a minute after its batch's time; a later date is not an honest one.
+pub const FUTURE_SIGNATURE_MS: u64 = 60 * 60 * 1_000;
+/// Batches timed from here on are judged under the freshness window and the batch-order rules;
+/// earlier ones as before. A constant, never a fleet activation: every build that carries the
+/// rule applies it to the same claims.
+pub const FRESHNESS_FROM_UNIX_MS: u64 = 1_796_083_200_000; // 2026-12-01T00:00:00Z
+
+/// No path forgets a signed claim younger than this by its batch's time: the window plus a day.
+/// Within the window every member still holds every earlier use of a signature, so a copy of it
+/// reads the same everywhere; the window makes any later copy invalid on its own.
+pub const FORGET_SIGNED_AFTER_MS: u64 = FRESHNESS_WINDOW_MS + 24 * 60 * 60 * 1_000;
+
+/// The verdict reason for a claim whose batch is out of its writer's order.
+pub const BATCH_DISORDER: &str = "its batch is timed before a batch it follows";
+
+/// The batch a judged claim arrived in, as the writer timed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchTime {
+    /// The batch's time, inside its header hash.
+    pub time_unix_ms: u64,
+    /// The batch keeps the writer's order: no claim in it is timed before the batch, and the
+    /// batch is not timed before the writer's previous batch or before any batch its claims name
+    /// as predecessors. Only batches this side of the cutover are asked.
+    pub ordered: bool,
+}
+
 /// What [`judge`] asks the store. Every answer about order is in the canonical order of claims,
 /// never arrival.
 pub trait Facts {
+    /// The judged claim's batch, when the store can tell. Without it the claim is judged as a
+    /// batch before [`FRESHNESS_FROM_UNIX_MS`] is.
+    fn batch(&self) -> Option<BatchTime> {
+        None
+    }
     /// A delegation claim by ID, when it has been admitted, and its verdict.
     fn delegation(&self, claim_id: &str) -> Option<Delegation>;
     /// Whether `key` is a trust root for node `subject`.
@@ -407,6 +445,17 @@ pub fn judge(claim: &Judged<'_>, signature: Option<&ClaimSignature>, facts: &dyn
     };
     if !signature.verifies(claim) {
         return Verdict::Invalid("the signature does not match the claim".into());
+    }
+    if let Some(batch) = facts.batch().filter(|batch| batch.time_unix_ms >= FRESHNESS_FROM_UNIX_MS) {
+        if !batch.ordered {
+            return Verdict::Invalid(BATCH_DISORDER.into());
+        }
+        if batch.time_unix_ms.saturating_sub(signature.signed_at_unix_ms) > FRESHNESS_WINDOW_MS {
+            return Verdict::Invalid("the signature is older than the freshness window".into());
+        }
+        if signature.signed_at_unix_ms.saturating_sub(batch.time_unix_ms) > FUTURE_SIGNATURE_MS {
+            return Verdict::Invalid("the signature is dated after its batch".into());
+        }
     }
     if facts.nonce_used_before(&signature.key, &signature.nonce) {
         return Verdict::Invalid("the signature was used by an earlier claim".into());
@@ -715,6 +764,56 @@ mod tests {
             content: content_digest("note/plans", "example.note", Some("person/ada"), fields),
             fields,
         }
+    }
+
+    /// Knows one node key and the judged claim's batch.
+    struct Batched(String, Option<BatchTime>);
+
+    impl Facts for Batched {
+        fn batch(&self) -> Option<BatchTime> {
+            self.1
+        }
+        fn delegation(&self, _: &str) -> Option<Delegation> {
+            None
+        }
+        fn is_root(&self, subject: &str, key: &str) -> bool {
+            subject == "host/studio" && key == self.0
+        }
+        fn revoked_before(&self, _: &str, _: &str) -> bool {
+            false
+        }
+        fn nonce_used_before(&self, _: &str, _: &str) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn the_freshness_window_and_batch_order_judge_batches_from_the_cutover() {
+        let (node, _) = MemberKey::generate().unwrap();
+        let fields = serde_json::json!({"fields": {"text": "hello"}});
+        let judged = claim(&fields);
+        let signed = FRESHNESS_FROM_UNIX_MS + 2 * FUTURE_SIGNATURE_MS;
+        let signature = ClaimSignature::sign(&node, &judged.content, "host/studio", None, vec![], signed);
+        let verdict = |batch: Option<BatchTime>| judge(&judged, Some(&signature), &Batched(node.public().into(), batch));
+        let at = |time: u64, ordered: bool| Some(BatchTime { time_unix_ms: time, ordered });
+        // Unknown batch, or within the window and the allowance, verifies.
+        assert_eq!(verdict(None), Verdict::Verified);
+        assert_eq!(verdict(at(signed, true)), Verdict::Verified);
+        assert_eq!(verdict(at(signed + FRESHNESS_WINDOW_MS, true)), Verdict::Verified);
+        assert_eq!(verdict(at(signed - FUTURE_SIGNATURE_MS, true)), Verdict::Verified);
+        // A copy carried more than the window later is invalid from its own fields.
+        assert_eq!(verdict(at(signed + FRESHNESS_WINDOW_MS + 1, true)),
+            Verdict::Invalid("the signature is older than the freshness window".into()));
+        // A signature dated well after its batch is not an honest one.
+        assert_eq!(verdict(at(signed - FUTURE_SIGNATURE_MS - 1, true)),
+            Verdict::Invalid("the signature is dated after its batch".into()));
+        // A batch timed before one it follows: the writer's order is broken.
+        assert_eq!(verdict(at(signed, false)),
+            Verdict::Invalid("its batch is timed before a batch it follows".into()));
+        // Before the cutover none of it applies.
+        let old = ClaimSignature::sign(&node, &judged.content, "host/studio", None, vec![], 1);
+        let before = Batched(node.public().into(), at(FRESHNESS_FROM_UNIX_MS - 1, false));
+        assert_eq!(judge(&judged, Some(&old), &before), Verdict::Verified);
     }
 
     #[test]

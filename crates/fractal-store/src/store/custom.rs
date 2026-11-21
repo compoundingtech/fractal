@@ -11,7 +11,7 @@ pub const DECISION_INPUTS_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 const DECISION_INPUTS_MAX_SCANNED_CLAIMS: u64 = 2 * DECISION_INPUTS_MAX_CLAIMS;
 
 // Explicit UPSERTs in triggers keep an outer admission UPSERT from overriding IGNORE.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hd9bc2fa21a4c owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5cb8dbc1250b owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS custom_registrations (
  subject TEXT PRIMARY KEY, kind TEXT NOT NULL, version INTEGER NOT NULL,
  prefix TEXT NOT NULL, hash TEXT NOT NULL, manifest TEXT NOT NULL,
@@ -98,7 +98,8 @@ CREATE TRIGGER IF NOT EXISTS custom_record_update AFTER UPDATE OF position,claim
 WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id OR OLD.state IS NOT NEW.state BEGIN
  INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (OLD.claim_id,NEW.claim_id) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
-CREATE TRIGGER IF NOT EXISTS custom_record_delete AFTER DELETE ON replica_records BEGIN
+CREATE TRIGGER IF NOT EXISTS custom_record_delete AFTER DELETE ON replica_records
+WHEN OLD.state<>'valid' BEGIN
  INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id=OLD.claim_id ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 "#;
@@ -384,7 +385,7 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
             let Ok((name, hash)) = split_document_ref(reference) else {
                 continue;
             };
-            let bytes:Option<Vec<u8>>=tx.query_row("SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",params![name,hash],|r|r.get(0)).optional()?;
+            let bytes:Option<Vec<u8>>=tx.query_row(concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),params![name,hash],|r|r.get(0)).optional()?;
             let Some(bytes) = bytes else { continue };
             if bytes.len() > schema::MAX_BYTES || hex::encode(Sha256::digest(&bytes)) != hash {
                 continue;

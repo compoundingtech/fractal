@@ -85,6 +85,10 @@ pub struct ReplicationExchange {
     /// protocol; older peers leave it out and are compared by envelopes alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_ranges: Option<ClaimRangeSummary>,
+    /// The writer signatures of the claims this exchange carries (`store::member_signatures`),
+    /// so a claim authenticates without its envelope. Older peers neither send nor read them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claim_member_signatures: Vec<crate::store::member_signatures::ClaimMemberSignature>,
 }
 
 /// The claim-range protocol version this build speaks.
@@ -312,6 +316,9 @@ pub struct ReplicaRecordView {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ReplicationStatus {
     pub configured: bool,
+    /// Waiting claim signatures refused for the per-peer or total cap (`member_signatures`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub claim_signatures_refused: u64,
     pub fleet_id: Option<String>,
     /// Current-daemon worker heartbeat and exchange evidence, never stored envelope counts.
     #[serde(default)]
@@ -357,6 +364,10 @@ pub struct ReplicationStatus {
     /// A member refused this node as removed or left, so it no longer syncs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed: Option<crate::fleet::RemovalNotice>,
+    /// Messages routed to the messages shard that this process appended to the graph instead
+    /// since it started, by error code. Absent from a daemon that does not count them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_fallbacks: Option<BTreeMap<String, u64>>,
 }
 
 /// Operational evidence expires even when the stored claim history is nonempty.

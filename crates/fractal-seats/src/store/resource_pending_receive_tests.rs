@@ -60,7 +60,7 @@ observer "github/acme/demo/pull/1" {
             "resource_observations_insert",
             "resource_observations_delete",
             "resource_observations_record_insert",
-            "resource_observations_record_update",
+            "resource_observations_record_change",
         ] {
             let sql: String = reader
                 .query_row(

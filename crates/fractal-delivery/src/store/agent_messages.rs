@@ -108,8 +108,8 @@ impl AgentMessagesStore for Store {
         let snapshot_sends = (!ready && pinned).then(|| snapshot_sends(&connection)).transpose()?;
         let calibration: Option<(String, Vec<u8>)> = connection
             .query_row(
-                "SELECT d.hash,b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash
-             WHERE d.name=?1 ORDER BY d.binding_key DESC LIMIT 1",
+                concat!("SELECT d.hash,", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash
+             WHERE d.name=?1 ORDER BY d.binding_key DESC LIMIT 1"),
                 [ALLOWANCES],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

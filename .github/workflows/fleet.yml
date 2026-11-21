@@ -16,14 +16,18 @@ permissions:
   actions: read
 
 concurrency:
-  group: "workspace-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name }}"
+  group: "workspace-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref) || github.run_id }}-${{ github.event_name }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pick-runner:
     name: pick-runner
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on' || (github.event_name == 'pull_request' && vars.CI_PR_NAMESPACE_PROFILE != '')) }}
-    runs-on: ubuntu-latest
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 3
     permissions:
       pull-requests: read
@@ -474,6 +478,10 @@ jobs:
                   # Queue batches can contain other changes. This is the entry identity; the source
                   # and tree always name the complete effective checkout, never its author's head.
                   return f'github:{repository}#{match[1]}'
+              if event_name == 'push':
+                  if event.get('after') != source:
+                      raise ValueError('mismatched push identity')
+                  return f'github:{repository}@{source}'
               if event_name == 'workflow_dispatch':
                   return f'github:{repository}@{source}'
               raise ValueError('unsupported workflow event')
@@ -543,7 +551,11 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-linux-gate:
     name: evidence-gate-linux-gate
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -612,7 +624,11 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-linux-clippy:
     name: evidence-gate-linux-clippy
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -681,7 +697,11 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-linux-fleet-compat:
     name: evidence-gate-linux-fleet-compat
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -750,7 +770,11 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-typescript-client:
     name: evidence-gate-typescript-client
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -819,7 +843,11 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-genie-freshness:
     name: evidence-gate-genie-freshness
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -888,7 +916,11 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-ci-script-tests:
     name: evidence-gate-ci-script-tests
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -958,7 +990,11 @@ jobs:
   evidence-gate-fractal-web:
     name: evidence-gate-fractal-web
     needs: [fractal-web-changes]
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -1028,7 +1064,11 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-rust-tests:
     name: evidence-gate-rust-tests
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -5346,7 +5386,11 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   compat-archives-x86_64-unknown-linux-gnu:
     name: Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
-    runs-on: ubuntu-latest
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 15
     permissions:
       contents: read
