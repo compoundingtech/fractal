@@ -326,15 +326,19 @@ impl AdhocWorkStore for Store {
                 return Err(super::stop_intake::stopping(&turn.agent));
             }
             let hash = hex::encode(Sha256::digest(key.as_bytes()));
-            let claim = append_claim_tx(tx, &self.origin, &run, "mission-run.created", Some(&parent.subject),
-                &json!({"fields": {
+            let body = json!({"fields": {
                     "native_turn": payload, "native_turn_key": key, "parent_attempt": attempt,
                     "status": "running", "mission": "mission/native-turn", "revision": hash,
                     "current_generation": format!("run-generation/native-turn-{hash}"),
                     "root_revision": parent.root_revision, "root_mission_run": parent.root_mission_run,
                     "parent_step_run": step, "workspace": parent.workspace, "requester": parent.requester,
                     "inputs": {}, "mode": parent.mode
-                }}), &[], None).map_err(claim_append_error)?;
+                }});
+            // Admission resolves subtree ownership from run rows. Establish that edge
+            // before appending, without making a ready leaf visible outside the transaction.
+            fractal_store::store::adhoc_work::prepare_native_turn(tx, &run, &body["fields"], now_ms())?;
+            let claim = append_claim_tx(tx, &self.origin, &run, "mission-run.created", Some(&parent.subject),
+                &body, &[], None).map_err(claim_append_error)?;
             fractal_store::store::adhoc_work::project_native_turn(tx, &claim)
         })?;
         self.mission_run(&run).map_err(internal)?
@@ -377,7 +381,8 @@ impl AdhocWorkStore for Store {
                 }
                 products.insert(product.path.clone(), value);
             }
-            let claim = append_claim_tx(tx, &self.origin, run, "program.turn.report", created.actor.as_deref(),
+            // Verification is a daemon receipt, not another outward effect by the parent.
+            let claim = append_claim_tx(tx, &self.origin, run, "program.turn.report", None,
                 &json!({"fields": {"report": {
                     "run": run, "step": subject, "summary": report.body["fields"]["summary"].as_str().unwrap_or_default(),
                     "evidence": report.body.get("evidence").cloned().unwrap_or_else(|| json!([])),

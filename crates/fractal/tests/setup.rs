@@ -161,7 +161,7 @@ list-units)
     printf '%s\n' '[{"unit":"st3.service","load":"loaded","active":"inactive","sub":"dead"}]'
     ;;
 show)
-    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup ]; then
+    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup ]; then
         echo 'unexpected property request' >&2
         exit 9
     fi
@@ -171,7 +171,7 @@ show)
             echo 'must not query an unloaded service' >&2
             exit 9
         fi
-        printf 'Id=%s\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n\n' "$name"
+        printf 'Id=%s\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nUnitFileState=disabled\nMainPID=0\nControlGroup=\n\n' "$name"
     done
     ;;
 *)
@@ -225,7 +225,7 @@ fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() 
     assert!(calls.lines().any(|line| line.starts_with("--user list-units ")), "{calls}");
     assert!(calls.lines().all(|line| {
         line.starts_with("--user list-units ")
-            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup st3.service"
+            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup st3.service"
     }), "{calls}");
 }
 
@@ -278,7 +278,7 @@ fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
     assert!(calls.lines().any(|line| line.starts_with("--user list-units ")), "{calls}");
     assert!(calls.lines().all(|line| {
         line.starts_with("--user list-units ")
-            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup st3.service"
+            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup st3.service"
     }), "{calls}");
 }
 
@@ -1092,7 +1092,7 @@ list-units)
     exit 0
     ;;
 show)
-    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup ]; then
+    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup ]; then
         echo 'unexpected property request' >&2
         exit 9
     fi
@@ -1102,7 +1102,7 @@ show)
             echo 'must not query an unloaded service' >&2
             exit 9
         fi
-        printf 'Id=%s\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=0\nControlGroup=\n\n' "$name"
+        printf 'Id=%s\nLoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=0\nControlGroup=\n\n' "$name"
     done
     exit 0
     ;;
@@ -1147,7 +1147,8 @@ esac
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("replication unit denied"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("replication unit denied"), "{stderr}");
         assert_eq!(unit.exists(), file_present);
         let calls = fs::read_to_string(&log).unwrap();
         assert!(!calls.contains("daemon-reload"), "{calls}");
