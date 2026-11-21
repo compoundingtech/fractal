@@ -160,8 +160,12 @@ fn own_claim_of_released_envelope(store: &Store) -> String {
         .unwrap()
 }
 
-// The daemon must not release envelopes before peers can receive their signed claims.
-const _: () = assert!(!ENVELOPE_RELEASE, "peers cannot be served a released envelope's claims before the claim-set transport");
+#[test]
+fn the_daemon_does_not_release_envelopes_yet() {
+    const {
+        assert!(!ENVELOPE_RELEASE, "peers cannot be served a released envelope's claims before the claim-set transport");
+    }
+}
 
 #[test]
 fn a_release_drops_payloads_and_changes_nothing_a_reader_or_a_peer_sees() {
