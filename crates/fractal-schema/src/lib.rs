@@ -2164,6 +2164,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["step", "program"],
         ),
         (
+            "program.turn.report",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            true,
+            &[],
+        ),
+        (
             "work.person-asked",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -3809,6 +3818,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "mission-run.created" => &[
             ("mission_spec", object()),
             ("ad_hoc_title", string()),
+            ("native_turn", object()),
+            ("native_turn_key", string()),
+            ("parent_attempt", integer()),
             ("status", string()),
             ("phase", string()),
             ("admission_publication", string()),
@@ -3953,6 +3965,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "mission.run.trace" => &[("trace", any())],
         "program.attempt.trace" => &[("attempt", required_integer()), ("trace", any())],
+        "program.turn.report" => &[("report", required_object())],
         "program.step" => &[
             ("key", required_string()),
             ("status", required_enum(&["started", "completed", "failed"])),
@@ -5462,6 +5475,55 @@ mod tests {
                 "invalid-claim-field",
             );
         }
+    }
+
+    #[test]
+    fn native_turn_creation_and_verified_report_are_registered_durable_system_claims() {
+        let subject = "mission-run/native-turn/episode";
+        let mut creation: BTreeMap<String, Value> = serde_json::from_value(serde_json::json!({
+            "native_turn": {
+                "agent": "agent/node.publisher", "instructions": "Produce an answer.",
+                "context": "Literal context.", "fresh_context": false,
+                "products": [{"path": "answer", "kind": "custom.test", "fields": {"head": "h1"}}]
+            },
+            "native_turn_key": "program:step-run/parent/program:1:turn", "parent_attempt": 1,
+            "status": "running", "mission": "mission/native-turn", "revision": "hash",
+            "current_generation": "run-generation/native-turn-hash",
+            "root_revision": "parent-hash", "root_mission_run": "mission-run/parent",
+            "parent_step_run": "step-run/parent/program", "workspace": ".",
+            "requester": "person/owner", "inputs": {}, "mode": "run"
+        })).unwrap();
+        registry().validate_claim(subject, "mission-run.created", &creation).unwrap();
+        for (name, value) in [
+            ("native_turn", serde_json::json!("not an object")),
+            ("native_turn_key", serde_json::json!(1)),
+            ("parent_attempt", serde_json::json!("1")),
+        ] {
+            let mut invalid = creation.clone();
+            invalid.insert(name.into(), value);
+            assert_eq!(registry().validate_claim(subject, "mission-run.created", &invalid)
+                .unwrap_err().code, "invalid-claim-field");
+        }
+        // Additive native metadata must not invalidate pre-existing graph creations.
+        for name in ["native_turn", "native_turn_key", "parent_attempt"] {
+            creation.remove(name);
+        }
+        registry().validate_claim("mission-run/graph", "mission-run.created", &creation).unwrap();
+        let report = BTreeMap::from([("report".into(), serde_json::json!({
+            "run": subject, "step": "step-run/native-turn-hash/turn",
+            "summary": "Actual worker summary", "evidence": [], "executions": [],
+            "products": {"answer": {"fields": {"kind": "custom.test", "head": "h1"}}}
+        }))]);
+        let spec = registry().validate_claim(subject, "program.turn.report", &report).unwrap();
+        assert_eq!(spec.write_policy, WritePolicy::SystemOnly);
+        assert_eq!(spec.cardinality, Cardinality::Once);
+        assert_eq!(spec.retention, Retention::Durable);
+        assert!(registry().validate_claim(subject, "program.turn.report", &BTreeMap::new()).is_err());
+        let invalid = BTreeMap::from([("report".into(), serde_json::json!("not an object"))]);
+        assert_eq!(registry().validate_claim(subject, "program.turn.report", &invalid)
+            .unwrap_err().code, "invalid-claim-field");
+        assert_eq!(registry().validate_public_claim(subject, "program.turn.report", &report, Some("agent/node.publisher"))
+            .unwrap_err().code, "claim-write-forbidden");
     }
 
     #[test]
