@@ -309,12 +309,80 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h98693fb60771 owner=smallclai
     Ok(())
 }
 
+/// The clock a forget is judged by: the store's write clock, which a simulation can fix or shift
+/// (`Store::set_write_clock_at`), otherwise this host's.
+fn forget_clock(connection: &Connection) -> u64 {
+    let (offset, at): (i64, Option<i64>) = connection
+        .prepare_cached("SELECT offset_ms, at_ms FROM temp.write_clock")
+        .and_then(|mut statement| statement.query_row(/* sqlite-large-value: allow-for-now lv-hde95c66af790 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?))))
+        .unwrap_or((0, None));
+    let now = at.map_or_else(|| i128::try_from(now_ms()).unwrap_or(i128::MAX) + i128::from(offset), i128::from);
+    u64::try_from(now.max(0)).unwrap_or(u64::MAX)
+}
+
+/// The first signed claim among these that the forget bound of the freshness window still holds:
+/// its batch is younger than `principal::FORGET_SIGNED_AFTER_MS` by the store's write clock.
+/// Batches timed before the window could first matter (the cutover less the window) are not held.
+/// A planner asks before it deletes, so it can skip the item and go on.
+pub fn young_signed_claim_tx(
+    transaction: &Transaction<'_>,
+    envelopes: &[EnvelopeTombstone],
+    claims: &[ClaimTombstone],
+) -> Result<Option<String>> {
+    use crate::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS, FRESHNESS_WINDOW_MS};
+    let now = forget_clock(transaction);
+    let youngest_forgettable = now.saturating_sub(FORGET_SIGNED_AFTER_MS);
+    let first_held = FRESHNESS_FROM_UNIX_MS.saturating_sub(FRESHNESS_WINDOW_MS);
+    let young = |time: i64| u64::try_from(time).is_ok_and(|time| time > youngest_forgettable && time >= first_held);
+    let mut by_claim = transaction.prepare_cached(
+        "SELECT CAST(b.accepted_at_unix_ms AS INTEGER) FROM claims c JOIN batches b ON b.id=c.batch_id
+         WHERE c.id=?1 AND EXISTS(SELECT 1 FROM claim_signatures s WHERE s.claim_id=c.id)",
+    )?;
+    for claim in claims {
+        if let Some(time) = by_claim.query_row(/* sqlite-large-value: allow-for-now lv-h3c5dadd92175 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, i64>(0)).optional()?
+            && young(time)
+        {
+            return Ok(Some(claim.id.clone()));
+        }
+    }
+    let mut by_envelope = transaction.prepare_cached(
+        "SELECT c.id, CAST(b.accepted_at_unix_ms AS INTEGER) FROM batches b JOIN claims c ON c.batch_id=b.id
+         WHERE b.origin=?1 AND b.replica_sequence=?2
+           AND EXISTS(SELECT 1 FROM claim_signatures s WHERE s.claim_id=c.id)
+         ORDER BY 2 DESC LIMIT 1",
+    )?;
+    for envelope in envelopes {
+        if let Some((id, time)) = by_envelope
+            .query_row(/* sqlite-large-value: allow-for-now lv-ha3c44bb1f1d2 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence as i64], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .optional()?
+            && young(time)
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// The deletion's own backstop: refuse the whole deletion when the forget bound holds one of its
+/// signed claims, and drop nothing. Planners ask `young_signed_claim_tx` first and skip the item.
+fn refuse_young_signed_claims_tx(
+    transaction: &Transaction<'_>,
+    envelopes: &[EnvelopeTombstone],
+    claims: &[ClaimTombstone],
+) -> Result<()> {
+    if let Some(id) = young_signed_claim_tx(transaction, envelopes, claims)? {
+        anyhow::bail!("refusing to forget signed claim {id}: its batch is younger than the forget bound");
+    }
+    Ok(())
+}
+
 /// Delete dropped claims and their envelopes from a store. The trim uses the same code.
 pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn delete_dropped_rows_tx(
     transaction: &Transaction<'_>,
     envelopes: &[EnvelopeTombstone],
     claims: &[ClaimTombstone],
 ) -> Result<()> {
+    refuse_young_signed_claims_tx(transaction, envelopes, claims)?;
     // Where the ledger is the authority, it holds what was deleted, in the deleting transaction:
     // a chunk that rolls back, or a cut that never trims, retires nothing a peer could learn.
     let authoritative = super::retired::authoritative(transaction)?;
@@ -893,3 +961,73 @@ pub fn allocator_reclaim_stats_for_test() -> (u64, u64, std::time::Duration) {
     super::checkpoint_completion::reclaim_stats()
 }
 
+
+#[cfg(test)]
+mod forget_bound_tests {
+    use super::*;
+    use crate::claim::ClaimInput;
+    use crate::fleet::MemberKey;
+    use crate::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    use std::sync::Arc;
+
+    fn tombstone(id: &str) -> ClaimTombstone {
+        ClaimTombstone {
+            id: id.into(), writer: String::new(), sequence: 0, envelope_hash: String::new(),
+            subject: String::new(), kind: String::new(), actor: None, predecessors: Vec::new(),
+            operation_id: None, request_digest: None, accepted_at_unix_ms: 0,
+        }
+    }
+
+    fn held(store: &Store, id: &str) -> bool {
+        store.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [id], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn no_path_forgets_a_signed_claim_younger_than_the_bound() {
+        let store = Store::open_memory("studio", Arc::new(crate::store::runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+        let at = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+        store.set_write_clock_at(at).unwrap();
+        let id = store.append_claim(&ClaimInput {
+            subject: "note/young".into(), kind: "example.note".into(), actor: None,
+            fields: serde_json::from_value(serde_json::json!({"text": "young"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap().id;
+        store.replication_snapshot().unwrap();
+        let forget = |now: u128| -> Result<()> {
+            store.set_write_clock_at(now).unwrap();
+            let mut connection = store.connection.write();
+            let tx = connection.transaction()?;
+            delete_dropped_rows_tx(&tx, &[], &[tombstone(&id)])?;
+            tx.commit()?;
+            Ok(())
+        };
+        // A day later: refused, and nothing is deleted.
+        let error = forget(at + 86_400_000).unwrap_err();
+        assert!(error.to_string().contains("younger than the forget bound"), "{error:#}");
+        assert!(held(&store, &id));
+        // Past the bound by batch time: it goes.
+        forget(at + u128::from(FORGET_SIGNED_AFTER_MS) + 1_000).unwrap();
+        assert!(!held(&store, &id));
+    }
+
+    #[test]
+    fn a_signed_claim_from_before_the_window_could_matter_is_forgotten_as_before() {
+        let store = Store::open_memory("studio", Arc::new(crate::store::runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+        let at = u128::from(FRESHNESS_FROM_UNIX_MS) - u128::from(FORGET_SIGNED_AFTER_MS);
+        store.set_write_clock_at(at).unwrap();
+        let id = store.append_claim(&ClaimInput {
+            subject: "note/old".into(), kind: "example.note".into(), actor: None,
+            fields: serde_json::from_value(serde_json::json!({"text": "old"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap().id;
+        store.replication_snapshot().unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        delete_dropped_rows_tx(&tx, &[], &[tombstone(&id)]).unwrap();
+        tx.commit().unwrap();
+        drop(connection);
+        assert!(!held(&store, &id));
+    }
+}

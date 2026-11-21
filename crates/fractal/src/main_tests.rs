@@ -1,4 +1,16 @@
 #[test]
+fn subject_activity_summary_is_explicit_and_conflicts_with_other_views() {
+    assert!(Cli::try_parse_from([
+        "fractal", "subject", "show", "agent/example", "--activity-summary", "--json", "--daemon-wait", "0",
+    ]).is_ok());
+    for flag in ["--kdl", "--references", "--source"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "subject", "show", "agent/example", "--activity-summary", flag,
+        ]).is_err());
+    }
+}
+
+#[test]
 fn series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets() {
     let cli = Cli::try_parse_from([
         "fractal", "series", "--objective", "factory/work-throughput", "--from", "1000", "--to", "4000",
