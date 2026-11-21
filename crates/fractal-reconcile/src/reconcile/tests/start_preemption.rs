@@ -329,6 +329,64 @@ use super::*;
 }
 
 #[tokio::test]
+async fn activation_lease_survives_non_waiting_dispatch_through_completion_publication() {
+    let (directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    let repository = crate::checkout::test_support::repository(directory.path());
+    apply_source(&store, &format!(
+        "version 2\nagent \"example/worker\" {{ workspace {:?}; command \"true\" }}",
+        repository.to_str().unwrap()), "leased-detached-start");
+    let pass_lease = reconciler.worktree_activation_lease(&repository, &repository).unwrap();
+    assert!(launch(&reconciler, "agent/example/worker"));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    drop(pass_lease);
+    let contend = || crate::checkout::activation_lease(&repository, &repository);
+    assert!(contend().is_err(), "the detached worker lost the pass's deletion fence");
+    release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+    assert!(store.observations_for("agent/example/worker", "runtime.action.succeeded").unwrap().is_empty());
+    assert!(contend().is_err(), "worker exit released admission before result adoption");
+    let owner = repository.clone();
+    *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(move || {
+        assert!(crate::checkout::activation_lease(&owner, &owner).is_err(),
+            "completion publication must remain fenced");
+    }));
+    let operation = store.runtime_start_for("agent/example/worker").unwrap().unwrap();
+    assert!(reconciler.apply_start_result(&operation.id, "agent/example/worker").unwrap());
+    assert!(!store.observations_for("agent/example/worker", "runtime.action.succeeded").unwrap().is_empty());
+    assert!(contend().is_ok(), "published completion did not release admission");
+}
+
+#[tokio::test]
+async fn activation_lease_is_reacquired_for_a_recovered_queued_start() {
+    let (directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let repository = crate::checkout::test_support::repository(directory.path());
+    apply_source(&store, &format!(
+        "version 2\nagent \"example/queued\" {{ workspace {:?}; command \"true\" }}",
+        repository.to_str().unwrap()), "leased-recovered-start");
+    store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "queued launches must keep their activation lease");
+    drop(reconciler);
+    let _released = crate::checkout::activation_lease(&repository, &repository).unwrap();
+    drop(_released);
+    let reopened = Arc::new(Store::open(&directory.path().join("claims.db"), "node").unwrap());
+    let restarted = Arc::new(Reconciler::new(reopened.clone(), runtime, "node".into(), Arc::new(Notify::new())));
+    restarted.wait_for_test_starts.store(false, Ordering::Release);
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "a recovered frozen queue must reacquire admission");
+    reopened.clear_launch_freeze("person/operator", "activation").unwrap();
+    restarted.reconcile_start_jobs().unwrap();
+    workers_done(&restarted).await;
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "recovered worker completion is not publication");
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(reopened.runtime_start_for("agent/example/queued").unwrap().is_none());
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_ok());
+}
+
+#[tokio::test]
 async fn launch_freeze_defers_a_durable_operation_then_launches_it_once() {
     let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
     apply_source(&store,
