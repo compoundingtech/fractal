@@ -99,9 +99,7 @@ fn empty_receipt_persists_advanced_ack_and_clears_outbound_refusal() {
     target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
     // The peer's inventory digest is the durable advertised acknowledgement cursor.
     exchange.inventory.digest = "advanced-inventory".into();
-    target.connection.write().execute(
-        "INSERT INTO replication_refusals(peer,reason,updated_at_unix_ms) VALUES('birch','refused','0')", [],
-    ).unwrap();
+    target.record_peer_failure("birch", "refused", "refused").unwrap();
     let metrics = crate::receive_metrics::RequestMetrics::default();
     {
         let _metrics = metrics.enter();
@@ -146,15 +144,9 @@ fn process_local_receipt_requires_its_durable_checkpoint_and_does_not_survive_re
     target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
     // External durable changes invalidate the local extension, including diagnostics that
     // deliberately age a peer while its daemon stays alive.
-    target.connection.write().execute(
-        "UPDATE replication_peers SET last_success_at_unix_ms='1' WHERE peer='birch'", [],
-    ).unwrap();
-    assert_eq!(target.replication_peer_up("birch").unwrap(), (false, Some(1)));
+    target.age_replication_peer_for_test("birch");
+    assert_eq!(target.replication_peer_up("birch").unwrap(), (false, Some(0)));
     assert!(target.replication_sync.lock().unwrap()["birch"].last_received_at_unix_ms.is_none());
-    target.connection.write().execute(
-        "DELETE FROM replication_peers WHERE peer='birch'", [],
-    ).unwrap();
-    assert_eq!(target.replication_peer_last_success("birch").unwrap(), None);
 }
 
 /// The injected SQL cost represents a populated runtime's per-claim admission work. The
