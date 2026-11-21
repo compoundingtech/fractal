@@ -66,7 +66,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     previous = Some(decision);
                     self.incremental.touch("host-lane-pressure");
-                    self.signal_changed();
+                    // Sampling changes admission inputs, not the durable graph event stream.
+                    self.notify.notify_one();
                 }
                 Ok(_) => {}
                 Err(error) => tracing::error!(%error, "invalid native admission PSI policy"),

@@ -24,17 +24,18 @@ async fn daemon_sampler_observes_without_a_pass_or_native_lanes() {
     assert!(reconciler.seat_admission.lanes.is_none());
     assert!(reconciler.seat_admission.config.is_none());
     assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
-    let mut events = reconciler.event_notify.subscribe();
+    let events = reconciler.event_notify.subscribe();
     let sampler = reconciler.sample_resource_pressure();
     tokio::pin!(sampler);
     if cfg!(target_os = "linux") {
         tokio::select! {
             () = &mut sampler => panic!("sampler must remain scoped to the daemon run"),
-            changed = events.changed() => changed.unwrap(),
+            () = reconciler.notify.notified() => {},
             () = tokio::time::sleep(Duration::from_secs(10)) => panic!("sampler did not observe independently"),
         }
         assert!(reconciler.seat_admission.pressure.lock().unwrap().is_some());
         assert!(!reconciler.step_deadlines.lock().unwrap().contains_key("resource-pressure"));
+        assert!(!events.has_changed().unwrap(), "sampling must not publish a graph mutation");
     } else {
         tokio::select! {
             () = &mut sampler => panic!("unsupported platforms keep the sampler dormant"),
