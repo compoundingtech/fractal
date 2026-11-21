@@ -404,7 +404,7 @@ def build_release(args):
         "scripts/prepare-pnpm-source-inputs.py")
         + str(shutil.which("node")) + str(shutil.which("pnpm"))).encode()).hexdigest()
     try:
-        run([sys.executable, str(repo / "scripts/prepare-pnpm-source-inputs.py"), "prepare", "--cache-only"],
+        run([sys.executable, "-P", str(repo / "scripts/prepare-pnpm-source-inputs.py"), "prepare", "--cache-only"],
             cwd=repo, env=env)
     except (OSError, subprocess.SubprocessError) as error:
         save(output / "failure.json", {"reason": "source_inputs_preparation_failed",
@@ -914,7 +914,7 @@ class Delivery:
         (output / "failure.json").unlink(missing_ok=True)
         self.record("build_started", commit=commit, build_version=version)
         command = [gate, "--class", "heavy", "--max-hold", "2700", "--",
-                   "taskpolicy", "-c", "utility", "nice", "-n", "19", sys.executable,
+                   "taskpolicy", "-c", "utility", "nice", "-n", "19", sys.executable, "-P",
                    str(Path(__file__).resolve()), "--build-worker",
                    "--repo", str(repo), "--output", str(output),
                    "--team", self.args.team, "--commit", commit,
