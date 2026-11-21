@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The daily answers check now also compares the verdicts members serve. The summary carries a reader, reader/verdicts, with one key per answer whose claim this member judges invalid, so a claim one member serves as verified and another as invalid opens an answers-disagreement fault naming the claim and reason.",
+  "replay": {"status": "none", "detail": "Verdicts are read, not changed; the summary is local and recomputed each check."},
+  "schema": {"status": "none", "detail": "No table or column change. The kept summary file beside the store gains the reader's keys; a build change recomputes it as before."},
+  "rules": {"status": "none", "detail": "No judging rule changes."},
+  "compatibility": {"status": "compatible", "detail": "The reader is one more summary kind. A member on an older build has no reader/verdicts, and two members compare it only when both carry it, so a mixed fleet raises no fault. Carrying it does not make a member compare fold readers it does not run."},
+  "downtime": {"status": "none", "detail": "None. The summary pass reads each answer's verdict with a few primary-key reads; see the PR for the measured cost on a copy of a real member."},
+  "manual": {"status": "none", "detail": "Nothing to do. An answers-disagreement fault for reader/verdicts names each claim and the verdict and reason the member serves. Two members that judge one claim differently have found a bug in judging or in what it read; keep both stores for the investigation."},
+  "recovery": {"status": "none", "detail": "Roll back to the previous release: its summary has no verdict reader and its peers compare nothing for it."}
+}
