@@ -52,6 +52,12 @@ fn unchanged_empty_receipts_are_write_free_until_the_freshness_deadline() {
     let exchange = source.export_replication_summary(FLEET).unwrap();
     target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
     target.record_transport_observation("birch", "up", None, None).unwrap();
+    let sealing = crate::receive_metrics::RequestMetrics::default();
+    {
+        let _metrics = sealing.enter();
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    }
+    assert_eq!(sealing.snapshot().commits, 1, "new local transport data still requires sealing");
     let changes = target.connection.write().total_changes();
     let index = target.index().unwrap();
     let metrics = crate::receive_metrics::RequestMetrics::default();

@@ -37,13 +37,18 @@ async fn identical_empty_receives_after_warmup_commit_nothing_and_do_not_wake_re
         peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
         round_trip_ms: None, carrier: Default::default(), authenticated_member_key: None,
     };
-    replication_receive(State(state.clone()), Default::default(), Json(request.clone())).await.unwrap();
+    let _ = replication_receive(State(state.clone()), Default::default(), Json(request.clone())).await.unwrap();
     state.notify = Arc::new(Notify::new());
     let logs = LogBuffer::default();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO).with_ansi(false).without_time()
         .with_writer(logs.clone()).finish();
     async {
+        // The initial transport observation is new local data. Its first subsequent
+        // receive must still commit the pending batch's seal before reaching steady state.
+        let _ = replication_receive(
+            State(state.clone()), Default::default(), Json(request.clone()),
+        ).await.unwrap();
         for _ in 0..32 {
             let response = replication_receive(
                 State(state.clone()), Default::default(), Json(request.clone()),
@@ -56,8 +61,9 @@ async fn identical_empty_receives_after_warmup_commit_nothing_and_do_not_wake_re
     let captured = String::from_utf8_lossy(&bytes);
     let summaries: Vec<_> = captured.lines()
         .filter(|line| line.contains("replication receive summary")).collect();
-    assert_eq!(summaries.len(), 32);
-    for summary in summaries {
+    assert_eq!(summaries.len(), 33);
+    assert!(summaries[0].contains("commits=1"), "pending local sealing was skipped: {}", summaries[0]);
+    for summary in summaries.into_iter().skip(1) {
         assert!(summary.contains("commits=0"), "{summary}");
         assert!(summary.contains("exchange_class=\"empty\""), "{summary}");
         assert!(summary.contains("metric_outcome=\"ok\""), "{summary}");
