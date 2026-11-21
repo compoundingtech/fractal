@@ -71,7 +71,10 @@ impl StoreWorktreeLease {
         let mut output = lease.child.stdout.take().context("mr lease readiness pipe")?;
         let mut ready = [0; 7];
         output.read_exact(&mut ready)
-            .with_context(|| format!("mr refused the activation lease for {}", lease.owner.display()))?;
+            .with_context(|| format!(
+                "store repository missing or unidentifiable: {}; mr refused the activation lease for {}",
+                repository.display(), lease.owner.display()
+            ))?;
         anyhow::ensure!(&ready == b"leased\n", "invalid mr lease readiness");
         Ok(lease)
     }
