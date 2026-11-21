@@ -12,25 +12,50 @@ use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result, ensure};
 pub use fractal_mac_custody::{Receipt, Status};
-use fractal_mac_custody::{Plan, SCHEMA, SLOT};
+use fractal_mac_custody::{Plan, SCHEMA};
 use serde::{Deserialize, Serialize};
 
 /// Explicit finite-job custody request. This never changes ambient PTY or exec isolation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Slot {
     Heavy1,
+    Gate1,
+    Gate2,
+    Gate3,
+    Eval1,
 }
 
 impl Slot {
     pub const fn name(self) -> &'static str {
-        match self { Self::Heavy1 => SLOT }
+        match self {
+            Self::Heavy1 => "heavy1",
+            Self::Gate1 => "gate1",
+            Self::Gate2 => "gate2",
+            Self::Gate3 => "gate3",
+            Self::Eval1 => "eval1",
+        }
+    }
+
+    pub fn for_lane(lane: &str) -> Result<&'static [Self]> {
+        match lane {
+            "heavy" => Ok(&[Self::Heavy1]),
+            "gate" => Ok(&[Self::Gate1, Self::Gate2, Self::Gate3]),
+            "eval" => Ok(&[Self::Eval1]),
+            _ => anyhow::bail!("darwin-custody-lane: unsupported lane {lane}"),
+        }
+    }
+
+    pub fn root(self) -> &'static Path {
+        Path::new(fractal_mac_custody::slot(self.name()).expect("runtime slot is compiled into helper").root)
     }
 }
 
 pub(crate) fn slot_for_unit(unit: &str) -> Option<Slot> {
-    let digest = unit.strip_prefix("st3-darwin-heavy1-")?.strip_suffix(".scope")?;
-    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(Slot::Heavy1)
+    let suffix = unit.strip_prefix("st3-darwin-")?.strip_suffix(".scope")?;
+    let (name, digest) = suffix.split_once('-')?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) { return None; }
+    [Slot::Heavy1, Slot::Gate1, Slot::Gate2, Slot::Gate3, Slot::Eval1]
+        .into_iter().find(|slot| slot.name() == name)
 }
 
 pub const HELPER_ENV: &str = "FRACTAL_MAC_CUSTODY";
@@ -70,7 +95,7 @@ impl Helper {
         let allowed = Command::new("/usr/bin/sudo")
             .args(["-n", "-l"])
             .arg(&path)
-            .args(["leftovers", SLOT])
+            .args(["leftovers", Slot::Heavy1.name()])
             .env_clear()
             .envs(environment)
             .stdin(Stdio::null())
@@ -88,27 +113,45 @@ impl Helper {
     }
 
     /// The caller must admit only an `Empty` receipt; members and unknown states retain custody.
-    pub fn leftovers(&self) -> Result<Receipt> {
-        self.invoke("leftovers", None)
+    pub fn leftovers(&self, slot: Slot) -> Result<Receipt> {
+        self.invoke("leftovers", slot, None)
+    }
+
+    /// Select an unbound, empty slot. Empty cwd requests any slot in the lane;
+    /// an explicit cwd must already lie beneath one of that lane's slot roots.
+    pub fn select_slot(&self, lane: &str, cwd: &Path) -> Result<Slot> {
+        let slots = Slot::for_lane(lane)?;
+        let cwd = if cwd.as_os_str().is_empty() { None } else {
+            Some(cwd.canonicalize().context("darwin-custody-cwd: canonicalize job cwd")?)
+        };
+        let mut contained = cwd.is_none();
+        for &slot in slots {
+            let root = slot.root().canonicalize().context("canonicalize Darwin slot root")?;
+            if cwd.as_ref().is_some_and(|cwd| !cwd.starts_with(&root)) { continue; }
+            contained = true;
+            if matches!(self.leftovers(slot)?.status, Status::Empty) { return Ok(slot); }
+        }
+        ensure!(contained, "darwin-custody-cwd: cwd must lie beneath a {lane} slot root");
+        anyhow::bail!("darwin-custody-slot: no empty {lane} slot is available")
     }
 
     /// Darwin RSS samples are observations, never memory enforcement or peak measurements.
-    pub fn sample(&self) -> Result<Receipt> {
-        self.invoke("sample", None)
+    pub fn sample(&self, slot: Slot) -> Result<Receipt> {
+        self.invoke("sample", slot, None)
     }
 
     /// Both natural exit and cancellation require this operation before retirement is claimed.
     /// The guard must still bind the caller to the current slot operation.
-    pub fn cancel(&self, job_id: &str, guard: &dyn Fn() -> Result<()>) -> Result<Receipt> {
+    pub fn cancel(&self, slot: Slot, job_id: &str, guard: &dyn Fn() -> Result<()>) -> Result<Receipt> {
         validate_job_id(job_id)?;
         guard()?;
-        self.invoke("cancel", Some(job_id))
+        self.invoke("cancel", slot, Some(job_id))
     }
 
-    fn invoke(&self, verb: &str, job_id: Option<&str>) -> Result<Receipt> {
+    fn invoke(&self, verb: &str, slot: Slot, job_id: Option<&str>) -> Result<Receipt> {
         ensure!(cfg!(target_os = "macos"), "Darwin custody requires macOS");
         let mut command = Command::new("/usr/bin/sudo");
-        command.arg("-n").arg(&self.path).args([verb, SLOT]);
+        command.arg("-n").arg(&self.path).args([verb, slot.name()]);
         if let Some(job_id) = job_id {
             command.arg(job_id);
         }
@@ -148,7 +191,7 @@ impl RetirementProof {
     /// Only the helper's completed root sweep can produce whole-slot retirement evidence.
     pub fn from_receipt(slot: &str, job_id: &str, receipt: &Receipt) -> Result<Self> {
         validate_job_id(job_id)?;
-        ensure!(slot == SLOT && receipt.schema == SCHEMA, "Darwin retirement changed its bound slot or schema");
+        ensure!(fractal_mac_custody::slot(slot).is_some() && receipt.schema == SCHEMA, "Darwin retirement changed its bound slot or schema");
         let Status::Retired { sweeps, signals } = &receipt.status else {
             anyhow::bail!("Darwin slot retirement is unproven: {:?}", receipt.status);
         };
@@ -156,7 +199,7 @@ impl RetirementProof {
     }
 
     pub fn validate(&self, expected_slot: &str, expected_job: &str) -> Result<()> {
-        ensure!(self.schema == SCHEMA && self.slot == SLOT && self.slot == expected_slot
+        ensure!(self.schema == SCHEMA && fractal_mac_custody::slot(&self.slot).is_some() && self.slot == expected_slot
             && self.job_id == expected_job,
             "Darwin retirement changed its bound slot, job, or schema");
         validate_job_id(expected_job)?;
@@ -176,10 +219,11 @@ pub(crate) fn launch(
     cwd: &Path, environment: Option<&BTreeMap<String, String>>,
 ) -> Result<Command> {
     validate_job_id(unit)?;
-    let leftovers = helper.leftovers()?;
+    let slot = slot_for_unit(unit).context("invalid Darwin custody unit")?;
+    let leftovers = helper.leftovers(slot)?;
     ensure!(matches!(&leftovers.status, Status::Empty),
         "Darwin slot is not empty: {:?}", leftovers.status);
-    let root = Path::new("/Users/Shared/fractal-jobs").join(SLOT).canonicalize()
+    let root = slot.root().canonicalize()
         .context("canonicalize Darwin slot root")?;
     let cwd = cwd.canonicalize().context("canonicalize Darwin job cwd")?;
     ensure!(cwd.starts_with(&root), "Darwin job cwd must lie under {}", root.display());
@@ -200,13 +244,32 @@ pub(crate) fn launch(
     file.write_all(&serde_json::to_vec(&plan)?)?;
     file.sync_all()?;
     let mut command = Command::new("/usr/bin/sudo");
-    command.arg("-n").arg(helper.path()).args(["run", SLOT]).arg(path);
+    command.arg("-n").arg(helper.path()).args(["run", slot.name()]).arg(path);
     Ok(command)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    const SLOT: &str = "heavy1";
+
+    #[test]
+    fn lane_slots_and_unit_roundtrip() {
+        assert_eq!(Slot::for_lane("heavy").unwrap(), &[Slot::Heavy1]);
+        assert_eq!(Slot::for_lane("gate").unwrap(), &[Slot::Gate1, Slot::Gate2, Slot::Gate3]);
+        assert_eq!(Slot::for_lane("eval").unwrap(), &[Slot::Eval1]);
+        assert!(Slot::for_lane("other").unwrap_err().to_string().contains("darwin-custody-lane"));
+        for lane in ["heavy", "gate", "eval"] {
+            for &slot in Slot::for_lane(lane).unwrap() {
+                let unit = format!("st3-darwin-{}-{}.scope", slot.name(), "a".repeat(64));
+                assert_eq!(slot_for_unit(&unit), Some(slot));
+                assert_eq!(slot.root(), Path::new(fractal_mac_custody::slot(slot.name()).unwrap().root));
+            }
+        }
+        for unit in ["st3-darwin-other-aaaaaaaa.scope", "st3-darwin-gate1-short.scope"] {
+            assert!(slot_for_unit(unit).is_none());
+        }
+    }
 
     #[test]
     fn unset_or_relative_helper_is_unavailable() {
