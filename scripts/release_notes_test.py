@@ -289,6 +289,30 @@ class ReleaseNotes(unittest.TestCase):
                                  ['release-notes/inherited.json', 'release-notes/repair.json'])
                 self.assertEqual(len(collect(self.repo, base, source)['fragments']), 2)
 
+    def test_queue_cannot_modify_fragment_repaired_by_earlier_member(self):
+        invalid = fragment()
+        invalid['compatibility']['status'] = 'additive'
+        self.add_fragment('inherited', invalid)
+        base = self.commit('Inherited invalid note')
+        self.git('checkout', '-qb', 'repair')
+        self.add_fragment('inherited')
+        self.add_fragment('repair')
+        self.commit('Repair invalid note')
+        self.git('checkout', '-q', '-')
+        self.git('merge', '--no-ff', '-qm', 'Merge pull request #1662 from example/repair', 'repair')
+        repaired = self.git('rev-parse', 'HEAD')
+        queue_ref = 'refs/heads/gh-readonly-queue/main/pr-1662-' + base
+        self.assertEqual(list(check_pull_request(self.repo, base, repaired, queue_ref=queue_ref)['coverage']),
+                         [repaired])
+        self.git('checkout', '-qb', 'mutate')
+        self.add_fragment('inherited', fragment('Edit the now-valid note'))
+        self.add_fragment('mutate')
+        self.commit('Mutate valid note with another fresh classification')
+        self.git('checkout', '-q', '-')
+        self.git('merge', '--no-ff', '-qm', 'Merge pull request #1663 from example/mutate', 'mutate')
+        with self.assertRaisesRegex(ImpactError, 'existing fragments are immutable'):
+            check_pull_request(self.repo, base, 'HEAD', queue_ref=queue_ref)
+
     def test_pr_invalid_fragment_repair_still_requires_fresh_fragment(self):
         invalid = fragment()
         invalid['compatibility']['status'] = 'additive'

@@ -228,24 +228,6 @@ def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
     base, source = resolve(repo, base), resolve(repo, source)
     if subprocess.run(['git', 'merge-base', '--is-ancestor', base, source], cwd=repo).returncode:
         raise ImpactError('PR/queue base must be an ancestor of the effective merge source')
-    changes = git(repo, 'diff', '--no-renames', '--name-status', base, source, '--', FRAGMENTS).splitlines()
-    for change in changes:
-        status, path = change.split('\t', 1)
-        if not path.endswith('.json') or status == 'A':
-            continue
-        if status == 'M':
-            try:
-                validate(json.loads(source_text(repo, base, path)), path)
-            except (json.JSONDecodeError, ImpactError):
-                # Only invalid bytes inherited from the base are repairable.
-                # Validate the replacement even for an adoption-exempt PR.
-                try:
-                    repaired = json.loads(source_text(repo, source, path))
-                except json.JSONDecodeError as error:
-                    raise ImpactError(f'{path}: invalid JSON: {error}') from error
-                validate(repaired, path)
-                continue
-        raise ImpactError(f'{path}: existing fragments are immutable; add a new fragment for corrections')
     commits = git(repo, 'rev-list', '--first-parent', '--reverse', f'{base}..{source}').splitlines()
     if not commits:
         raise ImpactError('no integrated change to classify')
@@ -257,6 +239,27 @@ def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
         queue_number = int(match[1])
     coverage, exemptions, version_changes = {}, {}, []
     for commit in commits:
+        # Each integrated member inherits its own first-parent tree, not the
+        # queue group's original base. A repaired note becomes immutable.
+        parent = f'{commit}^1'
+        changes = git(repo, 'diff', '--no-renames', '--name-status', parent, commit, '--', FRAGMENTS).splitlines()
+        for change in changes:
+            status, path = change.split('\t', 1)
+            if not path.endswith('.json') or status == 'A':
+                continue
+            if status == 'M':
+                try:
+                    validate(json.loads(source_text(repo, parent, path)), path)
+                except (json.JSONDecodeError, ImpactError):
+                    # Only invalid bytes inherited from this member's base are
+                    # repairable, including for an adoption-exempt PR.
+                    try:
+                        repaired = json.loads(source_text(repo, commit, path))
+                    except json.JSONDecodeError as error:
+                        raise ImpactError(f'{path}: invalid JSON: {error}') from error
+                    validate(repaired, path)
+                    continue
+            raise ImpactError(f'{path}: existing fragments are immutable; add a new fragment for corrections')
         number = pr_number
         if queue_number is not None:
             subject = git(repo, 'show', '-s', '--format=%s', commit)
