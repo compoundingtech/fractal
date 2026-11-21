@@ -520,3 +520,73 @@ fn claims_compare_only_between_members_that_finished_the_same_trim() {
     assert!(claims_compare(&alder_summary, &birch_summary));
     assert!(differing_kinds(&alder_summary, &birch_summary, true).is_empty());
 }
+#[test]
+fn a_verdict_that_differs_between_members_is_named_and_one_still_to_judge_is_not() {
+    let alder = node("alder");
+    let birch = node("birch");
+    let claim = state(&alder, "item/a", "one");
+    state(&alder, "item/b", "two");
+    push(&alder, &birch);
+    let cut = cut();
+    let kind = verdicts_kind();
+    let differing = |ours: &Store, theirs: &Store| {
+        differing_kinds(&ours.answers_summary(cut).unwrap(), &theirs.answers_summary(cut).unwrap(), false)
+            .into_iter()
+            .map(|difference| difference.kind)
+            .collect::<Vec<_>>()
+    };
+    assert!(alder.answers_summary(cut).unwrap().kinds.contains_key(&kind), "every member runs the verdict reader");
+    assert!(differing(&alder, &birch).is_empty(), "members that serve the same verdicts agree");
+
+    // birch serves the claim as invalid where alder serves it as unsigned.
+    birch
+        .connection
+        .write()
+        .execute(
+            "INSERT INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+            [&claim],
+        )
+        .unwrap();
+    assert_eq!(differing(&alder, &birch), vec![kind.clone()]);
+    let every: BTreeSet<usize> = (0..BUCKETS).collect();
+    let ours = alder.answer_buckets(&kind, cut, &every).unwrap();
+    let theirs = birch.answer_buckets(&kind, cut, &every).unwrap();
+    let wanted = differing_buckets(&ours.buckets, &theirs.buckets);
+    assert_eq!(wanted.len(), 1);
+    let keys = differing_keys(&ours.keys, &theirs.keys);
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert_eq!((keys[0].subject.as_str(), keys[0].origin.as_str()), ("item/a", r#"["example.state","alder"]"#));
+    assert_eq!(keys[0].ours, None);
+    assert_eq!(keys[0].theirs, Some(format!("{claim} invalid: batch-disorder")));
+
+    // A member that has not judged the claim again yet answers nothing for it.
+    alder.connection.write().execute("INSERT INTO claim_verdict_queue(claim_id) VALUES (?1)", [&claim]).unwrap();
+    alder
+        .connection
+        .write()
+        .execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','host/sample')", [&claim])
+        .unwrap();
+    // The digests differ, and the narrowing finds only a moving key, which the check drops.
+    let ours = alder.answer_buckets(&kind, cut, &every).unwrap();
+    assert!(ours.keys.iter().any(|key| key.moving && key.subject == "item/a"));
+    assert!(differing_keys(&ours.keys, &theirs.keys).is_empty(), "a queued verdict moves");
+    alder.connection.write().execute("DELETE FROM claim_verdict_queue WHERE claim_id=?1", [&claim]).unwrap();
+    assert_eq!(differing(&alder, &birch), vec![kind.clone()], "a settled verified verdict differs from invalid");
+
+    // A member on a build without the reader is no disagreement, and the reader alone does not
+    // make a member compare fold readers it does not run.
+    let mut old = birch.answers_summary(cut).unwrap();
+    old.kinds.remove(&kind);
+    assert!(differing_kinds(&alder.answers_summary(cut).unwrap(), &old, false).is_empty());
+    let mut folding = alder.answers_summary(cut).unwrap();
+    let (name, answers, _) = reader_answers("seat", cut, vec![AnswerKey {
+        subject: "agent/a".into(),
+        origin: String::new(),
+        claim: "one".into(),
+        moving: false,
+    }]);
+    folding.kinds.insert(name, answers);
+    folding.kinds.remove(&kind);
+    let plain = alder.answers_summary(cut).unwrap();
+    assert!(differing_kinds(&folding, &plain, false).is_empty(), "a member that runs only the verdict reader runs no fold reader");
+}

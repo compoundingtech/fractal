@@ -888,6 +888,27 @@ impl Facts for StoreFacts<'_> {
     }
 }
 
+/// Whether this store's verdicts can be compared with a peer's: none while a legacy cache serves
+/// them or the signature migration has not finished.
+pub(crate) fn verdicts_comparable(connection: &Connection) -> Result<bool> {
+    Ok(!legacy::active(connection)? && migration::unavailable(connection)?.is_none())
+}
+
+/// A claim's served verdict for the answers check, or `None` while it is still to be judged: fresh,
+/// queued, or held as [`Store::claim_verdict`] holds it while judgment is incomplete.
+pub(crate) fn settled_verdict(connection: &Connection, claim_id: &str) -> Result<Option<Verdict>> {
+    let waiting: bool = connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claim_verdict_fresh WHERE claim_id=?1)
+                 OR EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id=?1)",
+        )?
+        .query_row([claim_id], |row| row.get(0))?;
+    if waiting || judging::unavailable(connection, claim_id)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(cached_verdict(connection, claim_id)?.unwrap_or(Verdict::Unsigned)))
+}
+
 fn cached_verdict(connection: &Connection, claim_id: &str) -> Result<Option<Verdict>> {
     Ok(connection
         .prepare_cached("SELECT verdict, reason FROM claim_verdicts WHERE claim_id=?1")?

@@ -287,12 +287,23 @@ fn kinds(connection: &Connection) -> Result<Vec<String>> {
 
 /// One kind's answers at a cut.
 pub fn kind_answers(connection: &Connection, kind: &str, cut_unix_ms: u128) -> Result<KindAnswers> {
+    kind_answers_visiting(connection, kind, cut_unix_ms, |_| Ok(()))
+}
+
+/// [`kind_answers`], calling `each` with every key, the moving ones too.
+fn kind_answers_visiting(
+    connection: &Connection,
+    kind: &str,
+    cut_unix_ms: u128,
+    mut each: impl FnMut(&AnswerKey) -> Result<()>,
+) -> Result<KindAnswers> {
     let mut hash = Sha256::new();
     domain(&mut hash, kind);
     let mut before_hash = Sha256::new();
     domain(&mut before_hash, kind);
     let mut keys = 0;
     let claims = each_answer(connection, kind, cut_unix_ms, |key, before| {
+        each(&key)?;
         if let Some(before) = before {
             field(&mut before_hash, &key.subject);
             field(&mut before_hash, &key.origin);
@@ -318,12 +329,66 @@ pub fn kind_answers(connection: &Connection, kind: &str, cut_unix_ms: u128) -> R
 /// Every kind's answers at a cut. Each kind is read in its own statement, so no read holds one
 /// snapshot for the whole pass.
 pub fn summary(connection: &Connection, cut_unix_ms: u128) -> Result<AnswersSummary> {
+    summary_with_verdicts(connection, cut_unix_ms, None)
+}
+
+/// [`summary`], adding each answer's verdict key to `verdicts`; see [`VERDICTS`].
+fn summary_with_verdicts(
+    connection: &Connection,
+    cut_unix_ms: u128,
+    mut verdicts: Option<&mut Vec<AnswerKey>>,
+) -> Result<AnswersSummary> {
     let mut kinds_answers = BTreeMap::new();
     for kind in kinds(connection)? {
-        let answers = kind_answers(connection, &kind, cut_unix_ms)?;
+        let answers = kind_answers_visiting(connection, &kind, cut_unix_ms, |key| {
+            if let Some(verdicts) = verdicts.as_deref_mut()
+                && let Some(verdict) = verdict_key(connection, &kind, key)?
+            {
+                verdicts.push(verdict);
+            }
+            Ok(())
+        })?;
         kinds_answers.insert(kind, answers);
     }
+    if let Some(verdicts) = verdicts {
+        verdicts.sort();
+    }
     Ok(AnswersSummary { version: ANSWERS_VERSION, cut_unix_ms, kinds: kinds_answers, ..AnswersSummary::default() })
+}
+
+/// The reader that compares the verdicts members serve for the claims they answer with. Two
+/// members that judge the same claim differently have found a bug in judging or in what it read,
+/// such as the order batches arrived in. Each answer whose claim is judged `invalid` is a key,
+/// keyed by its subject and `[kind, origin]` and answering `CLAIM invalid: REASON`; `verified` and
+/// `unsigned` answers are no key, so a member that serves `verified` where its peer serves
+/// `invalid` differs in that key. An answer still to be judged (fresh, queued or held) moves, as
+/// does a key whose newest claim is at or after the cut. Members compare it only when both run it,
+/// and only while their verdicts come from the current signature tables; see [`differing_kinds`].
+/// `unsigned` answers are not listed: a signature can arrive apart from its claim, and listing
+/// them would hold one key for every unsigned answer.
+pub const VERDICTS: &str = "verdicts";
+
+/// The summary kind of [`VERDICTS`].
+pub fn verdicts_kind() -> String {
+    format!("{READER_PREFIX}{VERDICTS}")
+}
+
+fn verdict_key(connection: &Connection, kind: &str, key: &AnswerKey) -> Result<Option<AnswerKey>> {
+    let origin = serde_json::to_string(&[kind, key.origin.as_str()])?;
+    let moving = |claim: String| AnswerKey { subject: key.subject.clone(), origin: origin.clone(), claim, moving: true };
+    if key.moving {
+        return Ok(Some(moving(String::new())));
+    }
+    Ok(match crate::store::principals::settled_verdict(connection, &key.claim)? {
+        None | Some(crate::principal::Verdict::Held(_)) => Some(moving(String::new())),
+        Some(crate::principal::Verdict::Invalid(reason)) => Some(AnswerKey {
+            subject: key.subject.clone(),
+            origin: origin.clone(),
+            claim: format!("{} invalid: {reason}", key.claim),
+            moving: false,
+        }),
+        Some(crate::principal::Verdict::Verified | crate::principal::Verdict::Unsigned) => None,
+    })
 }
 
 /// Kinds named with this prefix are fold readers' answers, not claim kinds; see [`FoldReaders`].
@@ -420,18 +485,21 @@ pub fn differing_kinds(
 ) -> Vec<KindDifference> {
     // Fold readers compare only between members that both run them: a member on a build without
     // them has none, which is no disagreement about any answer.
-    let runs_readers = |summary: &AnswersSummary| summary.kinds.keys().any(|kind| kind.starts_with(READER_PREFIX));
+    let verdicts = verdicts_kind();
+    let runs_readers = |summary: &AnswersSummary| {
+        summary.kinds.keys().any(|kind| kind.starts_with(READER_PREFIX) && **kind != verdicts)
+    };
     let readers = runs_readers(ours) && runs_readers(theirs);
     let kinds = ours.kinds.keys().chain(theirs.kinds.keys()).collect::<BTreeSet<_>>();
     kinds
         .into_iter()
-        .filter(|kind| readers || !kind.starts_with(READER_PREFIX))
+        .filter(|kind| readers || !kind.starts_with(READER_PREFIX) || **kind == verdicts)
         .filter(|kind| {
             let replacement = format!("{READER_PREFIX}slots/{kind}");
             !(ours.kinds.contains_key(&replacement) && theirs.kinds.contains_key(&replacement))
         })
         .filter(|kind| {
-            !kind.starts_with("reader/slots/")
+            !(kind.starts_with("reader/slots/") || **kind == verdicts)
                 || (ours.kinds.contains_key(*kind) && theirs.kinds.contains_key(*kind))
         })
         .filter_map(|kind| {
@@ -495,6 +563,11 @@ pub fn differing_keys(ours: &[AnswerKey], theirs: &[AnswerKey]) -> Vec<KeyDiffer
 impl Store {
     /// Every kind's answers at a cut; see the module documentation for its cost.
     pub fn answers_summary(&self, cut_unix_ms: u128) -> Result<AnswersSummary> {
+        Ok(self.answers_summary_and_readers(cut_unix_ms)?.0)
+    }
+
+    /// [`Store::answers_summary`], with the keys of the readers it computes itself ([`VERDICTS`]).
+    pub fn answers_summary_and_readers(&self, cut_unix_ms: u128) -> Result<(AnswersSummary, Vec<KindBuckets>)> {
         let connection = self.readers.get();
         // The newest trimmed cut and the newest unfinished one, before and after the pass, so a
         // trim that starts or finishes during it counts as unfinished.
@@ -508,12 +581,20 @@ impl Store {
             )?)
         };
         let before = trims()?;
-        let mut summary = summary(&connection, cut_unix_ms)?;
+        let comparable = crate::store::principals::verdicts_comparable(&connection)?;
+        let mut verdicts = Vec::new();
+        let mut summary = summary_with_verdicts(&connection, cut_unix_ms, comparable.then_some(&mut verdicts))?;
         let (trimmed, unfinished) = trims()?;
         summary.trims_locally = self.trims_locally();
         summary.trimmed_cut_unix_ms = u128::try_from(trimmed)?;
         summary.trim_unfinished = unfinished > trimmed || before != (trimmed, unfinished);
-        Ok(summary)
+        let mut readers = Vec::new();
+        if comparable {
+            let (kind, answers, buckets) = reader_answers(VERDICTS, cut_unix_ms, verdicts);
+            summary.kinds.insert(kind, answers);
+            readers.push(buckets);
+        }
+        Ok((summary, readers))
     }
 
     /// Answer `request` at once, computing what it asks. Only a small store can afford this;
@@ -535,6 +616,17 @@ impl Store {
         cut_unix_ms: u128,
         wanted: &BTreeSet<usize>,
     ) -> Result<KindBuckets> {
+        if kind == verdicts_kind() {
+            // Only a small store answers at once; a daemon keeps these keys with its summary.
+            let every = self.answers_summary_and_readers(cut_unix_ms)?.1.pop().unwrap_or_else(|| KindBuckets {
+                kind: kind.to_owned(),
+                cut_unix_ms,
+                buckets: vec![String::new(); BUCKETS],
+                keys: Vec::new(),
+            });
+            let keys = every.keys.iter().filter(|key| wanted.contains(&bucket(&key.subject, &key.origin))).cloned().collect();
+            return Ok(KindBuckets { keys, ..every });
+        }
         kind_buckets(&self.readers.get(), kind, cut_unix_ms, wanted)
     }
 }
@@ -868,8 +960,7 @@ impl AnswersCache {
                         }
                     }
                     let mark = newest_claim(&store.readers.get())?;
-                    let mut summary = store.answers_summary(cut)?;
-                    let mut every = Vec::new();
+                    let (mut summary, mut every) = store.answers_summary_and_readers(cut)?;
                     if let Some(readers) = &readers {
                         for (name, keys) in readers(&store.readers.get(), cut)? {
                             let (kind, answers, buckets) = reader_answers(&name, cut, keys);
