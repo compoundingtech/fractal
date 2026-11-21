@@ -115,6 +115,42 @@ fn empty_receipt_persists_advanced_ack_and_clears_outbound_refusal() {
     assert_eq!(repeated.snapshot().commits, 0);
 }
 
+#[test]
+fn process_local_receipt_requires_its_durable_checkpoint_and_does_not_survive_reopen() {
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { set_thread_clock(None); }
+    }
+    let _clock = Clock;
+    let start = 1_000_000;
+    set_thread_clock(Some(start));
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("target.db");
+    let source = node("birch");
+    let target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    target.bind_fleet(FLEET).unwrap();
+    let exchange = source.export_replication_summary(FLEET).unwrap();
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    set_thread_clock(Some(start + 1_000));
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert_eq!(target.replication_peer_last_success("birch").unwrap(), Some(start + 1_000));
+    drop(target);
+    let target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    assert_eq!(target.replication_peer_last_success("birch").unwrap(), Some(start));
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    // External durable changes invalidate the local extension, including diagnostics that
+    // deliberately age a peer while its daemon stays alive.
+    target.connection.write().execute(
+        "UPDATE replication_peers SET last_success_at_unix_ms='1' WHERE peer='birch'", [],
+    ).unwrap();
+    assert_eq!(target.replication_peer_up("birch").unwrap(), (false, Some(1)));
+    assert!(target.replication_sync.lock().unwrap()["birch"].last_received_at_unix_ms.is_none());
+    target.connection.write().execute(
+        "DELETE FROM replication_peers WHERE peer='birch'", [],
+    ).unwrap();
+    assert_eq!(target.replication_peer_last_success("birch").unwrap(), None);
+}
+
 /// The injected SQL cost represents a populated runtime's per-claim admission work. The
 /// queued write must commit before the remainder of the page, and its ACK has a 100ms CI
 /// budget (including scheduler/commit overhead), separately from production's 50ms p99.

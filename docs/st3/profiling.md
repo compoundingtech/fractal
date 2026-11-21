@@ -86,8 +86,11 @@ nor error codes are metric labels.
 
 An unchanged empty receipt opens no transaction. Peer metadata, advertised inventory
 acknowledgements and route-refusal transitions still persist immediately. Timestamp-only
-peer receipts checkpoint every 17.5 seconds (half the 35-second missed-exchange deadline);
-live `replication_peer_up` decisions retain the exact receipt time in process memory.
+peer receipts checkpoint every 17.5 seconds (half the 35-second missed-exchange deadline).
+The durable row remains authoritative: an exact process-local receipt extends only its
+matching durable checkpoint, is discarded on external timestamp changes, and starts empty
+after restart. This preserves sub-checkpoint schedule-standby takeover deadlines as well as
+live peer liveness without rewriting the row for each heartbeat.
 `transport.observed` up claims already coalesce at 15 minutes, well before the two-hour
 `transport_links_at` evidence lifetime. Changed observations and deferred projection drains
 remain ordinary writes; these counters measure their cost even when an exchange is empty.

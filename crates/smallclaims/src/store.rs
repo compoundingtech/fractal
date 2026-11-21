@@ -1575,6 +1575,8 @@ pub struct PeerSyncProgress {
     pub last_failed_exchange: Option<crate::replication::ReplicationExchangeTransport>,
     /// Latest successful receipt, including write-free heartbeats.
     pub last_received_at_unix_ms: Option<u128>,
+    /// Durable timestamp this process-local receipt extends. A changed row invalidates it.
+    pub receipt_checkpoint_at_unix_ms: Option<u128>,
     /// How many envelopes this node held when it took the last measurement.
     pub measured_inventory_envelopes: u64,
     /// What the open window's measurements were compared against.
@@ -8313,7 +8315,6 @@ impl Store {
         // prepare/finalize/commit boundary, but lets queued foreground requests go first.
         // Immutable signature verification stays outside the writer. The guard returns before
         // any receipt counters, snapshot work or acknowledgement can observe success.
-        let received_at = now_ms();
         let projection_digests = serde_json::to_string(&input.projection_digests).map_err(internal)?;
         let projection_versions = serde_json::to_string(&input.projection_versions).map_err(internal)?;
         let projection_registry = input.projection_registry_digest.as_ref().unwrap_or(&input.schema_digest);
@@ -8321,17 +8322,18 @@ impl Store {
         let versions_key = format!("peer_projection_versions:{relay}");
         let registry_key = format!("peer_projection_registry:{relay}");
         let inventory_key = format!("peer_projection_inventory:{relay}");
-        let (received, duplicate, signatures, received_at) = 'receipt: {
+        let (received, duplicate, signatures, received_at, checkpoint_at) = 'receipt: {
             let mut connection = self.connection.write_background();
+            let received_at = now_ms();
             // Compare under the writer loan so concurrent failures and acknowledgements remain
             // ordered. Unchanged receipts open no transaction and run no managed finalizers.
-            let current = input.envelopes.is_empty() && input.signatures.is_empty()
-                && connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM replication_peers
+            let checkpoint_at: Option<i64> = if input.envelopes.is_empty() && input.signatures.is_empty() {
+                connection.query_row(
+                "SELECT CAST(last_success_at_unix_ms AS INTEGER) FROM replication_peers
                  WHERE peer=?1 AND status='up' AND last_error IS NULL
                    AND schema_digest IS ?2 AND authority_digest IS ?3 AND graph_digest IS ?4
                    AND CAST(last_success_at_unix_ms AS INTEGER)>?5
-                   AND CAST(last_success_at_unix_ms AS INTEGER)<=?6)
+                   AND CAST(last_success_at_unix_ms AS INTEGER)<=?6
                  AND (SELECT value FROM meta WHERE key=?7) IS ?8
                  AND (SELECT value FROM meta WHERE key=?9) IS ?10
                  AND (SELECT value FROM meta WHERE key=?11) IS ?12
@@ -8345,9 +8347,10 @@ impl Store {
                     &registry_key, projection_registry,
                     &inventory_key, input.inventory.digest, asks],
                 |row| row.get(0),
-            ).map_err(internal)?;
-            if current {
-                break 'receipt (0, 0, 0, received_at);
+            ).optional().map_err(internal)?
+            } else { None };
+            if let Some(checkpoint_at) = checkpoint_at {
+                break 'receipt (0, 0, 0, received_at, checkpoint_at as u128);
             }
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -8453,7 +8456,7 @@ impl Store {
                 Ok((received, duplicate, signatures, received_at))
             })(&transaction)?;
             transaction.commit().map_err(internal)?;
-            counts
+            (counts.0, counts.1, counts.2, counts.3, received_at)
         };
         // Only a response to our own dial is carrier evidence for a locally initiated
         // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
@@ -8574,6 +8577,7 @@ impl Store {
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
         progress.last_received_at_unix_ms = Some(received_at);
+        progress.receipt_checkpoint_at_unix_ms = Some(checkpoint_at);
         if let Some(comparison) = &claim_ranges {
             progress.compare_claims(comparison.same, now);
         }
@@ -10350,8 +10354,15 @@ impl Store {
     }
 
     fn latest_peer_receipt(&self, peer: &str, persisted: Option<u128>) -> Option<u128> {
-        self.replication_sync.lock().unwrap_or_else(PoisonError::into_inner)
-            .get(peer).and_then(|progress| progress.last_received_at_unix_ms).max(persisted)
+        let mut progress = self.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(progress) = progress.get_mut(peer) else { return persisted };
+        if persisted.is_some() && progress.receipt_checkpoint_at_unix_ms == persisted {
+            progress.last_received_at_unix_ms.max(persisted)
+        } else {
+            progress.last_received_at_unix_ms = None;
+            progress.receipt_checkpoint_at_unix_ms = None;
+            persisted
+        }
     }
 
     /// Whether `peer` counts as up now (see [`peer_up`]), and when it last exchanged.
