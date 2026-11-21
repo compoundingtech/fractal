@@ -875,7 +875,7 @@ use super::*;
                 // without relying on a wall-clock threshold.
                 let _snapshot_origin = telemetry::enter_origin(
                     telemetry::route_origin("GET", "/v1/snapshot-probe"));
-                worker_store.read_snapshot(|| {
+                worker_store.read_snapshot(|_| {
                     worker_store.readers.get().query_row("SELECT 1", [], |row| row.get::<_, u64>(0))
                         .map_err(anyhow::Error::from)
                 }).unwrap()
