@@ -10,7 +10,9 @@
 //! - `claim_verdict_links`: the default writer's conservative dependency superset.
 //!   `claim_verdict_dependency_links` reads it together with integer-key edges from a
 //!   later writer format. Both retain delegations, keys, nonces and roots regardless
-//!   of whether a judgment is cold; relevant changes queue every linked verdict.
+//!   of whether a judgment is cold; relevant changes queue every linked verdict. Links are
+//!   found by link only: a deleted claim leaves its links, which a requeue that meets them or
+//!   the daily sweep ([`link_sweep`]) drops.
 //! - `claim_verdict_queue`: claims to judge again.
 //! - `claim_verdict_fresh`: claims whose signature was just stored, at sealing or admission; a
 //!   pass judges them and queues whatever they change. Nothing scans the claims.
@@ -31,7 +33,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h47095dd529d7 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h80419dff1c6f owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -130,7 +132,10 @@ CREATE TABLE IF NOT EXISTS claim_verdict_links (
     claim_id TEXT NOT NULL,
     PRIMARY KEY(link, claim_id)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS claim_candidate_verdict_links_claim_index ON claim_verdict_links(claim_id);
+-- A claim's own links were found through an index on claim_id (about 450 B per signed claim).
+-- Nothing that verifies or serves reads them that way: a deleted claim leaves its links, and the
+-- requeue that meets one, or the paced sweep (link_sweep), drops it. An older build recreates it.
+DROP INDEX IF EXISTS claim_candidate_verdict_links_claim_index;
 CREATE TABLE IF NOT EXISTS claim_verdict_queue (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -373,6 +378,7 @@ fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
 }
 
 mod compaction;
+mod link_sweep;
 mod dependencies;
 mod judging;
 mod legacy;
@@ -1001,7 +1007,8 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
         "claim_signature_nonce_uses",
         "claim_signature_judging",
         "claim_verdicts",
-        "claim_verdict_links",
+        // Not claim_verdict_links: it has no index by claim, so this would scan every link.
+        // The link stays until a requeue meets it or the sweep finds its claim gone.
         "claim_verdict_dependency_edges",
         "claim_verdict_queue",
         "claim_verdict_fresh",
@@ -1244,6 +1251,17 @@ impl ClaimSigner {
             && signature.on_behalf == self.on_behalf
             && signature.chain == self.chain
     }
+}
+
+/// One loan of the orphan verdict-link sweep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkSweep {
+    pub examined: usize,
+    pub deleted: usize,
+    /// The pass reached the last link; the next starts `link_sweep::SWEEP_INTERVAL_MS` later.
+    pub finished: bool,
+    /// From the writer's lend to its return.
+    pub held: std::time::Duration,
 }
 
 /// One page of [`Store::prune_settled_signature_judgments`].
@@ -1678,6 +1696,24 @@ impl Store {
         let (examined, deleted, finished) = judging::prune_settled_page_tx(&transaction)?;
         transaction.commit()?;
         Ok(JudgingPrune { examined, deleted, finished })
+    }
+
+    /// Milliseconds until the next orphan verdict-link sweep may start; none when one is due or
+    /// under way. One meta read on a reader.
+    pub fn verdict_link_sweep_wait(&self, now_ms: u64) -> Result<Option<u64>> {
+        link_sweep::wait_ms(&self.readers.get(), now_ms)
+    }
+
+    /// One paced loan of the orphan verdict-link sweep (`link_sweep`).
+    pub fn sweep_orphan_verdict_links(&self, now_ms: u64) -> Result<LinkSweep> {
+        let mut connection = self.connection.write_background();
+        let lent = std::time::Instant::now();
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (examined, deleted, finished) = link_sweep::sweep_page_tx(&transaction, now_ms)?;
+        transaction.commit()?;
+        drop(connection);
+        Ok(LinkSweep { examined, deleted, finished, held: lent.elapsed() })
     }
 
     /// Whether a pass has anything to judge: a newly signed claim, a queued one, or a link whose
@@ -2424,7 +2460,16 @@ mod paced_verdict_tests {
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
+        // The links name claims the store holds: a requeue drops a link whose claim is gone.
+        tx.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                    VALUES ('batch/studio/1','studio',1,'hash','1')", []).unwrap();
         for i in 0..count {
+            tx.execute(
+                "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                 VALUES (?1,'batch/studio/1','note/root','example.note','studio',NULL,'{}','[]','1')",
+                [format!("claim/{i:05}")],
+            )
+            .unwrap();
             tx.execute(
                 "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)",
                 [format!("claim/{i:05}")],

@@ -2017,7 +2017,13 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
                 after.len(), saved as f64 / after.len() as f64,
                 saved as f64 * synthetic_completions_per_day as f64 / after.len() as f64,
             );
-            assert!(compact_bytes < old_bytes, "include dictionary UNIQUE and reverse-index btrees in the comparison");
+            // The links have had no index by claim since #6952 (a deletion leaves them for the sweep),
+            // while the edges keep their reverse index for forget. Compare like with like: the
+            // integer-keyed tables, dictionary UNIQUE included, against the links table.
+            let reverse: u64 = connection.query_row(
+                "SELECT coalesce(sum(pgsize),0) FROM dbstat WHERE name='claim_verdict_dependency_edges_claim'",
+                [], |row| row.get(0)).unwrap();
+            assert!(compact_bytes - reverse < old_bytes, "include the dictionary UNIQUE btree in the comparison");
             if mixed {
                 connection.execute_batch(
                     "INSERT INTO claim_verdict_links(link,claim_id)
@@ -2773,7 +2779,7 @@ fn remove_candidate_schema(connection: &rusqlite::Connection) {
     connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
     connection.execute_batch("DROP VIEW claim_verdict_dependency_links; DROP TABLE claim_verdict_dependency_edges; DROP TABLE claim_verdict_dependency_keys;").unwrap();
     connection.execute_batch("DROP TRIGGER claim_verdict_queue_marks_pruned; DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
-        DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
+        DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX IF EXISTS claim_candidate_verdict_links_claim_index;
         CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);
         CREATE INDEX claim_verdict_links_claim_index ON claim_verdict_links(claim_id);
         CREATE INDEX claim_signatures_nonce_index ON claim_signatures(key,nonce); PRAGMA user_version=19;").unwrap();
