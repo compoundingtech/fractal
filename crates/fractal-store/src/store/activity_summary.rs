@@ -57,15 +57,14 @@ fn bounded_actual(connection: &Connection, subject: &str, cut: u64) -> Result<(O
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let truncated = rows.len() > CANDIDATES;
     if truncated {
-        let boundary = rows[CANDIDATES].2.clone();
-        rows.truncate(CANDIDATES);
+        let boundary = rows.pop().expect("lookahead row").2;
         // The omitted row can precede every retained row of its accepted-time group in
         // canonical order. Discard that WHOLE group rather than report a possibly wrong value.
         rows.retain(|row| row.2 != boundary);
     }
     let mut candidates = Vec::with_capacity(rows.len());
     for (id, kind, _, index) in rows {
-        if index > cut || kind.to_ascii_lowercase().starts_with("harness.") { continue; }
+        if index > cut || kind.as_bytes().get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"harness.")) { continue; }
         let repaired: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
             [&id], |row| row.get(0))?;
@@ -83,8 +82,14 @@ fn bounded_actual(connection: &Connection, subject: &str, cut: u64) -> Result<(O
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
         seen = true;
         let body: Value = serde_json::from_str(&body)?;
-        let incoming = body.get("fields").unwrap_or(&body);
-        let Some(incoming) = incoming.as_object() else { continue; };
+        let mut incoming = match body {
+            Value::Object(mut body) => match body.remove("fields") {
+                Some(Value::Object(fields)) => fields,
+                None => body,
+                _ => continue,
+            },
+            _ => continue,
+        };
         if kind == "resource.observed"
             && incoming.get("kind").and_then(Value::as_str).is_some_and(carries_opener)
             && incoming.get("attribution_only") == Some(&Value::Bool(true)) { continue; }
@@ -93,8 +98,8 @@ fn bounded_actual(connection: &Connection, subject: &str, cut: u64) -> Result<(O
             .filter(|spec| spec.cardinality == fractal_schema::Cardinality::StateTransition);
         for (index, field) in FIELDS.iter().enumerate() {
             if resolved[index] { continue; }
-            if let Some(value) = incoming.get(*field) {
-                actual.insert((*field).into(), value.clone());
+            if let Some(value) = incoming.remove(*field) {
+                actual.insert((*field).into(), value);
                 resolved[index] = true;
             } else if transition.is_some_and(|spec| spec.fields.contains_key(*field)) {
                 resolved[index] = true;
