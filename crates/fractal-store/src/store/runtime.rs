@@ -692,6 +692,7 @@ impl Runtime for FractalRuntime {
     }
 
     fn forget_views(&self) {
+        eprintln!("[TMP] roster forget_views\n{}", std::backtrace::Backtrace::force_capture());
         // Pending work names the discarded projection generation. A recent reader or a
         // live subscriber below can request a new-generation publication after invalidation.
         {
@@ -850,6 +851,7 @@ impl FractalRuntime {
     /// Retention and clearing share the publication locks: a refresher must not publish
     /// between copying the previous roster and clearing its claim-dependent cache.
     fn forget_roster_reductions(&self, retain: bool) {
+        eprintln!("[TMP] roster forget_reductions retain={retain}");
         let mut resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
         let mut refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
         if retain {

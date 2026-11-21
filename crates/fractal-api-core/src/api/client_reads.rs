@@ -647,8 +647,20 @@ async fn client_agents_published(
         record_roster_stage(request_latency::RosterStage::FreshPage, built.elapsed());
     }
     match checked_agent_roster_page(page??, min_cut)? {
-        Some(page) => Ok(page),
+        Some(page) => {
+            eprintln!("[TMP] roster served history={history} min_cut={min_cut:?} cut={} current={:?}",
+                page.0.0.store_index, state.store.index());
+            Ok(page)
+        },
         None => {
+            eprintln!("[TMP] roster missing history={history} min_cut={min_cut:?} requested={requested} current={:?} revision={}",
+                state.store.index(), state.store.agent_roster_revision());
+            eprintln!("[TMP] current cards {:?}", state.store.fractal.agent_resources_cache.lock().unwrap().iter()
+                .map(|e| (e.index, e.local, e.history, e.covered.is_none(), e.items.len())).collect::<Vec<_>>());
+            eprintln!("[TMP] current refs {:?}", state.store.fractal.agent_page_refs_cache.lock().unwrap().iter()
+                .map(|e| (e.index, e.history, e.items.len())).collect::<Vec<_>>());
+            eprintln!("[TMP] retained cards {:?}", state.store.fractal.agent_roster_previous.lock().unwrap().resources.iter()
+                .map(|e| (e.index, e.local, e.history, e.covered.is_none(), e.items.len())).collect::<Vec<_>>());
             crate::otel::record_roster_read("not_ready", requested, None, fresh);
             if history {
                 state.store.request_agent_roster_history();
