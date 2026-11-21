@@ -5733,6 +5733,7 @@ mod tests {
         current.subjects.remove("notice-owner").unwrap();
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("program.turn.report").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
@@ -5747,7 +5748,8 @@ mod tests {
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
         current.claims.remove("mission-run.gate-carried").unwrap();
-        for field in ["phase", "admission_publication", "workspace_declaration"] {
+        for field in ["phase", "admission_publication", "workspace_declaration",
+            "native_turn", "native_turn_key", "parent_attempt"] {
             current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
         }
         for kind in ["work.person-asked", "work.person-done", "work.person-cancelled", "gate.requested"] {
