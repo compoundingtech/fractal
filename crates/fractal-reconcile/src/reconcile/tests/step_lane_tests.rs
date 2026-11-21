@@ -187,7 +187,7 @@ mission "orchid" state="ready" {
     let builder = format!("agent/{}/builder", run.id);
     let member = store.desired_subject_with_writer(&builder).unwrap().unwrap().0.member.unwrap();
     // The stage each pass runs for a live seat, before its wakes.
-    reconciler.reconcile_work_messages(&builder, "builder-1", Some(&member)).unwrap();
+    reconciler.reconcile_work_messages(&builder, "builder-1", Some(&member), RequestedRestart::Continue).unwrap();
     assert_eq!(*runtime.lanes_resized.lock().unwrap(), [(member.runtime_id.clone(), Capacity { cores: 8, memory: 16 * G })]);
 }
 
