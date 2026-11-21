@@ -726,10 +726,11 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
     assert!(fixture.reports(REPORTER).is_empty());
 
     // A live process must not suppress its independent execution deadline.
-    let mut overdue = fixture.store.mission_run(&run.id).unwrap().unwrap();
-    overdue.steps[0].execution_elapsed_ms = 2 * 60 * MINUTE;
-    fixture.reconciler.report_run(&overdue, &report, now).unwrap();
-    assert_eq!(fixture.reports(REPORTER).len(), 1);
+    let _expired = Clock::at(&fixture.store, since + 121 * MINUTE);
+    fixture.passes(4);
+    assert_eq!(fixture.store.mission_run(&run.id).unwrap().unwrap().status, "failed");
+    let reports = fixture.reports(REPORTER);
+    assert!(reports.iter().any(|report| report.tags.contains(&"st3-run-report:failed".to_owned())));
 }
 
 #[test]
