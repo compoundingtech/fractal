@@ -78,13 +78,19 @@ pub fn deletable_on_a_peers_word(kind: &str, actor: Option<&str>) -> bool {
     checkpoint_trim::LOCAL_TRIM_KINDS.contains(&kind) && !actor.is_some_and(|actor| actor.starts_with("person/"))
 }
 
-/// The claims waiting for deletion that this member holds: their tombstones and claim rows.
+/// The claims waiting for deletion that this member holds: their tombstones and claim rows. A
+/// signed claim whose batch is younger than the freshness window's forget bound (after ?2, from
+/// ?3 on) is not among them yet: the deletion would refuse it (`checkpoint::young_signed_claim_tx`),
+/// and left in the page it would hold back the claims behind it.
 const PENDING_SQL: &str = "SELECT claims.id, claims.subject, claims.kind, claims.actor, claims.predecessors,
         claims.accepted_at_unix_ms, claims.batch_id, batches.origin, batches.replica_sequence, claims.body
      FROM peer_retired_claims AS learned INDEXED BY peer_retired_claims_state
      JOIN claims ON claims.id=learned.id
      JOIN batches ON batches.id=claims.batch_id
-     WHERE learned.state='pending' ORDER BY learned.id LIMIT ?1";
+     WHERE learned.state='pending'
+       AND NOT (CAST(batches.accepted_at_unix_ms AS INTEGER) > ?2 AND CAST(batches.accepted_at_unix_ms AS INTEGER) >= ?3
+                AND EXISTS(SELECT 1 FROM claim_signatures AS signed WHERE signed.claim_id=claims.id))
+     ORDER BY learned.id LIMIT ?1";
 
 impl Store {
     /// Whether this member deletes what its peers retired: [`RETIREMENT_WINS`], or what a test
@@ -159,6 +165,15 @@ impl Store {
         if trimming || left == 0 {
             return Ok(());
         }
+        // The forget bound, by the clock the deletion judges it with: a later step takes what waits.
+        let (youngest_forgettable, first_held) = {
+            use crate::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS, FRESHNESS_WINDOW_MS};
+            let now = super::checkpoint::forget_clock(&self.connection.write());
+            (
+                i64::try_from(now.saturating_sub(FORGET_SIGNED_AFTER_MS)).unwrap_or(i64::MAX),
+                i64::try_from(FRESHNESS_FROM_UNIX_MS.saturating_sub(FRESHNESS_WINDOW_MS)).unwrap_or(i64::MAX),
+            )
+        };
         let rows = {
             let connection = self.readers.get();
             let mut envelope = connection.prepare_cached(
@@ -166,7 +181,7 @@ impl Store {
             )?;
             let rows = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-h60e0bfc24ee7 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ PENDING_SQL)?
-                .query_map([usize::try_from(left).unwrap_or(usize::MAX).min(STEP_CLAIMS)], |row| {
+                .query_map(params![usize::try_from(left).unwrap_or(usize::MAX).min(STEP_CLAIMS), youngest_forgettable, first_held], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,

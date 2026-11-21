@@ -311,7 +311,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h98693fb60771 owner=smallclai
 
 /// The clock a forget is judged by: the store's write clock, which a simulation can fix or shift
 /// (`Store::set_write_clock_at`), otherwise this host's.
-fn forget_clock(connection: &Connection) -> u64 {
+pub(crate) fn forget_clock(connection: &Connection) -> u64 {
     let (offset, at): (i64, Option<i64>) = connection
         .prepare_cached("SELECT offset_ms, at_ms FROM temp.write_clock")
         .and_then(|mut statement| statement.query_row(/* sqlite-large-value: allow-for-now lv-hde95c66af790 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?))))

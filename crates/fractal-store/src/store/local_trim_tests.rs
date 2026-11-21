@@ -2506,3 +2506,46 @@ fn a_local_cut_keeps_signed_claims_inside_the_forget_bound() {
     step(&store, &at(later));
     assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
 }
+
+/// The freshness window's forget bound holds on a peer's word too: an observation alder signed
+/// and retired stays at birch while its batch is younger than the window and a day, and birch's
+/// next step past the bound deletes it.
+#[test]
+fn a_peers_retirement_keeps_a_signed_claim_inside_the_forget_bound() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    const DAY_MS: u128 = 24 * 60 * 60 * 1_000;
+    let scratch = tempfile::tempdir().unwrap();
+    let alder = declared(Store::open_memory("alder").unwrap(), true);
+    let birch = declared(Store::open_memory("birch").unwrap(), true);
+    alder.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    let at = |store: &Store, now: u128| {
+        store.set_write_clock_at(now).unwrap();
+        CheckpointContext { now_unix_ms: now, scratch: scratch.path().to_path_buf() }
+    };
+    at(&alder, written);
+    for n in 0..20 {
+        apply(&alder, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    while sync_into(&alder, &birch) != 0 {}
+    while sync_into(&birch, &alder) != 0 {}
+    let past_bound = written + u128::from(FORGET_SIGNED_AFTER_MS) + 2 * DAY_MS;
+    assert!(kinds(&step(&alder, &at(&alder, past_bound))).contains(&"trimmed"));
+    assert_eq!(claims_of(&alder, "observer.observed"), 1);
+    birch.set_retirement_wins(true);
+    learn_retirements(&birch, &alder);
+    // Three days on at birch: signed and inside the bound, so nothing goes and the step goes on.
+    step(&birch, &at(&birch, written + 3 * DAY_MS));
+    assert_eq!(claims_of(&birch, "observer.observed"), 20, "nothing signed inside the bound goes on a peer's word");
+    assert!(!birch.checkpoint_halted().unwrap(), "the bound is skipped, not refused");
+    let set_aside: i64 = birch
+        .readers
+        .get()
+        .query_row("SELECT COUNT(*) FROM checkpoints WHERE state='set-aside'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(set_aside, 0, "no cut is planned over a claim the bound holds, so none is set aside");
+    // Past it, the same retirements delete them.
+    assert!(kinds(&step(&birch, &at(&birch, past_bound))).contains(&"trimmed"));
+    assert_eq!(claims_of(&birch, "observer.observed"), 1);
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+}
