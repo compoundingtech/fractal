@@ -6,6 +6,10 @@ use super::invocation_receipts::{append_receipt_tx, InvocationPhase, InvocationR
 
 pub const TAG_PREFIX: &str = "fractal-invocation:";
 
+pub(super) fn mission_run_id(run: &str) -> &str {
+    run.strip_prefix("mission-run/").unwrap_or(run)
+}
+
 fn operation_id(run: &str, step: &str, attempt: u32, epoch: u32, agent: &str,
     incarnation: &str, prior_claim: Option<&str>) -> String {
     let identity = json!([run, step, attempt, epoch, agent, incarnation, prior_claim]);
@@ -14,8 +18,10 @@ fn operation_id(run: &str, step: &str, attempt: u32, epoch: u32, agent: &str,
 
 fn receipt_tx(tx: &Transaction<'_>, run: &str, step: &str, attempt: u32, epoch: u32,
     agent: &str, incarnation: &str) -> Result<InvocationReceipt> {
+    // Wake views already carry the subject prefix; work claims read the raw SQL ID.
+    let run = format!("mission-run/{}", mission_run_id(run));
     let prior = latest_claim_of_kind_tx(tx, step, "work.claimed")?;
-    let operation = operation_id(run, step, attempt, epoch, agent, incarnation,
+    let operation = operation_id(&run, step, attempt, epoch, agent, incarnation,
         prior.as_ref().map(|claim| claim.id.as_str()));
     // Only exact verified launch provenance establishes parentage. Never use the
     // latest launch, desired declaration, or an inherited invocation environment.
