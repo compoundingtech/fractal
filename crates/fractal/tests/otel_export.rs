@@ -1915,8 +1915,15 @@ async fn daemon_request_id_and_roster_stages_match_response() {
     // The seeded undeclared seat appears only in history. Await that one-card cold
     // publication, not the startup diagnostic reader's unadmitted empty current roster.
     let cold_publication = daemon.await_span(root.path(), |span| {
-        span["name"] == "st.roster.rebuild"
-            && string_attribute(span, "st.roster.invalidation") == Some("cold")
+        if span["name"] != "st.roster.rebuild" {
+            return false;
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for attribute in span["attributes"].as_array().expect("exported rebuild attributes") {
+            assert!(keys.insert(attribute["key"].as_str().unwrap()),
+                "rebuild attribute keys must be unique: {span}");
+        }
+        string_attribute(span, "st.roster.invalidation") == Some("cold")
             && int_attribute(span, "st.roster.covered") == Some(1)
     });
     let spans = daemon.captured_spans(root.path());

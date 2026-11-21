@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Export roster rebuild measurements once with their final values, avoiding duplicate attribute keys inherited from earlier roster work.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No graph or retention rule changes."},
+  "compatibility": {"status": "none", "detail": "Existing telemetry attribute names and types are unchanged."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}
