@@ -22,6 +22,7 @@ mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+pub mod store_worktree_lease;
 mod resource_profile;
 pub mod resource_pressure;
 pub mod resource_class;
