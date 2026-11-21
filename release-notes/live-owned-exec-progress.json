@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Count live generation-owned agentless execs as run progress",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "none", "detail": "No schema, client-v0 or code generation changes."},
+  "rules": {"status": "changed", "detail": "Run stall reporting counts an agentless step's locally observed running exec as progress only when run, step and generation ownership, selected declaration, launch receipt incarnation and physical launch provenance match. Missing, exited, stale or foreign runtimes do not suppress stall alerts. Linked child run exec progress also counts. Execution timeouts remain independent."},
+  "compatibility": {"status": "none", "detail": "Agent-held work retains its existing quiet-limit behavior. Remote or unverified runtime evidence is not treated as proof of progress."},
+  "downtime": {"status": "none", "detail": "Behavior changes when the reconciler is restarted."},
+  "manual": {"status": "none", "detail": "No new commands or settings; synthetic wait progress is not required for verified live execs."},
+  "recovery": {"status": "none", "detail": "Existing durable launch receipts and process incarnation evidence are reused."}
+}

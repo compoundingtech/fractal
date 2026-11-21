@@ -131,7 +131,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// register every run and step read, including nested work, so progress moves the stall
     /// deadline on the next incremental evaluation rather than waiting for a scan.
     pub(super) fn run_report_activity(&self, run: &MissionRunView) -> Result<u128> {
-        let mut activity = run_activity(run).max(self.held_progress(run)?);
+        let mut activity = run_activity(run).max(self.held_progress(run)?).max(self.exec_progress(run)?);
         let mut pending = run
             .steps
             .iter()
@@ -145,7 +145,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 activity = activity
                     .max(run_activity(&child))
-                    .max(self.held_progress(&child)?);
+                    .max(self.held_progress(&child)?)
+                    .max(self.exec_progress(&child)?);
                 pending.extend(child.steps.into_iter().map(|step| step.subject));
             }
         }
@@ -170,6 +171,57 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         Ok(progress)
+    }
+
+    /// An agentless exec can spend its whole quiet interval in an external queue. Only a
+    /// physically live incarnation launched for this step's current declaration counts;
+    /// an absent observation, foreign process or superseded generation is not progress.
+    /// This does not renew or pause the step's independent execution timeout.
+    fn exec_progress(&self, run: &MissionRunView) -> Result<u128> {
+        for step in &run.steps {
+            if !step.agentless || step.status != "working" || step.generation != run.generation
+                || step.timeout_ms.is_some_and(|limit| {
+                    step.execution_elapsed_ms >= u128::from(limit.saturating_add(step.timeout_extension_ms))
+                })
+            {
+                continue;
+            }
+            for subject in self.store.desired_subjects_for_owner_step(&step.subject)? {
+                if subject.kind != "exec"
+                    || subject.owner_run.as_deref() != Some(run.subject.as_str())
+                    || subject.owner_generation.as_deref() != Some(step.generation.as_str())
+                    || subject.owner_step.as_deref() != Some(step.subject.as_str())
+                {
+                    continue;
+                }
+                let Some(member) = subject.member.as_ref().filter(|member| {
+                    member.host == self.host && !member.terminal
+                }) else { continue };
+                smallclaims::touched::note_read(|| format!("exec:{}", member.runtime_id));
+                let Some(observation) = self.runtime.observe_exec(&member.runtime_id)?
+                    .filter(|observation| observation.status == "running" && !observation.terminal
+                        && observation.runtime_id == member.runtime_id)
+                else { continue };
+                let Some(incarnation) = observation.incarnation_id.as_deref() else { continue };
+                let Some(receipt) = self.store.latest_observation(&subject.subject, "runtime.action.succeeded")?
+                else { continue };
+                let fields = &receipt.body["fields"];
+                let token = self.store.selected_desired_token(&subject.subject)?;
+                if fields["action"] != "start"
+                    || fields["incarnation_id"].as_str() != Some(incarnation)
+                    || token.as_deref().is_none_or(|token| fields["desired_token"] != token)
+                {
+                    continue;
+                }
+                let Some(operation) = fields["operation"].as_str() else { continue };
+                if self.runtime.start_operation(&member.runtime_id, false, incarnation)?.as_deref() == Some(operation)
+                    && !self.store.runtime_start_revoked(operation)?
+                {
+                    return Ok(now_ms());
+                }
+            }
+        }
+        Ok(0)
     }
 
     /// Who a run reports to: its latest `st missions report-to`, else what it was created with.
