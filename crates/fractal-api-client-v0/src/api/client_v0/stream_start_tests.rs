@@ -35,9 +35,14 @@ async fn terminal_authority_idle_stream_delivers_incarnation_change_without_glob
         std::future::pending::<()>().await;
     });
     let (sender, mut frames) = watch::channel(TerminalFrame::Waiting);
-    let stream = tokio::spawn(terminal_stream_socket(
-        TerminalSink::Subscription(sender), state.clone(), subject.into(), "one".into(), None, None,
-    ));
+    let follow = TerminalFollow::Local {
+        id: subject.into(), incarnation: "one".into(),
+        session: ClientSession::local(Some("person/alex")).unwrap(),
+    };
+    let stream_state = state.clone();
+    let stream = tokio::spawn(async move {
+        follow.run(stream_state, TerminalSink::Subscription(sender), None, None).await;
+    });
     tokio::time::timeout(Duration::from_secs(5), frames.changed()).await.unwrap().unwrap();
     assert!(matches!(&*frames.borrow_and_update(), TerminalFrame::Screen(_)));
     for _ in 0..10 {
