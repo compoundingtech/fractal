@@ -3969,7 +3969,7 @@ mod tests {
             github.take_requests();
             let idle = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
                 .await.unwrap();
-            assert_eq!(idle.facts, json!({"repository_id": 7}));
+            assert_eq!(idle.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
             assert_eq!(idle.cursor, first.cursor);
             let requests = std::mem::take(&mut *github.requests.lock());
             assert_eq!(requests.len(), 3);
@@ -3999,7 +3999,7 @@ mod tests {
             assert_eq!(item(&edited.facts, "issues", 1)["title"], "edited within the same second");
             let quiet = observe_at(request(&["comments"], edited.cursor.as_deref(), None), &base, Some(&token))
                 .await.unwrap();
-            assert_eq!(quiet.facts, json!({"repository_id": 7}));
+            assert_eq!(quiet.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
         }).await;
     }
 
@@ -4117,7 +4117,7 @@ mod tests {
         assert_eq!(requests.iter().filter(|request| request.contains("&page=11 ")).count(), 2);
         let replay = observe_at(request(&["comments"], continued.cursor.as_deref(), None), &base, Some(&token))
             .await.unwrap();
-        assert_eq!(replay.facts, json!({"repository_id": 7}));
+        assert_eq!(replay.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
         let reconciled = observe_at(request(&["comments"], replay.cursor.as_deref(), None), &base, Some(&token))
             .await.unwrap();
         let cursor = RepositoryCursor::parse(reconciled.cursor.as_deref());
@@ -4388,7 +4388,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(third.facts, json!({"repository_id": 7}));
+        assert_eq!(third.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
         assert_eq!(third.cursor, second.cursor);
         let requests = github.take_requests();
         assert_eq!(
@@ -4426,7 +4426,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(quiet.facts, json!({"repository_id": 7}));
+        assert_eq!(quiet.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
         let requests = github.take_requests();
         assert!(
             !requests
