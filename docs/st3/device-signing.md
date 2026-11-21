@@ -313,8 +313,12 @@ its batch, but its signature covers only subject, kind, actor and body. So a wri
 signed claim's content again in a later batch, and members keep that original only while they
 have not trimmed it. The window makes such a copy of a claim old enough to be forgotten invalid
 from its own fields, so members agree without holding the original. Forgets keep signed claims at
-least 8 days. A writer with no earlier batch and no predecessors can still time a copy within the
-window; that remaining gap is accepted, since it needs a member with a writer key.
+least 8 days. The order check reads the writer's previous batch and the batches of its claims'
+predecessors where the member still holds them. Every member holds batches younger than 8 days, so
+for an active writer every member gives the same answer. The remaining gap is accepted, since it
+needs a member with a writer key: a writer can still time a copy within the window if it has no
+earlier batch and no predecessors, or if its previous batch is one some members no longer hold
+(older than 8 days, or before the checkpoint a member joined from).
 
 ## Scope of version 1
 
