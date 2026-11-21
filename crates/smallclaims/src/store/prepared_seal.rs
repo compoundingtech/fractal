@@ -71,13 +71,17 @@ pub(crate) fn unsealed_batches(
     } else {
         "origin, replica_sequence, id"
     };
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h1b7cc8d148aa owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h40d1bd6ea3d2 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
         "SELECT id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms,
                 batches.rowid
          FROM batches
          WHERE batches.rowid>=?1 AND batches.rowid<=?2
            AND NOT EXISTS (
              SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id
+         )
+           -- A released envelope still seals its batch (`envelope_release`).
+           AND NOT EXISTS (
+             SELECT 1 FROM released_envelopes WHERE released_envelopes.batch_id=batches.id
          )
          ORDER BY {order}"
     ))?;

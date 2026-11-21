@@ -311,7 +311,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h98693fb60771 owner=smallclai
 
 /// The clock a forget is judged by: the store's write clock, which a simulation can fix or shift
 /// (`Store::set_write_clock_at`), otherwise this host's.
-fn forget_clock(connection: &Connection) -> u64 {
+pub(crate) fn forget_clock(connection: &Connection) -> u64 {
     let (offset, at): (i64, Option<i64>) = connection
         .prepare_cached("SELECT offset_ms, at_ms FROM temp.write_clock")
         .and_then(|mut statement| statement.query_row(/* sqlite-large-value: allow-for-now lv-hde95c66af790 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?))))
@@ -434,7 +434,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
         let batch: Option<String> = delete_statement("envelope_batch", || -> Result<Option<String>> {
             Ok(transaction
                 .prepare_cached(
-                    "SELECT batch_id FROM replica_envelopes
+                    "SELECT batch_id FROM envelope_rows
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
                 )?
                 .query_row(
@@ -444,11 +444,13 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
                 .optional()?
                 .flatten())
         })?;
+        // A released envelope's identity goes with it; its tombstone lists it from now on.
         for table in [
             "replica_records",
             "replica_envelope_signatures",
             "replica_envelope_holds",
             "replica_envelopes",
+            "released_envelopes",
         ] {
             delete_statement(table, || -> Result<()> {
                 transaction
@@ -462,9 +464,9 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
         if let Some(batch) = batch {
             delete_statement("batches", || -> Result<()> {
                 transaction
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1ffbd7f1dfc6 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE batch_id=?1)
-                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)")?
+                 AND NOT EXISTS (SELECT 1 FROM envelope_rows WHERE batch_id=?1)")?
                     .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
                 Ok(())
             })?;
@@ -526,7 +528,8 @@ pub fn sealed_records_page_sql() -> String {
 }
 
 /// `sealed_records_page_sql` for the records of one envelope (?1, ?2, ?5), with the cut ?3 and
-/// the seal row ?4.
+/// the seal row ?4. The envelope may be one this member released (`envelope_rows`); its row id is
+/// the rowid it had.
 pub fn sealed_envelope_records_sql() -> String {
     let order = super::canonical::components("claims").join(", ");
     format!(
@@ -536,10 +539,10 @@ pub fn sealed_envelope_records_sql() -> String {
          JOIN batches ON batches.id=claims.batch_id
          WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?5
            AND records.state<>'repaired'
-           AND EXISTS(SELECT 1 FROM replica_envelopes envelopes
-                      WHERE envelopes.writer=?1 AND envelopes.sequence=?2 AND envelopes.envelope_hash=?5
-                        AND envelopes.rowid <= ?4
-                        AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3)"
+           AND EXISTS(SELECT 1 FROM envelope_rows
+                      WHERE envelope_rows.writer=?1 AND envelope_rows.sequence=?2
+                        AND envelope_rows.envelope_hash=?5 AND envelope_rows.row_id <= ?4
+                        AND CAST(envelope_rows.accepted_at_unix_ms AS INTEGER) < ?3)"
     )
 }
 

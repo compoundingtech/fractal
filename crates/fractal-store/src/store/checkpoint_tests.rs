@@ -1522,6 +1522,7 @@ fn only(exchange: &ReplicationExchange, envelopes: Vec<ReplicaEnvelope>) -> Repl
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: Vec::new(),
         },
         envelopes,
         ..exchange.clone()

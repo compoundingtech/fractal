@@ -50,6 +50,8 @@ fn response(digest: String) -> ReplicationExportResponse {
             build: None,
             claim_ranges: None,
             claim_member_signatures: Vec::new(),
+            signed_envelopes: Vec::new(),
+            unservable_released: Default::default(),
         },
     }
 }
