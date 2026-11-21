@@ -101,6 +101,8 @@ pub fn attach_writer(connection: &Connection, database: &Path) -> Result<()> {
         connection.execute_batch("PRAGMA blob_file.auto_vacuum = INCREMENTAL")?;
     }
     connection.query_row("PRAGMA blob_file.journal_mode = WAL", [], |_| Ok(()))?;
+    connection.pragma_update(Some(rusqlite::DatabaseName::Attached("blob_file")),
+        "journal_size_limit", super::WAL_JOURNAL_SIZE_LIMIT)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hed8f4c129a6a owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ &format!("PRAGMA blob_file.synchronous = FULL; {BLOB_FILE_TABLE};"))?;
     Ok(())
 }
