@@ -270,6 +270,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signatures",
         "claim_verdicts",
         "claim_verdict_links",
+        "claim_batch_disorder",
         "claim_verdict_dependency_keys",
         "claim_verdict_dependency_edges",
         "claim_verdict_queue",
