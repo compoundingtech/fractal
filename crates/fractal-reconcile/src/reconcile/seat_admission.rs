@@ -59,7 +59,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             match decision {
                 Ok(decision) if previous != Some(decision) => {
-                    tracing::info!(blocked = decision.blocked, reason = ?decision.reason, "host PSI brake decision");
+                    if previous.is_some() && decision.blocked {
+                        tracing::warn!(reason = ?decision.reason, "host PSI brake blocked admission");
+                    } else {
+                        tracing::debug!(blocked = decision.blocked, reason = ?decision.reason, "host PSI brake decision");
+                    }
                     previous = Some(decision);
                     self.incremental.touch("host-lane-pressure");
                     self.signal_changed();
