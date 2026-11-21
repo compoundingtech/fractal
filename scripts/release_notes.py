@@ -219,8 +219,10 @@ def collect(repo, since, source):
 def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
     """Check the effective merge tree, independently of the unreleased main backlog.
 
-    Each new first-parent PR merge in a queue group needs a fresh fragment. Existing
-    fragments are immutable; a later correction or backfill gets its own file.
+    Each new first-parent PR merge in a queue group needs a fresh fragment. Valid
+    existing fragments are immutable; corrections or backfills get their own file.
+    An inherited invalid fragment may only be modified into a valid fragment.
+    Deletion remains forbidden, and repairs still require a fresh PR fragment.
     No event identity means strict local validation without a rollout exemption.
     """
     base, source = resolve(repo, base), resolve(repo, source)
@@ -229,8 +231,21 @@ def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
     changes = git(repo, 'diff', '--no-renames', '--name-status', base, source, '--', FRAGMENTS).splitlines()
     for change in changes:
         status, path = change.split('\t', 1)
-        if path.endswith('.json') and status != 'A':
-            raise ImpactError(f'{path}: existing fragments are immutable; add a new fragment for corrections')
+        if not path.endswith('.json') or status == 'A':
+            continue
+        if status == 'M':
+            try:
+                validate(json.loads(source_text(repo, base, path)), path)
+            except (json.JSONDecodeError, ImpactError):
+                # Only invalid bytes inherited from the base are repairable.
+                # Validate the replacement even for an adoption-exempt PR.
+                try:
+                    repaired = json.loads(source_text(repo, source, path))
+                except json.JSONDecodeError as error:
+                    raise ImpactError(f'{path}: invalid JSON: {error}') from error
+                validate(repaired, path)
+                continue
+        raise ImpactError(f'{path}: existing fragments are immutable; add a new fragment for corrections')
     commits = git(repo, 'rev-list', '--first-parent', '--reverse', f'{base}..{source}').splitlines()
     if not commits:
         raise ImpactError('no integrated change to classify')
