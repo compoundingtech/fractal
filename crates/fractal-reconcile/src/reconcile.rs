@@ -4225,10 +4225,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             observed.as_ref(),
                             blocked.as_ref(),
                         )?;
-                        if restart == RequestedRestart::Handled
-                            || (restart == RequestedRestart::WaitingForPreparation
-                                && !observed.as_ref().is_some_and(|item| item.status == "running"))
-                        {
+                        if restart == RequestedRestart::Handled {
                             return Ok(());
                         }
                         match observed {
