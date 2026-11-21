@@ -6741,11 +6741,15 @@ fn retire_claim_ids(store: &Store, ids: &[String]) {
     }
 }
 
+/// A member that trims locally. These tests check what the walk teaches a member; a retirement
+/// winning (deleting a held copy, fetching an unheld claim to retire it) is `retirement_wins`'s
+/// own tests', so it is off here.
 fn local_trim_member(origin: &str, fleet: &str) -> Store {
     let store = plain_memory(origin).unwrap();
     store.bind_fleet(fleet).unwrap();
     store.import_retired_identities_paced(|_| {}).unwrap();
     store.trim_locally(true).unwrap();
+    store.set_retirement_wins(false);
     store
 }
 

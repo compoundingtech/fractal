@@ -2556,3 +2556,29 @@ fn a_peers_retirement_keeps_a_signed_claim_inside_the_forget_bound() {
     assert_eq!(claims_of(&birch, "observer.observed"), 1);
     assert_eq!(retired_ids(&birch), retired_ids(&alder));
 }
+
+/// Deleting on a peer's word waits, as envelope release does, while a peer heard from in the last
+/// 14 days does not take signed claims: such a peer keeps what it holds whatever its peers
+/// retired. Once it does, the same retirements delete.
+#[test]
+fn a_peers_retirement_waits_while_a_recent_peer_cannot_take_signed_claims() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    let cedar = declared(Store::open_memory("cedar").unwrap(), true);
+    let hear = |capable: bool| {
+        let mut exchange = cedar.export_replication_exchange(TEST_FLEET, &birch.replication_inventory().unwrap()).unwrap();
+        if !capable {
+            exchange.inventory.capabilities.clear();
+        }
+        birch.receive_replication_exchange("cedar", TEST_FLEET, &exchange).unwrap();
+    };
+    hear(false);
+    learn_retirements(&birch, &alder);
+    step(&birch, &quiet);
+    assert_eq!(claims_of(&birch, "observer.observed"), 20, "nothing goes on a peer's word while cedar is older");
+    assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().envelope_release_paused_for, ["cedar"]);
+    hear(true);
+    assert!(kinds(&step(&birch, &quiet)).contains(&"trimmed"));
+    assert_eq!(claims_of(&birch, "observer.observed"), 1);
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+}

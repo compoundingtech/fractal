@@ -19,9 +19,10 @@ use super::*;
 use super::checkpoint::ClaimTombstone;
 use super::checkpoint_agreement::CheckpointAction;
 
-/// Whether a member deletes the claims its peers retired. Off until the convergence of mixed
-/// trims is proven on running members; it does not depend on releasing envelopes.
-pub const RETIREMENT_WINS: bool = false;
+/// Whether a member deletes the claims its peers retired. The deletion waits, as envelope release
+/// does, while a peer this member exchanged with in the last 14 days does not take signed claims
+/// (`envelope_release::Store::peers_lacking_signed_claims`).
+pub const RETIREMENT_WINS: bool = true;
 
 pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hd0a8c2a3ba86 owner=smallclaims::store::retirement_wins TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS peer_retired_claims (
@@ -130,6 +131,11 @@ impl Store {
     /// claim still the newest of its subject and kind here waits.
     pub(crate) fn trim_peer_retired(&self, actions: &mut Vec<CheckpointAction>) -> Result<()> {
         if !self.retirement_wins() || self.checkpoint_halted()? {
+            return Ok(());
+        }
+        // An older peer keeps what it holds whatever its peers retired: deleting on a peer's word
+        // waits until every recent peer is of a build that does too.
+        if !self.peers_lacking_signed_claims()?.is_empty() {
             return Ok(());
         }
         // A claim a peer supplied after its retirement was learned is held now: it waits for

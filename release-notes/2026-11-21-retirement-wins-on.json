@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A retirement wins, on (RETIREMENT_WINS): a member deletes the copy it holds of a claim a peer retired, as #6965 describes, while every peer it exchanged with in the last 14 days takes signed claims. While one does not, the deletion waits and the replication status lists it (envelope_release_paused_for), as envelope release does.",
+  "replay": {"status": "none", "detail": "No replay. The deletion runs through the trim's guarded chunk path under a cut of its own, as #6965 describes."},
+  "schema": {"status": "none", "detail": "No schema or storage version change: the deletion records tombstones and retired IDs, which earlier builds read."},
+  "rules": {"status": "changed", "detail": "A retired ID learned from an authenticated peer, of a held claim of a kind in LOCAL_TRIM_KINDS no person wrote, deletes the held copy, unless the claim is signed and inside the freshness window's forget bound, or it is still the newest of its subject and kind here. Any other is kept and counted (peer_retired_kept)."},
+  "compatibility": {"status": "changed", "detail": "The deletion waits while any peer exchanged with in the last 14 days sends an inventory without signed-claims-v1: such a peer keeps every claim whatever its peers retired. envelope_release_paused_for in the replication status names those peers. A peer not heard from for 14 days no longer counts."},
+  "downtime": {"status": "none", "detail": "No startup work. The deletion runs in the local trim's steps, paced and under the day's cap."},
+  "manual": {"status": "none", "detail": "No action."},
+  "recovery": {"status": "none", "detail": "Rollback is supported: earlier builds read the tombstones and retired IDs the deletion records, and keep them."}
+}
