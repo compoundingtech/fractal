@@ -1641,7 +1641,7 @@
       "description": "Admit a finite shell payload and forward its actual outcome after custody retirement",
       "tests": [
         "crates/fractal/src/resources_cli.rs::exec_requires_resources_and_preserves_payload_argv",
-        "crates/fractal/src/resources_cli.rs::platform_refusal_precedes_daemon_contact_and_capacity_acquisition",
+        "crates/fractal/src/resources_cli.rs::darwin_exec_requires_a_known_lane_and_authorized_helper",
         "crates/fractal/src/resources_cli.rs::payload_exit_code_is_passed_through_and_result_is_durable",
         "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard",
         "crates/fractal-api-core/src/api/resources.rs::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials"

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fence worktree activation against concurrent megarepo build-output reclamation",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No storage, client schema or code generation changes."},
+  "rules": {"status": "none", "detail": "Graph rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Checkout creation and reuse, reconciliation rendering and runtime initialization, cargo-test gates, and web snapshot activation hold an mr store lease through publication and failure cleanup. Prospective and existing owners use the same canonical identity, including symlinked parents. Detached and queued starts share the activation guard until durable completion adoption and cleanup; recovered queues reacquire it before launch. Activation refuses when mr cannot acquire admission; refusal errors name the repository path and identify missing or unidentifiable store repositories. Rust activation invokes the absolute mr executable compiled into the product, independent of login-shell PATH. Admission waits at most five seconds before a typed retryable refusal terminates and reaps its holder; release also bounds an unresponsive holder. Relative cargo-test gate worktree paths remain supported. The installed mr must support store lease --owner-path/--repo-path and descendant reentrancy, as provided by the main-pinned effect-utils CLI."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
+  "manual": {"status": "changed", "detail": "The packaged daemon includes its pinned mr CLI. Make a compatible mr CLI available to standalone web activation launchers before upgrading."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+}

@@ -12579,6 +12579,32 @@ agent "worker" {
     }
 
     #[test]
+    fn a_declared_checkout_below_a_symlinked_parent_starts_with_one_lease() {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let workspace = alias.join("new/worker");
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"symlink-worker\"; command \"true\"; restart \"never\" }}",
+            workspace.to_str().unwrap(), repository.to_str().unwrap()), "symlinked-checkout");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(std::fs::canonicalize(&workspace).unwrap(), real.join("new/worker"));
+        assert_eq!(runtime.starts.lock().unwrap().len(), 1,
+            "render/start must reuse admission acquired before the checkout existed");
+        assert!(!store.observations_for("agent/node.worker", "runtime.action.succeeded").unwrap().is_empty());
+        assert!(crate::checkout::activation_lease(&workspace, &repository).is_ok(),
+            "the completed pass must release its shared lease");
+    }
+
+    #[test]
     fn a_top_level_checkout_leaves_after_stop_and_workspace_observations_do_not_repeat() {
         let root = crate::test_support::canonical_tempdir();
         let repository = crate::checkout::test_support::repository(root.path());
@@ -12668,8 +12694,9 @@ agent "worker" {
             Arc::new(Notify::new()),
         );
         let workspace = root.path().join("new");
+        let lease = checkout.activation_lease(&workspace).unwrap();
         let failure = reconciler
-            .create_checkout("agent/node.worker", &checkout, &workspace)
+            .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
             .unwrap()
             .unwrap();
         assert!(failure.contains(existing.to_str().unwrap()), "{failure}");
@@ -12678,7 +12705,7 @@ agent "worker" {
         checkout.remove(&existing).unwrap();
         assert_eq!(
             reconciler
-                .create_checkout("agent/node.worker", &checkout, &workspace)
+                .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
                 .unwrap(),
             Some(failure)
         );
@@ -12688,7 +12715,7 @@ agent "worker" {
         };
         assert!(
             reconciler
-                .create_checkout("agent/node.worker", &revised, &workspace)
+                .create_checkout("agent/node.worker", &revised, &workspace, &lease)
                 .unwrap()
                 .is_none()
         );
