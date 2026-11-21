@@ -6,7 +6,8 @@ pub const STORAGE_VERSION: u32 = 20;
 /// (`smallclaims::store::blob_file`); an older build would read them as empty.
 /// Version 26 also has compacted claim signatures: a settled claim keeps its facade and its
 /// count at 1, without candidate or source rows (`smallclaims::store::principals::compaction`).
+/// Version 27 is a store that keeps no valid replica record (`smallclaims::store::record_bytes`).
 /// Versions 23 and 24 are skipped and never used: builds from #6894 on open them unchecked.
 /// A PR that raises this to N gives every number up to N its reader; never raise past a number
 /// that is only reserved.
-pub const MAX_SUPPORTED_STORAGE_VERSION: u32 = 26;
+pub const MAX_SUPPORTED_STORAGE_VERSION: u32 = 27;

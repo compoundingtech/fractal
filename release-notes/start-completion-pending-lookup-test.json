@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Observe completed starts using the exact launched member, including its operation provenance, and prove durable adoption before counting quiet reconciliation passes.",
+  "replay": {
+    "status": "none",
+    "detail": "Existing receipts remain valid; no replay is required."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Completion observation now receives the launched member's operation metadata; exact-incarnation and operation-provenance checks remain unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Preserves the helper completion barrier and exact quiet-pass counts."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal daemon upgrade; no planned downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persisted state changes."
+  }
+}

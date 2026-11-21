@@ -149,6 +149,7 @@ pub mod stop_deferral;
 pub mod stopping_seat;
 pub mod card_fold;
 mod card_actual;
+mod activity_summary;
 #[cfg(test)]
 pub mod card_fold_tests;
 #[cfg(test)]
@@ -2643,7 +2644,9 @@ pub fn stale_pull_request_request_tx(
 
 pub fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0 || (13..=fractal_schema::STORAGE_VERSION).contains(&version)
+    // Versions above the default writer format are reached by passes that run after open,
+    // such as the deletion of valid records (`record_bytes`); none needs a migration here.
+    if version == 0 || (13..=smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
     {
         return Ok(());
     }

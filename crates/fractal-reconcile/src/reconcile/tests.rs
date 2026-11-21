@@ -12375,8 +12375,9 @@ agent "worker" {
             Arc::new(Notify::new()),
         );
         let workspace = root.path().join("new");
+        let lease = checkout.activation_lease(&workspace).unwrap();
         let failure = reconciler
-            .create_checkout("agent/node.worker", &checkout, &workspace)
+            .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
             .unwrap()
             .unwrap();
         assert!(failure.contains(existing.to_str().unwrap()), "{failure}");
@@ -12385,7 +12386,7 @@ agent "worker" {
         checkout.remove(&existing).unwrap();
         assert_eq!(
             reconciler
-                .create_checkout("agent/node.worker", &checkout, &workspace)
+                .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
                 .unwrap(),
             Some(failure)
         );
@@ -12395,7 +12396,7 @@ agent "worker" {
         };
         assert!(
             reconciler
-                .create_checkout("agent/node.worker", &revised, &workspace)
+                .create_checkout("agent/node.worker", &revised, &workspace, &lease)
                 .unwrap()
                 .is_none()
         );

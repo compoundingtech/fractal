@@ -943,7 +943,8 @@ fn signed_store_with_drops(origin: &str) -> (Store, DropPlan) {
     (store, plan)
 }
 
-/// The signature and verdict rows the store holds for `ids`.
+/// The signature and verdict rows the store holds for `ids`. Verdict links are counted apart:
+/// a trim leaves them, and the orphan link sweep drops them.
 fn signature_and_verdict_rows(store: &Store, ids: &[String]) -> usize {
     let connection = store.readers.get();
     ids.iter()
@@ -951,7 +952,6 @@ fn signature_and_verdict_rows(store: &Store, ids: &[String]) -> usize {
             [
                 "claim_signatures",
                 "claim_verdicts",
-                "claim_verdict_links",
                 "claim_verdict_queue",
                 "claim_verdict_fresh",
             ]
@@ -968,6 +968,23 @@ fn signature_and_verdict_rows(store: &Store, ids: &[String]) -> usize {
             .sum::<usize>()
         })
         .sum()
+}
+
+/// The verdict links the store holds for `ids`.
+fn verdict_links(store: &Store, ids: &[String]) -> usize {
+    let connection = store.readers.get();
+    ids.iter()
+        .map(|id| {
+            connection
+                .query_row("SELECT COUNT(*) FROM claim_verdict_links WHERE claim_id=?1", [id], |row| row.get::<_, usize>(0))
+                .unwrap()
+        })
+        .sum()
+}
+
+/// One whole pass of the orphan verdict-link sweep.
+fn sweep_links(store: &Store) {
+    while !store.sweep_orphan_verdict_links(now_ms() as u64).unwrap().finished {}
 }
 
 /// The claims a trim of `dropped` keeps.
@@ -995,9 +1012,15 @@ fn a_trim_forgets_the_signatures_and_verdicts_of_what_it_drops() {
     let before = authority(&store);
     let graph = smallclaims::store::graph_digest(&store.readers.get()).unwrap();
 
+    let kept_links = verdict_links(&store, &kept);
+    assert!(verdict_links(&store, &dropped) > 0, "judged claims have links");
     trim(&store, &plan);
     assert_eq!(signature_and_verdict_rows(&store, &dropped), 0);
     assert_eq!(signature_and_verdict_rows(&store, &kept), kept_rows);
+    // The trim leaves the dropped claims' links; the orphan sweep takes them, and only them.
+    sweep_links(&store);
+    assert_eq!(verdict_links(&store, &dropped), 0);
+    assert_eq!(verdict_links(&store, &kept), kept_links);
     assert_eq!(authority(&store), before);
     assert_eq!(smallclaims::store::graph_digest(&store.readers.get()).unwrap(), graph);
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
@@ -1052,6 +1075,11 @@ fn the_sweep_forgets_what_an_older_trim_left_behind_once() {
     assert_eq!(store.sweep_trimmed_claim_rows().unwrap(), left);
     assert_eq!(signature_and_verdict_rows(&store, &dropped), 0);
     assert_eq!(signature_and_verdict_rows(&store, &kept), kept_rows);
+    let kept_links = verdict_links(&store, &kept);
+    assert!(verdict_links(&store, &dropped) > 0, "the older trim left the dropped claims' links");
+    sweep_links(&store);
+    assert_eq!(verdict_links(&store, &dropped), 0);
+    assert_eq!(verdict_links(&store, &kept), kept_links, "the sweep keeps every live claim's links");
     assert_eq!(authority(&store), before);
     assert_eq!(smallclaims::store::graph_digest(&store.readers.get()).unwrap(), graph);
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());

@@ -1029,6 +1029,45 @@ async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_quer
     assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
 }
 
+#[tokio::test]
+async fn activity_summary_keeps_observed_ownership_and_default_status_provenance() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/declared\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "activity-summary-fixture",
+    ).unwrap();
+    state.store.append_claim(&crate::model::ClaimInput {
+        subject: "agent/eval/named".into(), kind: "workspace.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"workspace":"/observed", "host":"runtime-host"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    state.store.append_claim(&crate::model::ClaimInput {
+        subject: "agent/eval/named".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({
+            "status":"running", "host":"runtime-host",
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let app = router(state);
+    let (code, before) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{before}");
+    let (code, summary) = get_request(app.clone(), "/v1/status?subject=agent/eval/named&activity_summary=true").await;
+    assert_eq!(code, StatusCode::OK, "{summary}");
+    assert_eq!(summary["store_index"], before["store_index"]);
+    assert_eq!(summary["subjects"][0]["subject"], "agent/eval/named");
+    for field in ["status", "workspace", "host"] {
+        assert_eq!(summary["subjects"][0]["actual"][field], before["subjects"][0]["actual"][field]);
+    }
+    assert_eq!(summary["subjects"][0]["actual"]["workspace"], "/observed");
+    assert_eq!(summary["subjects"][0]["actual"]["host"], "runtime-host");
+    assert_eq!(summary["complete"], true);
+    assert_eq!(summary["unresolved"], json!([]));
+    let (code, after) = get_request(app, "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{after}");
+    assert_eq!(after, before, "opt-in summary must not alter default output");
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {

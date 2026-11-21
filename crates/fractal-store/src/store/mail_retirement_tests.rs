@@ -319,3 +319,17 @@ fn mail_that_stays_keeps_what_it_cites() {
     assert!(retired(&store).is_empty());
     assert!(cited.iter().all(|id| claims(&store).contains(id)));
 }
+
+/// What `warm` reads by claim is an index search on every table, never a scan.
+#[test]
+fn warming_reads_each_table_by_an_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    let reader = store.readers.get();
+    for table in crate::store::mail_retirement::BY_CLAIM {
+        let mut plan = reader.prepare(/* sqlite-large-value: allow-for-now lv-h174c1a7332e1 owner=fractal_store::store::mail_retirement_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN SELECT * FROM {table} WHERE claim_id=?1")).unwrap();
+        let lines = plan.query_map(["claim/example"], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(lines.iter().all(|line| !line.starts_with("SCAN")), "{table}: {lines:?}");
+    }
+}

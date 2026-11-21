@@ -286,7 +286,8 @@ A cut is trimmed in two steps, and a crash anywhere is safe.
    `meta` so a restart goes on from it. For each dropped envelope it deletes its claims, their
    events, records, operations, the envelope's signatures and the envelope row; for a dropped claim
    in a kept envelope, the claim's own rows. It deletes each claim's signature and cached verdict
-   rows too (`claim_signatures`, `claim_verdicts`, `claim_verdict_links` and the verdict queues).
+   rows too (`claim_signatures`, `claim_verdicts` and the verdict queues). Its verdict links stay
+   until a requeue meets them or the daily link sweep finds the claim gone.
    After the last chunk it marks the cut `trimmed` and moves the committed index forward by one, so
    snapshots and page cursors taken before the trim expire through the existing "snapshot changed"
    path. A cut that dropped nothing is trimmed at once.

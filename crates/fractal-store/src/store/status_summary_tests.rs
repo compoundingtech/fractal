@@ -103,6 +103,134 @@ fn a_summary_status_read_of_a_seat_does_not_read_its_history() {
     assert_eq!(summary.projection.layer, full.projection.layer);
 }
 
+fn activity_fixture(store: &Store, count: usize) {
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example/worker\" { command \"true\"; workspace \"/declared\"; restart \"never\"; }\n",
+        store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| (
+        subject.clone(), store.selected_desired_token(subject).unwrap().into_iter().collect(),
+    )).collect();
+    store.apply(&intent, &expected, "activity-declare").unwrap();
+    store.append_claim(&crate::model::ClaimInput {
+        subject: SEAT.into(), kind: "workspace.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"workspace":"/observed", "host":"runtime-host"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    for index in 0..count {
+        observe(store, json!({"status":"running", "host":"runtime-host",
+            "incarnation_id":format!("incarnation-{index}")}));
+    }
+}
+
+#[test]
+fn activity_summary_bounds_cold_history_and_never_populates_the_roster_cache() {
+    let (few, many) = (Store::open_memory("node").unwrap(), Store::open_memory("node").unwrap());
+    activity_fixture(&few, 80);
+    activity_fixture(&many, 3_000);
+    let read = |store: &Store| {
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+        let summary = store.status_activity_summary_at(SEAT, None).unwrap();
+        assert!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get) <= activity_summary::CANDIDATES);
+        (scope.finish(), summary)
+    };
+    let (few_work, _) = read(&few);
+    let (many_work, summary) = read(&many);
+    assert!(many_work.vm_steps <= few_work.vm_steps + 2_000,
+        "activity cost grew with history: 80={few_work:?}, 3000={many_work:?}");
+    assert_eq!(summary["store_index"], many.index().unwrap());
+    assert_eq!(summary["subjects"][0]["subject"], SEAT);
+    assert_eq!(summary["complete"], false);
+    assert!(summary["unresolved"].as_array().unwrap().contains(&json!("workspace")));
+    assert_eq!(summary["subjects"][0]["actual"]["workspace"], Value::Null);
+    let full = many.status_at(Some(SEAT), None, Some(summary["store_index"].as_u64().unwrap())).unwrap();
+    for field in ["status", "workspace", "host"] {
+        if !summary["unresolved"].as_array().unwrap().contains(&json!(field)) {
+            assert_eq!(summary["subjects"][0]["actual"].get(field), full.subjects[0].actual.as_ref().unwrap().get(field));
+        }
+    }
+    assert!(many.fractal.card_actuals.lock().unwrap().is_empty());
+}
+
+#[test]
+fn activity_summary_warm_cache_preserves_observed_ownership_at_the_same_cut() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("claims.sqlite3"), "node").unwrap();
+    activity_fixture(&store, 300);
+    for terminal in [false, true] {
+        if terminal {
+            // Retained older writers can contain explicit nulls forbidden by today's append validator.
+            notice_raw_observation(&store, SEAT, "runtime.observed", "activity-explicit-null", "node",
+                4_000_000_000_000, json!({"status":"stopped", "host":null}));
+        }
+        let cut = store.index().unwrap();
+        store.read_snapshot(|_| {
+            let mut cards = card_fold::CardReads::for_generic_reads(cut);
+            cards.load_actual(&store, &store.readers.get(), &[SEAT.into()])
+        }).unwrap();
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+        let summary = store.status_activity_summary_at(SEAT, Some(cut)).unwrap();
+        assert_eq!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get), 0);
+        assert_eq!(summary["store_index"], cut);
+        assert_eq!(summary["complete"], true);
+        assert_eq!(summary["unresolved"], json!([]));
+        let full = store.status_at(Some(SEAT), None, Some(cut)).unwrap();
+        for field in ["status", "workspace", "host"] {
+            assert_eq!(summary["subjects"][0]["actual"].get(field), full.subjects[0].actual.as_ref().unwrap().get(field));
+        }
+        assert_eq!(summary["subjects"][0]["actual"]["workspace"], "/observed");
+    }
+}
+
+#[test]
+fn activity_summary_short_histories_match_full_fold_with_sparse_fields_and_clears() {
+    for seed in 1..32 {
+        let store = random_history(seed);
+        // Preserve the fixture's legacy order as explicit positions. Cold summaries may not
+        // infer positions from batch prefixes; that case has its own bounded/unresolved test.
+        store.connection.write().execute(
+            "INSERT OR IGNORE INTO claim_positions(claim_id,position)
+             SELECT id,ROW_NUMBER() OVER (PARTITION BY batch_id ORDER BY store_index)-1 FROM claims",
+            [],
+        ).unwrap();
+        let summary = store.status_activity_summary_at(SEAT, None).unwrap();
+        assert_eq!(summary["complete"], true, "seed {seed}");
+        let full = store.status_at(Some(SEAT), None, Some(summary["store_index"].as_u64().unwrap())).unwrap();
+        for field in ["status", "workspace", "host"] {
+            assert_eq!(summary["subjects"][0]["actual"].get(field),
+                full.subjects[0].actual.as_ref().and_then(|actual| actual.get(field)), "seed {seed}: {field}");
+        }
+    }
+}
+
+#[test]
+fn activity_summary_keeps_only_fields_strictly_newer_than_a_missing_legacy_position() {
+    let store = Store::open_memory("node").unwrap();
+    notice_raw_observation(&store, SEAT, "workspace.observed", "legacy-workspace", "node", 1000,
+        json!({"workspace":"/old-observed", "host":"old-host"}));
+    observe(&store, json!({"status":"running", "host":"new-host"}));
+    let result = store.status_activity_summary_at(SEAT, None).unwrap();
+    assert_eq!(result["complete"], false);
+    assert_eq!(result["unresolved"], json!(["workspace"]));
+    assert_eq!(result["subjects"][0]["actual"], json!({"status":"running","host":"new-host","workspace":null}));
+    let full = store.status_at(Some(SEAT), None, Some(result["store_index"].as_u64().unwrap())).unwrap();
+    assert_eq!(full.subjects[0].actual.as_ref().unwrap()["workspace"], "/old-observed");
+}
+
+#[test]
+fn activity_summary_does_not_guess_when_the_row_bound_splits_a_canonical_tie() {
+    let store = Store::open_memory("node").unwrap();
+    for index in 0..100 {
+        notice_raw_observation(&store, SEAT, "runtime.observed", &format!("tie-{index}"), "node", 1000,
+            json!({"status":"running", "host":"actual-host"}));
+    }
+    let summary = store.status_activity_summary_at(SEAT, None).unwrap();
+    assert_eq!(summary["complete"], false);
+    assert_eq!(summary["unresolved"], json!(["status", "workspace", "host"]));
+    assert_eq!(summary["subjects"][0]["actual"], json!({"status":null, "workspace":null, "host":null}));
+}
+
 #[test]
 fn a_summary_takes_each_field_from_the_newest_observation_that_has_it() {
     let store = seat_with(10);

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve the running or enabled systemd service during a staged namespace rename instead of treating an inactive linked unit as a conflicting install.",
+  "replay": {"status": "none", "detail": "No event format changes."},
+  "schema": {"status": "none", "detail": "No database or client schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "Manager-confirmed inactive linked units no longer conflict with running or enabled services. Both running or both enabled namespaces still conflict; unknown installed states remain conservative. Worker authorization and process-generation validation are unchanged. launchd retains its existing running-before-installed preference."},
+  "downtime": {"status": "none", "detail": "No coordinated service cutover is required."},
+  "manual": {"status": "none", "detail": "No migration commands are required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes; reverting requires no data migration."}
+}

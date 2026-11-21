@@ -1210,6 +1210,9 @@ impl Store {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h61123e79de50 owner=smallclaims::store TODO=trace-statement-and-value-representation */ record_bytes::VIEW_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd91f85b95b89 owner=smallclaims::store TODO=trace-statement-and-value-representation */ member_signatures::SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
@@ -1551,6 +1554,9 @@ pub struct PeerSyncProgress {
     pub measured_inventory_envelopes: u64,
     /// What the open window's measurements were compared against.
     pub window_basis: InventoryBasis,
+    /// Last three distinct healthy schedule measurements, oldest first. Process-local only;
+    /// neither inventory cardinalities nor writer maxima prove an acknowledged prefix.
+    pub schedule_measurements: [u128; 3],
 }
 
 /// What a measured difference is relative to. When it changes, the number of envelopes the peer
@@ -1584,6 +1590,30 @@ impl InventoryBasis {
 }
 
 impl PeerSyncProgress {
+    /// Record a comparable exchange for the bounded schedule-admission fallback.
+    /// An unhealthy exchange, restart, incarnation/basis change, clock regression or quiet
+    /// gap breaks the streak. Re-reading one measurement can never advance it.
+    pub fn observe_schedule_progress(&mut self, healthy: bool, now: u128) {
+        let last = self.schedule_measurements[2];
+        if !healthy {
+            self.schedule_measurements = [0; 3];
+            return;
+        }
+        if last != 0 && (now < last || now.saturating_sub(last) >= PEER_QUIET_EXCHANGE_MS) {
+            self.schedule_measurements = [0; 3];
+        } else if now == last {
+            return;
+        }
+        self.schedule_measurements.rotate_left(1);
+        self.schedule_measurements[2] = now;
+    }
+
+    /// Three healthy measurements taken since the gate's boundary, not three gate reads.
+    /// This is a liveness fallback, not proof that an old individual envelope arrived.
+    pub fn schedule_progress_since(&self, since: u128) -> bool {
+        self.schedule_measurements[0] != 0 && self.schedule_measurements[0] >= since
+    }
+
     /// Record one comparison of this node's graph digest with the peer's, made while both nodes
     /// held the same envelopes.
     pub fn compare_graphs(&mut self, equal: bool, now: u128) {
@@ -8388,6 +8418,7 @@ impl Store {
             None => None,
         };
         let now = now_ms();
+        let admission_healthy = self.replication_admission_healthy().map_err(internal)?;
         let mut sync = self
             .replication_sync
             .lock()
@@ -8401,6 +8432,12 @@ impl Store {
             local_inventory_generation: snapshot.inventory_generation,
             compact: !input.inventory.buckets.is_empty(),
         };
+        let same_incarnation = progress.measured_member_key.as_deref() == authenticated_member_key;
+        let same_basis = !progress.window_basis.changed_to(&basis);
+        progress.observe_schedule_progress(
+            admission_healthy && difference.is_some() && same_incarnation && same_basis,
+            now,
+        );
         progress.observe_on(received, difference, basis, now);
         if difference.is_some() {
             // This identity was authenticated before receive began. Never relabel an
@@ -10412,6 +10449,15 @@ impl Store {
             age(last_exchange),
         ))
     }
+    /// Invalid claims and fenced writers cannot be treated as ordinary in-flight traffic.
+    pub fn replication_admission_healthy(&self) -> Result<bool> {
+        Ok(self.readers.get().query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM replica_records WHERE state='invalid')
+                AND NOT EXISTS(SELECT 1 FROM replica_envelope_holds WHERE reason='fenced')",
+            [],
+            |row| row.get(0),
+        )?)
+    }
 
     /// The latest sync measurement for each configured peer that has one.
     pub fn replication_peer_sync(
@@ -11697,14 +11743,20 @@ fn apply_replication_repair_with_operations_tx(
     if !replacement_exists {
         return Ok((0, BTreeSet::new()));
     }
-    let (repaired_claim, previous_replacement) = transaction
+    let record = transaction
         .query_row(
             "SELECT claim_id, replacement_claim_id FROM replica_records WHERE record_ref=?1",
             [record_ref],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
         )
-        .optional()?
-        .unwrap_or_default();
+        .optional()?;
+    // A store that keeps no valid record has no row for a valid claim's record: the repair
+    // waits until its record is found again (`record_bytes::resolve_record_repairs`).
+    if record.is_none() && !record_bytes::valid_records_kept(transaction)? {
+        record_bytes::await_repaired_record_tx(transaction, record_ref)?;
+        return Ok((0, BTreeSet::new()));
+    }
+    let (repaired_claim, previous_replacement) = record.unwrap_or_default();
     let changed = transaction.execute(
         /* sqlite-large-value: allow-for-now lv-h48ffdf85be51 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired', replacement_claim_id=?2,
                 error_code=NULL, error_message=NULL, updated_at_unix_ms=?3

@@ -323,7 +323,10 @@ pub(crate) fn write_sealed_batch_tx(
             relay
         ],
     )?;
-    for (position, record) in sealed.records.iter().enumerate() {
+    // A store that keeps no valid record stores none for its own claims either; each claim's
+    // position was stored when it was appended (`record_bytes`).
+    let keep_valid = super::record_bytes::valid_records_kept(transaction)?;
+    for (position, record) in sealed.records.iter().enumerate().filter(|_| keep_valid) {
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h7bd22e8b7f8a owner=smallclaims::store::prepared_seal TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_records(
                  record_ref, writer, sequence, envelope_hash, position, raw, state,

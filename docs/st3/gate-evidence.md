@@ -566,8 +566,10 @@ including source objects whose synthetic merge ref has since moved or disappeare
 for a PR or merge queue entry in the source receipt, `github:OWNER/REPO@SHA` in the aggregate
 note, and `local:<commit>` from the local wrapper. Nothing reads a commit message, and no
 trailer or ref is needed. A queue entry can contain additional changes: its source
-and tree still identify the whole tested checkout. A manual run uses
-`github:OWNER/REPO@SOURCE`, without inventing a PR identity.
+and tree still identify the whole tested checkout. A push or manual run uses
+`github:OWNER/REPO@SOURCE`, without inventing a PR identity. Push receipts require
+the event's `after` commit to match the effective tested source; `before` names
+the previous branch tip, not the change identity.
 
 This receipt supplies source provenance for the record adapter; it is not a signed
 evidence record and authorizes no gate. The protected observer must independently
