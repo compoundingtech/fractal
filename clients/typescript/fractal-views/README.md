@@ -143,4 +143,25 @@ create check, starts validation of the exact live owner/v2 identity. This satisf
 the shared-container precondition without proving that our CREATE was applied. A failed adoption read retains
 validation; explicit recovery repeats only GET, then sends the original membership.
 Unknown or replay-unsafe errors never start adoption. Incompatible validation
-stays locked with an explicit reason; it never recreates the reserved identity. This commit adds no followed UI or public editing controller.
+stays locked with an explicit reason; it never recreates the reserved identity. The shared follow below owns its read lifecycle and explicit delivery checks.
+
+
+`followQuickAccess` follows the exact reserved root Pins arrangement and all
+membership pages. Whole-container invalidation includes changes outside the first
+window. It is transport-only, without Effect schemas or native platform APIs.
+The host supplies immutable action IDs, keys and fences. Creation requires distinct
+create/member identities and explicit coordinated `v2ReadersReady`; server support
+alone does not establish that all readers were upgraded. Retirement is terminal.
+
+Refresh explicitly reopens an interrupted stream without polling or edit replay.
+Retain the same follow instance across ordinary disconnects. Its `unconfirmed`
+phase blocks fresh edits through reads and reconnects. **Check delivery** calls
+`checkEdit()` with the same original request stage; matching completed receipts
+settle ambiguous writes. Safe canonical create conflicts, including on explicit create replay, may
+validate the exact live owner/v2 identity without proving the original CREATE applied; failed validation retains an explicit
+GET-only recovery step. Other statuses do not guarantee nonapplication. A replay
+refusal cannot settle an originally ambiguous attempt. Recovery is in memory only;
+closing the follow or exiting the process discards it.
+
+Quick access is one flat root collection. The planner refuses folder memberships.
+A rebalance preserves the observed order; concurrent edits may require a later reorder.

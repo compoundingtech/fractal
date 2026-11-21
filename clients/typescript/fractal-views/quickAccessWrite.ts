@@ -1,4 +1,4 @@
-import { appliedAnswer, notApplied, type ActionOf, type FractalClient, type OrderedMembershipOperation } from '@fractal/client'
+import { outcomeUnknown, notApplied, type ActionOf, type FractalClient, type OrderedMembershipOperation } from '@fractal/client'
 
 export type QuickAccessEditIdentity = Pick<ActionOf<'arrangement.membership.edit'>, 'id' | 'idempotency_key' | 'fence'>
 type Gateway = Pick<FractalClient, 'arrangementEdit' | 'arrangementMembershipEdit' | 'arrangementsGet'>
@@ -16,7 +16,7 @@ const code = (error: unknown): unknown => typeof error === 'object' && error !==
 
 /** Only an explicit guarantee releases the original request. Unknown takes precedence over
  * stale/rate-limited shorthand, and a replay-unsafe outcome never permits a fresh identity. */
-const unsafe = (error: unknown): boolean => appliedAnswer(error) === 'unknown' || details(error)?.applied === 'unknown'
+const unsafe = (error: unknown): boolean => outcomeUnknown(error)
   || (details(error)?.replay_unsafe !== undefined && details(error)?.replay_unsafe !== false)
 export const quickAccessNotApplied = (error: unknown): boolean => !unsafe(error) && notApplied(error)
 
@@ -47,7 +47,7 @@ export class QuickAccessWrite {
         if (!this.adopting) {
           try {
             const created = await this.gateway.arrangementEdit(this.create!)
-            if (created.value.status !== 'completed' || created.value.action_id !== this.create!.id) throw new TypeError('Quick access creation is not confirmed')
+            if (created.value.kind !== 'action-result' || created.value.status !== 'completed' || created.value.action_id !== this.create!.id) throw new TypeError('Quick access creation is not confirmed')
           } catch (error) {
             // This safe canonical conflict permits ensuring the exact shared container, not inferring our create receipt.
             if (code(error) !== 'arrangement-exists' || unsafe(error)) {
@@ -78,7 +78,7 @@ export class QuickAccessWrite {
       }
       try {
         const edited = await this.gateway.arrangementMembershipEdit(this.membership)
-        if (edited.value.status !== 'completed' || edited.value.action_id !== this.membership.id) throw new TypeError('Quick access edit is not confirmed')
+        if (edited.value.kind !== 'action-result' || edited.value.status !== 'completed' || edited.value.action_id !== this.membership.id) throw new TypeError('Quick access edit is not confirmed')
       } catch (error) { this.refused = !checking && quickAccessNotApplied(error); throw error }
       this.unconfirmed = false
     } catch (error) { this.unconfirmed = !this.refused; throw error }
