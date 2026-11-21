@@ -63,8 +63,10 @@ pub const PAGE: usize = 512;
 pub const BUDGET: Duration = Duration::from_millis(10);
 /// How long a page judges envelopes on a reader before it takes the writer.
 pub const JUDGE_BUDGET: Duration = Duration::from_millis(50);
-/// The releasable envelopes one write takes at most.
-pub const RELEASES_PER_WRITE: usize = 64;
+/// The releasable envelopes one write takes at most. Each release deletes rows and index entries
+/// across several tables, so a write's commit costs what it releases more than its work does: on
+/// a 52 GB member copy, writes of about 40 held the writer 100-340 ms to commit.
+pub const RELEASES_PER_WRITE: usize = 8;
 
 /// The next envelopes past the cursor. The batch and state columns follow the payload in the row,
 /// so reading them walks each payload's overflow pages; a page reads them on a reader.
