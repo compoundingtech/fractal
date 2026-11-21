@@ -11727,10 +11727,31 @@ agent "example/relaunch" { workspace "/tmp"; harness "codex" {}; env { REVISION 
         reconciler.reconcile_once().unwrap();
         assert_eq!(store.observations_for("agent/example/relaunch", "runtime.observed").unwrap()
             .iter().filter(|claim| claim.store_index > finished_cut).count(), 0, "ready clear must remain stable");
-        let replacement_observations = store.observations_for("agent/example/relaunch", "runtime.observed")
-            .unwrap().into_iter().filter(|claim| claim.store_index > replacement_cut).count();
-        assert_eq!(replacement_observations, 4,
-            "cutover, starting, new running, and ready clear; no per-pass claims");
+        // A verified physical launch is already running at completion: it must not
+        // emit an artificial starting claim, nor clear the restart before readiness.
+        let replacement_observations: Vec<_> = store
+            .observations_for("agent/example/relaunch", "runtime.observed")
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.store_index > replacement_cut)
+            .map(|claim| {
+                let fields = &claim.body["fields"];
+                (
+                    fields["status"].clone(),
+                    fields["incarnation_id"].clone(),
+                    fields["restarting_from"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            replacement_observations,
+            vec![
+                (serde_json::json!("running"), serde_json::json!(old), serde_json::json!(old)),
+                (serde_json::json!("running"), serde_json::json!(new), serde_json::json!(old)),
+                (serde_json::json!("running"), serde_json::json!(new), Value::Null),
+            ],
+            "exactly cutover, verified running replacement, and ready clear; no per-pass claims"
+        );
 
         // An explicit stop during a later cutover ends the replacement interval.
         apply_source(&store, source, "relaunch-back");
@@ -29143,7 +29164,25 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 ("running".into(), Some(format!("{name}-one")))
             );
         }
-        assert_eq!(latest_runtime(&store, "vanished").0, "starting");
+        // The replacement's verified launch is running, but its driver is not
+        // ready yet. Use its durable incarnation instead of inventing a second one.
+        let replacement = store
+            .observations_for("agent/node.vanished", "runtime.action.succeeded")
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body.pointer("/fields/action") == Some(&serde_json::json!("start")))
+            .unwrap();
+        let replacement_incarnation = replacement.body["fields"]["incarnation_id"]
+            .as_str()
+            .unwrap();
+        assert_ne!(replacement_incarnation, "vanished-one");
+        assert_eq!(
+            latest_runtime(&store, "vanished"),
+            ("running".into(), Some(replacement_incarnation.into()))
+        );
+        assert!(!store.current_harness("agent/node.vanished").unwrap()
+            .is_some_and(|harness| harness.incarnation_id == replacement_incarnation && harness.is_ready()));
 
         // The starting seat's driver reports ready after the restart; no seat is left waiting.
         store
@@ -29154,21 +29193,21 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             ))
             .unwrap();
         runtime.ptys.lock().unwrap().push(RuntimeObservation {
-            incarnation_id: Some("vanished-two".into()),
+            incarnation_id: Some(replacement_incarnation.into()),
             ..pty("vanished")
         });
         store
             .append_claim(&harness_claim(
                 "agent/node.vanished",
                 "ready",
-                "vanished-two",
+                replacement_incarnation,
             ))
             .unwrap();
         reconciler.reconcile_once().unwrap();
         for (name, incarnation) in [
             ("running", "running-one"),
             ("starting", "starting-one"),
-            ("vanished", "vanished-two"),
+            ("vanished", replacement_incarnation),
         ] {
             let harness = store
                 .current_harness(&format!("agent/node.{name}"))
