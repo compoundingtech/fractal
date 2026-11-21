@@ -1124,7 +1124,9 @@ mod seat_admission_tests {
         assert!(!state.seat_admission.admit("agent/example/queued", None, None, false, admission_now()));
         for (query, live) in [(json!({}), true), (json!({"history":true}), false),
             (json!({"at_index":0}), false)] {
-            let Json(response) = status(State(state.clone()), Query(serde_json::from_value(query).unwrap())).await.unwrap();
+            let response = status(State(state.clone()), Query(serde_json::from_value(query).unwrap())).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response: StatusResponse = serde_json::from_slice(&body).unwrap();
             assert_eq!(response.seat_admission.is_some(), live);
             if let Some(admission) = response.seat_admission {
                 assert_eq!(admission["pendingCount"], 1);

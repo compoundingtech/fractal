@@ -159,7 +159,11 @@ fn activity_summary_warm_cache_preserves_observed_ownership_at_the_same_cut() {
     let store = Store::open(&root.path().join("claims.sqlite3"), "node").unwrap();
     activity_fixture(&store, 300);
     for terminal in [false, true] {
-        if terminal { observe(&store, json!({"status":"stopped", "host":null})); }
+        if terminal {
+            // Retained older writers can contain explicit nulls forbidden by today's append validator.
+            notice_raw_observation(&store, SEAT, "runtime.observed", "activity-explicit-null", "node",
+                4_000_000_000_000, json!({"status":"stopped", "host":null}));
+        }
         let cut = store.index().unwrap();
         store.read_snapshot(|_| {
             let mut cards = card_fold::CardReads::for_generic_reads(cut);
