@@ -13,7 +13,7 @@ const catalog = defineCatalog({
   '@types/react-dom': '19.2.7',
   storybook: '10.6.1',
   typescript: '6.0.3',
-  vite: '8.2.2',
+  vite: '^8.3.8',
 })
 
 /* FractalMacGallery writes native PNGs and manifests; stories only frame them. */
