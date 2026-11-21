@@ -271,6 +271,19 @@ struct ExchangeShard {
 }
 
 const REPLICATION_WAKE_COALESCE: Duration = Duration::from_secs(1);
+
+/// Coalesce filesystem events before graph, shard and membership followers see them.
+/// The first event is immediate; events during the next second produce one trailing wake.
+pub async fn coalesce_replication_wakes(
+    mut raw: watch::Receiver<u64>,
+    paced: watch::Sender<u64>,
+) {
+    while raw.changed().await.is_ok() {
+        paced.send_modify(|generation| *generation = generation.saturating_add(1));
+        super::telemetry::record_wake(super::telemetry::WakeStage::Paced);
+        tokio::time::sleep(REPLICATION_WAKE_COALESCE).await;
+    }
+}
 const PEER_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -1744,6 +1757,9 @@ async fn dial_peer<B: Backend>(
     let mut activity_changes = fleet.activity_changed.subscribe();
     let mut connectivity = fleet.connectivity_changed.subscribe();
     let mut must_send = false;
+    let mut guard_not_before = tokio::time::Instant::now();
+    let mut guard_wake = None;
+    let mut guard_in_sync_at = None;
     // The last exchange moved envelopes, so more may wait on either side: exchange again at
     // once, even though the peer dialed in recently.
     let mut moving = false;
@@ -1796,23 +1812,30 @@ async fn dial_peer<B: Backend>(
         let continuing = std::mem::take(&mut moving);
         if let Some(at) = inbound_at.filter(|_| !continuing) {
             if must_send && at.elapsed() < worker_interval(Duration::from_secs(30)) {
-                let offered = fleet
-                    .inbound_authority
-                    .read()
-                    .expect("inbound inventory lock poisoned")
-                    .get(&name)
-                    .cloned();
-                if let Some(offered) = offered
-                    && let Ok(current) = backend
-                        .authority_digest(auth.fleet_id())
-                        .await
-                {
-                    // The other side already knows this inventory and is draining both
-                    // queues. Notifications from that exchange must not trigger a reverse
-                    // connection. A genuinely new local envelope still requests a push.
-                    if !current.is_empty() && current == offered {
-                        must_send = false;
+                // A matching witness remains valid only for this paced generation
+                // and inbound cut. Other notifications must not repeat the guard read.
+                let wake = *notify.borrow();
+                let now = tokio::time::Instant::now();
+                if guard_wake != Some(wake) && now >= guard_not_before {
+                    let offered = fleet
+                        .inbound_authority
+                        .read()
+                        .expect("inbound inventory lock poisoned")
+                        .get(&name)
+                        .cloned();
+                    if let Some(offered) = offered {
+                        guard_not_before = now + REPLICATION_WAKE_COALESCE;
+                        guard_wake = Some(wake);
+                        guard_in_sync_at = None;
+                        if let Ok(current) = backend.authority_digest(auth.fleet_id()).await
+                            && !current.is_empty() && current == offered
+                        {
+                            guard_in_sync_at = Some(at);
+                        }
                     }
+                }
+                if guard_wake == Some(wake) && guard_in_sync_at == Some(at) {
+                    must_send = false;
                 }
             }
             let window = if must_send {

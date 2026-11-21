@@ -85,9 +85,20 @@ async fn idle_dialer_backs_off_and_wake_inbound_and_movement_restart_the_sequenc
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = completed.clone();
     let server = tokio::spawn(axum::serve(
         listener,
-        Router::new().route(EXCHANGE_PATH, post(receive_exchange)).with_state(state),
+        Router::new().route(EXCHANGE_PATH, post(receive_exchange))
+            .layer(axum::middleware::from_fn(move |request: Request<Body>, next: axum::middleware::Next| {
+                let observed = observed.clone();
+                async move {
+                    let response = next.run(request).await;
+                    observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    response
+                }
+            }))
+            .with_state(state),
     ).into_future());
     let (_routes, routes) = watch::channel(vec![Route::Http(format!("http://{address}"))]);
     let (notify, _) = watch::channel(0);
@@ -154,6 +165,45 @@ async fn idle_dialer_backs_off_and_wake_inbound_and_movement_restart_the_sequenc
     tokio::time::advance(Duration::from_secs(60)).await;
     idle_at(&local, 30).await;
     assert!(local.latest_claim("host/target", Some("transport.observed")).unwrap().is_some());
+    tokio::time::advance(REPLICATION_WAKE_COALESCE).await;
+    let (raw, events) = watch::channel(0_u64);
+    let pacer = tokio::spawn(coalesce_replication_wakes(events, notify.clone()));
+    let mut broadcasts = notify.subscribe();
+    let before = *broadcasts.borrow();
+    let round_before = completed.load(std::sync::atomic::Ordering::Relaxed);
+    let started = tokio::time::Instant::now();
+    raw.send_modify(|generation| *generation += 1);
+    broadcasts.changed().await.unwrap(); // leading wake
+    for _ in 0..100 {
+        raw.send_modify(|generation| *generation += 1);
+    }
+    let leading_wall = std::time::Instant::now();
+    while completed.load(std::sync::atomic::Ordering::Relaxed) == round_before {
+        assert!(leading_wall.elapsed() < Duration::from_secs(10), "leading round did not finish");
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(500)).await;
+    // A real write after the irrelevant burst must survive the trailing coalesced wake.
+    local.append_claim(&ClaimInput {
+        subject: "host/source".into(),
+        kind: "transport.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    raw.send_modify(|generation| *generation += 1);
+    tokio::time::advance(Duration::from_millis(500)).await;
+    broadcasts.changed().await.unwrap(); // trailing wake
+    let wall = std::time::Instant::now();
+    while remote.latest_claim("host/source", Some("transport.observed")).unwrap().is_none() {
+        assert!(wall.elapsed() < Duration::from_secs(10), "trailing write did not propagate");
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(*broadcasts.borrow(), before + 2);
+    assert_eq!(started.elapsed(), REPLICATION_WAKE_COALESCE);
+    pacer.abort();
     dialer.abort();
     server.abort();
     awake.abort();

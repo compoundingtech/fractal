@@ -22,6 +22,8 @@ struct Gate {
 struct GuardBackend {
     answer: Arc<Mutex<Result<String, String>>>,
     calls: Arc<AtomicUsize>,
+    exports: Arc<AtomicUsize>,
+    views: Arc<AtomicUsize>,
     gate: Option<Arc<Gate>>,
 }
 
@@ -61,6 +63,8 @@ impl GuardBackend {
         Self {
             answer: Arc::new(Mutex::new(answer.map(str::to_owned).map_err(str::to_owned))),
             calls: Arc::default(),
+            exports: Arc::default(),
+            views: Arc::default(),
             gate: None,
         }
     }
@@ -74,6 +78,7 @@ impl Backend for GuardBackend {
         _summary: bool,
         _signatures: &[crate::claim::ReplicaEnvelopeId],
     ) -> Result<ReplicationExportResponse> {
+        self.exports.fetch_add(1, Ordering::Relaxed);
         Ok(response("ordinary-full-export".into()))
     }
     async fn guard_summary(&self, _fleet: &str) -> Result<ReplicationExportResponse> {
@@ -110,7 +115,8 @@ impl Backend for GuardBackend {
         unreachable!()
     }
     async fn fleet_view(&self) -> Result<FleetView> {
-        unreachable!()
+        self.views.fetch_add(1, Ordering::Relaxed);
+        Ok(FleetView::default())
     }
     async fn record_failure(
         &self,
@@ -122,6 +128,50 @@ impl Backend for GuardBackend {
     ) -> Result<()> {
         Ok(())
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn paced_wake_burst_bounds_actual_guard_export_and_membership_work() {
+    let backend = GuardBackend::new(Ok("same"));
+    let fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
+    let now = tokio::time::Instant::now();
+    fleet.online.write().unwrap().insert("peer".into(), now);
+    fleet.inbound.write().unwrap().insert("peer".into(), now);
+    fleet.inbound_authority.write().unwrap().insert("peer".into(), "same".into());
+    let (raw, events) = watch::channel(0_u64);
+    let (paced, _) = watch::channel(0_u64);
+    let (_routes, routes) = watch::channel(vec![Route::Http("http://127.0.0.1:1".into())]);
+    let pacer = coalesce_replication_wakes(events, paced.clone());
+    let membership = keep_fleet_view_current(backend.clone(), fleet.clone(), paced.subscribe());
+    let dialer = dial_peer(
+        backend.clone(), "local".into(), "peer".into(), routes,
+        FleetAuth::test(FLEET, &[7; 32]), fleet.clone(), paced.subscribe(),
+    );
+    tokio::pin!(pacer, membership, dialer);
+    raw.send_modify(|generation| *generation += 1);
+    assert!(futures_util::poll!(&mut pacer).is_pending());
+    assert!(futures_util::poll!(&mut membership).is_pending());
+    assert!(futures_util::poll!(&mut dialer).is_pending());
+    for _ in 0..100 {
+        raw.send_modify(|generation| *generation += 1);
+        // Other notifications may re-enter the guard even without a new paced wake.
+        fleet.inbound_changed.send_modify(|generation| *generation += 1);
+        assert!(futures_util::poll!(&mut pacer).is_pending());
+        assert!(futures_util::poll!(&mut membership).is_pending());
+        assert!(futures_util::poll!(&mut dialer).is_pending());
+    }
+    assert_eq!(*paced.borrow(), 1);
+    assert_eq!(backend.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.views.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.exports.load(Ordering::Relaxed), 0);
+    tokio::time::advance(REPLICATION_WAKE_COALESCE).await;
+    assert!(futures_util::poll!(&mut pacer).is_pending());
+    assert!(futures_util::poll!(&mut membership).is_pending());
+    assert!(futures_util::poll!(&mut dialer).is_pending());
+    assert_eq!(*paced.borrow(), 2);
+    assert_eq!(backend.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(backend.views.load(Ordering::Relaxed), 2);
+    assert_eq!(backend.exports.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

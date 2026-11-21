@@ -918,6 +918,14 @@ detects PID reuse on Linux; other platforms retain the runtime's PID-based token
 The check also detects a daemon-only upgrade while the reporting worker keeps running.
 
 A local graph change writes `replication.wake`. The worker watches only this file, not the SQLite files.
+Filesystem events are coalesced **before** shared fan-out to graph, messages-shard and
+membership followers: the leading wake is immediate, followed by at most one broadcast
+per second while events continue. The final event is retained for the trailing broadcast.
+Authority guard reads also have a one-second minimum gap, including re-entry caused by
+inbound or route notifications. Coalescing adds at most one second before a write is
+announced; movement still drains immediately and failure/overload scheduling is unchanged.
+`st.replication.wakes{stage="raw"}` counts filesystem events and `stage="paced"` counts
+shared broadcasts, exposing wake amplification separately from completed round rates.
 
 The worker coalesces wake bursts for one second, so new authority, such as a mission publish, reaches every peer within seconds. An exchange that stored new envelopes on either side runs again at once until a backlog drains. An exchange that stored nothing new waits for the next wake, even if it carried envelopes the other side already held.
 
