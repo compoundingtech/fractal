@@ -287,7 +287,7 @@ fn channel_recovery_rechecks_then_restarts_once_and_ignores_a_stale_incarnation(
         store.selected_desired_token(SEAT).unwrap().unwrap()
     );
     // The regular restart path stops this exact seat even under restart "never".
-    assert!(
+    assert_eq!(
         reconciler
             .reconcile_requested_restart(
                 &desired,
@@ -295,7 +295,8 @@ fn channel_recovery_rechecks_then_restarts_once_and_ignores_a_stale_incarnation(
                 Some(&claude_seat_pty("orchid", "running", "orchid-one")),
                 None
             )
-            .unwrap()
+            .unwrap(),
+        RequestedRestart::Handled
     );
     assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
     let restarted = Reconciler::new(
@@ -403,15 +404,16 @@ fn channel_initialization_can_cancel_a_recorded_recovery_before_the_stop() {
     assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
     attachment(&store, "orchid-one", true);
     assert!(!recover(&reconciler, &desired, "orchid-one", since + 10_001).unwrap());
-    assert!(
-        !reconciler
+    assert_eq!(
+        reconciler
             .reconcile_requested_restart(
                 &desired,
                 desired.member.as_ref().unwrap(),
                 Some(&claude_seat_pty("orchid", "running", "orchid-one")),
                 None
             )
-            .unwrap()
+            .unwrap(),
+        RequestedRestart::Continue
     );
     assert!(runtime.stops.lock().unwrap().is_empty());
     assert_eq!(attempts(&store).len(), 1);
@@ -466,15 +468,16 @@ fn recovery_success_requires_channel_attachment_even_when_hooks_are_ready() {
     }
     let replacement = claude_seat_pty("orchid", "running", "orchid-two");
     assert!(store.current_harness(SEAT).unwrap().unwrap().is_ready());
-    assert!(
-        !reconciler
+    assert_eq!(
+        reconciler
             .reconcile_requested_restart(
                 &desired,
                 desired.member.as_ref().unwrap(),
                 Some(&replacement),
                 None
             )
-            .unwrap()
+            .unwrap(),
+        RequestedRestart::Continue
     );
     let completion = format!("agent-restart-completed:{}", request.id);
     assert!(store.operation_claim(&completion).unwrap().is_none());
@@ -860,7 +863,7 @@ fn an_explicit_restart_in_flight_owns_the_incarnation_it_replaces() {
     explicit_restart(&store, "orchid-one");
     assert!(!recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
     assert!(attempts(&store).is_empty());
-    assert!(
+    assert_eq!(
         reconciler
             .reconcile_requested_restart(
                 &desired,
@@ -868,7 +871,8 @@ fn an_explicit_restart_in_flight_owns_the_incarnation_it_replaces() {
                 Some(&claude_seat_pty("orchid", "running", "orchid-one")),
                 None
             )
-            .unwrap()
+            .unwrap(),
+        RequestedRestart::Handled
     );
     assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
     // The replacement's own failure is the budget's first.

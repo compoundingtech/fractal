@@ -414,7 +414,9 @@ impl Store {
         super::inventory_generation::bump(&transaction)?;
         transaction.commit()?;
         drop(connection);
-        self.replica_rows_changed();
+        // Authority changes admission and inventory, not live claims or their projections.
+        // In particular, the background startup import must not withdraw published views.
+        self.replica_inventory_changed();
         Ok(())
     }
 }
