@@ -58,6 +58,7 @@ if name == "taskpolicy":
     os.execvpe(args[2], args[2:], os.environ)
 if name == "nice":
     assert args[:2] == ["-n", "19"], args
+    assert args[3] == "-P", args
     os.execvpe(args[2], args[2:], os.environ)
 if name == "nix":
     if args[0] == "build":
