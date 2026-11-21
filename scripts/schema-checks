@@ -15,13 +15,16 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 CHECKS = [
     ("canonical table audit", ["cargo", "test", "-q", "-p", "fractal-seats", "--lib", "--", "store::tests::canonical_audit"]),
     ("schema install", ["cargo", "test", "-q", "-p", "smallclaims", "--lib", "--", "store::schema_install_tests"]),
-    ("large-value inventory", ["python3", "scripts/check-sqlite-large-values"]),
 ]
+# Judged against the merge base: a change fails only on findings it adds, never on ones main already has.
+INVENTORY = ["python3", "scripts/check-sqlite-large-values"]
+FINDING_LINE = re.compile(r":\d+(?=[:\s]|$)")
 
 SCHEMA = re.compile(
     r"\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+|UNIQUE\s+|VIRTUAL\s+)*(?:TABLE|INDEX|TRIGGER|VIEW)|DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW))\b", re.I
@@ -66,10 +69,41 @@ def run(repo, base, head):
             failed.append(name)
             tail = "\n".join((done.stdout + done.stderr).splitlines()[-25:])
             print(tail, file=sys.stderr)
+    added = new_inventory_findings(repo, base, head)
+    print(f"schema-checks: large-value inventory: {'ok' if not added else 'FAILED'}"
+          f"{'' if not added else f' ({len(added)} finding(s) this change adds)'}")
+    if added:
+        failed.append("large-value inventory")
+        for finding in sorted(added):
+            print(f"  {finding}", file=sys.stderr)
     if failed:
         print(f"schema-checks: failed: {', '.join(failed)}", file=sys.stderr)
         return 1
     return 0
+
+
+def inventory_findings(tree):
+    """The inventory check's findings in TREE, each without its line number (lines move with any edit)."""
+    done = subprocess.run(INVENTORY, cwd=tree, capture_output=True, text=True, env=os.environ)
+    if done.returncode == 0:
+        return set()
+    lines = [line.strip() for line in (done.stdout + done.stderr).splitlines() if line.strip()]
+    return {FINDING_LINE.sub("", line).split(": ", 1)[0] if " at " in line else line for line in lines}
+
+
+def new_inventory_findings(repo, base, head):
+    """Findings at HEAD that the merge base does not have."""
+    current = inventory_findings(repo)
+    if not current:
+        return set()
+    merge_base = git(repo, "merge-base", base, head).strip()
+    with tempfile.TemporaryDirectory(prefix="schema-checks-base-") as tree:
+        subprocess.run(["git", "worktree", "add", "--detach", "-q", tree, merge_base], cwd=repo, check=True, capture_output=True)
+        try:
+            before = inventory_findings(tree)
+        finally:
+            subprocess.run(["git", "worktree", "remove", "--force", tree], cwd=repo, capture_output=True)
+    return current - before
 
 
 def main():
@@ -82,6 +116,7 @@ def main():
     if args.list:
         for name, command in CHECKS:
             print(f"{name}: {' '.join(command)}")
+        print(f"large-value inventory (new findings against the merge base): {' '.join(INVENTORY)}")
         for path, line in schema_lines(args.repo, args.base, args.head):
             print(f"{path}: {line}")
         return 0
