@@ -736,9 +736,10 @@ impl Runtime for FractalRuntime {
 
     fn claims_trim_finished(&self) {
         self.retain_agent_roster();
+        // Invalidate inputs before either the roster revision or attention-owner wake is sent.
+        self.summary_list.refold();
         self.forget_reductions();
         self.claims_trimmed();
-        self.summary_list.refold();
     }
 
     fn projection_advanced(&self, caught_up: bool) {
