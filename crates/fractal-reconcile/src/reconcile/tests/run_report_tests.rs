@@ -734,9 +734,18 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
     let expired = fixture.store.mission_run(&run.id).unwrap().unwrap();
     assert_eq!(expired.steps[0].status, "failed");
     assert_eq!(expired.steps[0].blocked_reason.as_deref(), Some("the active execution timeout expired"));
-    assert_eq!(expired.status, "failed");
+    assert_eq!(expired.phase, "cleanup-failed");
     let reports = fixture.reports(REPORTER);
     assert!(reports.iter().any(|report| report.tags.contains(&"st3-run-report:failed".to_owned())));
+
+    // A process that ignores stop cannot hold failure cleanup open forever either.
+    let _cleanup_expired = Clock::at(
+        &fixture.store,
+        since + 121 * MINUTE + fixture.reconciler.cleanup_deadline.as_millis() + 1,
+    );
+    fixture.reconciler.incremental.touch(&run.subject);
+    fixture.passes(4);
+    assert_eq!(fixture.store.mission_run(&run.id).unwrap().unwrap().status, "failed");
 }
 
 #[test]
