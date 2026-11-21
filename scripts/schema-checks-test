@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""scripts/schema-checks runs its checks only for a change that adds or drops a schema object, and fails when one fails."""
+import importlib.machinery
+import importlib.util
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader('schema_checks', str(ROOT / 'scripts/schema-checks'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+def git(repo, *args):
+    subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.com', *args], cwd=repo, check=True, capture_output=True)
+
+
+def commit(repo, path, text, message):
+    target = Path(repo) / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', message)
+    return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+
+with tempfile.TemporaryDirectory() as repo:
+    git(repo, 'init', '-q', '-b', 'main')
+    base = commit(repo, 'crates/example/src/lib.rs', 'fn main() {}\n', 'base')
+    plain = commit(repo, 'crates/example/src/lib.rs', 'fn main() { let x = 1; }\n', 'no schema')
+    assert module.schema_lines(repo, base, plain) == [], 'an ordinary change has no schema line'
+    tested = commit(repo, 'crates/example/src/tests.rs', 'const T: &str = "CREATE TABLE t(x)";\n', 'a table in a test file under src')
+    table = commit(repo, 'crates/example/src/store.rs', 'const S: &str = "CREATE TABLE IF NOT EXISTS claim_new(id TEXT)";\n', 'a table')
+    found = module.schema_lines(repo, plain, table)
+    assert sorted(path for path, _ in found) == ['crates/example/src/store.rs', 'crates/example/src/tests.rs'], found
+    dropped = commit(repo, 'crates/example/src/store.rs', 'const S: &str = "DROP TRIGGER IF EXISTS old_v1";\n', 'a drop')
+    assert module.schema_lines(repo, table, dropped), 'a dropped trigger counts'
+    virtual = commit(repo, 'crates/example/src/search.rs', 'const V: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS s USING fts5(x)";\n', 'fts')
+    assert module.schema_lines(repo, dropped, virtual), 'a virtual table counts'
+    outside = commit(repo, 'docs/schema.md', 'CREATE TABLE in prose\n', 'docs')
+    assert module.schema_lines(repo, virtual, outside) == [], 'only crate sources count'
+
+    # A stand-in for the inventory check: one finding per line of findings.txt, at a line that moves.
+    module.INVENTORY = ['python3', '-c', (
+        "import pathlib,sys\n"
+        "p=pathlib.Path('findings.txt')\n"
+        "lines=p.read_text().split() if p.exists() else []\n"
+        "[print(f'unregistered sql-template {x} at crates/example/src/store.rs:{n}: excerpt') for n,x in enumerate(lines, 7)]\n"
+        "sys.exit(1 if lines else 0)")]
+    # Nothing to run: success without touching cargo.
+    module.CHECKS = [('never', ['false'])]
+    assert module.run(repo, base, plain) == 0
+    # A schema change runs the checks; a failing one fails the run, a passing one passes.
+    assert module.run(repo, plain, outside) == 1
+    module.CHECKS = [('passes', ['true'])]
+    assert module.run(repo, plain, outside) == 0
+    # A cargo test filter that matches nothing ran no test: that fails, it does not pass.
+    if shutil.which('cargo'):
+        module.CHECKS = [('renamed', ['cargo', 'test', '--help'])]
+        assert module.run(repo, plain, outside) == 1
+    # The checks run in the checkout, so it must be at the head.
+    assert module.run(repo, plain, table) == 2
+
+    # The inventory is judged against the merge base: a finding main already has, even at a moved
+    # line, passes; one the change adds fails.
+    module.CHECKS = []
+    inherited = commit(repo, 'findings.txt', 'lv-hmain\n', 'main has a finding')
+    moved = commit(repo, 'crates/example/src/store.rs', 'const S: &str = "CREATE TABLE IF NOT EXISTS moved(id TEXT)";\n', 'schema')
+    (Path(repo) / 'findings.txt').write_text('lv-hnew\nlv-hmain\n')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', 'adds a finding, moves the old one')
+    added = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert module.run(repo, inherited, added) == 1
+    assert module.new_inventory_findings(repo, inherited, added) == {'unregistered sql-template lv-hnew at crates/example/src/store.rs'}
+    (Path(repo) / 'findings.txt').write_text('lv-hmain\n')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', 'only the inherited finding')
+    head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert module.run(repo, inherited, head) == 0, 'a finding main already has does not fail the change'
+print('schema-checks-test: ok')
