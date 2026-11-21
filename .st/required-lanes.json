@@ -150,7 +150,6 @@
       ],
       "definition_paths": [
         ".st",
-        "apps/fractal-web/scripts/devnet",
         "apps/ios/modules/fractal-fabric/build.sh",
         "apps/ios/scripts/release_delivery.py",
         "apps/ios/scripts/test_release_delivery.py",
@@ -169,7 +168,6 @@
         ".st",
         ".fractal",
         "apps/fractal-web/.gitignore",
-        "apps/fractal-web/scripts/devnet",
         "apps/fractal-web/src/changelog/seen.ts",
         "apps/ios/modules/fractal-fabric/build.sh",
         "apps/ios/scripts/release_delivery.py",
