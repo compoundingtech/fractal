@@ -258,6 +258,30 @@ ZIP uses storage-only mode because both large payloads are already compressed.
 No build caches, incremental directories or raw gateway copy belong in this transfer.
 A failed producer explicitly fails consumer checks and the gate.
 
+The Workspace producer also runs the first native Rust Buck slice:
+`//crates/fractal-storage-version:unit-tests` and `:integration-tests`, against
+the real `:fractal-storage-version` library. Its `BUCK.genie.ts` uses the existing
+consumer's pinned Prelude and Nix-capability native Rust/C++ toolchains, not Cargo
+inside a Buck action. Source files and the package manifest are declared inputs.
+This dependency-free slice does not translate other crates, build scripts or proc
+macros. Buck's local action cache reuses unchanged compilation; `buck2 test` still
+executes the tests. Remote caching and uploads remain disabled.
+
+`scripts/ci-buck2-rust-parity` compares both Buck libtest executable listings with
+the complete nextest inventory for that package, including ignored tests. Missing,
+extra or duplicate identities fail the producer and hence `linux-gate`. Local parity
+uses the same commands as CI:
+
+```sh
+mkdir -p target
+nix develop -c bash -euc 'cargo nextest list --locked -p fractal-storage-version --message-format json > target/buck2-storage-version-nextest.json'
+nix develop .#web -c bash -euc 'buck2 test //crates/fractal-storage-version:unit-tests //crates/fractal-storage-version:integration-tests; python3 scripts/ci-buck2-rust-parity --nextest-json target/buck2-storage-version-nextest.json'
+```
+
+This inventory proof is not a cached test-success receipt or a replacement for the
+full nextest suite. Shared action identity, protected cache writers, remote workers
+and fresh exact-head suite envelopes remain separate prerequisites.
+
 Tests resolve archived executables through nextest's runtime binary paths. A source guard rejects raw compiled binary, manifest and temporary-directory lookups in test code.
 Manifest/fixture paths
 map each compiled package beneath the recorded producer root to the consumer checkout, including
