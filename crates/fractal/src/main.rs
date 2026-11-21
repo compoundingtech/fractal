@@ -2574,6 +2574,9 @@ struct SubjectDesiredArgs {
 #[derive(Args)]
 struct SubjectShowArgs {
     subject: String,
+    /// Read only runtime status, workspace and host, without replaying provenance or harness history.
+    #[arg(long, conflicts_with_all = ["kdl", "references", "source"])]
+    activity_summary: bool,
     /// Print the current managed agent declaration as canonical KDL v2.
     #[arg(long)]
     kdl: bool,
@@ -12758,6 +12761,13 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
+            if args.activity_summary {
+                anyhow::ensure!(args.subject.starts_with("agent/"), "--activity-summary requires an agent subject");
+                let status: StatusResponse = client.get(&format!(
+                    "/v1/status?subject={}&activity_summary=true", urlencoding::encode(&args.subject)
+                )).await?;
+                return print_value(&json!({ "status": status }), json_output);
+            }
             if args.source {
                 return source_cli::show(client, &args.subject, args.revision.as_deref(), args.node.as_deref(), json_output).await;
             }

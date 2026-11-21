@@ -104,6 +104,53 @@ fn a_summary_status_read_of_a_seat_does_not_read_its_history() {
 }
 
 #[test]
+fn activity_summary_preserves_runtime_ownership_at_one_cut_without_history_replay() {
+    fn fixture(count: usize) -> Store {
+        let store = Store::open_memory("node").unwrap();
+        let intent = crate::graph::parse_test_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; workspace \"/declared\"; restart \"never\"; }\n",
+            store.origin(),
+        ).unwrap();
+        let expected = intent.subjects.keys().map(|subject| (
+            subject.clone(), store.selected_desired_token(subject).unwrap().into_iter().collect(),
+        )).collect();
+        store.apply(&intent, &expected, "activity-declare").unwrap();
+        for index in 0..count {
+            observe(&store, json!({
+                "status": "running", "workspace": "/observed", "host": "runtime-host",
+                "incarnation_id": format!("incarnation-{index}"),
+            }));
+        }
+        store
+    }
+    let (few, many) = (fixture(50), fixture(3_000));
+    let cut = many.index().unwrap();
+    observe(&many, json!({"status": "stopped", "workspace": null, "host": null}));
+    let (few_work, _) = work(|| few.status_activity_summary_at(SEAT, None).unwrap());
+    ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+    let (many_work, summary) = work(|| many.status_activity_summary_at(SEAT, Some(cut)).unwrap());
+    assert!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get) <= 1,
+        "activity summary replayed runtime history");
+    assert!(many_work.vm_steps <= few_work.vm_steps + 2_000,
+        "activity cost grew with history: 50={few_work:?}, 3000={many_work:?}");
+    assert_eq!(summary.store_index, cut);
+    assert_eq!(summary.subjects[0].subject, SEAT);
+    assert!(summary.subjects[0].claims.is_empty());
+    assert!(summary.subjects[0].harness.is_none());
+    for at in [Some(cut), None] {
+        let summary = many.status_activity_summary_at(SEAT, at).unwrap();
+        let full = many.status_at(Some(SEAT), None, Some(summary.store_index)).unwrap();
+        assert_eq!(summary.store_index, full.store_index);
+        for field in ["status", "workspace", "host"] {
+            assert_eq!(summary.subjects[0].actual.as_ref().unwrap().get(field),
+                full.subjects[0].actual.as_ref().unwrap().get(field), "{field} at {at:?}");
+        }
+    }
+    assert_eq!(summary.subjects[0].actual.as_ref().unwrap()["workspace"], "/observed");
+    assert_eq!(summary.subjects[0].actual.as_ref().unwrap()["host"], "runtime-host");
+}
+
+#[test]
 fn a_summary_takes_each_field_from_the_newest_observation_that_has_it() {
     let store = seat_with(10);
     observe(&store, json!({"status": "stopped"}));

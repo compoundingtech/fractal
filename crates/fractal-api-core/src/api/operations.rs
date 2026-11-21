@@ -792,6 +792,9 @@ pub struct StatusQuery {
     /// the full reduction.
     #[serde(default)]
     summary: bool,
+    /// Runtime ownership evidence only; leaves full status and client-v0 unchanged.
+    #[serde(default)]
+    activity_summary: bool,
 }
 
 pub async fn resource_referrers(
@@ -884,6 +887,10 @@ pub async fn status(
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
+        if query.activity_summary && (query.history || query.owner_run.is_some()
+            || !subject.as_deref().is_some_and(|subject| subject.starts_with("agent/"))) {
+            anyhow::bail!("activity_summary requires one agent without history or owner_run");
+        }
         let mut response = if query.harness_only && !query.history && let Some(subject) = subject.as_deref() {
             // The harness shortcut reads current state even when a historical cut is supplied.
             if !store.generic_status_subject_visible_at(subject, store.index()?)? {
@@ -892,6 +899,8 @@ pub async fn status(
                 ).with_detail("reason", "notices-unavailable")));
             }
             store.status_harness_only(subject)?
+        } else if query.activity_summary {
+            store.status_activity_summary_at(subject.as_deref().expect("validated agent"), query.at_index)?
         } else if query.summary && !query.history && query.owner_run.is_none()
             && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
         {
