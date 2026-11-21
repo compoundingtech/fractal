@@ -59,6 +59,8 @@ pub struct Tally {
     logged: BTreeSet<String>,
     /// Signed envelopes refused because something in them did not verify.
     pub refused: u64,
+    /// For each peer, whether its last noted exchange took signed claims, and when it was noted.
+    pub(crate) seen: BTreeMap<String, (bool, u64)>,
 }
 
 /// A blob's bytes, by its hash. Every reader of a blob for signed claims reads it here.
@@ -582,6 +584,7 @@ fn admit_signed_tx(
                 .map_err(internal)?;
         }
     }
+    super::envelope_release::mark_released_version_tx(transaction).map_err(internal)?;
     transaction
         .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h15c0380ff98b owner=smallclaims::store::signed_claims TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO released_envelopes(writer, sequence, envelope_hash, previous_hash,

@@ -21,15 +21,41 @@ use std::time::{Duration, Instant};
 /// An envelope is released only once it was accepted this long ago: 14 days.
 pub const ENVELOPE_RELEASE_AGE_MS: u64 = 14 * 24 * 60 * 60 * 1000;
 
-/// Whether the daemon releases envelopes. Off until the claim-set transport can serve a released
-/// envelope's claims to a peer that lacks them: until then such a peer could not get them here.
-pub const ENVELOPE_RELEASE: bool = false;
+/// Whether the daemon releases envelopes. A peer that takes signed claims gets a released
+/// envelope's claims as signed claims (`signed_claims`); release pauses while any peer this member
+/// exchanged with in the last [`PEER_WINDOW_MS`] does not take them ([`Store::peers_lacking_signed_claims`]).
+pub const ENVELOPE_RELEASE: bool = true;
+
+/// How long a peer's last exchange counts toward pausing release: 14 days, the release's own age.
+pub const PEER_WINDOW_MS: u64 = ENVELOPE_RELEASE_AGE_MS;
+
+/// How often a peer whose answer has not changed is noted again.
+const PEER_NOTE_EVERY_MS: u64 = 60 * 60 * 1000;
+
+/// Why release waits while a recent peer cannot take signed claims.
+pub const PEERS_LACK_SIGNED_CLAIMS: &str = "a peer exchanged with in the last 14 days does not take signed claims";
+
+/// The storage version from which a store may hold released envelopes, or claims it received as
+/// signed claims: their claims have no envelope row, which a build that reads only up to version
+/// 27 would take for claims never admitted. It commits with the first release, or the first
+/// signed envelope admitted.
+pub const ENVELOPES_RELEASED_VERSION: u32 = 28;
+
+/// Raise the store to [`ENVELOPES_RELEASED_VERSION`], in the transaction that first releases an
+/// envelope or admits a signed one.
+pub(crate) fn mark_released_version_tx(connection: &Connection) -> Result<()> {
+    let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version < ENVELOPES_RELEASED_VERSION {
+        connection.pragma_update(None, "user_version", ENVELOPES_RELEASED_VERSION)?;
+    }
+    Ok(())
+}
 
 /// A released envelope's identity, and the view of every envelope this member holds or released.
 /// `original_rowid` is the envelope's `replica_envelopes` rowid, so a capture bounded by a seal row
 /// (`row_id <= ?`) sees a released envelope exactly where it saw the stored one. A released
 /// envelope was validated and admitted (`receipt_state` 'validated').
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1a70733fac43 owner=smallclaims::store::envelope_release TODO=chunk-or-reference-variable-columns */ "
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-he61bb3747c23 owner=smallclaims::store::envelope_release TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS released_envelopes (
     writer TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -45,6 +71,11 @@ CREATE TABLE IF NOT EXISTS released_envelopes (
 );
 CREATE INDEX IF NOT EXISTS released_envelopes_batch ON released_envelopes(batch_id);
 CREATE UNIQUE INDEX IF NOT EXISTS released_envelopes_rowid ON released_envelopes(original_rowid);
+CREATE TABLE IF NOT EXISTS peer_signed_claims (
+    peer TEXT PRIMARY KEY,
+    capable INTEGER NOT NULL,
+    seen_at_unix_ms INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE VIEW IF NOT EXISTS envelope_rows(row_id, writer, sequence, envelope_hash, previous_hash,
         accepted_at_unix_ms, batch_id, receipt_state, released) AS
     SELECT rowid, writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms, batch_id,
@@ -129,6 +160,8 @@ pub struct EnvelopeRelease {
     pub work: Duration,
     /// The page's work judging envelopes on a reader, before it took the writer.
     pub judged: Duration,
+    /// The recent peers that do not take signed claims, while release waits for them.
+    pub paused_for: Vec<String>,
     /// How many envelopes the page read and kept, by why.
     pub kept: BTreeMap<&'static str, usize>,
     /// The payload bytes of the envelopes kept only because a claim lacks its writer's signature:
@@ -160,6 +193,11 @@ impl Store {
         let Some(fleet_id) = self.signing_fleet_id(&self.readers.get())? else {
             return waiting("this store has no fleet");
         };
+        // A peer that cannot take signed claims could never get a released envelope's claims.
+        let paused_for = self.peers_lacking_signed_claims()?;
+        if !paused_for.is_empty() {
+            return Ok(EnvelopeRelease { done: true, waiting: Some(PEERS_LACK_SIGNED_CLAIMS), paused_for, ..Default::default() });
+        }
         let authority = Authority { fleet_id, shard: self.bound_shard()?, membership: self.fleet_membership_sealed()? };
         // Judging reads payload rows, hashes every claim and checks every signature, which costs
         // what a batch's size and the disk make it: it runs on a reader. The write checks again
@@ -173,6 +211,43 @@ impl Store {
             self.mark_payloads_released(&released, changes)?;
         }
         Ok(report)
+    }
+
+    /// The peers this member exchanged with in the last [`PEER_WINDOW_MS`] that do not take
+    /// signed claims, as their last exchange said. Release, and deleting on a peer's word, wait
+    /// for them.
+    pub fn peers_lacking_signed_claims(&self) -> Result<Vec<String>> {
+        let since = i64::try_from(now_ms().saturating_sub(u128::from(PEER_WINDOW_MS)))?;
+        Ok(self
+            .readers
+            .get()
+            .prepare_cached("SELECT peer FROM peer_signed_claims WHERE capable=0 AND seen_at_unix_ms>?1 ORDER BY peer")?
+            .query_map([since], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Note whether `peer` takes signed claims, as the inventory of its exchange says. Kept when
+    /// the answer changes, and otherwise once an hour.
+    pub fn note_peer_signed_claims(&self, peer: &str, capable: bool) -> Result<()> {
+        let now = u64::try_from(now_ms())?;
+        {
+            let mut tally = crate::read_budget::lock_sync(&self.signed_claims)?;
+            if tally.seen.get(peer).is_some_and(|(was, at)| *was == capable && now.saturating_sub(*at) < PEER_NOTE_EVERY_MS) {
+                return Ok(());
+            }
+            tally.seen.insert(peer.to_owned(), (capable, now));
+        }
+        let peer = peer.to_owned();
+        self.connection
+            .batched(move |tx| {
+                tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-h01f683b64633 owner=smallclaims::store::envelope_release TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO peer_signed_claims(peer, capable, seen_at_unix_ms) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(peer) DO UPDATE SET capable=excluded.capable, seen_at_unix_ms=excluded.seen_at_unix_ms",
+                    params![peer, capable, i64::try_from(now).unwrap_or(i64::MAX)],
+                )
+            })
+            .map_err(anyhow::Error::msg)??;
+        Ok(())
     }
 
     /// How many envelopes this member released.
@@ -315,7 +390,12 @@ fn commit_page(tx: &Transaction<'_>, judged: Judged) -> Result<Released> {
         }
         let kept = match still_releasable(tx, &envelope, &batch)? {
             Some(reason) => Some(reason),
-            None if release_tx(tx, rowid, &envelope, &signature)? => None,
+            None if release_tx(tx, rowid, &envelope, &signature)? => {
+                if released.is_empty() {
+                    mark_released_version_tx(tx)?;
+                }
+                None
+            }
             None => Some("rowid-taken"),
         };
         report.scanned += 1;
