@@ -2840,13 +2840,24 @@ fn subject_cache_overflow_advances_once_and_rebuilds_only_selected_subjects() {
         store.status_for_subject_names_at(names.clone(), before, true, ClaimsReduction::Summary).unwrap();
         assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), names.len());
         store.connection.batched(|transaction| -> Result<()> {
-            for index in 0..=SUBJECT_CACHE_DELTA_ROWS {
-                append_claim_tx(transaction, &store.origin, "custom/example/overflow", "custom.example.reading",
-                    None, &json!({"fields":{"round":round,"reading":index}}), &[], None)?;
+            // Seed the backlog before the final admitted append flushes projections.
+            // Flushing each custom claim rereads this subject's growing history,
+            // making setup quadratic even though the cache only needs the row delta.
+            // Keep every claim and event, and project the complete batch once.
+            for index in 0..SUBJECT_CACHE_DELTA_ROWS {
+                let body = json!({"fields":{"round":round,"reading":index}});
+                let claim = append_claim_record_tx(
+                    transaction, &store.origin, "custom/example/overflow",
+                    "custom.example.reading", None, &body, &[], None,
+                )?;
+                insert_event(transaction, claim.store_index, &claim.kind, &claim.subject, &body)?;
             }
+            append_claim_tx(transaction, &store.origin, "custom/example/overflow", "custom.example.reading",
+                None, &json!({"fields":{"round":round,"reading":SUBJECT_CACHE_DELTA_ROWS}}), &[], None)?;
             Ok(())
         }).unwrap().unwrap();
         let cut = store.index().unwrap();
+        assert_eq!(cut - before, (SUBJECT_CACHE_DELTA_ROWS + 1) as u64);
         store.advance_subject_cache(&store.readers.get(), cut).unwrap();
         {
             let cache = store.fractal.subject_cache.lock().unwrap();
