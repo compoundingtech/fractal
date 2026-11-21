@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add regression coverage for duplicate canonical-position joins and legacy escalation trigger replacement.",
+  "replay": { "status": "none", "detail": "Canonical minimum-position joins and repaired-record invalidation retain their existing semantics; no replay is required." },
+  "schema": { "status": "none", "detail": "Tests retain the existing v2 pending table and conflict-safe trigger implementation without changing the store schema." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordinated upgrade changes." },
+  "compatibility": { "status": "none", "detail": "No protocol, receipt, or public API changes." },
+  "downtime": { "status": "none", "detail": "Test-only change; no runtime deployment behavior changes." },
+  "manual": { "status": "none", "detail": "No operator action is required." },
+  "recovery": { "status": "none", "detail": "No authoritative data is changed; escalation clocks remain rebuildable." }
+}

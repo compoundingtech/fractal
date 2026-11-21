@@ -118,9 +118,7 @@ fn independent_registers_and_same_register_canonical_max_converge_in_both_orders
     c.rebuild_claim_projections().unwrap();
     assert_eq!(resource,layout(&c));
     assert_eq!(before,c.replication_status(true,None,&[]).unwrap().projection_digests);
-    let directory = tempfile::tempdir().unwrap();
-    let (plan,proof) = c.plan_checkpoint(now_ms()+1,directory.path()).unwrap();
-    assert!(proof.passed);
+    let plan = crate::store::checkpoint::plan_drops(&c.checkpoint_sealed_set(now_ms()+1).unwrap());
     assert!(plan.claims.iter().all(|claim| claim.kind != "arrangement.edited"));
 }
 
@@ -178,9 +176,7 @@ fn permanent_tombstones_lift_ancestors_and_keep_orphan_placements() {
     assert_eq!(a.append_claim(&input(json!([{"op":"create","name":"Reuse"}]))).unwrap_err().code,"arrangement-retired");
     b.rebuild_claim_projections().unwrap();
     assert!(b.arrangement(SUBJECT,u64::MAX).unwrap().is_none());
-    let directory = tempfile::tempdir().unwrap();
-    let (plan,proof) = a.plan_checkpoint(now_ms()+1,directory.path()).unwrap();
-    assert!(proof.passed);
+    let plan = crate::store::checkpoint::plan_drops(&a.checkpoint_sealed_set(now_ms()+1).unwrap());
     assert!(plan.claims.iter().all(|claim| claim.kind != "arrangement.edited"));
 }
 
@@ -296,9 +292,7 @@ fn checkpoint_retains_superseded_agent_edits_and_proves_rebuilt_head_readers() {
     let before = layout(&store);
     store.rebuild_claim_projections().unwrap();
     assert_eq!(layout(&store),before);
-    let directory = tempfile::tempdir().unwrap();
-    let (plan,proof) = store.plan_checkpoint(now_ms()+1,directory.path()).unwrap();
-    assert!(proof.passed);
+    let plan = crate::store::checkpoint::plan_drops(&store.checkpoint_sealed_set(now_ms()+1).unwrap());
     assert!(plan.claims.iter().all(|claim| claim.kind != "arrangement.edited"));
     assert_eq!(store.claim_by_id(&older.id).unwrap().unwrap().actor.as_deref(),Some("agent/fleet/fixture-arrangements/seat"));
     assert_eq!(store.claim_by_id(&newer.id).unwrap().unwrap().actor.as_deref(),Some("agent/fleet/fixture-arrangements/seat"));

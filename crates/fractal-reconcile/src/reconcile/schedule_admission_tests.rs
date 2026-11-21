@@ -22,6 +22,206 @@ fn ready(store: &Store, schedule: &DesiredSubject, since: u128) -> bool {
     schedule_admission_ready(store, "node", &["peer".into(), "awake".into()], since, schedule).unwrap()
 }
 
+fn traffic_measurement(store: &Store, peer: &str, missing: u64, at: u128) {
+    let healthy = store.replication_admission_healthy().unwrap();
+    let basis = smallclaims::store::InventoryBasis {
+        local_inventory_generation: store.replication_snapshot().unwrap().inventory_generation,
+        ..Default::default()
+    };
+    let mut sync = store.replication_sync.lock().unwrap();
+    let progress = sync.entry(peer.into()).or_default();
+    progress.observe_on(5, Some((missing, missing + 7)), basis, at);
+    progress.observe_schedule_progress(healthy, at);
+}
+
+#[test]
+fn continuous_traffic_needs_three_distinct_measurements_since_boundary() {
+    let store = Store::open_memory("node").unwrap();
+    let schedule = publish(&store, "host \"node\";", "initial");
+    let since = now_ms();
+    for (offset, missing) in [(0, 16), (1, 59)] {
+        traffic_measurement(&store, "peer", missing, since + offset);
+        assert!(!ready(&store, &schedule, since));
+    }
+    for _ in 0..5 {
+        traffic_measurement(&store, "peer", 23, since + 1);
+        assert!(!ready(&store, &schedule, since), "one measurement is not a streak");
+    }
+    traffic_measurement(&store, "peer", 23, since + 2);
+    assert!(ready(&store, &schedule, since));
+    assert!(!ready(&store, &schedule, since + 1), "old samples cannot release a new boundary");
+}
+
+#[test]
+fn replacement_membership_relayed_before_exchange_cannot_reuse_healthy_streak() {
+    use crate::schedule_standby::tests::{FLEET, pair, sync};
+    let _clock = smallclaims::store::clock_snapshot();
+    let (relay, old_peer, _) = pair();
+    let store = Store::open_memory("node").unwrap();
+    let node_key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    store.bind_fleet(FLEET).unwrap();
+    store.pin_fleet_anchor(&relay.member_public_key().unwrap()).unwrap();
+    store.set_member_key(Some(node_key.clone())).unwrap();
+    let membership_claim = |subject: &str, kind: &str, fields: Value| {
+        relay.append_claim(&crate::model::ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    membership_claim("host/node", "fleet.member-admitted", serde_json::json!({
+        "fleet_id": FLEET, "member_key": node_key.public(), "via": "invite",
+        "sponsor": "host/ivory", "mode": "listening"
+    }));
+    sync(&relay, &store);
+    let schedule = publish(&store, "host \"node\";", "initial");
+    let since = now_ms();
+    for offset in 0..3 { traffic_measurement(&store, "jade", 20, since + offset); }
+    let old_key = old_peer.member_public_key().unwrap();
+    store.replication_sync.lock().unwrap().get_mut("jade").unwrap()
+        .measured_member_key = Some(old_key.clone());
+    let admitted = || schedule_admission_ready(&store, "node", &["jade".into()], since, &schedule).unwrap();
+    assert!(admitted(), "the original authenticated incarnation has a healthy streak");
+
+    let replacement = crate::fleet::MemberKey::generate().unwrap().0;
+    membership_claim("host/jade", "fleet.member-removed", serde_json::json!({
+        "member_key": old_key, "high_water": 100, "reason": "replacement",
+        "removed_by": "person/test"
+    }));
+    membership_claim("host/jade", "fleet.member-admitted", serde_json::json!({
+        "fleet_id": FLEET, "member_key": replacement.public(), "via": "invite",
+        "sponsor": "host/ivory", "mode": "listening", "writer_floor": 100
+    }));
+    // Only the relay exchanges with this observer. The replacement never contacts it.
+    sync(&relay, &store);
+    assert!(matches!(store.fleet_membership().unwrap().state("jade"),
+        crate::fleet::MemberState::Current(member) if member.member_key == replacement.public()));
+    assert!(!admitted(), "a fresh old-incarnation measurement cannot authorize its replacement");
+    assert!(!store.replication_sync.lock().unwrap()["jade"].schedule_progress_since(since),
+        "discard old progress immediately, rather than waiting for a direct exchange");
+}
+
+#[test]
+fn admission_discards_a_streak_measured_against_a_different_inventory_basis() {
+    let store = Store::open_memory("node").unwrap();
+    let schedule = publish(&store, "host \"node\";", "initial");
+    let since = now_ms();
+    for offset in 0..3 { traffic_measurement(&store, "peer", 20, since + offset); }
+    assert!(ready(&store, &schedule, since));
+    store.replication_sync.lock().unwrap().get_mut("peer").unwrap()
+        .window_basis.local_inventory_generation += 1;
+    assert!(!ready(&store, &schedule, since));
+    assert!(!store.replication_sync.lock().unwrap()["peer"].schedule_progress_since(since));
+}
+
+#[test]
+fn invalid_and_fenced_state_hold_healthy_traffic_and_reset_streak() {
+    for sql in [
+        /* sqlite-large-value: allow-for-now lv-he6c21184bcd0 owner=fractal_reconcile::reconcile::schedule_admission_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,updated_at_unix_ms)
+         VALUES('bad','peer',1,'hash',0,X'00','invalid','0')",
+        /* sqlite-large-value: allow-for-now lv-h4786749395c7 owner=fractal_reconcile::reconcile::schedule_admission_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelope_holds VALUES('peer',1,'hash','fenced','0')",
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let schedule = publish(&store, "host \"node\";", "initial");
+        let since = now_ms();
+        for offset in 0..3 { traffic_measurement(&store, "peer", 20, since + offset); }
+        assert!(ready(&store, &schedule, since));
+        store.connection.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h5c8ae9829e96 owner=fractal_reconcile::reconcile::schedule_admission_tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
+        assert!(!ready(&store, &schedule, since), "current unhealthy state vetoes an old streak");
+        traffic_measurement(&store, "peer", 20, since + 3);
+        store.connection.lock().unwrap().execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hb1c9f0d22451 owner=fractal_reconcile::reconcile::schedule_admission_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE record_ref='bad'; DELETE FROM replica_envelope_holds;"
+        ).unwrap();
+        for offset in 4..6 {
+            traffic_measurement(&store, "peer", 20, since + offset);
+            assert!(!ready(&store, &schedule, since));
+        }
+        traffic_measurement(&store, "peer", 20, since + 6);
+        assert!(ready(&store, &schedule, since));
+    }
+}
+
+#[test]
+fn moved_host_and_standby_never_use_traffic_fallback() {
+    for original in ["host \"peer\";", "standby { host \"peer\"; after \"1m\" }"] {
+        let store = Store::open_memory("node").unwrap();
+        publish(&store, original, "initial");
+        let schedule = publish(&store, "host \"node\";", "moved");
+        let since = now_ms();
+        measure(&store, "awake", 0, since);
+        for offset in 0..3 { traffic_measurement(&store, "peer", 20, since + offset); }
+        assert!(!ready(&store, &schedule, since), "fresh in-flight traffic cannot release moved ownership");
+        measure(&store, "peer", 0, since + 3);
+        assert!(ready(&store, &schedule, since));
+    }
+    let store = Store::open_memory("node").unwrap();
+    let schedule = publish(&store, "standby { host \"peer\"; after \"1m\" }", "initial");
+    let since = now_ms();
+    measure(&store, "awake", 0, since);
+    for offset in 0..3 { traffic_measurement(&store, "peer", 20, since + offset); }
+    assert!(!ready(&store, &schedule, since));
+}
+
+#[test]
+fn stale_strict_peer_holds_even_with_a_healthy_streak_and_fresh_other_peer() {
+    let store = Store::open_memory("node").unwrap();
+    let schedule = publish(&store, "standby { host \"peer\"; after \"1m\" }", "initial");
+    let since = now_ms() - 60_000;
+    for offset in 0..3 { traffic_measurement(&store, "peer", 20, since + offset); }
+    measure(&store, "awake", 0, now_ms());
+    assert!(!ready(&store, &schedule, since));
+}
+
+#[test]
+fn strict_schedule_requires_a_measurement_from_each_peer() {
+    let store = Store::open_memory("node").unwrap();
+    let schedule = publish(&store, "standby { host \"peer\"; after \"1m\" }", "initial");
+    let since = now_ms();
+    measure(&store, "awake", 0, since);
+    assert!(!ready(&store, &schedule, since));
+    measure(&store, "peer", 0, since);
+    assert!(ready(&store, &schedule, since));
+}
+
+#[test]
+fn quiet_gap_unhealthy_exchange_and_clock_regression_break_progress_streak() {
+    for (healthy, next) in [(false, 103), (true, 60_103), (true, 99)] {
+        let mut progress = PeerSyncProgress::default();
+        for at in 100..103 { progress.observe_schedule_progress(true, at); }
+        assert!(progress.schedule_progress_since(100));
+        progress.observe_schedule_progress(healthy, next);
+        assert!(!progress.schedule_progress_since(100));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn continuous_nonzero_traffic_fires_due_occurrence() {
+    let _clock = smallclaims::store::clock_snapshot();
+    let now = now_ms();
+    let due = now + 60_000;
+    let at = chrono::DateTime::from_timestamp_millis(due as i64).unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    super::tests::apply_source(&store, &format!(r#"version 2
+schedule "orchard" {{
+ at "{at}"
+ work {{ mission "orchard"; workspace "/workspace/orchard" }}
+}}"#), "timed-traffic");
+    let schedule = store.desired_subjects().unwrap().into_iter()
+        .find(|subject| subject.kind == "schedule").unwrap();
+    let reconciler = Reconciler::new(store.clone(), Arc::new(super::tests::FakeRuntime::default()),
+        "node".into(), Arc::new(Notify::new())).with_schedule_peers(vec!["peer".into()]);
+    for (offset, missing) in [(0, 16), (1, 59), (2, 23)] {
+        traffic_measurement(&store, "peer", missing, now + offset);
+    }
+    reconciler.reconcile_schedule(&schedule).unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(60_000)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(store.claims_for(&schedule.subject, Some("schedule.occurrence-reached")).unwrap().len(), 1);
+    assert!(store.replication_peer_sync(&["peer".into()])["peer"].peer_only_envelopes > 0);
+}
+
 #[test]
 fn stale_positive_admits_no_standby_schedule_but_fresh_positive_blocks() {
     let store = Store::open_memory("node").unwrap();

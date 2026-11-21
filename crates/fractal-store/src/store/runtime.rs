@@ -801,15 +801,6 @@ impl Runtime for FractalRuntime {
         checkpoint_rules::plan_staged(planner)
     }
 
-    fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        checkpoint_rules::clear_projections(transaction)
-    }
-
-    fn replay_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        checkpoint_rules::replay_from_nothing(transaction)?;
-        Ok(())
-    }
-
     fn checkpoint_subject_answers(
         &self,
         connection: &Connection,
@@ -819,18 +810,6 @@ impl Runtime for FractalRuntime {
         checkpoint_rules::subject_answers(connection, subject, cut)
     }
 
-    fn checkpoint_global_answers(&self, transaction: &Transaction<'_>) -> Result<Option<Value>> {
-        checkpoint_rules::global_answers(transaction).map(Some)
-    }
-
-    fn checkpoint_subject_answers_with_sources(
-        &self,
-        connection: &Connection,
-        subject: &str,
-        cut: u128,
-    ) -> Result<(Value, smallclaims::store::checkpoint::CheckpointAnswerSources)> {
-        checkpoint_rules::subject_answers_with_sources(connection, subject, cut)
-    }
 }
 
 /// The version of Fractal's shared projection layout, beside the claim vocabulary. Nodes whose

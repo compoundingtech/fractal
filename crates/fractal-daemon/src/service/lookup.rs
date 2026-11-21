@@ -35,6 +35,7 @@ fn check_conflicts<'a>(statuses: impl IntoIterator<Item = &'a ServiceStatus>) ->
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn select(mut statuses: Vec<ServiceStatus>) -> Result<ServiceStatus> {
     check_conflicts(&statuses)?;
     // Candidate order retains the original CLI target when legacy installs coexist.
@@ -97,6 +98,14 @@ pub(super) fn systemd(snapshot: &fractal_runtime::systemd::Snapshot) -> Result<S
 }
 
 #[cfg(target_os = "linux")]
+pub(super) fn replication_worker_identity(
+    snapshot: &fractal_runtime::systemd::Snapshot,
+) -> Result<fractal_runtime::PeerProcessIdentity> {
+    let service = systemd(snapshot)?.replication;
+    snapshot.worker_identity(&service.name)
+}
+
+#[cfg(target_os = "linux")]
 fn systemd_host_paths() -> Vec<PathBuf> {
     systemd_search_paths(|variable| match variable {
         "XDG_CONFIG_HOME" | "XDG_DATA_HOME" | "XDG_RUNTIME_DIR" => {
@@ -125,14 +134,30 @@ fn resolve_systemd(
     snapshot: &fractal_runtime::systemd::Snapshot,
     paths: &[PathBuf],
 ) -> Result<ServiceStatus> {
-    select(candidate_names(old, home_manager_name).iter().map(|name| {
+    let mut statuses: Vec<_> = candidate_names(old, home_manager_name).iter().map(|name| {
         let mut status = systemd_service_status(name, snapshot.units.get(name));
         // Unloaded installed units are absent from list-units. Inspect only local
         // user-unit entries, including Home Manager links and /dev/null masks;
         // never ask the manager to load an absent candidate with `show`.
         status.installed |= systemd_installed_in(name, paths);
         status
-    }).collect())
+    }).collect();
+    let enabled = |status: &ServiceStatus| snapshot.units.get(&status.name).is_some_and(|unit| {
+        matches!(unit.unit_file_state.as_str(), "enabled" | "enabled-runtime")
+    });
+    if statuses.iter().any(|status| status.running || enabled(status)) {
+        // Home Manager can link the next namespace before enabling it. Only
+        // manager-confirmed inactive links are staging, never unknown installs.
+        statuses.retain(|status| status.running || !snapshot.units.get(&status.name).is_some_and(|unit| {
+            unit.active == "inactive"
+                && matches!(unit.unit_file_state.as_str(), "linked" | "linked-runtime")
+        }));
+    }
+    check_conflicts(&statuses)?;
+    let selected = statuses.iter().enumerate()
+        .max_by_key(|(index, status)| (status.running, enabled(status), status.installed, std::cmp::Reverse(*index)))
+        .map(|(index, _)| index).unwrap_or(0);
+    Ok(statuses.swap_remove(selected))
 }
 
 #[cfg(target_os = "linux")]
@@ -340,7 +365,7 @@ mod tests {
 
         let mut unit = fractal_runtime::systemd::Unit {
             load: "not-found".into(), active: "active".into(), sub: "running".into(),
-            main_pid: 42, control_group: None,
+            unit_file_state: String::new(), main_pid: 42, control_group: None,
         };
         // A manager-confirmed active service still counts after its unit file disappears.
         let active = systemd_service_status("fractal.service", Some(&unit));
@@ -350,6 +375,81 @@ mod tests {
         unit.sub = "dead".into();
         let loaded = systemd_service_status("st3.service", Some(&unit));
         assert!(loaded.installed && !loaded.running);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn staged_snapshot(
+        legacy: (&str, &str), renamed: (&str, &str),
+    ) -> fractal_runtime::systemd::Snapshot {
+        let mut snapshot = fractal_runtime::systemd::Snapshot {
+            units: Default::default(),
+            service_identities: Default::default(),
+            captured_at: std::time::Instant::now(),
+        };
+        for (family, (active, unit_file_state)) in [("smalltalk", legacy), ("fractal", renamed)] {
+            for suffix in ["", "-replication"] {
+                snapshot.units.insert(format!("{family}{suffix}.service"), fractal_runtime::systemd::Unit {
+                    load: "loaded".into(), active: active.into(),
+                    sub: if active == "active" { "running" } else { "dead" }.into(),
+                    unit_file_state: unit_file_state.into(),
+                    main_pid: if active == "active" { std::process::id() } else { 0 },
+                    control_group: None,
+                });
+            }
+        }
+        snapshot
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_lookup_staged_links_prefer_running_or_enabled_family() {
+        for (legacy, renamed, expected) in [
+            (("active", "enabled"), ("inactive", "linked"), "smalltalk"),
+            (("inactive", "enabled"), ("inactive", "linked"), "smalltalk"),
+            (("inactive", "linked"), ("active", "enabled"), "fractal"),
+            (("inactive", "linked-runtime"), ("inactive", "enabled-runtime"), "fractal"),
+        ] {
+            let snapshot = staged_snapshot(legacy, renamed);
+            for (old, hm, suffix) in [
+                ("st3.service", "smalltalk.service", ""),
+                ("st3-replication.service", "smalltalk-replication.service", "-replication"),
+            ] {
+                let selected = resolve_systemd((old, Some(hm)), &snapshot, &[]).unwrap();
+                assert_eq!(selected.name, format!("{expected}{suffix}.service"));
+                assert!(selected.installed);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_lookup_both_running_or_both_enabled_still_conflict() {
+        for (legacy, renamed) in [
+            (("active", "linked"), ("active", "linked")),
+            (("inactive", "enabled"), ("inactive", "enabled")),
+            (("active", "enabled"), ("inactive", "enabled")),
+            (("inactive", "enabled-runtime"), ("inactive", "enabled")),
+            (("active", "enabled"), ("inactive", "")),
+        ] {
+            let snapshot = staged_snapshot(legacy, renamed);
+            let error = resolve_systemd(("st3.service", Some("smalltalk.service")), &snapshot, &[]).unwrap_err();
+            assert!(error.downcast_ref::<ConflictingServices>().is_some());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_lookup_replication_worker_pid_uses_running_home_manager_unit_with_staged_links() {
+        let mut snapshot = staged_snapshot(("active", "enabled"), ("inactive", "linked"));
+        let identity = fractal_runtime::PeerProcessIdentity::capture_pid(std::process::id()).unwrap();
+        snapshot.service_identities.insert("smalltalk-replication.service".into(), identity);
+        let snapshot = std::sync::Arc::new(snapshot);
+        let mut cached = None;
+        let pid = cached_worker_pid(&mut cached, snapshot, replication_worker_identity, |identity| {
+            identity.validate()?;
+            Ok(identity.pid())
+        }).unwrap();
+        assert_eq!(pid, std::process::id());
     }
 
     #[cfg(target_os = "linux")]
