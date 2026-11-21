@@ -290,11 +290,11 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     }).count(), 0);
 }
 
-/// A local cut that deletes in many chunks leaves the roster's generation alone until its run
-/// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
-/// roster's fold before it could publish, all through a run.
+/// A local cut preserves the roster's publication generation through recording, deletion and
+/// completion, including a capped run resumed the next day. Reductions still release deleted
+/// history, answers stay equivalent, and the final mark still expires old claim cursors.
 #[test]
-fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
+fn a_local_cut_preserves_publications_however_many_chunks_it_deletes() {
     let scratch = tempfile::tempdir().unwrap();
     let store = local_member("alder");
     store.set_trim_pause(std::time::Duration::ZERO);
@@ -316,12 +316,8 @@ fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
         let chunks = all.difference(&observer_ids(&store)).count() - deleted;
         let forgets = store.fractal.presented_agents.generation() - generation;
         assert!(chunks > 4, "day {day}: the run deletes in many chunks ({chunks})");
-        // Once when a cut's tombstones are recorded and once when its run stops: the second
-        // day finishes the first cut, then records the next one and stops at the cap.
-        assert!(forgets <= 3, "day {day}: {forgets} forgets for {chunks} chunks");
-        // A stopped run still forgets what the views hold of the claims it deleted, and the
-        // final mark still expires every cursor taken before it.
-        assert!(forgets >= 1, "day {day}: the run's stop forgets the views");
+        assert_eq!(forgets, 0, "day {day}: graph-preserving trim must retain publication generations");
+        // Publication identity survives, but the final trim mark still expires claim cursors.
         assert_eq!(claims_sequence(&store) > sequence, outcome == "trimmed", "day {day}: cursors expire at the final mark");
         assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}: the readers answer the same");
     }
