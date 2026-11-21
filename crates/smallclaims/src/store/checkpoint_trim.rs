@@ -951,7 +951,10 @@ impl Store {
             transaction.commit()?;
         }
         drop(record);
-        self.replica_rows_changed();
+        // Recording changes the replication ledger, not claims or their projections. Only
+        // deletion below needs to release claim-dependent reductions; withdrawing publications
+        // here would discard an already-ready roster before a graph-preserving trim even starts.
+        self.replica_inventory_changed();
         self.stop_for_trim_fault(TrimFault::AfterTombstones)?;
         self.finish_trim(checkpoint, actions)
     }

@@ -343,6 +343,7 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
     }
     let fractal = Arc::clone(&store.fractal);
     fractal.presented_agents.start();
+    let initial_generation = fractal.presented_agents.generation();
     let published = Arc::new(Mutex::new(Vec::new()));
     let hook_published = Arc::clone(&published);
     let mut building = None;
@@ -368,9 +369,10 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
     let published = published.lock().unwrap();
     assert!(published.len() > 4, "the cut deletes in many chunks ({})", published.len());
     assert!(published.iter().all(|(done, _)| *done), "the agents source reset while materializing its publication: {published:?}");
-    // Recording the tombstones before deletion legitimately invalidates old publications.
-    // Compare with the generation observed inside deletion, not before recording began.
+    // Recording changes the replication ledger but has not deleted any claims or replaced
+    // projections: it must preserve the same generation the deletion chunks keep serving.
     let generation = published.first().unwrap().1;
+    assert_eq!(generation, initial_generation, "recording tombstones must not withdraw presentation rows");
     assert!(published.iter().all(|(_, observed)| *observed == generation),
         "deletion chunks must preserve their publication generation: {published:?}");
     assert_eq!(store.fractal.presented_agents.generation(), generation,

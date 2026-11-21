@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Keep published agent rosters and collection views available when a graph-preserving local trim finishes, including the initial bounded roster head. Release history-dependent reductions without withdrawing presentation generations; telemetry fixtures wait on collection publication events rather than another list's readiness or retired checkpoint claims.",
+  "summary": "Keep published agent rosters and collection views available while a graph-preserving local trim records tombstones and finishes, including the initial bounded roster head. Recording invalidates only the replication inventory; completion releases history-dependent reductions without withdrawing presentation generations. Telemetry fixtures wait on collection publication events rather than another list's readiness or retired checkpoint claims.",
   "replay": {"status": "none", "detail": "No replay changes; replaced projections still invalidate their publications."},
   "schema": {"status": "none", "detail": "No persistent schema changes."},
   "rules": {"status": "none", "detail": "Retention rules and graph-equivalence checks are unchanged."},
