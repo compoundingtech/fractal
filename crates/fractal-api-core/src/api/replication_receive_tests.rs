@@ -28,6 +28,49 @@ fn state(root: &std::path::Path) -> AppState {
 }
 
 #[tokio::test]
+async fn identical_empty_receives_after_warmup_commit_nothing_and_do_not_wake_reconcile() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    let source = Store::open_memory("summary-source").unwrap();
+    let exchange = source.export_replication_summary("summary-fleet").unwrap();
+    let request = ReplicationReceiveRequest {
+        peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
+        round_trip_ms: None, carrier: Default::default(), authenticated_member_key: None,
+    };
+    let _ = replication_receive(State(state.clone()), Default::default(), Json(request.clone())).await.unwrap();
+    state.notify = Arc::new(Notify::new());
+    let logs = LogBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO).with_ansi(false).without_time()
+        .with_writer(logs.clone()).finish();
+    async {
+        // The initial transport observation is new local data. Its first subsequent
+        // receive must still commit the pending batch's seal before reaching steady state.
+        let _ = replication_receive(
+            State(state.clone()), Default::default(), Json(request.clone()),
+        ).await.unwrap();
+        for _ in 0..32 {
+            let response = replication_receive(
+                State(state.clone()), Default::default(), Json(request.clone()),
+            ).await.unwrap().0;
+            assert!(!response.changed);
+        }
+    }.with_subscriber(subscriber).await;
+    assert!(tokio::time::timeout(Duration::ZERO, state.notify.notified()).await.is_err());
+    let bytes = logs.0.lock().unwrap();
+    let captured = String::from_utf8_lossy(&bytes);
+    let summaries: Vec<_> = captured.lines()
+        .filter(|line| line.contains("replication receive summary")).collect();
+    assert_eq!(summaries.len(), 33);
+    assert!(summaries[0].contains("commits=1"), "pending local sealing was skipped: {}", summaries[0]);
+    for summary in summaries.into_iter().skip(1) {
+        assert!(summary.contains("commits=0"), "{summary}");
+        assert!(summary.contains("exchange_class=\"empty\""), "{summary}");
+        assert!(summary.contains("metric_outcome=\"ok\""), "{summary}");
+    }
+}
+
+#[tokio::test]
 async fn replication_receive_logs_one_summary_with_expected_fields_on_success_and_error() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
