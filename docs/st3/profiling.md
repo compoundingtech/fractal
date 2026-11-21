@@ -91,6 +91,8 @@ The durable row remains authoritative: an exact process-local receipt extends on
 matching durable checkpoint, is discarded on external timestamp changes, and starts empty
 after restart. This preserves sub-checkpoint schedule-standby takeover deadlines as well as
 live peer liveness without rewriting the row for each heartbeat.
+Concurrent receipts publish monotonically by (durable checkpoint, observed receipt time),
+so an older receive finishing late cannot replace a newer heartbeat.
 `transport.observed` up claims already coalesce at 15 minutes, well before the two-hour
 `transport_links_at` evidence lifetime. Changed observations and deferred projection drains
 remain ordinary writes; these counters measure their cost even when an exchange is empty.

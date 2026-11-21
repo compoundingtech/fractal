@@ -149,6 +149,65 @@ fn process_local_receipt_requires_its_durable_checkpoint_and_does_not_survive_re
     assert!(target.replication_sync.lock().unwrap()["birch"].last_received_at_unix_ms.is_none());
 }
 
+#[test]
+fn out_of_order_receipt_publication_keeps_the_latest_checkpoint_and_observation() {
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { set_thread_clock(None); }
+    }
+    let _clock = Clock;
+    let start = 1_000_000;
+    for newer_offset in [10_000, PEER_QUIET_EXCHANGE_MS / 2] {
+        set_thread_clock(Some(start));
+        let source = node("birch");
+        let target = node("cedar");
+        let exchange = source.export_replication_summary(FLEET).unwrap();
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+        set_thread_clock(Some(start + 1_000));
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+        let older = target.replication_sync.lock().unwrap()["birch"].clone();
+        let newer_at = start + newer_offset;
+        set_thread_clock(Some(newer_at));
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+        let newer = target.replication_sync.lock().unwrap()["birch"].clone();
+        // Deterministically resume A's publication after B published, both within one
+        // checkpoint and across a checkpoint advance. Use the production publication step.
+        target.replication_sync.lock().unwrap().get_mut("birch").unwrap().record_receipt(
+            older.receipt_checkpoint_at_unix_ms.unwrap(),
+            older.last_received_at_unix_ms.unwrap(),
+        );
+        target.record_peer_failure("birch", "unreachable", "probe failed").unwrap();
+        set_thread_clock(Some(start + 1_000 + PEER_QUIET_EXCHANGE_MS));
+        assert_eq!(target.replication_peer_up("birch").unwrap(), (true, Some(newer_at)));
+        let sync = target.replication_sync.lock().unwrap();
+        assert_eq!(sync["birch"].receipt_checkpoint_at_unix_ms, newer.receipt_checkpoint_at_unix_ms);
+        assert_eq!(sync["birch"].last_received_at_unix_ms, Some(newer_at));
+    }
+
+    // A newly committed checkpoint must replace an older cached checkpoint even when
+    // that older checkpoint carried a later process-local observation.
+    set_thread_clock(Some(start));
+    let source = node("birch");
+    let target = node("cedar");
+    let exchange = source.export_replication_summary(FLEET).unwrap();
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    let checkpoint_at = start + PEER_QUIET_EXCHANGE_MS / 2;
+    set_thread_clock(Some(checkpoint_at));
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    {
+        let mut sync = target.replication_sync.lock().unwrap();
+        let progress = sync.get_mut("birch").unwrap();
+        progress.receipt_checkpoint_at_unix_ms = Some(start);
+        progress.last_received_at_unix_ms = Some(start + 40_000);
+        progress.record_receipt(checkpoint_at, checkpoint_at);
+        assert_eq!(progress.receipt_checkpoint_at_unix_ms, Some(checkpoint_at));
+        assert_eq!(progress.last_received_at_unix_ms, Some(checkpoint_at));
+    }
+    target.record_peer_failure("birch", "unreachable", "probe failed").unwrap();
+    set_thread_clock(Some(start + 50_000));
+    assert_eq!(target.replication_peer_up("birch").unwrap(), (true, Some(checkpoint_at)));
+}
+
 /// The injected SQL cost represents a populated runtime's per-claim admission work. The
 /// queued write must commit before the remainder of the page, and its ACK has a 100ms CI
 /// budget (including scheduler/commit overhead), separately from production's 50ms p99.

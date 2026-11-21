@@ -1617,6 +1617,16 @@ impl InventoryBasis {
 }
 
 impl PeerSyncProgress {
+    /// Receives can finish after a later receipt has already published its liveness.
+    /// A newer durable checkpoint takes precedence; within it, keep the latest observation.
+    fn record_receipt(&mut self, checkpoint_at: u128, received_at: u128) {
+        let receipt = (Some(checkpoint_at), Some(received_at));
+        if receipt > (self.receipt_checkpoint_at_unix_ms, self.last_received_at_unix_ms) {
+            self.receipt_checkpoint_at_unix_ms = Some(checkpoint_at);
+            self.last_received_at_unix_ms = Some(received_at);
+        }
+    }
+
     /// Record a comparable exchange for the bounded schedule-admission fallback.
     /// An unhealthy exchange, restart, incarnation/basis change, clock regression or quiet
     /// gap breaks the streak. Re-reading one measurement can never advance it.
@@ -8578,8 +8588,7 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
-        progress.last_received_at_unix_ms = Some(received_at);
-        progress.receipt_checkpoint_at_unix_ms = Some(checkpoint_at);
+        progress.record_receipt(checkpoint_at, received_at);
         if let Some(comparison) = &claim_ranges {
             progress.compare_claims(comparison.same, now);
         }
