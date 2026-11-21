@@ -8328,7 +8328,7 @@ impl Store {
             // Compare under the writer loan so concurrent failures and acknowledgements remain
             // ordered. Unchanged receipts open no transaction and run no managed finalizers.
             let checkpoint_at: Option<i64> = if input.envelopes.is_empty() && input.signatures.is_empty() {
-                connection.query_row(
+                connection.prepare_cached(
                 "SELECT CAST(last_success_at_unix_ms AS INTEGER) FROM replication_peers
                  WHERE peer=?1 AND status='up' AND last_error IS NULL
                    AND schema_digest IS ?2 AND authority_digest IS ?3 AND graph_digest IS ?4
@@ -8339,6 +8339,7 @@ impl Store {
                  AND (SELECT value FROM meta WHERE key=?11) IS ?12
                  AND (SELECT value FROM meta WHERE key=?13) IS ?14
                  AND (NOT ?15 OR NOT EXISTS(SELECT 1 FROM replication_refusals WHERE peer=?1))",
+                ).map_err(internal)?.query_row(
                 params![relay, input.schema_digest, input.authority_digest, input.graph_digest,
                     i64::try_from(received_at.saturating_sub(PEER_QUIET_EXCHANGE_MS / 2)).map_err(internal)?,
                     i64::try_from(received_at).map_err(internal)?,
