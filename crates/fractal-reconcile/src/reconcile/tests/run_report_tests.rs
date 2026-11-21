@@ -113,6 +113,7 @@ mission "gated" state="ready" report-to="agent/node.reporter" stalled-after="10m
 mission "queued-exec" state="ready" report-to="agent/node.reporter" {
   concurrent-runs
   goal "Wait for external queue admission without synthetic progress."
+  completion { when "all-steps-exhausted" }
   step "check" timeout="2h" {
     agentless
     exec "check" { host "node"; workspace "/tmp"; command "true"; restart "never" }
@@ -730,7 +731,10 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
     // Deliver the step timer's wake explicitly: this synchronous fixture has no Tokio timers.
     fixture.reconciler.incremental.touch(&run.steps[0].subject);
     fixture.passes(4);
-    assert_eq!(fixture.store.mission_run(&run.id).unwrap().unwrap().status, "failed");
+    let expired = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(expired.steps[0].status, "failed");
+    assert_eq!(expired.steps[0].blocked_reason.as_deref(), Some("the active execution timeout expired"));
+    assert_eq!(expired.status, "failed");
     let reports = fixture.reports(REPORTER);
     assert!(reports.iter().any(|report| report.tags.contains(&"st3-run-report:failed".to_owned())));
 }
