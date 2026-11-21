@@ -37,6 +37,177 @@ fn page(source: &Store, target: &Store, count: usize) -> ReplicationExchange {
         .unwrap()
 }
 
+#[test]
+fn unchanged_empty_receipts_are_write_free_until_the_freshness_deadline() {
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { set_thread_clock(None); }
+    }
+    let _clock = Clock;
+    let start = 1_000_000;
+    set_thread_clock(Some(start));
+    let source = node("birch");
+    let target = node("cedar");
+    target.set_write_clock_at(start).unwrap();
+    let exchange = source.export_replication_summary(FLEET).unwrap();
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    target.record_transport_observation("birch", "up", None, None).unwrap();
+    let sealing = crate::receive_metrics::RequestMetrics::default();
+    {
+        let _metrics = sealing.enter();
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    }
+    assert_eq!(sealing.snapshot().commits, 1, "new local transport data still requires sealing");
+    let changes = target.connection.write().total_changes();
+    let index = target.index().unwrap();
+    let metrics = crate::receive_metrics::RequestMetrics::default();
+    {
+        let _metrics = metrics.enter();
+        for offset in 1..100 {
+            let at = start + offset * 100;
+            set_thread_clock(Some(at));
+            target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+            target.record_transport_observation("birch", "up", None, None).unwrap();
+            assert_eq!(target.replication_peer_up("birch").unwrap(), (true, Some(at)));
+        }
+    }
+    assert_eq!(metrics.snapshot().commits, 0);
+    assert_eq!(target.connection.write().total_changes(), changes);
+    assert_eq!(target.index().unwrap(), index);
+    set_thread_clock(Some(start + PEER_QUIET_EXCHANGE_MS / 2));
+    let refreshed = crate::receive_metrics::RequestMetrics::default();
+    {
+        let _metrics = refreshed.enter();
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    }
+    assert_eq!(refreshed.snapshot().commits, 1);
+    assert_eq!(target.index().unwrap(), index, "receipt checkpoints append no claims");
+    set_thread_clock(Some(start + TRANSPORT_LINK_REFRESH_MS - 1));
+    target.record_transport_observation("birch", "up", None, None).unwrap();
+    assert_eq!(target.index().unwrap(), index);
+    set_thread_clock(Some(start + TRANSPORT_LINK_REFRESH_MS));
+    target.set_write_clock_at(start + TRANSPORT_LINK_REFRESH_MS).unwrap();
+    target.record_transport_observation("birch", "up", None, None).unwrap();
+    assert!(target.index().unwrap() > index, "transport evidence renews at its deadline");
+}
+
+#[test]
+fn empty_receipt_persists_advanced_ack_and_clears_outbound_refusal() {
+    let source = node("birch");
+    let target = node("cedar");
+    let mut exchange = source.export_replication_summary(FLEET).unwrap();
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    // The peer's inventory digest is the durable advertised acknowledgement cursor.
+    exchange.inventory.digest = "advanced-inventory".into();
+    target.record_peer_failure("birch", "refused", "refused").unwrap();
+    let metrics = crate::receive_metrics::RequestMetrics::default();
+    {
+        let _metrics = metrics.enter();
+        target.receive_replication_exchange_asking("birch", FLEET, &exchange, true).unwrap();
+    }
+    assert_eq!(metrics.snapshot().commits, 1);
+    assert_eq!(target.replication_peer_refusal("birch").unwrap(), None);
+    let saved: String = target.readers.get().query_row(
+        "SELECT value FROM meta WHERE key='peer_projection_inventory:birch'", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(saved, exchange.inventory.digest);
+    let repeated = crate::receive_metrics::RequestMetrics::default();
+    {
+        let _metrics = repeated.enter();
+        target.receive_replication_exchange_asking("birch", FLEET, &exchange, true).unwrap();
+    }
+    assert_eq!(repeated.snapshot().commits, 0);
+}
+
+#[test]
+fn process_local_receipt_requires_its_durable_checkpoint_and_does_not_survive_reopen() {
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { set_thread_clock(None); }
+    }
+    let _clock = Clock;
+    let start = 1_000_000;
+    set_thread_clock(Some(start));
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("target.db");
+    let source = node("birch");
+    let target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    target.bind_fleet(FLEET).unwrap();
+    let exchange = source.export_replication_summary(FLEET).unwrap();
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    set_thread_clock(Some(start + 1_000));
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert_eq!(target.replication_peer_last_success("birch").unwrap(), Some(start + 1_000));
+    drop(target);
+    let target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    assert_eq!(target.replication_peer_last_success("birch").unwrap(), Some(start));
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    // External durable changes invalidate the local extension, including diagnostics that
+    // deliberately age a peer while its daemon stays alive.
+    target.age_replication_peer_for_test("birch");
+    assert_eq!(target.replication_peer_up("birch").unwrap(), (false, Some(0)));
+    assert!(target.replication_sync.lock().unwrap()["birch"].last_received_at_unix_ms.is_none());
+}
+
+#[test]
+fn out_of_order_receipt_publication_keeps_the_latest_checkpoint_and_observation() {
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { set_thread_clock(None); }
+    }
+    let _clock = Clock;
+    let start = 1_000_000;
+    for newer_offset in [10_000, PEER_QUIET_EXCHANGE_MS / 2] {
+        set_thread_clock(Some(start));
+        let source = node("birch");
+        let target = node("cedar");
+        let exchange = source.export_replication_summary(FLEET).unwrap();
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+        set_thread_clock(Some(start + 1_000));
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+        let older = target.replication_sync.lock().unwrap()["birch"].clone();
+        let newer_at = start + newer_offset;
+        set_thread_clock(Some(newer_at));
+        target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+        let newer = target.replication_sync.lock().unwrap()["birch"].clone();
+        // Deterministically resume A's publication after B published, both within one
+        // checkpoint and across a checkpoint advance. Use the production publication step.
+        target.replication_sync.lock().unwrap().get_mut("birch").unwrap().record_receipt(
+            older.receipt_checkpoint_at_unix_ms.unwrap(),
+            older.last_received_at_unix_ms.unwrap(),
+        );
+        target.record_peer_failure("birch", "down", "probe failed").unwrap();
+        set_thread_clock(Some(start + 1_000 + PEER_QUIET_EXCHANGE_MS));
+        assert_eq!(target.replication_peer_up("birch").unwrap(), (true, Some(newer_at)));
+        let sync = target.replication_sync.lock().unwrap();
+        assert_eq!(sync["birch"].receipt_checkpoint_at_unix_ms, newer.receipt_checkpoint_at_unix_ms);
+        assert_eq!(sync["birch"].last_received_at_unix_ms, Some(newer_at));
+    }
+
+    // A newly committed checkpoint must replace an older cached checkpoint even when
+    // that older checkpoint carried a later process-local observation.
+    set_thread_clock(Some(start));
+    let source = node("birch");
+    let target = node("cedar");
+    let exchange = source.export_replication_summary(FLEET).unwrap();
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    let checkpoint_at = start + PEER_QUIET_EXCHANGE_MS / 2;
+    set_thread_clock(Some(checkpoint_at));
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    {
+        let mut sync = target.replication_sync.lock().unwrap();
+        let progress = sync.get_mut("birch").unwrap();
+        progress.receipt_checkpoint_at_unix_ms = Some(start);
+        progress.last_received_at_unix_ms = Some(start + 40_000);
+        progress.record_receipt(checkpoint_at, checkpoint_at);
+        assert_eq!(progress.receipt_checkpoint_at_unix_ms, Some(checkpoint_at));
+        assert_eq!(progress.last_received_at_unix_ms, Some(checkpoint_at));
+    }
+    target.record_peer_failure("birch", "down", "probe failed").unwrap();
+    set_thread_clock(Some(start + 50_000));
+    assert_eq!(target.replication_peer_up("birch").unwrap(), (true, Some(checkpoint_at)));
+}
+
 /// The injected SQL cost represents a populated runtime's per-claim admission work. The
 /// queued write must commit before the remainder of the page, and its ACK has a 100ms CI
 /// budget (including scheduler/commit overhead), separately from production's 50ms p99.
