@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add intentionally unwired typed native OMP process-proof and paired-person attachment admission APIs.",
+  "replay": {"status": "changed", "detail": "Native attach preparation, ask binding and externally owned channel-pending incarnation records persist as claims with audit predecessors. Existing claim storage retains their fields; no event replay is required."},
+  "schema": {"status": "changed", "detail": "Add disposable native attach claim lookup indexes on store open. No client schema or code generation changes."},
+  "rules": {"status": "changed", "detail": "Native attachment requires a one-shot expiring kernel-bound process report and an exact accepting assigned-person answer from a trusted live paired device with control.work. Generic claim writes cannot forge native attach authority. Commit atomically reserves the agent, process, native ID and answer."},
+  "compatibility": {"status": "changed", "detail": "The typed APIs remain unwired. Extension transport, CLI, channel readiness and dispatch arrive separately; automatic external-session rebinding must be refused before dispatch is connected. No running native sessions are attached by this change."},
+  "downtime": {"status": "none", "detail": "No process restart or live-session interruption is performed."},
+  "manual": {"status": "none", "detail": "No operator action is required for these intentionally unwired APIs. Restart consent is separate from attachment approval."},
+  "recovery": {"status": "changed", "detail": "Identical commits recover their persisted result. Expired or changed evidence, replayed approval and conflicting reservations fail closed. External incarnations convey no launch, kill, restart or startup-message authority."}
+}
