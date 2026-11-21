@@ -143,6 +143,25 @@ pub fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), Fr
     Ok(())
 }
 
+/// Establish the parent-linked run row before claim admission, just as graph run creation
+/// does. The caller must append the creation and project the leaf in this same transaction;
+/// an authority refusal rolls back the row as well.
+pub fn prepare_native_turn(
+    tx: &Transaction<'_>, subject: &str, fields: &Value, at: u128,
+) -> Result<(), FractalError> {
+    let text = |name: &str| fields[name].as_str().ok_or_else(||
+        FractalError::new("invalid-mission-run-claim", format!("native turn lacks {name}")));
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-hf7749efab5f3 owner=fractal_store::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,parent_step_run,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
+         VALUES(?1,'native-turn',?2,?3,?4,?5,?6,?7,?8,'{}',?9,'running','normal',?10,?10)",
+        params![subject.trim_start_matches("mission-run/"), text("revision")?,
+            text("current_generation")?.trim_start_matches("run-generation/"),
+            text("root_revision")?, text("root_mission_run")?.trim_start_matches("mission-run/"),
+            text("parent_step_run")?, text("workspace")?, text("requester")?, text("mode")?, at.to_string()],
+    ).map_err(internal)?;
+    Ok(())
+}
+
 /// A native turn uses the ordinary finite-work rows, but has no mission declaration or
 /// published revision. Its creation claim is the authority for its one literal leaf.
 pub fn project_native_turn(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), FractalError> {
@@ -153,15 +172,9 @@ pub fn project_native_turn(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<
         FractalError::new("invalid-mission-run-claim", format!("native turn lacks {name}")));
     let run = claim.subject.trim_start_matches("mission-run/");
     let generation = text("current_generation")?.trim_start_matches("run-generation/");
-    let root = text("root_mission_run")?.trim_start_matches("mission-run/");
+    prepare_native_turn(tx, &claim.subject, fields, claim.accepted_at_unix_ms)?;
     let revision = text("revision")?;
     let at = claim.accepted_at_unix_ms.to_string();
-    tx.execute(
-        /* sqlite-large-value: allow-for-now lv-hf7749efab5f3 owner=fractal_store::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,parent_step_run,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
-         VALUES(?1,'native-turn',?2,?3,?4,?5,?6,?7,?8,'{}',?9,'running','normal',?10,?10)",
-        params![run, revision, generation, text("root_revision")?, root, text("parent_step_run")?,
-            text("workspace")?, text("requester")?, text("mode")?, at],
-    ).map_err(internal)?;
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-h8195589e83ca owner=fractal_store::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
          VALUES(?1,?2,?3,'running',?4,'native agent turn',?5,?5)",

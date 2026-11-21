@@ -55,6 +55,11 @@ describe('scoped native resource lanes', () => {
         case 'resource.lane.exec': return { _tag: 'Success', value: { code: 0, signal: null, stdout: '', stderr: '' } }
         case 'resource.lane.run': return { _tag: 'Success', value: { run: 'mission-run/child', status: 'completed' } }
         case 'resource.lane.release': return { _tag: 'Success', value: null }
+        // This lane fixture does not host native agent turns.
+        case 'agent.turn': return {
+          _tag: 'Failure',
+          error: { _tag: 'ResourceError', code: 'operation-refused', message: 'Unexpected native agent turn in lane fixture.' },
+        }
       }
     } })
     const exit = yield* start(program, host)

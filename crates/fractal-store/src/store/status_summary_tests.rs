@@ -190,7 +190,7 @@ fn activity_summary_short_histories_match_full_fold_with_sparse_fields_and_clear
         // Preserve the fixture's legacy order as explicit positions. Cold summaries may not
         // infer positions from batch prefixes; that case has its own bounded/unresolved test.
         store.connection.write().execute(
-            "INSERT OR IGNORE INTO claim_positions(claim_id,position)
+            /* sqlite-large-value: allow-for-now lv-hdc7968d42d77 owner=fractal_store::store::status_summary_tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claim_positions(claim_id,position)
              SELECT id,ROW_NUMBER() OVER (PARTITION BY batch_id ORDER BY store_index)-1 FROM claims",
             [],
         ).unwrap();
