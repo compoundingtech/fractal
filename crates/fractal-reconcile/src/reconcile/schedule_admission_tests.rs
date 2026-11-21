@@ -117,20 +117,20 @@ fn admission_discards_a_streak_measured_against_a_different_inventory_basis() {
 #[test]
 fn invalid_and_fenced_state_hold_healthy_traffic_and_reset_streak() {
     for sql in [
-        "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,updated_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-he6c21184bcd0 owner=fractal_reconcile::reconcile::schedule_admission_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,updated_at_unix_ms)
          VALUES('bad','peer',1,'hash',0,X'00','invalid','0')",
-        "INSERT INTO replica_envelope_holds VALUES('peer',1,'hash','fenced','0')",
+        /* sqlite-large-value: allow-for-now lv-h4786749395c7 owner=fractal_reconcile::reconcile::schedule_admission_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelope_holds VALUES('peer',1,'hash','fenced','0')",
     ] {
         let store = Store::open_memory("node").unwrap();
         let schedule = publish(&store, "host \"node\";", "initial");
         let since = now_ms();
         for offset in 0..3 { traffic_measurement(&store, "peer", 20, since + offset); }
         assert!(ready(&store, &schedule, since));
-        store.connection.lock().unwrap().execute(sql, []).unwrap();
+        store.connection.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h5c8ae9829e96 owner=fractal_reconcile::reconcile::schedule_admission_tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
         assert!(!ready(&store, &schedule, since), "current unhealthy state vetoes an old streak");
         traffic_measurement(&store, "peer", 20, since + 3);
         store.connection.lock().unwrap().execute_batch(
-            "DELETE FROM replica_records WHERE record_ref='bad'; DELETE FROM replica_envelope_holds;"
+            /* sqlite-large-value: allow-for-now lv-hb1c9f0d22451 owner=fractal_reconcile::reconcile::schedule_admission_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE record_ref='bad'; DELETE FROM replica_envelope_holds;"
         ).unwrap();
         for offset in 4..6 {
             traffic_measurement(&store, "peer", 20, since + offset);
