@@ -640,6 +640,90 @@ impl Store {
     }
 }
 
+/// The judged claim's batch time, and for a batch this side of the freshness cutover whether it
+/// keeps the writer's order: no claim in it timed before it, and it timed no earlier than the
+/// writer's previous batch or any batch its claims name as predecessors. Every read is an index
+/// seek; batches before the cutover are not checked.
+///
+/// Arrival order and forgetting must not change the answer. A batch the check reads but this
+/// member does not hold is returned as a dependency link (`batch:` for the writer's previous batch,
+/// `arrival:` for a predecessor), whose arrival requeues the claim. A disorder once found is
+/// recorded in `claim_batch_disorder`: more batches can only add constraints, so it is final, and a
+/// batch forgotten afterwards cannot turn it back.
+fn batch_time(connection: &Connection, claim_id: &str) -> Result<Option<(crate::principal::BatchTime, Vec<String>)>> {
+    use crate::principal::BatchTime;
+    let Some((time, origin, sequence, batch)) = connection
+        .prepare_cached(
+            "SELECT CAST(b.accepted_at_unix_ms AS INTEGER), b.origin, b.replica_sequence, b.id
+             FROM claims c JOIN batches b ON b.id=c.batch_id WHERE c.id=?1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hccc03f5454c6 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)))
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let time_unix_ms = u64::try_from(time).unwrap_or(0);
+    if time_unix_ms < crate::principal::FRESHNESS_FROM_UNIX_MS {
+        return Ok(Some((BatchTime { time_unix_ms, ordered: true }, Vec::new())));
+    }
+    let recorded: bool = connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM claim_batch_disorder WHERE claim_id=?1)")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h7f915a30389b owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))?;
+    if recorded {
+        return Ok(Some((BatchTime { time_unix_ms, ordered: false }, Vec::new())));
+    }
+    let disordered: bool = connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index
+                           WHERE batch_id=?1 AND CAST(accepted_at_unix_ms AS INTEGER)<?2)
+                 OR EXISTS(SELECT 1 FROM batches INDEXED BY batches_writer_sequence
+                           WHERE origin=?3 AND replica_sequence=?4-1
+                             AND CAST(accepted_at_unix_ms AS INTEGER)>?2)
+                 OR EXISTS(SELECT 1 FROM claims c INDEXED BY claims_batch_index, json_each(c.predecessors) j
+                           JOIN claims p ON p.id=j.value JOIN batches pb ON pb.id=p.batch_id
+                           WHERE c.batch_id=?1 AND CAST(pb.accepted_at_unix_ms AS INTEGER)>?2)",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h01b6552da688 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![batch, time, origin, sequence], |row| row.get(0))?;
+    if disordered {
+        return Ok(Some((BatchTime { time_unix_ms, ordered: false }, Vec::new())));
+    }
+    // What the answer read as absent: when it arrives, judge again.
+    let mut missing = Vec::new();
+    let previous: bool = connection
+        .prepare_cached("SELECT ?2<=1 OR EXISTS(SELECT 1 FROM batches INDEXED BY batches_writer_sequence WHERE origin=?1 AND replica_sequence=?2-1)")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h2bb2b5a2f8c0 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![origin, sequence], |row| row.get(0))?;
+    if !previous {
+        missing.push(format!("batch:{origin}|{}", sequence - 1));
+    }
+    let absent = connection
+        .prepare_cached(
+            "SELECT DISTINCT j.value FROM claims c INDEXED BY claims_batch_index, json_each(c.predecessors) j
+             WHERE c.batch_id=?1 AND NOT EXISTS(SELECT 1 FROM claims p WHERE p.id=j.value)",
+        )?
+        .query_map([&batch], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    missing.extend(absent.into_iter().map(|id| format!("arrival:{id}")));
+    Ok(Some((BatchTime { time_unix_ms, ordered: true }, missing)))
+}
+
+/// Requeue what a batch's or a claim's arrival can change (see `batch_time`). Installed with the
+/// store schema, after `claims` and `batches` exist.
+pub(super) const ARRIVAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5bff0fda78bc owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ "
+CREATE TABLE IF NOT EXISTS claim_batch_disorder(claim_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS claim_verdict_batch_arrived AFTER INSERT ON batches BEGIN
+    UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN
+        (SELECT claim_id FROM claim_verdict_links WHERE link='batch:'||NEW.origin||'|'||NEW.replica_sequence);
+    INSERT OR IGNORE INTO claim_verdict_queue(claim_id)
+        SELECT claim_id FROM claim_verdict_links WHERE link='batch:'||NEW.origin||'|'||NEW.replica_sequence;
+END;
+CREATE TRIGGER IF NOT EXISTS claim_verdict_claim_arrived AFTER INSERT ON claims BEGIN
+    UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN
+        (SELECT claim_id FROM claim_verdict_links WHERE link='arrival:'||NEW.id);
+    INSERT OR IGNORE INTO claim_verdict_queue(claim_id)
+        SELECT claim_id FROM claim_verdict_links WHERE link='arrival:'||NEW.id;
+END;
+";
+
 /// Answers for one claim being judged: every question about order is about claims before it.
 struct StoreFacts<'a> {
     connection: &'a Connection,
@@ -699,6 +783,12 @@ impl StoreFacts<'_> {
 }
 
 impl Facts for StoreFacts<'_> {
+    fn batch(&self) -> Option<crate::principal::BatchTime> {
+        let (batch, missing) = self.read(batch_time(self.connection, &self.claim_id), None)?;
+        self.links.borrow_mut().extend(missing);
+        Some(batch)
+    }
+
     fn delegation(&self, claim_id: &str) -> Option<Delegation> {
         self.links
             .borrow_mut()
@@ -962,7 +1052,7 @@ fn write_verdict_tx(
         ])?;
     let notify: bool = connection
         .prepare_cached("SELECT notified=0 FROM claim_signature_judging WHERE claim_id=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h7f915a30389b owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h8f1806fabd15 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
         .optional()?
         .unwrap_or(false);
     let ready = !matches!(verdict,Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:"));
@@ -1007,6 +1097,7 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
         "claim_signature_nonce_uses",
         "claim_signature_judging",
         "claim_verdicts",
+        "claim_batch_disorder",
         // Not claim_verdict_links: it has no index by claim, so this would scan every link.
         // The link stays until a requeue meets it or the sweep finds its claim gone.
         "claim_verdict_dependency_edges",
@@ -2460,7 +2551,16 @@ mod paced_verdict_tests {
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
+        // The links name claims the store holds: a requeue drops a link whose claim is gone.
+        tx.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                    VALUES ('batch/studio/1','studio',1,'hash','1')", []).unwrap();
         for i in 0..count {
+            tx.execute(
+                "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                 VALUES (?1,'batch/studio/1','note/root','example.note','studio',NULL,'{}','[]','1')",
+                [format!("claim/{i:05}")],
+            )
+            .unwrap();
             tx.execute(
                 "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)",
                 [format!("claim/{i:05}")],
@@ -2884,5 +2984,153 @@ mod paced_verdict_tests {
                 .unwrap(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    use crate::claim::ClaimInput;
+    use crate::fleet::MemberKey;
+    use crate::principal::{BatchTime, FRESHNESS_FROM_UNIX_MS};
+
+    fn note(store: &Store, text: &str, at: u64) -> String {
+        store.set_write_clock_at(u128::from(at)).unwrap();
+        let id = store
+            .append_claim(&ClaimInput {
+                subject: format!("note/{text}"),
+                kind: "example.note".into(),
+                actor: None,
+                fields: serde_json::from_value(serde_json::json!({"text": text})).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+            .id;
+        store.replication_snapshot().unwrap();
+        id
+    }
+
+    fn batch_of(store: &Store, claim: &str) -> BatchTime {
+        batch_time(&store.readers.get(), claim).unwrap().unwrap().0
+    }
+
+    fn judge_all(store: &Store) {
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_batch_past_the_cutover_keeps_the_writers_order_or_its_claims_are_invalid() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+        let start = FRESHNESS_FROM_UNIX_MS + 60_000;
+        let first = note(&store, "first", start);
+        let second = note(&store, "second", start + 60_000);
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+        }
+        for claim in [&first, &second] {
+            assert!(batch_of(&store, claim).ordered);
+            assert_eq!(store.claim_verdict(claim).unwrap(), Verdict::Verified);
+        }
+        assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+        let batch: String = store.readers.get()
+            .query_row("SELECT batch_id FROM claims WHERE id=?1", [&second], |row| row.get(0)).unwrap();
+        let write = |sql: &str| { store.connection.write().execute(sql, [&batch]).unwrap(); };
+
+        // Timed before the writer's previous batch.
+        write(&format!("UPDATE batches SET accepted_at_unix_ms='{}' WHERE id=?1", start - 1));
+        write(&format!("UPDATE claims SET accepted_at_unix_ms='{}' WHERE batch_id=?1", start - 1));
+        assert!(!batch_of(&store, &second).ordered);
+        let mismatches = store.recheck_claim_verdicts().unwrap();
+        assert!(mismatches.iter().any(|m| m.claim_id == second), "{mismatches:?}");
+        write(&format!("UPDATE batches SET accepted_at_unix_ms='{}' WHERE id=?1", start + 60_000));
+        write(&format!("UPDATE claims SET accepted_at_unix_ms='{}' WHERE batch_id=?1", start + 60_000));
+        // The recheck judged it disordered and recorded that: a disorder once found is final.
+        assert!(!batch_of(&store, &second).ordered);
+        // Clear the record to check the next case on the same batch.
+        store.connection.write().execute("DELETE FROM claim_batch_disorder", []).unwrap();
+        assert!(batch_of(&store, &second).ordered);
+
+        // A claim timed before its own batch.
+        write(&format!("UPDATE claims SET accepted_at_unix_ms='{}' WHERE batch_id=?1", start + 59_999));
+        assert!(!batch_of(&store, &second).ordered);
+        write(&format!("UPDATE claims SET accepted_at_unix_ms='{}' WHERE batch_id=?1", start + 60_000));
+
+        // Timed before a batch one of its claims names as a predecessor.
+        store.connection.write().execute(
+            "UPDATE claims SET predecessors=json_array(?2) WHERE id=?1", params![&first, &second]).unwrap();
+        assert!(!batch_of(&store, &first).ordered, "the first batch now follows a later one");
+        assert!(batch_of(&store, &second).ordered);
+    }
+
+    #[test]
+    fn a_predecessor_that_arrives_late_rejudges_and_a_forgotten_one_keeps_the_verdict() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+        let start = FRESHNESS_FROM_UNIX_MS + 60_000;
+        let claim = note(&store, "cites", start);
+        judge_all(&store);
+        assert_eq!(store.claim_verdict(&claim).unwrap(), Verdict::Verified);
+        // It names a predecessor this member does not hold yet: judged without it, the claim
+        // waits on its arrival.
+        {
+            let connection = store.connection.write();
+            connection.execute("UPDATE claims SET predecessors='[\"claim/late\"]' WHERE id=?1", [&claim]).unwrap();
+            connection.execute("INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)", [&claim]).unwrap();
+        }
+        judge_all(&store);
+        assert_eq!(store.claim_verdict(&claim).unwrap(), Verdict::Verified);
+        let waits: bool = store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM claim_verdict_links WHERE link='arrival:claim/late' AND claim_id=?1)",
+            [&claim], |row| row.get(0)).unwrap();
+        assert!(waits, "the claim depends on its predecessor's arrival");
+        // The predecessor arrives, in a batch timed after the claim's: the claim is judged again.
+        {
+            let connection = store.connection.write();
+            connection.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                VALUES ('batch/peer/9','peer',9,'hash',?1)", [(start + 120_000).to_string()]).unwrap();
+            connection.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                VALUES ('claim/late','batch/peer/9','note/late','example.note','peer',NULL,'{}','[]',?1)",
+                [(start + 120_000).to_string()]).unwrap();
+        }
+        judge_all(&store);
+        assert_eq!(store.claim_verdict(&claim).unwrap(),
+            Verdict::Invalid(crate::principal::BATCH_DISORDER.into()));
+        assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+        // A trim forgets the predecessor: the recorded disorder stands, on a recheck and on a
+        // full rebuild alike.
+        {
+            let connection = store.connection.write();
+            connection.execute("DELETE FROM claims WHERE id='claim/late'", []).unwrap();
+            connection.execute("DELETE FROM batches WHERE id='batch/peer/9'", []).unwrap();
+        }
+        assert!(store.recheck_claim_verdicts().unwrap().is_empty(), "the recorded verdict holds");
+        assert_eq!(store.claim_verdict(&claim).unwrap(),
+            Verdict::Invalid(crate::principal::BATCH_DISORDER.into()));
+    }
+
+    #[test]
+    fn a_writers_previous_batch_arriving_requeues_what_waits_on_it() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        let connection = store.connection.write();
+        connection.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('batch:peer|4','claim/waiting')", []).unwrap();
+        connection.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            VALUES ('batch/peer/4','peer',4,'hash','1')", []).unwrap();
+        let queued: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id='claim/waiting')", [], |row| row.get(0)).unwrap();
+        assert!(queued);
+    }
+
+    #[test]
+    fn a_batch_before_the_cutover_is_not_checked() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+        let claim = note(&store, "early", FRESHNESS_FROM_UNIX_MS - 60_000);
+        let batch = batch_of(&store, &claim);
+        assert!(batch.time_unix_ms < FRESHNESS_FROM_UNIX_MS && batch.ordered);
     }
 }
