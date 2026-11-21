@@ -128,6 +128,7 @@ pub use usage_credits::{UsageCreditReading, UsageCreditSnapshot};
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
+mod observer_mail_inputs;
 pub mod completion_state;
 #[cfg(test)]
 pub mod resource_preparation_fence_tests;
