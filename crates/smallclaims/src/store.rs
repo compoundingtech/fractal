@@ -6888,6 +6888,7 @@ impl Store {
                 None => guard.pinned.take().expect("a request loan holds its connection"),
             }),
             transaction: Some(crate::windows::holds::ReadHold::start()),
+            _live: guard._live.take(),
         };
         drop(guard);
         let connection = pinned

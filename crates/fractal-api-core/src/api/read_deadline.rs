@@ -900,6 +900,51 @@ use super::*;
         assert!(!durations.iter().any(|(origin, _)| origin == "GET /v1/snapshot-probe"),
             "diagnostic snapshot tokens must not double-charge the physical loan");
     }
+
+    #[test]
+    fn standalone_snapshot_records_its_full_physical_loan_duration() {
+        const CHILD: &str = "ST_STANDALONE_SNAPSHOT_COST_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::read_deadline::tests::standalone_snapshot_records_its_full_physical_loan_duration"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        use smallclaims::sqlite::telemetry;
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let root = tempfile::tempdir().unwrap();
+        let store = super::super::Store::open(&root.path().join("claims.sqlite"), "node").unwrap();
+        let _origin = telemetry::enter_origin(
+            telemetry::route_origin("GET", "/v1/standalone-snapshot-probe"));
+        let held = store.read_snapshot(|_| {
+            let started = std::time::Instant::now();
+            // This is the measured checkout workload, not a synchronization delay.
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(started.elapsed())
+        }).unwrap();
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        let sum = exported.iter().rev().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "st.db.read_loan.duration")
+            .and_then(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Sum(sum)) => Some(sum),
+                _ => None,
+            }).expect("standalone snapshot publishes its physical loan cost");
+        let charged: f64 = sum.data_points().filter(|point| point.attributes().any(|attribute|
+            attribute == &opentelemetry::KeyValue::new("origin", "GET /v1/standalone-snapshot-probe")))
+            .map(|point| point.value()).sum();
+        assert!(charged >= held.as_secs_f64(),
+            "physical loan cost {charged}s must include the snapshot callback's {held:?}");
+        assert_eq!(store.readers.live_read_report().live_checkouts, 0);
+    }
+
     #[test]
     fn export_read_loan_snapshot_wait_obeys_deadline() {
         let root = tempfile::tempdir().unwrap();
