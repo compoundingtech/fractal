@@ -1547,7 +1547,8 @@ mod tests {
     fn deferred_roster_attributes_export_each_final_value_once() {
         use opentelemetry::trace::{TraceContextExt as _, Tracer as _, TracerProvider as _};
         let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
-        let provider = SdkTracerProvider::builder().with_simple_exporter(exporter.clone()).build();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone()).build();
         let _export = super::fixture_export_scope();
         super::roster_collect_warm(|| {
             super::roster_attribute("st.roster.covered", 0_i64);
