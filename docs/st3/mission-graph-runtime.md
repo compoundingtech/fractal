@@ -1599,6 +1599,13 @@ mission's policy; schedules retain their timers, catch-up and no-overlap behavio
 does not change schedule admission or schedule faults. `stalled-after` remains a positive
 duration even when stall reports are disabled.
 
+An agentless exec step also makes progress while its host observes its owned exec running.
+The run, step and current generation must match the declaration, and the observed incarnation
+must match both its launch receipt and physical launch provenance. A queue wait inside that exec
+therefore needs no synthetic `work wait` heartbeat. Missing, exited, stale or foreign processes
+do not count; neither does an unverified remote observation. This does not pause or extend the
+step's execution timeout. Agent-held work still requires the progress described below.
+
 A stall is measured from the run's last sign of life: its last state change and any step's last
 change or progress record. A step that a worker holds counts from the start of its current
 execution interval (its claim, or the end of its last wait), its last progress record, and a
