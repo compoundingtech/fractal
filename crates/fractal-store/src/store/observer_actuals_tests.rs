@@ -14,7 +14,25 @@ fn append(store: &Store, subject: &str, at: u128, fields: Value) -> String {
     claim.id
 }
 
+/// Finish the preparation a delivery deferred before a fenced read. The writer runs it in paced
+/// turns between loans (#6859), and one landing between the fence's seed and its check moves the
+/// cut, which the fence rightly refuses. Waiting for those turns timed out on a loaded host, so
+/// the test drains the work itself, on the writer, until none is left.
+fn settle(store: &Store) {
+    for _ in 0..10_000 {
+        if !store.runtime.deferred_pending(&store.readers.get()).unwrap() {
+            return;
+        }
+        let runtime = store.runtime.clone();
+        store.connection.batched(move |transaction| {
+            runtime.rebuild_deferred(transaction, std::time::Duration::from_millis(50))
+        }).unwrap().unwrap();
+    }
+    panic!("deferred preparation must finish");
+}
+
 fn read(store: &Store) -> (Option<Value>, u64) {
+    settle(store);
     let fence = resource_preparation::Fence::new(store);
     let prepared = fence.prepare_with_actuals(store, |connection, serial| {
         let work = smallclaims::sqlite::work::SqliteWorkScope::start();

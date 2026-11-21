@@ -600,6 +600,7 @@ mission "example/report" state="ready" {
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
+    mod stream_work_wakes;
     mod ref_watch_tests;
     mod revision_seat_tests;
     mod rollout_tests;
@@ -30194,8 +30195,9 @@ mission "wake" state="ready" {
             .latest_claim(&wake.subject, Some("message.sent"))
             .unwrap()
             .unwrap();
-        let evidence = work_wake_attempt_evidence(&store, &[(now_ms(), &wake)]).unwrap();
+        let (evidence, stream) = work_wake_attempt_evidence(&store, &[(now_ms(), &wake)]).unwrap();
         assert_eq!(evidence, vec![sent_claim.id]);
+        assert!(stream.is_empty());
         store
             .append_claim(&ClaimInput {
                 subject: desired.subject,

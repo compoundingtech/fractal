@@ -196,8 +196,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::ops::Deref;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result};
@@ -245,18 +243,14 @@ use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
 pub use smallclaims::store::{
-    CHECKPOINT_SPACE_GATE_VERSION, CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
-    CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction,
-    CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest,
-    CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView, CheckpointProof,
-    CheckpointResumeRequest, CheckpointStatusView, ClaimTombstone, CreatedFleetInvite, DropCount,
-    DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue, FleetInviteView,
-    FleetRedemption, FleetRemoval, PendingCheckpointView, ReplicationAdmission, SealTerms,
-    SealedSet, TRIM_CHUNK_ENVELOPES, TrimFault, VerifiedTerms, certificates, checkpoint_build,
-    checkpoint_cut, checkpoint_name, checkpoint_participants, chosen_certificate,
-    configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
-    newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
+    CHECKPOINT_SPACE_GATE_VERSION, CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointAction,
+    CheckpointContext, CheckpointManifest, CheckpointManifestCursor, CheckpointManifestPage,
+    CheckpointManifestRequest, CheckpointResumeRequest, TrimStatusView, ClaimTombstone,
+    CreatedFleetInvite, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue,
+    FleetInviteView, FleetRedemption, FleetRemoval, ReplicationAdmission, SealedSet,
+    TRIM_CHUNK_ENVELOPES, TrimFault, checkpoint_build, checkpoint_cut, checkpoint_name,
+    configure_projection_writer, drop_digest, newest_due_cut, valid_fleet_node_name,
+    check_checkpoint_manifest,
 };
 use smallclaims::windows::holds;
 
@@ -291,7 +285,6 @@ pub mod backup_ledgers;
 pub mod backup_shards;
 pub mod checkpoint_rules;
 pub mod harness_questions;
-pub mod checkpoint_status;
 pub mod human_review_reassignment;
 pub mod mission_eligibility;
 pub use mission_eligibility::MISSING_AGENT_CONDITION;
@@ -360,19 +353,13 @@ pub use limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
-pub mod checkpoint_agreement_tests;
-#[cfg(test)]
 mod local_trim_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]
 pub mod checkpoint_tests;
 #[cfg(test)]
-pub mod checkpoint_identity_reuse_tests;
-#[cfg(test)]
 mod newest_claim_index_tests;
-#[cfg(test)]
-mod checkpoint_proof_span_tests;
 #[cfg(test)]
 pub mod provenance_tests;
 #[cfg(test)]
@@ -399,6 +386,8 @@ pub mod wake_lookup;
 mod gate_runners_tests;
 #[cfg(test)]
 mod wake_lookup_tests;
+#[cfg(test)]
+mod mail_delivery_source_tests;
 #[cfg(test)]
 mod status_summary_tests;
 #[cfg(test)]
@@ -442,21 +431,6 @@ pub use smallclaims::sqlite::STATEMENTS_RUN;
 pub mod checkpoint {
     pub use super::checkpoint_rules::*;
     pub use smallclaims::store::checkpoint::*;
-
-    /// Prove a drop plan on a copy of the store with Fractal's projections and readers.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn prove_on_copy(
-        copy: &std::path::Path,
-        sealed: &SealedSet,
-        plan: &DropPlan,
-    ) -> anyhow::Result<CheckpointProof> {
-        smallclaims::store::checkpoint::prove_on_copy(
-            &super::FractalRuntime::default(),
-            copy,
-            sealed,
-            plan,
-        )
-    }
 }
 
 /// The graph's projection digests over Fractal's shared tables.
@@ -2669,7 +2643,9 @@ pub fn stale_pull_request_request_tx(
 
 pub fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0 || (13..=fractal_schema::STORAGE_VERSION).contains(&version)
+    // Versions above the default writer format are reached by passes that run after open,
+    // such as the deletion of valid records (`record_bytes`); none needs a migration here.
+    if version == 0 || (13..=smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
     {
         return Ok(());
     }
@@ -7129,7 +7105,6 @@ impl Store {
             items.push(fault.item);
         }
         items.extend(gates);
-        items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
         let dismissed = self.dismissed_faults()?;
@@ -9427,14 +9402,13 @@ pub fn desired_row_at(
     if subject.starts_with("message/") {
         if let Some(row) = current_desired_row(connection, subject)? {
             let unchanged: bool = connection.query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                /* sqlite-large-value: allow-for-now lv-hb1f5eb722a0b owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!("SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                  WHERE subject=?1 AND kind='intent.desired' AND store_index>?2)
                  AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                    WHERE subject=?1 AND kind='intent.desired'
                      AND store_index>COALESCE((SELECT last_good_store_index FROM projection_health
                        WHERE aggregate='graph' AND status='healthy'),0)
-                     AND EXISTS(SELECT 1 FROM replica_records
-                       WHERE claim_id=claims.id AND state='valid'))",
+                     AND {})", smallclaims::store::record_bytes::admitted_claim_sql("claims")),
                 params![subject,at_index], |row| row.get(0),
             )?;
             if unchanged { return Ok(Some(row)); }
@@ -22191,7 +22165,7 @@ pub fn enrich_step_definition_cached(
 ) -> rusqlite::Result<()> {
     if view.run.starts_with("mission-run/native-turn/") {
         let fresh: Option<bool> = connection.query_row(
-            &canonical_sql("SELECT coalesce(json_extract(body,'$.fields.native_turn.freshContext'),0)
+            /* sqlite-large-value: allow-for-now lv-hcf0f7f13c0e5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT coalesce(json_extract(body,'$.fields.native_turn.freshContext'),0)
                 FROM claims WHERE subject=?1 AND kind='mission-run.created'
                 ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
             [&view.run], |row| row.get(0),
@@ -22319,6 +22293,25 @@ pub(super) fn work_wake_history_query(complete: bool) -> String {
     ))
 }
 
+/// [`work_wake_history_query`]'s rows for wakes that are stream items, from their mirror rows.
+/// The mirror keeps no time for a lifecycle step, so a snapshot sees the steps recorded so far.
+const STREAM_WORK_WAKE_HISTORY: &str = "SELECT item.fields, CAST(item.sent_ms AS TEXT), item.subject,
+        EXISTS(SELECT 1 FROM local_stream_lifecycle step
+               WHERE step.subject=item.subject AND step.kind IN ('message.read','message.closed')),
+        EXISTS(SELECT 1 FROM local_stream_lifecycle step
+               WHERE step.subject=item.subject AND step.kind='message.delivered'),
+        EXISTS(SELECT 1 FROM local_stream_lifecycle step
+               WHERE step.subject=item.subject AND step.kind='message.staged')
+     FROM (
+         SELECT DISTINCT claim_id FROM local_work_wake_tags
+         WHERE recipient IN (?3, ?4) AND tag>=?2 AND tag<?5 AND claim_id LIKE 'message/%'
+     ) AS wake_candidates
+     CROSS JOIN local_stream_sent item ON item.subject=wake_candidates.claim_id
+     WHERE item.sent_ms<=CAST(?1 AS INTEGER)
+       AND json_extract(item.fields, '$.to') IN (?3, ?4)
+       AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.subject=item.subject AND claims.kind='message.sent')
+     ORDER BY item.stream_index";
+
 pub fn enrich_step_wake_at(
     connection: &Connection,
     view: &mut StepRunView,
@@ -22399,28 +22392,39 @@ fn enrich_step_wake_with(
     let mut upper = wake_tag_prefix.clone();
     upper.pop();
     upper.push('A'); // The exclusive lexicographic successor of the final '@'.
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h20950ed4b5dc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &work_wake_history_query(complete))?;
-    let rows = statement.query_map(
-        params![
-            snapshot_unix_ms.to_string(),
-            wake_tag_prefix,
-            assignee,
-            bare_assignee,
-            upper
-        ],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, bool>(4)?,
-                row.get::<_, bool>(5)?,
-            ))
-        },
-    )?;
-    for row in rows {
-        let (body, accepted, message, consumed, delivered, staged) = row?;
+    let snapshot = snapshot_unix_ms.to_string();
+    let wake_params = params![
+        snapshot,
+        wake_tag_prefix,
+        assignee,
+        bare_assignee,
+        upper
+    ];
+    let history_row = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, bool>(3)?,
+            row.get::<_, bool>(4)?,
+            row.get::<_, bool>(5)?,
+        ))
+    };
+    let mut rows = connection
+        .prepare(/* sqlite-large-value: allow-for-now lv-h20950ed4b5dc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &work_wake_history_query(complete))?
+        .query_map(wake_params, history_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let stream = connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf8968ee53382 owner=fractal_store::store TODO=trace-statement-and-value-representation */ STREAM_WORK_WAKE_HISTORY)?
+        .query_map(wake_params, history_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // A seat's wakes moved to the stream on this build, so its graph wakes come first; the sort
+    // only interleaves a history written across a rollback and a second upgrade.
+    if !stream.is_empty() {
+        rows.extend(stream);
+        rows.sort_by_key(|(_, accepted, ..)| accepted.parse::<u128>().unwrap_or(0));
+    }
+    for (body, accepted, message, consumed, delivered, staged) in rows {
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         if fields
@@ -23758,24 +23762,24 @@ pub fn cancel_mission_run_tx(
         if let Some(claimant) = claimant {
             let stable = canonical_hash(&(run_id, &generation_id, &subject, "cancelled"))
                 .map_err(internal)?;
-            append_claim_tx(
-                transaction,
-                origin,
-                &format!("message/mission-cancelled-{}", &stable[..20]),
-                "message.sent",
-                None,
-                &json!({"fields": {
+            // The notice goes through the outbox: its route can't be read inside this batch.
+            message_routing::queue_tx(transaction, &ClaimInput {
+                subject: format!("message/mission-cancelled-{}", &stable[..20]),
+                kind: "message.sent".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({
                     "from": "daemon/runtime",
                     "to": claimant,
                     "title": "Mission work cancelled",
                     "content": format!("Mission run mission-run/{run_id} cancelled step {subject}. Stop this work. Reason: {reason}"),
                     "status": "sent",
                     "tags": [format!("mission-run:mission-run/{run_id}"), format!("step-run:{subject}")],
-                }}),
-                &[],
-                forced_batch,
-            )
-            .map_err(internal)?;
+                }))
+                .map_err(internal)?,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })?;
         }
         transaction
             .execute(

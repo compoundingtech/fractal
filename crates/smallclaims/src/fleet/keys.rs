@@ -17,6 +17,7 @@ const ENVELOPE_SIGNATURE_DOMAIN: &str = "st3-envelope-v1";
 /// envelopes separately in every store, so without the shard a signature made for one store
 /// would verify for an envelope of another.
 const SHARD_ENVELOPE_SIGNATURE_DOMAIN: &str = "st3-shard-envelope-v1";
+const CLAIM_SIGNATURE_DOMAIN: &str = "st3-claim-v1";
 
 fn encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -158,6 +159,14 @@ pub fn envelope_signature_message_in(
         ),
     }
     .into_bytes()
+}
+
+/// The bytes a writer signs for one of its claims. The claim id hashes the claim's content and its
+/// batch, and the batch id hashes the writer, sequence, previous hash and accept time, so with the
+/// writer and sequence (which place the key in the membership window) this authenticates the claim
+/// without the envelope that carried it. The fleet ID keeps a signature from counting elsewhere.
+pub fn claim_signature_message(fleet_id: &str, writer: &str, sequence: u64, claim_id: &str) -> Vec<u8> {
+    format!("{CLAIM_SIGNATURE_DOMAIN}\n{fleet_id}\n{writer}\n{sequence}\n{claim_id}").into_bytes()
 }
 
 #[cfg(test)]

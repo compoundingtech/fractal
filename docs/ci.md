@@ -127,9 +127,12 @@ Node setup is already explicit. The moved web aggregator installs pinned Node
 on owned runners only when uncovered relevant receipts need validation.
 CI-script tests, Home Manager evaluation and real web execution retain their existing
 hosted placement. The picker, eight evidence gates and compatibility archive producers
-instead use the same ephemeral `nscloud-ubuntu-24.04-amd64-8x16-with-features` shape
-as required PR stages,
-at priority 1 for merge groups and 2 otherwise. None depends on picker output.
+instead use the ephemeral `nscloud-ubuntu-24.04-amd64-2x4-with-features` shape,
+at priority 1 for merge groups and 2 otherwise. These Python/Git/API controls
+need no build capacity: compared with the 8x16 compilation shape, each requests
+75% less CPU and RAM from the shared Namespace concurrency budget. Their
+labels require no provider-managed profile or picker output. This reduces
+admission pressure but does not reserve capacity or preempt running jobs.
 These are the complete prerequisite paths for the fast-lane required checks
 `linux-test-build`, `linux-clippy` and `linux-fleet-compat`; unrelated hosted jobs,
 including source retention, cannot delay their admission. Fork source is not moved

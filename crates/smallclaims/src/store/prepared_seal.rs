@@ -148,12 +148,12 @@ pub(crate) fn own_unsigned_envelopes(
     Ok(unsigned)
 }
 
-/// One record of a sealed batch: a claim, encoded as the envelope carries it.
+/// One record of a sealed batch: which claim it holds. A valid record keeps no bytes of its
+/// own; the envelope's payload is the signed encoding (`record_bytes`).
 pub(crate) struct SealedRecord {
     claim_id: String,
     subject: String,
     kind: String,
-    raw: Vec<u8>,
 }
 
 /// One batch sealed into an envelope, with what sealing read to make it.
@@ -248,13 +248,10 @@ pub(crate) fn seal_batch(
     }
     let mut records = Vec::with_capacity(claims.len());
     for claim in &claims {
-        let mut raw = Vec::new();
-        ciborium::into_writer(claim, &mut raw)?;
         records.push(SealedRecord {
             claim_id: claim.id.clone(),
             subject: claim.subject.clone(),
             kind: claim.kind.clone(),
-            raw,
         });
     }
     let claim_rows = claims
@@ -326,7 +323,10 @@ pub(crate) fn write_sealed_batch_tx(
             relay
         ],
     )?;
-    for (position, record) in sealed.records.iter().enumerate() {
+    // A store that keeps no valid record stores none for its own claims either; each claim's
+    // position was stored when it was appended (`record_bytes`).
+    let keep_valid = super::record_bytes::valid_records_kept(transaction)?;
+    for (position, record) in sealed.records.iter().enumerate().filter(|_| keep_valid) {
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h7bd22e8b7f8a owner=smallclaims::store::prepared_seal TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_records(
                  record_ref, writer, sequence, envelope_hash, position, raw, state,
@@ -343,7 +343,7 @@ pub(crate) fn write_sealed_batch_tx(
                 batch.sequence,
                 sealed.envelope_hash,
                 position as u64,
-                record.raw,
+                super::record_bytes::VALID_RECORD_RAW,
                 record.claim_id,
                 record.subject,
                 record.kind,

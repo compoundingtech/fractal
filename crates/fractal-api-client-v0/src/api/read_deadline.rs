@@ -58,10 +58,6 @@ mod tests {
             Some(ORDINARY)
         );
         assert_eq!(
-            deadline(&request(Method::GET, "/v1/checkpoint/plan")),
-            Some(BULK)
-        );
-        assert_eq!(
             deadline(&request(Method::POST, "/v1/internal/replication/export")),
             Some(BULK)
         );

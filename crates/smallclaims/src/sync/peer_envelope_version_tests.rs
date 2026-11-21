@@ -4,7 +4,7 @@ use super::*;
 #[tokio::test]
 async fn peer_envelope_versions_are_accepted_by_each_signed_reader() {
     for version in ["st3.v1", "fractal.v1", "future.v9"] {
-        for path in [EXCHANGE_PATH, CHECKPOINT_PATH, crate::sync::ANSWERS_PATH] {
+        for path in [EXCHANGE_PATH, crate::sync::ANSWERS_PATH] {
             let auth = FleetAuth::test("fleet-test", &[7; 32]);
             let signing = auth.clone();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -14,12 +14,7 @@ async fn peer_envelope_versions_are_accepted_by_each_signed_reader() {
                 post(move |request: Bytes| {
                     let signing = signing.clone();
                     async move {
-                        let value = if path == CHECKPOINT_PATH {
-                            serde_json::json!({"checkpoint": "test", "cut_unix_ms": 0,
-                            "envelopes": [], "claims": []})
-                        } else {
-                            serde_json::json!({})
-                        };
+                        let value = serde_json::json!({});
                         let mut envelope = PeerResponse::new("peer", 0, value);
                         assert_eq!(envelope.api_version, "st3.v1");
                         envelope.api_version = version.into();
@@ -45,22 +40,7 @@ async fn peer_envelope_versions_are_accepted_by_each_signed_reader() {
             };
             let fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
             let http = replication_http_client();
-            let result = if path == CHECKPOINT_PATH {
-                fetch_checkpoint_manifest_page(
-                    &http,
-                    &peer,
-                    "reader",
-                    &auth,
-                    &fleet,
-                    &CheckpointManifestRequest {
-                        checkpoint: "test".into(),
-                        cut_unix_ms: 0,
-                        after: None,
-                    },
-                )
-                .await
-                .map(|_| ())
-            } else if path == crate::sync::ANSWERS_PATH {
+            let result = if path == crate::sync::ANSWERS_PATH {
                 answers_check::fetch_answers(
                     &http,
                     &peer,

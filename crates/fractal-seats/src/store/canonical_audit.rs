@@ -67,6 +67,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "replica_envelopes",
         "replica_records",
         "claim_positions",
+        "claim_member_signatures",
+        "claim_member_signature_pending",
+        "record_repair_lookups",
         "repaired_claim_replacements",
         "retired_claim_ids",
         "retired_envelopes",
@@ -100,6 +103,7 @@ fn every_persistent_table_has_a_projection_scope() {
         // Rebuildable indexed escalation clocks and transaction-local change capture.
         "local_escalation_clocks_v1",
         "local_escalation_pending_v1",
+        "local_escalation_pending_v2",
         "unread_mail",
         "unread_mail_prefixes",
         "unread_mail_pending",
@@ -1111,13 +1115,6 @@ fn every_shared_projection_agrees_after_shuffle_restart_and_checkpoint() {
             &format!("{name}/restart-replay"),
             &mut mismatches,
         );
-        let scratch = tempfile::tempdir().unwrap();
-        let (_, _, proof) = target
-            .plan_checkpoint_through(cut, None, scratch.path())
-            .unwrap();
-        if !proof.passed {
-            mismatches.push(format!("{name}/checkpoint proof: {:?}", proof.mismatches));
-        }
         // Use the production tombstone/delete/replay path on isolated stores. Certificate and
         // fleet protocol behavior already has separate tests; this tests the projection boundary.
         let checkpoint_reference = Store::open_memory("cedar").unwrap();
