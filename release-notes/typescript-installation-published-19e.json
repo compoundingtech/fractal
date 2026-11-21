@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Align the TypeScript installation with the published 19e Effect-utils producer and record its measured dependency hash",
+  "replay": {"status": "none", "detail": "This change aligns build-toolchain inputs and their measured installation hash; it does not modify Fractal store replay or recovery code."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, migrations or schema versions are changed."},
+  "rules": {"status": "none", "detail": "No checkpoint rules, digests or coordinated-member upgrade requirements are changed."},
+  "compatibility": {"status": "unknown", "detail": "The published toolchain also supplies shared CI generators and the telemetry collector. The canonical TypeScript installation hash has been measured for exact producer 19e8869676e66a39bd3b3e0fccf217ad1b5d71ce, but full TypeScript consumer, generated-workflow and release-integration qualification remain required before readiness; this hash measurement does not attest mixed-version runtime compatibility."},
+  "downtime": {"status": "none", "detail": "The source and dependency-hash update itself performs no service restart or deployment and introduces no additional required interruption."},
+  "manual": {"status": "changed", "detail": "Source maintainers updating this toolchain must keep flake and source-member selections aligned, run the native lock update, then scripts/nix-typescript-client-deps-hash --system x86_64-linux --flake . to measure both recorded hash fields. Do not reuse the previous producer's hash. Existing deployed installations require no action from this source-only change."},
+  "recovery": {"status": "none", "detail": "No persistent-state migration is introduced. A source rollback must restore the matching toolchain selections, lock metadata and measured installation hash together; the existing hash producer restores its input hash file if evaluation or measurement fails."}
+}
