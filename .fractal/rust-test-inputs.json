@@ -242,7 +242,7 @@
    "extra": [
     ".config",
     ".github/workflows/fleet.yml",
-    ".st/evidence-policy.json",
+    ".fractal/evidence-policy.json",
     "claude-channel",
     "crates/fractal-daemon/hooks/claude-observe.sh",
     "crates/fractal-daemon/hooks/claude-statusline.sh",
