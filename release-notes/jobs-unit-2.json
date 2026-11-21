@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive canonical execution identity and pure idempotency decisions in fractal-jobs.",
+  "replay": {"status": "none", "detail": "No projections or persistent receipts; those belong to unit 4."},
+  "schema": {"status": "none", "detail": "Pure unused types only; no database schema changes."},
+  "rules": {"status": "none", "detail": "No authority, configuration defaults or admission changes. Gate-slot remains the admission path."},
+  "compatibility": {"status": "none", "detail": "No runtime consumer. Versioned canonical bytes bind exact source, complete environment, argv, source-relative cwd and resources; matching requester/key digests reuse a job, changed digests are refused. Typed command validation rejects empty argv or an empty executable, permitting empty later arguments."},
+  "downtime": {"status": "none", "detail": "No runtime wiring or host activation."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Removing these inactive contracts does not change runtime behavior."}
+}
