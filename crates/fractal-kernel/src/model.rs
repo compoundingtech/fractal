@@ -698,6 +698,51 @@ pub struct ProductSpec {
     pub fields: BTreeMap<String, Value>,
 }
 
+/// An inert, daemon-owned finite work request. The durable program key identifies the
+/// episode; none of these strings are graph templates, commands, or environment variables.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeTurn {
+    pub agent: String,
+    pub instructions: String,
+    pub context: String,
+    #[serde(default)]
+    pub products: Vec<NativeTurnProduct>,
+    #[serde(default)]
+    pub fresh_context: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTurnProduct {
+    pub path: String,
+    pub kind: String,
+    pub fields: BTreeMap<String, Value>,
+}
+
+impl NativeTurn {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if !self.agent.starts_with("agent/") || self.agent.split('/').skip(1).any(str::is_empty)
+            || self.instructions.trim().is_empty()
+        {
+            return Err(FractalError::new("invalid-native-turn", "a turn needs a literal agent/<id> and nonempty instructions"));
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        for product in &self.products {
+            if product.path.split('/').any(|part| matches!(part, "" | "." | ".."))
+                || product.path.contains(['@', '\\', '\0'])
+                || product.kind.trim().is_empty()
+                || !paths.insert(&product.path)
+                || product.fields.values().any(|value| value.is_array() || value.is_object())
+                || product.fields.get("kind").is_some_and(|kind| kind.as_str() != Some(product.kind.as_str()))
+            {
+                return Err(FractalError::new("invalid-native-turn", "turn products need unique relative resource paths, a kind, and scalar fields"));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "source", rename_all = "kebab-case")]
 pub enum UsedMissionSpec {
@@ -870,10 +915,77 @@ impl Default for RetrySpec {
     }
 }
 
+/// Inline, absolute-delay ladder, identified within its mission or step scope.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EscalationSpec {
+    pub id: String,
+    pub state: EscalationState,
+    pub clock: EscalationClock,
+    pub stages: Vec<EscalationStage>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationClock {
+    SinceProgress,
+    SinceEntered,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EscalationStage {
+    pub after_ms: u64,
+    pub action: EscalationAction,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationAction {
+    Notify(String),
+    Ask(String),
+}
+
+/// Closed runtime state vocabulary (work states and mission run statuses, not phases).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationState {
+    WaitingPerson, Waiting, Ready, Claimed, Blocked, Verifying,
+    Completed, Failed, Cancelled, Queued, Running,
+}
+
+impl EscalationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WaitingPerson => "waiting-person", Self::Waiting => "waiting",
+            Self::Ready => "ready", Self::Claimed => "claimed", Self::Blocked => "blocked",
+            Self::Verifying => "verifying", Self::Completed => "completed",
+            Self::Failed => "failed", Self::Cancelled => "cancelled",
+            Self::Queued => "queued", Self::Running => "running",
+        }
+    }
+}
+
+/// Absence inherits; a disabled declaration is distinct from replacement.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "_tag", rename_all = "kebab-case")]
+pub enum EscalationOverride {
+    #[default]
+    Inherit,
+    Disable,
+    Replace { policies: Vec<EscalationSpec> },
+}
+
+impl EscalationOverride {
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StepSpec {
     pub id: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "EscalationOverride::is_inherit")]
+    pub escalation: EscalationOverride,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     /// st's own step that holds its run open while the mission watches: not work. Read it with
@@ -1054,12 +1166,46 @@ impl AuthorityVerb {
     }
 }
 
+/// Ordered soft metadata; milestones have no execution or delivery effect.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MissionMilestone {
+    pub id: String,
+    pub at: String,
+}
+
+/// Normalize the explicit-offset RFC3339 profile to fixed-width UTC milliseconds.
+pub fn mission_target_instant(value: &str) -> Result<String, FractalError> {
+    let invalid = || FractalError::new("invalid-mission-instant", "mission dates need an explicit known offset, valid RFC3339 calendar date and at most millisecond precision");
+    let bytes = value.as_bytes();
+    if !value.is_ascii() || bytes.len() < 20
+        || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T') || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':') || value.get(17..19) == Some("60")
+        || !bytes[..4].iter().all(u8::is_ascii_digit) || value.ends_with("-00:00")
+    {
+        return Err(invalid());
+    }
+    let offset_length = if value.ends_with('Z') { 1 } else { 6 };
+    let fraction = value.get(19..value.len() - offset_length).ok_or_else(invalid)?;
+    if !fraction.is_empty() && !(fraction.starts_with('.') && (2..=4).contains(&fraction.len())
+        && fraction.as_bytes()[1..].iter().all(u8::is_ascii_digit)) {
+        return Err(invalid());
+    }
+    let instant = chrono::DateTime::parse_from_rfc3339(value).map_err(|_| invalid())?;
+    if !(0..=9999).contains(&chrono::Datelike::year(&instant.with_timezone(&chrono::Utc))) {
+        return Err(invalid());
+    }
+    Ok(instant.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MissionSpec {
     pub id: String,
     pub subject: String,
     pub state: MissionState,
     pub revision: String,
+    #[serde(default, skip_serializing_if = "EscalationOverride::is_inherit")]
+    pub escalation: EscalationOverride,
     /// st's own plumbing or a standing observer, which clients fold away until asked. Read it
     /// with `mission::is_system` (fractal-daemon), which covers revisions published before the flag.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1076,6 +1222,11 @@ pub struct MissionSpec {
     pub max_active_runs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Soft date metadata only. Absence preserves pre-date persisted bytes and revision hashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestones: Vec<MissionMilestone>,
     /// The agent told when a run fails, is cancelled or stalls; none unless the mission asks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_to: Option<String>,

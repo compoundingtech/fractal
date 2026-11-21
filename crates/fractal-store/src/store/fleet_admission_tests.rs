@@ -878,11 +878,20 @@ fn staged_blobs_join_shared_authority_only_with_a_committed_claim() {
         let mut connection = source.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
         promote_claim_blobs(&transaction, &json!({"blob_hash":hash})).unwrap();
-        assert_ne!(
-            projection_digest::tables(&transaction).unwrap()["blobs"],
-            baseline.projection_digests["blobs"]
-        );
+        // Promotion makes it a shared blob inside the claim's transaction, and only there.
+        let shared: bool = transaction
+            .query_row("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash=?1)", [&hash], |row| row.get(0))
+            .unwrap();
+        assert!(shared);
         transaction.rollback().unwrap();
+    }
+    {
+        let shared: bool = source
+            .readers
+            .get()
+            .query_row("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash=?1)", [&hash], |row| row.get(0))
+            .unwrap();
+        assert!(!shared, "a rolled-back claim shares no blob");
     }
     assert_eq!(
         source
@@ -955,7 +964,6 @@ fn legacy_unreferenced_blobs_are_staged_without_losing_bytes() {
 
 #[test]
 fn arrangement_checkpoint_inputs_have_distinct_rules() {
-    use smallclaims::store::checkpoint_agreement::{SealTerms, seal_difference};
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("claims.sqlite3"), "alder").unwrap();
     let connection = store.readers.get();
@@ -978,18 +986,7 @@ fn arrangement_checkpoint_inputs_have_distinct_rules() {
         projection_digest::root(&legacy)
     );
     // Actual v10 identity immediately before #1267; its description stayed unchanged.
-    let legacy_rules = "d9a0e51ead09502fc373102832d96d530052735e53a75334b64906b149606fad";
-    let legacy_terms = SealTerms {
-        cut_unix_ms: 1,
-        participants: BTreeSet::from(["alder".into(), "birch".into()]),
-        sealed_digest: "same sealed claims".into(),
-        rules_digest: legacy_rules.into(),
-    };
-    let current_terms = SealTerms {
-        rules_digest: rules_digest(),
-        ..legacy_terms.clone()
-    };
-    assert_eq!(seal_difference(&current_terms, &legacy_terms), "rules");
+    assert_ne!(rules_digest(), "d9a0e51ead09502fc373102832d96d530052735e53a75334b64906b149606fad");
 }
 
 #[test]

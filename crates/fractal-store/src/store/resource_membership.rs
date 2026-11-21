@@ -50,7 +50,7 @@ pub struct LaneRequest {
     pub disk_path: Option<String>,
 }
 
-/// Historical tuple policies remain authoritative. Keyed policy identity deliberately excludes
+/// Historical tuple policies remain readable. Keyed policy identity deliberately excludes
 /// the immutable estimate carried by each membership.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(untagged)]
@@ -72,6 +72,36 @@ impl InstalledPolicy {
                 profile: profile.clone(), coverage: request.coverage },
             None => Self::Declared((request.max_members, request.capacity, request.coverage)),
         }
+    }
+
+    fn differences(&self, requested: &Self) -> String {
+        fn fields(policy: &InstalledPolicy) -> (Option<u32>, u32, Option<&str>, Option<Capacity>, Coverage) {
+            match policy {
+                InstalledPolicy::Keyed { version, max_members, profile, coverage } =>
+                    (Some(*version), *max_members, Some(profile.as_str()), None, *coverage),
+                InstalledPolicy::Declared((max_members, capacity, coverage)) =>
+                    (None, *max_members, None, *capacity, *coverage),
+            }
+        }
+        let (version, max_members, profile, capacity, coverage) = fields(self);
+        let (next_version, next_max_members, next_profile, next_capacity, next_coverage) = fields(requested);
+        let mut differences = Vec::new();
+        macro_rules! difference {
+            ($name:literal, $previous:expr, $next:expr) => {
+                if $previous != $next {
+                    differences.push(format!("{} {:?} -> {:?}", $name, $previous, $next));
+                }
+            };
+        }
+        difference!("version", version, next_version);
+        difference!("maxMembers", max_members, next_max_members);
+        difference!("profile", profile, next_profile);
+        difference!("capacity", capacity, next_capacity);
+        if coverage != next_coverage {
+            let name = |coverage| match coverage { Coverage::Logical => "logical", Coverage::Enforced => "enforced" };
+            differences.push(format!("coverage {} -> {}", name(coverage), name(next_coverage)));
+        }
+        differences.join(", ")
     }
 }
 
@@ -617,11 +647,15 @@ impl Store {
             if let Some(installed) = installed {
                 let previous: InstalledPolicy = serde_json::from_str(&installed)?;
                 if previous != expected {
-                    anyhow::ensure!(previous == InstalledPolicy::Declared((request.max_members, None, request.coverage)),
-                        "resource lane policy differs from host-installed policy");
-                    // Only the historical profile-less policy may acquire its first footprint.
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-h156314ba7532 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
-                    rusqlite::params![request.host,request.name])?;
+                    let legacy_upgrade = previous == InstalledPolicy::Declared((request.max_members, None, request.coverage));
+                    let live: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1
+                        WHERE host=?1 AND lane=?2 AND state IN ('queued','admitted','launched','retiring','uncertain'))",
+                        rusqlite::params![request.host,request.name], |row| row.get(0))?;
+                    anyhow::ensure!(legacy_upgrade || !live,
+                        "resource lane policy differs from host-installed policy: {}", previous.differences(&expected));
+                    // An idle lane can be redeclared atomically; live custody only permits the historical footprint upgrade.
+                    transaction.execute(/* sqlite-large-value: allow-for-now lv-h156314ba7532 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+                        rusqlite::params![request.host,request.name])?;
                 }
             }
             transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
@@ -1282,6 +1316,41 @@ mod tests {
             assert!(matches!(store.request_resource_membership(&head, fit.clone(), 2).unwrap(), Admission::Queued { .. }));
             fit.disk = None;
             assert!(matches!(store.request_resource_membership(&sized_request("later", 1), fit, 3).unwrap(), Admission::Admitted(_)));
+        }
+    }
+
+    #[test]
+    fn idle_lane_policy_can_change_coverage_after_a_refused_request() {
+        let store = fixture();
+        let mut enforced = request("enforced");
+        enforced.coverage = Coverage::Enforced;
+        assert!(matches!(store.request_resource_membership(&enforced, Fit { room: None, ..test_fit() }, 1).unwrap(),
+            Admission::Refused { code: RefusalCode::UnsupportedCoverage, .. }));
+        let logical = request("logical");
+        assert!(matches!(store.request_resource_membership(&logical, test_fit(), 2).unwrap(), Admission::Admitted(_)));
+        let policy: String = store.connection.write().query_row(
+            "SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+            rusqlite::params![logical.host,logical.name], |row| row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<InstalledPolicy>(&policy).unwrap(), InstalledPolicy::for_request(&logical));
+    }
+
+    #[test]
+    fn live_lane_policy_refuses_coverage_change_and_names_the_difference() {
+        for state in ["queued", "admitted", "launched", "retiring", "uncertain"] {
+            let store = fixture();
+            let mut enforced = request("enforced");
+            enforced.coverage = Coverage::Enforced;
+            // Queue on every platform, then exercise each state that retains a policy fence.
+            assert!(matches!(store.request_resource_membership(&enforced,
+                Fit { outside_bytes: 128 << 30, ..test_fit() }, 1).unwrap(), Admission::Queued { .. } | Admission::Refused { .. }));
+            store.connection.write().execute("UPDATE resource_memberships_v1 SET state=?1 WHERE id=?2",
+                rusqlite::params![state,enforced.id]).unwrap();
+            let error = store.request_resource_membership(&request("logical"), test_fit(), 2).unwrap_err();
+            assert!(error.to_string().contains("coverage enforced -> logical"), "{state}: {error}");
+            let policy: String = store.connection.write().query_row(
+                "SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+                rusqlite::params![enforced.host,enforced.name], |row| row.get(0)).unwrap();
+            assert_eq!(serde_json::from_str::<InstalledPolicy>(&policy).unwrap(), InstalledPolicy::for_request(&enforced));
         }
     }
 

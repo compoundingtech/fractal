@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Update the terminal authority idle-stream regression test for authenticated terminal followers.",
+  "replay": {"status": "none", "detail": "No runtime changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "The test now starts a local terminal follower with a local client session instead of calling the obsolete socket signature."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}

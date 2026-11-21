@@ -19,7 +19,6 @@ use rusqlite::params;
 use smallclaims::store::now_ms;
 use crate::store::*;
 use smallclaims::store::checkpoint::checkpoint_name;
-use smallclaims::store::checkpoint_agreement::SealTerms;
 
 fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
 let reader = store.readers.get();

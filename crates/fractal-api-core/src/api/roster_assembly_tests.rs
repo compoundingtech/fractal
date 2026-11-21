@@ -72,7 +72,7 @@ fn queue_activity_preserves_completed_membership_pages() {
             let before = store.index().unwrap();
             let kind = if attempt % 2 == 0 { "work.progress" } else { "work.renewed" };
             append(&store, "step-run/example/work", kind, Some("agent/test-00"),
-                json!({"summary":format!("attempt {attempt}"), "lease_expires_at_unix_ms":1}));
+                json!({"summary":format!("attempt {attempt}"), "claim_expires_at_unix_ms":1}));
             let change = store.changed_agent_resources(before, store.index().unwrap(), &[]).unwrap();
             let AgentResourcesChange::Delta(delta) = change else { panic!("ordinary work must have a scoped delta"); };
             assert!(!delta.queues && !delta.membership, "ordinary activity must not restart a fleet comparison");
@@ -180,38 +180,39 @@ fn dirty_page_addition_tracks_later_child_changes() {
         assert_eq!(state.cursor.as_deref(), Some("agent/ccc"));
         // This declared member is behind the completed keyset page, so only
         // reconciliation can add its card to the assembled rows.
-        let source = "version 2\nagent \"aaa\" { host \"node\"; exec \"child\" { id \"child\"; command \"true\"; } }\n";
+        // A qualified name is not host-prefixed by parse_test_intent and sorts behind the cursor.
+        let source = "version 2\nagent \"aaa/worker\" { host \"node\"; exec \"child\" { id \"child\"; command \"true\"; } }\n";
         let intent = crate::graph::parse_test_intent(source, "node").unwrap();
         let planned = store.mission(&intent, crate::model::IntentInput {
             kdl: source.to_owned(), source_name: None,
         }).unwrap();
         store.apply(&intent, &planned.subject_tokens, "late-member").unwrap();
         while state.scanning { state.step(&store, history).unwrap(); }
-        assert!(!state.rows.contains_key("agent/aaa"));
+        assert!(!state.rows.contains_key("agent/aaa/worker"));
         // More dirty agents than fit in a card page force a nonterminal fold.
         for name in ["agent/bbb", "agent/ccc", "agent/ddd"] { running(&store, name); }
         state.step(&store, history).unwrap();
-        assert!(!state.rows.contains_key("agent/aaa"));
+        assert!(!state.rows.contains_key("agent/aaa/worker"));
         let mut folded = false;
         for _ in 0..64 {
             let dirty = state.reconcile.as_ref().unwrap().dirty.len();
             assert!(state.step(&store, history).unwrap().is_none(), "must not publish before the child change");
-            if state.rows.contains_key("agent/aaa") {
+            if state.rows.contains_key("agent/aaa/worker") {
                 assert!(dirty > state.width, "aaa must be added by a nonterminal dirty-card page");
                 folded = true;
                 break;
             }
         }
         assert!(folded);
-        assert_ne!(state.rows["agent/aaa"]["state"], "running");
-        append(&store, "exec/aaa/child", "runtime.observed", None,
+        assert_ne!(state.rows["agent/aaa/worker"]["state"], "running");
+        append(&store, "exec/aaa/worker/child", "runtime.observed", None,
             json!({"status":"running", "runtime_id":"child", "host":"node", "incarnation_id":"one"}));
         let mut completed = false;
         for _ in 0..64 {
             if state.step(&store, history).unwrap().is_some() { completed = true; break; }
         }
         assert!(completed);
-        assert_eq!(state.rows["agent/aaa"]["state"], "running", "the tail must refold the newly assembled parent");
+        assert_eq!(state.rows["agent/aaa/worker"]["state"], "running", "the tail must refold the newly assembled parent");
         store.extension::<Assemblies>().0.lock().unwrap()[usize::from(history)] = Some(state);
         refresh_agent_roster(&store, history).unwrap();
         assert_uncached(&store, history);
@@ -223,7 +224,7 @@ fn child_change_after_unchanged_reconciliation_target_refolds_parent() {
     for history in [false, true] {
         let store = Store::open_memory("test").unwrap();
         let _wake = store.start_agent_roster_refresher().unwrap();
-        let source = "version 2\nagent \"aaa\" { host \"node\"; exec \"child\" { id \"child\"; command \"true\"; } }\n";
+        let source = "version 2\nagent \"aaa/worker\" { host \"node\"; exec \"child\" { id \"child\"; command \"true\"; } }\n";
         let intent = crate::graph::parse_test_intent(source, "node").unwrap();
         let planned = store.mission(&intent, crate::model::IntentInput {
             kdl: source.to_owned(), source_name: None,
@@ -231,18 +232,18 @@ fn child_change_after_unchanged_reconciliation_target_refolds_parent() {
         store.apply(&intent, &planned.subject_tokens, "initial-member").unwrap();
         let mut state = Assembly::new(store.fractal.presented_agents.generation());
         while state.scanning { state.step(&store, history).unwrap(); }
-        assert!(state.rows.contains_key("agent/aaa"));
+        assert!(state.rows.contains_key("agent/aaa/worker"));
         state.step(&store, history).unwrap();
         assert_eq!(state.reconcile.as_ref().unwrap().target, state.floor,
             "no writes may intervene between membership scanning and target capture");
-        append(&store, "exec/aaa/child", "runtime.observed", None,
+        append(&store, "exec/aaa/worker/child", "runtime.observed", None,
             json!({"status":"running", "runtime_id":"child", "host":"node", "incarnation_id":"one"}));
         let mut completed = false;
         for _ in 0..64 {
             if state.step(&store, history).unwrap().is_some() { completed = true; break; }
         }
         assert!(completed);
-        assert_eq!(state.rows["agent/aaa"]["state"], "running");
+        assert_eq!(state.rows["agent/aaa/worker"]["state"], "running");
         store.extension::<Assemblies>().0.lock().unwrap()[usize::from(history)] = Some(state);
         refresh_agent_roster(&store, history).unwrap();
         assert_uncached(&store, history);

@@ -120,7 +120,7 @@ assert.deepEqual(withUpdate.map(row => row.color), ['person', 'green']);
 }
 
 // intake-b's #3048 cases: a null card keeps an item off Home; a custom kind shows as the Today
-// request st presents; a presented item with no held step names none.
+// request Fractal presents; a presented item with no held step names none.
 {
   const offNow = item('fault', 'fault', { alert: true, presentation: { tier: 'stopped', kind: null, agent: null, raised_by: null, waiting: null } });
   assert.deepEqual(homeRows([offNow], 'person/alex', now), []);

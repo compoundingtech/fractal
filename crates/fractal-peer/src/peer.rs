@@ -25,7 +25,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 pub use smallclaims::sync::{
-    Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, MAX_MANIFEST_BYTES, WorkerConfig,
+    Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, WorkerConfig,
 };
 use smallclaims::sync::{dial_targets, signed_error_response_for, signed_response_for};
 
@@ -39,10 +39,6 @@ use crate::model::{
 };
 use crate::store::Store;
 use crate::relay_trace::{self, Outcome, Phase};
-use crate::store::{
-    CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest,
-};
 mod raw_lease;
 mod seat_freshness;
 pub use seat_freshness::*;
@@ -1766,8 +1762,8 @@ fn signed_client_read_failure(
 pub struct MainBackend {
     socket: PathBuf,
     client: Client,
-    /// A named shard this backend reaches instead of the graph. A shard has no checkpoints,
-    /// answers or worker status of its own; it shares the graph's fleet and endpoints.
+    /// A named shard this backend reaches instead of the graph. A shard has no answers or worker
+    /// status of its own; it shares the graph's fleet and endpoints.
     shard: Option<String>,
 }
 
@@ -1960,16 +1956,6 @@ impl Backend for MainBackend {
             ))
     }
 
-    async fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> Result<CheckpointManifestPage> {
-        anyhow::ensure!(self.shard.is_none(), "a shard has no checkpoints");
-        self.client
-            .post("/v1/internal/replication/checkpoint", request)
-            .await
-    }
-
     async fn answers(
         &self,
         request: &smallclaims::answers::AnswersRequest,
@@ -1989,25 +1975,6 @@ impl Backend for MainBackend {
             .post("/v1/internal/replication/answers-check", check)
             .await?;
         Ok(())
-    }
-
-    async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
-        if self.shard.is_some() {
-            return Ok(None);
-        }
-        self.client
-            .post(
-                "/v1/internal/replication/checkpoint-need",
-                &serde_json::json!({}),
-            )
-            .await
-    }
-
-    async fn adopt_checkpoint(&self, manifest: &CheckpointManifest) -> Result<Vec<CheckpointAction>> {
-        anyhow::ensure!(self.shard.is_none(), "a shard has no checkpoints");
-        self.client
-            .post("/v1/internal/replication/checkpoint-adopt", manifest)
-            .await
     }
 
     async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {
@@ -2501,15 +2468,7 @@ mod tests {
         assert!(relay.read("host/owner-node", &read).await.is_err());
     }
 
-    use crate::model::ClaimInput;
 
-    
-
-    
-
-    use serde_json::Value;
-
-    use std::collections::BTreeMap;
 
     
 
@@ -2521,7 +2480,7 @@ mod tests {
     
 
     use smallclaims::sync::{
-        FleetContext, PeerState, exchange, fetch_checkpoint_manifest, peer_router,
+        FleetContext, PeerState, exchange, peer_router,
         replication_http_client,
     };
 
@@ -2728,205 +2687,6 @@ mod tests {
             ),
             names(&["c"])
         );
-    }
-
-    #[tokio::test]
-    async fn a_peer_serves_a_checkpoint_manifest_to_its_fleet_only() {
-        use crate::store::{ClaimTombstone, EnvelopeTombstone, checkpoint_cut};
-        let fleet = "1f91ca65-7793-48cc-866e-ac15690130e1";
-        let auth = FleetAuth::test(fleet, &[6; 32]);
-        let target = Arc::new(Store::open_memory("target").unwrap());
-        target.bind_fleet(fleet).unwrap();
-        let checkpoint = "checkpoint/2026-09-27";
-        let cut = checkpoint_cut(checkpoint).unwrap();
-        let envelopes = (1..=3)
-            .map(|sequence| EnvelopeTombstone {
-                writer: "source".into(),
-                sequence,
-                envelope_hash: format!("{sequence:064x}"),
-                accepted_at_unix_ms: cut - 1_000 + u128::from(sequence),
-            })
-            .collect::<Vec<_>>();
-        let claims = envelopes
-            .iter()
-            .map(|envelope| ClaimTombstone {
-                id: format!("claim-{}", envelope.sequence),
-                writer: envelope.writer.clone(),
-                sequence: envelope.sequence,
-                envelope_hash: envelope.envelope_hash.clone(),
-                subject: "daemon/source".into(),
-                kind: "daemon.diagnostic".into(),
-                actor: None,
-                predecessors: Vec::new(),
-                operation_id: None,
-                request_digest: None,
-                accepted_at_unix_ms: envelope.accepted_at_unix_ms,
-            })
-            .collect::<Vec<_>>();
-        target
-            .apply_checkpoint_drop(checkpoint, &envelopes, &claims)
-            .unwrap();
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let state = PeerState::new(Local(target.clone()), "target".into(), auth.clone(), FleetContext::legacy(BTreeSet::from(["source".into()])));
-        let server = tokio::spawn(axum::serve(listener, peer_router(state, Router::new())).into_future());
-        let peer = PeerConfig {
-            name: "target".into(),
-            url: format!("http://{address}"),
-        };
-        let http = replication_http_client();
-        let dialer = FleetContext::legacy(BTreeSet::from(["target".into()]));
-        let manifest =
-            fetch_checkpoint_manifest(&http, &peer, "source", &auth, &dialer, checkpoint, cut)
-                .await
-                .unwrap();
-        assert_eq!(
-            manifest,
-            target.checkpoint_manifest(checkpoint, cut).unwrap()
-        );
-        assert_eq!(manifest.envelopes, envelopes);
-        assert_eq!(manifest.claims, claims);
-        crate::store::verify_checkpoint_manifest(
-            &manifest,
-            &crate::store::drop_digest(&envelopes, &claims),
-        )
-        .unwrap();
-
-        // A node that is not the target's peer, or holds another fleet secret, gets nothing.
-        let stranger =
-            fetch_checkpoint_manifest(&http, &peer, "stranger", &auth, &dialer, checkpoint, cut)
-                .await;
-        assert!(stranger.is_err());
-        let other_fleet = FleetAuth::test(fleet, &[7; 32]);
-        let forged = fetch_checkpoint_manifest(
-            &http,
-            &peer,
-            "source",
-            &other_fleet,
-            &dialer,
-            checkpoint,
-            cut,
-        )
-        .await;
-        assert!(forged.is_err());
-        server.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_new_node_adopts_the_checkpoint_its_peer_advertises() {
-        use crate::store::{CheckpointContext, newest_due_cut};
-        const DAY_MS: u128 = 24 * 60 * 60 * 1_000;
-        let fleet = "3c2b6f0e-4d1a-4f7e-9a53-2e8b1c0d7f64";
-        let auth = FleetAuth::test(fleet, &[8; 32]);
-        let scratch = tempfile::tempdir().unwrap();
-        let context = CheckpointContext {
-            now_unix_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-                + 3 * DAY_MS,
-            configured_peers: Vec::new(),
-            scratch: scratch.path().to_path_buf(),
-            reviewer: "person/operator".into(),
-        };
-        let [alder, birch] = ["alder", "birch"].map(|name| {
-            let store = Arc::new(Store::open_memory(name).unwrap());
-            store.bind_fleet(fleet).unwrap();
-            store
-        });
-        let sync = || {
-            for (source, target) in [(&alder, &birch), (&birch, &alder)] {
-                let exchange = source
-                    .export_replication_exchange(fleet, &target.replication_inventory().unwrap())
-                    .unwrap();
-                target
-                    .receive_replication_exchange(source.origin(), fleet, &exchange)
-                    .unwrap();
-                target.validate_replication_backlog().unwrap();
-                target.project_replication_backlog().unwrap();
-            }
-        };
-        for (store, count) in [(&alder, 6), (&birch, 4)] {
-            for index in 0..count {
-                store
-                    .append_as_older_build_for_test(&ClaimInput {
-                        subject: format!("daemon/{}", store.origin()),
-                        kind: "daemon.diagnostic".into(),
-                        actor: None,
-                        fields: BTreeMap::from([
-                            ("severity".into(), Value::String("warning".into())),
-                            ("code".into(), Value::String("slow-request".into())),
-                            ("reason".into(), Value::String(format!("slow {index}"))),
-                        ]),
-                        evidence: Vec::new(),
-                        expected_subject: None,
-                        idempotency_key: Some(format!("{}-slow-{index}", store.origin())),
-                    })
-                    .unwrap();
-            }
-        }
-        sync();
-        // Seal, verify, then trim on both.
-        for _ in 0..3 {
-            for store in [&alder, &birch] {
-                store.checkpoint_step(&context).unwrap();
-            }
-            sync();
-        }
-        let advertised = alder.trimmed_checkpoint().unwrap().expect("alder trimmed");
-        assert_eq!(
-            birch.trimmed_checkpoint().unwrap().as_ref(),
-            Some(&advertised)
-        );
-        assert_eq!(advertised.cut_unix_ms, newest_due_cut(context.now_unix_ms));
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let state = PeerState::new(Local(alder.clone()), "alder".into(), auth.clone(), FleetContext::legacy(BTreeSet::from(["cedar".into()])));
-        let server = tokio::spawn(axum::serve(listener, peer_router(state, Router::new())).into_future());
-        let peer = PeerConfig {
-            name: "alder".into(),
-            url: format!("http://{address}"),
-        };
-        let cedar = Arc::new(Store::open_memory("cedar").unwrap());
-        cedar.bind_fleet(fleet).unwrap();
-        let http = replication_http_client();
-        let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
-        for _ in 0..10 {
-            let moved = exchange(
-                &http,
-                &Local(cedar.clone()),
-                "cedar",
-                &peer,
-                &auth,
-                &dialer,
-            )
-            .await
-            .unwrap();
-            if !moved {
-                break;
-            }
-        }
-        assert_eq!(
-            cedar.trimmed_checkpoint().unwrap().as_ref(),
-            Some(&advertised)
-        );
-        assert_eq!(cedar.checkpoint_manifest_need().unwrap(), None);
-        let status = |store: &Store| {
-            let status = store.replication_status(true, Some(fleet), &[]).unwrap();
-            (status.authority_digest, status.graph_digest)
-        };
-        assert_eq!(status(&cedar), status(&alder));
-        assert_eq!(
-            cedar
-                .checkpoint_manifest(&advertised.id, advertised.cut_unix_ms)
-                .unwrap(),
-            alder
-                .checkpoint_manifest(&advertised.id, advertised.cut_unix_ms)
-                .unwrap()
-        );
-        server.abort();
     }
 
     #[tokio::test]

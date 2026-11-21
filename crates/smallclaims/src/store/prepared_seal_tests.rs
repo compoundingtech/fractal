@@ -158,13 +158,16 @@ fn sealed_by_the_old_passes<T>(store: &Store, read: impl FnOnce(&Connection) -> 
     read(&transaction)
 }
 
-/// Every row sealing writes, in key order, without the time a signature was stored.
+/// Every row sealing writes, in key order, without the time a signature was stored. A valid
+/// record's bytes are not compared: the old sealing stored them, and sealing now keeps none
+/// (`record_bytes`).
 fn sealed_rows(connection: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
     [
         "SELECT writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms, payload,
                 batch_id, relay, receipt_state, received_at_unix_ms
          FROM replica_envelopes ORDER BY writer, sequence, envelope_hash",
-        "SELECT record_ref, writer, sequence, envelope_hash, position, raw, state, claim_id,
+        "SELECT record_ref, writer, sequence, envelope_hash, position,
+                CASE WHEN state='valid' THEN x'' ELSE raw END, state, claim_id,
                 subject_hint, kind_hint, updated_at_unix_ms
          FROM replica_records ORDER BY record_ref",
         "SELECT writer, sequence, envelope_hash, member_key, signature

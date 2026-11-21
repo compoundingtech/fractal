@@ -254,9 +254,9 @@ to 128 MiB; export refuses a larger record before publishing a file:
   writer's public key and signature when present. Envelopes sort by writer, sequence, hash;
   projections replay claims in their normal canonical total order.
 - `signatures`: sync signature records, including additional signatures held for those envelopes.
-- `checkpoint`: the sync manifest of the newest applied or in-progress trim, including older
-  tombstones. Restore initializes empty checkpoint state through the normal certificate checks,
-  even if the source knew a newer certificate it had not applied yet.
+- `checkpoint`: the tombstones of the newest trimmed or in-progress cut, including older
+  tombstones, in the unchanged manifest format. Restore records them as they are; no certificate
+  is needed or checked.
 - `ledger`: one page of one permanent ledger, in its primary-key order (see below).
 - `shard-envelope`, `shard-signatures`, `shard-local`: a shard's envelopes in its own sync wire
   form, their signatures, and pages of its local tables, each naming its shard (version `5`).
@@ -342,8 +342,7 @@ a retained batch or repaired record still implies, which restore rebuilds from t
 The header records each nonempty ledger's row count and digest. Restore adds the archived rows
 by union: an identity is never removed and a writer head never lowered. After admission and the
 checkpoint manifest add their own rows, each ledger's digest has to equal the header's; a missing
-row would forget a deletion, an extra one would invent one. The checkpoint manifest is still
-restored through its certificate checks, as before.
+row would forget a deletion, an extra one would invent one.
 
 Restore verifies signatures, envelope and claim hashes through normal admission, checks writer
 chains, reapplies replicated repairs, and replays projections with the current code. Pre-membership envelopes retain their
@@ -359,7 +358,7 @@ The append-only `replica_restore_quarantine` ledger survives subsequent archives
 and restores. Any archive carrying quarantine uses version `6`, which older
 readers refuse; archives without quarantine retain their existing version.
 
-The complete envelope-log digest always has to match, including certified tombstone identities.
+The complete envelope-log digest always has to match, including tombstone identities.
 Without quarantined operation envelopes, the same registry fingerprint requires the claim
 source digest and count to match. The fingerprint covers known claim kinds and shared
 projection layout, as it does for sync. With the same schema and fingerprint, all table and

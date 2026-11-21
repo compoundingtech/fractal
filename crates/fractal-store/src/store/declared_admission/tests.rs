@@ -521,3 +521,82 @@ fn attention_capability_is_additive_and_anchored() {
     sync(&peer, &store);
     publish(&store, attention, "supported").unwrap();
 }
+
+#[test]
+fn escalation_publication_refuses_an_older_reader_until_signed_upgrade() {
+    let (store, anchor) = enabled();
+    started(&store, json!({"mission-escalation-v1":1}));
+    let (peer, _) = peer(&store, &anchor);
+    started(&peer, json!({"declared_admission":1}));
+    sync(&peer, &store);
+    let source = r#"version 2
+mission "escalated" state="ready" {
+ goal "Escalate overdue work."
+ escalation { policy "waiting" state="waiting" clock="since-entered" {
+   stage "1m" notify="agent/example/reporter"
+ } }
+ step "work" { agentless }
+}"#;
+    let before = store.index().unwrap();
+    let error = publish(&store, source, "older-reader").unwrap_err();
+    assert_eq!(error.code, MISSION_ESCALATION.code);
+    assert!(error.message.contains("mission-escalation-v1"));
+    assert_eq!(store.index().unwrap(), before);
+    let intent = crate::graph::parse_intent(source, "alder").unwrap();
+    let mission = serde_json::to_value(&intent.missions["escalated"]).unwrap();
+    for body in [mission.clone(), json!({"fields":{"body":mission}})] {
+        assert_eq!(validate_claim(&store.readers.get(), "alder", "mission.published", &body)
+            .unwrap_err().code, MISSION_ESCALATION.code);
+    }
+    started(&peer, json!({"mission-escalation-v1":1}));
+    assert_eq!(publish(&store, source, "unsigned-upgrade").unwrap_err().code, MISSION_ESCALATION.code);
+    sync(&peer, &store);
+    publish(&store, source, "upgraded-readers").unwrap();
+}
+
+#[test]
+fn ordinary_step_and_input_names_do_not_require_escalation_support() {
+    let source = "version 2\nmission \"ordinary\" state=\"ready\" { goal \"Ordinary names.\"; step \"escalation\" { agentless; } }";
+    let store = Store::open_memory("alder").unwrap();
+    publish(&store, source, "typed").unwrap();
+    let intent = crate::graph::parse_intent(source, "alder").unwrap();
+    let mut mission = serde_json::to_value(&intent.missions["ordinary"]).unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "mission/ordinary".into(), kind: "mission.published".into(),
+        actor: Some("person/example".into()), fields: schema_fields_for_body("mission.published", &mission).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    mission["inputs"] = json!({"escalation":{"type":"text","default":"ordinary"}});
+    for body in [mission.clone(), json!({"fields":{"body":mission}})] {
+        validate_claim(&store.readers.get(), "alder", "mission.published", &body).unwrap();
+    }
+    let (mixed, anchor) = enabled();
+    let (old, _) = peer(&mixed, &anchor);
+    started(&old, json!({"declared_admission":1}));
+    sync(&old, &mixed);
+    let ordinary = json!({"steps":{"escalation":{"escalation":{"_tag":"inherit"}}},"inputs":{"escalation":{}}});
+    validate_claim(&mixed.readers.get(), "alder", "mission.published", &ordinary).unwrap();
+}
+
+#[test]
+fn escalation_detection_follows_only_mission_and_step_declaration_locations() {
+    for declaration in [
+        json!({"escalation":{"_tag":"disable"}}),
+        json!({"steps":{"work":{"escalation":{"_tag":"replace","policies":[]}}}}),
+        json!({"steps":{"work":{"nested_mission":{"escalation":{"_tag":"disable"}}}}}),
+        json!({"steps":{"work":{"loop_spec":{"round":{"escalation":{"_tag":"disable"}}}}}}),
+        json!({"steps":{"work":{"loop_spec":{"on_keep":{"escalation":{"_tag":"disable"}}}}}}),
+        json!({"steps":{"work":{"loop_spec":{"on_discard":{"escalation":{"_tag":"disable"}}}}}}),
+        json!({"declarations_kdl":"mission \"nested\" { escalation disabled=#true; }"}),
+    ] {
+        assert!(declares_escalation(&declaration), "{declaration}");
+    }
+    for ordinary in [
+        json!({"steps":{"escalation":{}}}),
+        json!({"inputs":{"escalation":{}}}),
+        json!({"inputs":{"data":{"default":{"escalation":{"_tag":"disable"}}}}}),
+        json!({"declarations_kdl":"mission \"ordinary\" { step \"escalation\" { agentless; } }"}),
+    ] {
+        assert!(!declares_escalation(&ordinary), "{ordinary}");
+    }
+}

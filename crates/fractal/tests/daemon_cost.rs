@@ -146,8 +146,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
     ("GET /v1/repair", 97.0),
-    // Sessions read every harness observation (11.5x full-scan steps).
-    ("GET /v1/sessions", 17.5),
 ];
 
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
@@ -423,13 +421,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/replication/shard/{shard}/wake",
         "drains the messages shard backlog; the shard stays empty until the stream writer",
     ),
-    // Checkpoints: the trim is measured directly, per deleted row.
-    (
-        "POST /v1/checkpoint/plan",
-        "plans a checkpoint over the whole sealed set, by design",
-    ),
-    ("POST /v1/checkpoint/excuse", "checkpoint agreement"),
-    ("POST /v1/checkpoint/resume", "checkpoint agreement"),
+    // The trim is measured directly, per deleted row.
+    ("POST /v1/checkpoint/resume", "a person's word after a trim stopped: one state row"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
     ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
     ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
@@ -437,14 +430,6 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
     ("POST /v1/hosts/launch-freeze", "rare host-local daemon-replacement barrier; bounded spawn drain and typed failures covered by launch_freeze tests"),
     ("POST /v1/hosts/launch-freeze/clear", "authenticated owner/id-fenced host-local release; covered by host_holds::tests::launch_freeze_api_authenticates_owner_reports_state_and_clears"),
-    (
-        "POST /v1/internal/replication/checkpoint",
-        "pages a trimmed checkpoint's manifest",
-    ),
-    (
-        "POST /v1/internal/replication/checkpoint-adopt",
-        "adopts a peer's checkpoint",
-    ),
     (
         "POST /v1/internal/replication/answers",
         "answers from a cache filled off the request path; filling it reads every claim, once a day by design",
@@ -1298,7 +1283,6 @@ const PROBES: &[Probe] = &[
         "GET /v1/replication/records/{*record}",
         "/v1/replication/records/{record}",
     ),
-    get("GET /v1/checkpoint/status", "/v1/checkpoint/status"),
     get(
         "GET /v1/internal/fleet/membership",
         "/v1/internal/fleet/membership",
@@ -1527,7 +1511,9 @@ const PROBES: &[Probe] = &[
     // Native physical authority is absent from generated stores. Exercise the real fenced
     // persistence path, including a fresh incarnation and non-replayed frontier each time.
     direct("POST /v1/mailbox/acceptance-frontier", |store, fixture, attempt| {
-        let agent = &fixture.subjects.seats[0];
+        // Reserve the third seat for frontier incarnations; seat zero remains the
+        // running driver used by subsequent harness-event and native-question probes.
+        let agent = &fixture.subjects.seats[2];
         let incarnation = format!("cost-mail-frontier-{attempt}");
         for (kind, fields) in [
             ("runtime.observed", json!({"status":"running","runtime_id":"cost-frontier","incarnation_id":incarnation})),
@@ -1637,11 +1623,6 @@ const PROBES: &[Probe] = &[
                 "round_trip_ms": 5,
             })
         },
-    ),
-    post(
-        "POST /v1/internal/replication/checkpoint-need",
-        "/v1/internal/replication/checkpoint-need",
-        |_, _| json!({}),
     ),
     get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
     get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
@@ -5028,7 +5009,6 @@ async fn trim_cost(store: &Arc<Store>) -> Cost {
             &plan.drop_digest,
             &plan.envelopes,
             &plan.claims,
-            false,
             &mut actions,
         );
         let spent = work::total() - before;

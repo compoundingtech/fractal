@@ -1119,12 +1119,6 @@ fn a_replay_quarantines_claims_it_cannot_project_and_projects_the_rest() {
             .is_some_and(|claim| claim.id == later.id)
     );
     drop(connection);
-    // The proof replays the same claims after creating its temporary tables.
-    let scratch = tempfile::tempdir().unwrap();
-    let (_, _, proof) = target
-        .plan_checkpoint_through(now_ms() + 1_000, None, scratch.path())
-        .unwrap();
-    assert!(proof.passed, "{proof:?}");
 }
 
 /// Writes that arrive together share one transaction and one commit, and each caller hears
@@ -2846,13 +2840,24 @@ fn subject_cache_overflow_advances_once_and_rebuilds_only_selected_subjects() {
         store.status_for_subject_names_at(names.clone(), before, true, ClaimsReduction::Summary).unwrap();
         assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), names.len());
         store.connection.batched(|transaction| -> Result<()> {
-            for index in 0..=SUBJECT_CACHE_DELTA_ROWS {
-                append_claim_tx(transaction, &store.origin, "custom/overflow", "custom.example.reading",
-                    None, &json!({"fields":{"round":round,"reading":index}}), &[], None)?;
+            // Seed the backlog before the final admitted append flushes projections.
+            // Flushing each custom claim rereads this subject's growing history,
+            // making setup quadratic even though the cache only needs the row delta.
+            // Keep every claim and event, and project the complete batch once.
+            for index in 0..SUBJECT_CACHE_DELTA_ROWS {
+                let body = json!({"fields":{"round":round,"reading":index}});
+                let claim = append_claim_record_tx(
+                    transaction, &store.origin, "custom/example/overflow",
+                    "custom.example.reading", None, &body, &[], None,
+                )?;
+                insert_event(transaction, claim.store_index, &claim.kind, &claim.subject, &body)?;
             }
+            append_claim_tx(transaction, &store.origin, "custom/example/overflow", "custom.example.reading",
+                None, &json!({"fields":{"round":round,"reading":SUBJECT_CACHE_DELTA_ROWS}}), &[], None)?;
             Ok(())
         }).unwrap().unwrap();
         let cut = store.index().unwrap();
+        assert_eq!(cut - before, (SUBJECT_CACHE_DELTA_ROWS + 1) as u64);
         store.advance_subject_cache(&store.readers.get(), cut).unwrap();
         {
             let cache = store.fractal.subject_cache.lock().unwrap();
@@ -5041,7 +5046,8 @@ fn deploy_reader_old_peer_quarantines_all_kinds_without_changing_projection() {
             "SELECT raw FROM replica_records WHERE claim_id=?1", [&claim.id],
             |row| row.get::<_, Vec<u8>>(0),
         ).unwrap();
-        assert_eq!(retried_raw, original_raw);
+        // The retry admitted the original bytes; a valid record then keeps none (`record_bytes`).
+        assert!(retried_raw.is_empty() && !original_raw.is_empty());
     }
     assert!(upgraded.replica_records(true).unwrap().is_empty());
     assert_eq!(upgraded.latest_claim("host/host-a", Some("transport.observed")).unwrap().unwrap().id, later.id);
@@ -5209,7 +5215,8 @@ fn review_reader_old_peer_quarantines_and_retries_original_bytes() {
         let retried_raw: Vec<u8> = upgraded.readers.get().query_row(
             "SELECT raw FROM replica_records WHERE claim_id=?1",[&claim.id],|row|row.get(0),
         ).unwrap();
-        assert_eq!(raw,retried_raw);
+        // The retry admitted the original bytes; a valid record then keeps none (`record_bytes`).
+        assert!(retried_raw.is_empty() && !raw.is_empty());
         assert!(upgraded.replica_records(true).unwrap().is_empty(), "{kind}");
         assert_eq!(
             upgraded.latest_claim("host/ada", Some("transport.observed")).unwrap().unwrap().id,
@@ -5412,6 +5419,7 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
     let input = ReplicationExchange {
         build: None,
         claim_ranges: None,
+        claim_member_signatures: Vec::new(),
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
@@ -5432,10 +5440,13 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: Vec::new(),
         },
         envelopes: vec![candidate],
         signature_requests: Vec::new(),
         signatures: Vec::new(),
+        signed_envelopes: Vec::new(),
+        unservable_released: Default::default(),
     };
 
     let target = Store::open_memory("target").unwrap();
@@ -5489,6 +5500,7 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
     let make_exchange = |envelopes: Vec<ReplicaEnvelope>| ReplicationExchange {
         build: None,
         claim_ranges: None,
+        claim_member_signatures: Vec::new(),
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
@@ -5512,10 +5524,13 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: Vec::new(),
         },
         envelopes,
         signature_requests: Vec::new(),
         signatures: Vec::new(),
+        signed_envelopes: Vec::new(),
+        unservable_released: Default::default(),
     };
     let left = Store::open_memory("left").unwrap();
     let right = Store::open_memory("right").unwrap();
@@ -6299,6 +6314,7 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
                 &ReplicationExchange {
                     build: None,
                     claim_ranges: None,
+                    claim_member_signatures: Vec::new(),
                     projection_digests: Default::default(),
                     peer: "source".into(),
                     fleet_id: FLEET.into(),
@@ -6312,6 +6328,8 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
                     envelopes: vec![envelope],
                     signature_requests: Vec::new(),
                     signatures: Vec::new(),
+                    signed_envelopes: Vec::new(),
+                    unservable_released: Default::default(),
                 },
             )
             .unwrap();
@@ -7416,6 +7434,71 @@ fn a_mailbox_stream_seeks_its_seats_newer_local_observations() {
 /// Foreign keys are on, so deleting or rekeying a parent row looks up every child that names
 /// it. A child column without an index made each lookup read the whole child table: deleting
 /// a claim read every operation, and a checkpoint trim held the writer for an hour.
+#[test]
+fn emptying_a_valid_records_bytes_fires_no_trigger() {
+    // `record_bytes` empties `raw` on every valid record of an existing store. A trigger that
+    // fired on that update would queue or rebuild work for every record.
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let triggers = connection
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='replica_records'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(!triggers.is_empty());
+    let mut blind = Vec::new();
+    for (name, sql) in triggers {
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let Some(event) = sql.split(" ON replica_records").next() else { continue };
+        let Some((_, update)) = event.split_once(" UPDATE") else { continue };
+        let columns = update.trim_start().strip_prefix("OF ").map(|columns| {
+            columns.split(',').map(str::trim).collect::<Vec<_>>()
+        });
+        // The checkpoint capture trigger fires on any update but compares every column but
+        // `raw` in its condition.
+        let compared = sql.contains("OLD.state IS NOT NEW.state") && !sql.contains("OLD.raw");
+        match columns {
+            Some(columns) if columns.contains(&"raw") => blind.push(name),
+            None if !compared => blind.push(name),
+            _ => {}
+        }
+    }
+    assert!(blind.is_empty(), "triggers that fire when only `raw` changes: {blind:?}");
+}
+
+#[test]
+fn deleting_a_valid_record_fires_only_the_position_trigger() {
+    // `record_bytes` deletes every valid record of a store once its rollback window has passed.
+    // Its claim keeps its row and its position, so a trigger that fired on that deletion would
+    // only queue rebuilds of unchanged state, for every record.
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let triggers = connection
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='replica_records'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let mut blind = Vec::new();
+    for (name, sql) in triggers {
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let head = sql.split(" BEGIN").next().unwrap_or_default();
+        if !head.contains(" DELETE ON replica_records") {
+            continue;
+        }
+        // The position trigger stores a legacy claim's position before its record goes, and
+        // the checkpoint capture guard fences a capture in progress; both are bounded.
+        let exempt = name == "claim_positions_record_delete_v1" || name.contains("checkpoint_capture");
+        if !exempt && !head.contains("OLD.state<>'valid'") {
+            blind.push(name);
+        }
+    }
+    assert!(blind.is_empty(), "triggers that fire when a valid record is deleted: {blind:?}");
+}
+
 #[test]
 fn every_foreign_key_column_leads_an_index() {
     let store = Store::open_memory("node").unwrap();
@@ -13591,4 +13674,59 @@ fn shared_step_timing_history_reuses_revision_but_refolds_snapshot() {
     let transactional = shared_step_timing_events(&transaction, subject).unwrap();
     assert!(!Arc::ptr_eq(&changed, &transactional));
     assert_eq!(*changed, *transactional);
+}
+
+#[test]
+fn releasing_an_envelope_fires_no_trigger_that_rebuilds_or_moves_the_inventory() {
+    // `envelope_release` deletes an envelope's signatures, hold, valid records and row, and
+    // keeps its identity in `released_envelopes` first. Its claims and their positions stay, and
+    // the inventory lists the identity from there, so a trigger that fired on those deletions
+    // would queue rebuilds of unchanged state or move digests the release leaves alone.
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let triggers = connection
+        .prepare(
+            "SELECT tbl_name, name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name IN
+                 ('replica_envelopes','replica_envelope_signatures','replica_envelope_holds','replica_records',
+                  'released_envelopes')",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let mut blind = Vec::new();
+    let mut fired = 0;
+    for (table, name, sql) in triggers {
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let head = sql.split(" BEGIN").next().unwrap_or_default();
+        let deletes = head.contains(&format!(" DELETE ON {table}"));
+        if table != "released_envelopes" && !deletes {
+            continue;
+        }
+        fired += 1;
+        let spared = match table.as_str() {
+            // The inventory lists the identity from `released_envelopes` instead.
+            "replica_envelopes" if head.contains("FROM released_envelopes") => true,
+            // Only the newest envelope row moves the tail, and a release never takes it.
+            "replica_envelopes" => head.contains("OLD.rowid > COALESCE((SELECT MAX(rowid) FROM replica_envelopes), 0)"),
+            // A released envelope's record is valid.
+            "replica_records" => head.contains("OLD.state<>'valid'"),
+            _ => false,
+        };
+        // Membership changes only with a `fleet.*` envelope, which is never released.
+        let fleet = head.contains("'fleet.member-admitted'");
+        // The checkpoint capture guard fences a capture in progress; the saved inventory's count
+        // is taken in by the release's own snapshot patch; the position trigger fires only for a
+        // claim without a stored position, which a release requires. None changes a projection
+        // or a digest.
+        let exempt = name.contains("checkpoint_capture")
+            || name.contains("_saved_inventory_")
+            || name == "claim_positions_record_delete_v1";
+        if !spared && !fleet && !exempt {
+            blind.push(name);
+        }
+    }
+    assert!(fired > 0);
+    assert!(blind.is_empty(), "triggers a release fires: {blind:?}");
 }
