@@ -49,7 +49,9 @@ impl Drop for LiveReadToken {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.0);
-        if let Some(read) = read.filter(|read| read.pool.is_some()) {
+        // Snapshot entries diagnose pins, including pins that reuse an enclosing loan.
+        // They do not represent another physical reader checkout.
+        if let Some(read) = read.filter(|read| read.pool.is_some() && !read.snapshot) {
             super::telemetry::METRICS.read_loan_duration.add(
                 read.started.elapsed().as_secs_f64(),
                 &[read.origin.attribute("origin")],

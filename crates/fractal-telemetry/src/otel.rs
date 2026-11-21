@@ -1513,6 +1513,44 @@ impl Drop for Telemetry {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn reconcile_stage_costs_follow_metrics_not_traces() {
+        const CHILD: &str = "ST_STAGE_METRICS_SIGNAL_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "otel::tests::reconcile_stage_costs_follow_metrics_not_traces"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        super::EXPORT_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        super::METRICS_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(crate::reconcile_telemetry::phase("pass/changes"));
+        super::METRICS_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        super::EXPORT_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(crate::reconcile_telemetry::phase("pass/desired"));
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        for name in ["st.reconcile.stage.cpu_time", "st.reconcile.stage.duration"] {
+            let sum = exported.iter().flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics()).find(|metric| metric.name() == name)
+                .and_then(|metric| match metric.data() {
+                    AggregatedMetrics::F64(MetricData::Sum(sum)) => Some(sum),
+                    _ => None,
+                }).expect("metrics-only stage costs must be exported");
+            let points = sum.data_points().collect::<Vec<_>>();
+            assert_eq!(points.len(), 1, "trace-only stage must not record metric costs");
+            assert!(points[0].attributes().any(|attribute|
+                attribute == &opentelemetry::KeyValue::new("stage", "changes")));
+        }
+    }
+
+    #[test]
     fn request_outcomes_distinguish_deadlines_from_upstream_timeouts_and_cancellation() {
         use super::{ReadDeadline, RequestOutcome};
         for code in 100..600 {

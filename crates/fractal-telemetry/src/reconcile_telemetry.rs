@@ -116,7 +116,7 @@ pub fn phase(scope: &str) -> Phase {
             .start_with_context(&tracer, &tracing::Span::current().context())
     });
     let members = (scope == "pass/members" && span.is_some()).then(Default::default);
-    let cost = crate::otel::export_enabled().then(|| StageCost {
+    let cost = crate::otel::metrics_enabled().then(|| StageCost {
         name: name.strip_prefix("st.reconcile.").unwrap_or(name),
         started: Instant::now(),
         cpu: smallclaims::task_cpu::thread_cpu(),
