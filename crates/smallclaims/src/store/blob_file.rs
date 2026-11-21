@@ -325,7 +325,9 @@ impl Store {
     /// pages to the freelist, for the caller's paced incremental vacuum to give back. Updating
     /// only the rowid keeps the hash, so `documents.hash` and every lookup by hash are untouched.
     /// It waits while the move is between a copy and its emptying, and refuses a table with a
-    /// trigger, which a rowid update would fire. Call again while `more`.
+    /// trigger, which a rowid update would fire. A blob of zero bytes, which has no bytes to move,
+    /// is packed the same way. The rows to relocate are read before the writer is taken, and each
+    /// relocation re-checks that its row has no bytes. Call again while `more`.
     pub fn compact_blob_rows_step(&self, batch: usize, budget: Duration) -> Result<BlobCompaction> {
         let reader = self.readers.get();
         let triggers: i64 = reader.query_row(
@@ -364,9 +366,12 @@ impl Store {
             let transaction = connection.unchecked_transaction()?;
             // The move has dealt with every row there is: the relocated rows, empty, need none
             // of its passes, so its cursors move past them rather than page through them again.
+            // Read under the writer, as the move's own steps write them.
             let caught_up: bool = transaction.query_row(
-                "SELECT COALESCE((SELECT MAX(rowid) FROM blobs), 0)<=?1 AND ?2>=?1",
-                params![emptied, copied],
+                "SELECT COALESCE((SELECT MAX(rowid) FROM blobs), 0)<=moved AND copied>=moved
+                 FROM (SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?1), 0) AS moved,
+                              COALESCE((SELECT CAST(value AS INTEGER) FROM blob_file.meta WHERE key=?2), 0) AS copied)",
+                params![CURSOR, COPIED],
                 |row| row.get(0),
             )?;
             let mut last = if page.len() < batch { through } else { *page.last().unwrap_or(&through) };
