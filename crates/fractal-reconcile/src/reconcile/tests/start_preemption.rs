@@ -1588,6 +1588,37 @@ async fn ended_pty_without_complete_retirement_proof_keeps_the_seat_busy() {
     );
 }
 
+#[tokio::test]
+async fn revoked_pty_diagnostic_targets_owning_agent() {
+    let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
+    let owner = "agent/example/worker";
+    let subject = "pty/agent/example/worker/019a0000-0000-7000-8000-000000000001";
+    apply_source(
+        &store,
+        "version 2\nterminal \"agent/example/worker/019a0000-0000-7000-8000-000000000001\" { workspace \"/tmp\"; command \"true\" }",
+        "revoked-owned-pty",
+    );
+    assert!(launch(&reconciler, subject));
+    tokio::time::timeout(Duration::from_secs(30), entered.recv())
+        .await.unwrap().unwrap();
+    reconciler.revoke_start(subject).unwrap();
+    runtime.inner.ptys.lock().unwrap().clear();
+    release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+    runtime.inner.ptys.lock().unwrap().clear();
+    for _ in 0..2 {
+        reconciler.reconcile_start_jobs().unwrap();
+    }
+    let operation = store.runtime_start_for(subject).unwrap().unwrap();
+    assert!(operation.finished);
+    assert!(!operation.cleanup_verified);
+    assert!(store.observations_for(subject, "harness.diagnostic").unwrap().is_empty());
+    let diagnostics = store.observations_for(owner, "harness.diagnostic").unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].body["fields"]["code"], "start-revocation-unverified");
+    assert_eq!(diagnostics[0].actor.as_deref(), Some(owner));
+}
+
     #[tokio::test]
 async fn revoked_pidless_pty_requires_operation_fenced_producer_closure() {
     for different_operation in [false, true] {
