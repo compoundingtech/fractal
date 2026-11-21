@@ -128,6 +128,11 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn retain_start_activation_lease(&self, id: &str, member: &MemberSpec) -> Result<Option<ActivationLease>> {
+        if let Some(lease) = self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
+            .starts.get(id)
+        {
+            return Ok(Some(lease.clone()));
+        }
         let lease = self.member_activation_lease(member)?;
         if let Some(lease) = &lease {
             self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
