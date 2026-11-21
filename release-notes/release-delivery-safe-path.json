@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep Python safe-path mode enabled when iOS release delivery starts its build worker and source-input preparation, avoiding import-time scans of the Nix store for installed scripts.",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No schema or migration changes."},
+  "rules": {"status": "none", "detail": "No authority or rule changes."},
+  "compatibility": {"status": "none", "detail": "No API, protocol or persisted-state changes."},
+  "downtime": {"status": "none", "detail": "No additional restart or downtime required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No recovery procedure changes."}
+}
