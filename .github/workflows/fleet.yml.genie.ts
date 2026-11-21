@@ -28,6 +28,7 @@ import {
   linuxRunner,
   requiredLinuxRunner,
   controlLinuxRunner,
+  prerequisiteLinuxRunner,
   linuxStageJob as namespaceStageJob,
   evidenceStageJob,
   evidenceEnvironment,
@@ -291,8 +292,8 @@ const evidenceGateRunInputs: Record<string, { needs: string[], values: Record<st
 const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`evidence-gate-${check}`, {
   name: `evidence-gate-${check}`,
   ...(evidenceGateRunInputs[check] ? { needs: evidenceGateRunInputs[check].needs } : {}),
-  // Trusted merge/main controls use existing owned capacity; every PR stays hosted.
-  'runs-on': controlLinuxRunner,
+  // Receipt verification starts independently of hosted saturation and runner selection.
+  'runs-on': prerequisiteLinuxRunner,
   'timeout-minutes': 5,
   'continue-on-error': true,
   permissions: { contents: 'read' },
@@ -406,8 +407,9 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   },
   permissions: { contents: 'read', actions: 'read' },
   concurrency: {
-    // PR updates replace stale checks; every other run has its own group so pending pushes survive.
-    group: 'workspace-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name }}',
+    // Main keeps its running proof and only the newest pending tree, which includes earlier merges.
+    // PR heads replace stale work; merge groups and manual runs retain independent identities.
+    group: 'workspace-${{ github.event.pull_request.number || (github.event_name == \'push\' && github.ref) || github.run_id }}-${{ github.event_name }}',
     'cancel-in-progress': '${{ github.event_name == \'pull_request\' }}',
   },
   // actionlint must know the Namespace shape label the stage jobs use.
@@ -636,6 +638,18 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
       'runs-on': testBuildRunsOn,
       'timeout-minutes': 120,
       ...testArchiveProducer,
+      steps: [
+        ...testArchiveProducer.steps,
+        nixDevelopStep({
+          name: 'List the complete storage-version nextest inventory',
+          command: ['bash', '-euc', 'mkdir -p target; cargo nextest list --locked -p fractal-storage-version --message-format json > target/buck2-storage-version-nextest.json'],
+        }),
+        nixDevelopStep({
+          name: 'Run native Buck Rust tests and prove nextest inventory parity',
+          flake: '.#web',
+          command: ['bash', '-euc', 'python3 scripts/ci-buck2-rust-parity-test; buck2 test //crates/fractal-storage-version:unit-tests //crates/fractal-storage-version:integration-tests; python3 scripts/ci-buck2-rust-parity --nextest-json target/buck2-storage-version-nextest.json'],
+        }),
+      ],
     },
     // Four merge partitions (two for other events) reuse the one producer archive.
     // `linux-gate` below is the single required check that collects them.

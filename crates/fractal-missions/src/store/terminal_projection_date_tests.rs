@@ -391,9 +391,8 @@ mission "terminal-date-root" state="ready" {
 }
 
 #[test]
-fn completed_child_dates_survive_certified_trim_adoption_and_reopen() {
+fn completed_child_dates_survive_a_trim_on_both_members_and_reopen() {
     use smallclaims::store::checkpoint::checkpoint_name;
-    use smallclaims::store::checkpoint_agreement::SealTerms;
     let source = Store::open_memory("node").unwrap();
     let at = now_ms() + 60_000;
     source.set_write_clock_at(at).unwrap();
@@ -463,32 +462,11 @@ mission "trim-date-child" state="ready" { goal "End before parent."; step "work"
     );
     let cut = at + 2_001;
     let checkpoint = checkpoint_name(cut);
-    let sealed = source.checkpoint_sealed_identities(cut, None).unwrap();
-    let terms = SealTerms {
-        cut_unix_ms: cut,
-        participants: BTreeSet::from(["node".into()]),
-        sealed_digest: sealed.digest.clone(),
-        rules_digest: rules_digest(),
-    };
-    source
-        .publish_seal(&checkpoint, &terms, &sealed, None)
-        .unwrap();
-    let (_, plan, proof) = source
-        .plan_checkpoint_through(cut, None, directory.path())
-        .unwrap();
-    assert!(proof.passed, "actual replay/retention proof: {proof:?}");
+    let plan = crate::store::checkpoint::plan_drops(&source.checkpoint_sealed_set(cut).unwrap());
     assert!(
         !plan.claims.is_empty(),
         "exercise real claim deletion, not an empty trim"
     );
-    source
-        .publish_verification(
-            &checkpoint,
-            &terms,
-            &smallclaims::store::checkpoint_staging::StagedPlan::of(&plan),
-            &proof,
-        )
-        .unwrap();
     receive_dates(
         &peer,
         exchange_from(&source, &peer.replication_inventory().unwrap()).envelopes,
@@ -502,12 +480,11 @@ mission "trim-date-child" state="ready" { goal "End before parent."; step "work"
             &plan.drop_digest,
             &plan.envelopes,
             &plan.claims,
-            false,
             &mut actions,
         )
         .unwrap();
-    let manifest = source.checkpoint_manifest(&checkpoint, cut).unwrap();
-    assert!(!peer.adopt_checkpoint(&manifest).unwrap().is_empty());
+    peer.trim_checkpoint(&checkpoint, cut, &plan.drop_digest, &plan.envelopes, &plan.claims, &mut actions)
+        .unwrap();
     assert_eq!(
         source.checkpoint_manifest(&checkpoint, cut).unwrap(),
         peer.checkpoint_manifest(&checkpoint, cut).unwrap()

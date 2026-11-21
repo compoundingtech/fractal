@@ -118,23 +118,31 @@ the aggregate. Mail redelivery and isolation VM coverage run in the daily lanes.
 Namespace build/test stages use `nscloud-ubuntu-24.04-amd64-8x16-with-features`;
 the daily `isolation-vm` uses `namespace-profile-linux-x86-64`.
 The four required Workspace gates (`linux-gate`, `typescript-client`, `fractal-web`,
-`genie-freshness`) and tiny supporting controls (eight evidence gates,
-`upgrade-impact`, and web change detection) use the existing `ci1-priority` owned
-role only for `merge_group` and protected-main `push` events. Their labels do not
-depend on picker output. Every PR, including same-repository and fork PRs, and
-every manual run retains GitHub-hosted `ubuntu-latest` for these jobs.
+`genie-freshness`) and supporting controls (`upgrade-impact` and web change detection)
+use the existing `ci1-priority` owned role only for `merge_group` and protected-main
+`push` events. Their labels do not depend on picker output. PRs and manual runs
+retain GitHub-hosted `ubuntu-latest` for these jobs.
 Genie and TypeScript retain their existing Nix setup and commands; TypeScript's
 Node setup is already explicit. The moved web aggregator installs pinned Node
 on owned runners only when uncovered relevant receipts need validation.
-CI-script tests, Home Manager evaluation, compatibility archives and real web
-execution retain their existing hosted placement.
-No new Namespace usage or provisioned capacity is introduced. The picker and
-queue watchers remain hosted independently of both workload pools.
-In baseline run `44693797114`, the initial fourteen hosted jobs waited a median
-1,249 seconds (range 798–1,356). Nine of those initial dispatches move to owned
-capacity for merge groups; five remain independently hosted. Across the full
-workflow, fourteen gate/control definitions change placement, while all required
-check names, predicates, dependency edges, evidence decisions and work remain unchanged.
+CI-script tests, Home Manager evaluation and real web execution retain their existing
+hosted placement. The picker, eight evidence gates and compatibility archive producers
+instead use the ephemeral `nscloud-ubuntu-24.04-amd64-2x4-with-features` shape,
+at priority 1 for merge groups and 2 otherwise. These Python/Git/API controls
+need no build capacity: compared with the 8x16 compilation shape, each requests
+75% less CPU and RAM from the shared Namespace concurrency budget. Their
+labels require no provider-managed profile or picker output. This reduces
+admission pressure but does not reserve capacity or preempt running jobs.
+These are the complete prerequisite paths for the fast-lane required checks
+`linux-test-build`, `linux-clippy` and `linux-fleet-compat`; unrelated hosted jobs,
+including source retention, cannot delay their admission. Fork source is not moved
+onto persistent owned runners. Queue watchers remain independently hosted.
+
+Workspace main-push concurrency is grouped by workflow and branch with cancellation
+of running work disabled. GitHub retains the running run and only its newest pending
+successor: that newest tree covers earlier commits, but superseded intermediate trees
+do not each receive a full Workspace proof. PR updates still cancel obsolete heads;
+merge groups and manual runs keep separate run identities.
 
 By default, required merge-group producers, the first two test shards and supporting
 Rust jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common
@@ -249,6 +257,30 @@ retained for panic backtraces; local compiler profiles are unchanged. The outer 
 ZIP uses storage-only mode because both large payloads are already compressed.
 No build caches, incremental directories or raw gateway copy belong in this transfer.
 A failed producer explicitly fails consumer checks and the gate.
+
+The Workspace producer also runs the first native Rust Buck slice:
+`//crates/fractal-storage-version:unit-tests` and `:integration-tests`, against
+the real `:fractal-storage-version` library. Its `BUCK.genie.ts` uses the existing
+consumer's pinned Prelude and Nix-capability native Rust/C++ toolchains, not Cargo
+inside a Buck action. Source files and the package manifest are declared inputs.
+This dependency-free slice does not translate other crates, build scripts or proc
+macros. Buck's local action cache reuses unchanged compilation; `buck2 test` still
+executes the tests. Remote caching and uploads remain disabled.
+
+`scripts/ci-buck2-rust-parity` compares both Buck libtest executable listings with
+the complete nextest inventory for that package, including ignored tests. Missing,
+extra or duplicate identities fail the producer and hence `linux-gate`. Local parity
+uses the same commands as CI:
+
+```sh
+mkdir -p target
+nix develop -c bash -euc 'cargo nextest list --locked -p fractal-storage-version --message-format json > target/buck2-storage-version-nextest.json'
+nix develop .#web -c bash -euc 'buck2 test //crates/fractal-storage-version:unit-tests //crates/fractal-storage-version:integration-tests; python3 scripts/ci-buck2-rust-parity --nextest-json target/buck2-storage-version-nextest.json'
+```
+
+This inventory proof is not a cached test-success receipt or a replacement for the
+full nextest suite. Shared action identity, protected cache writers, remote workers
+and fresh exact-head suite envelopes remain separate prerequisites.
 
 Tests resolve archived executables through nextest's runtime binary paths. A source guard rejects raw compiled binary, manifest and temporary-directory lookups in test code.
 Manifest/fixture paths

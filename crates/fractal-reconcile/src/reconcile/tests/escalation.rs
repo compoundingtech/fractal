@@ -94,11 +94,13 @@ fn closed_graph_notification_keeps_deduplication_at_later_deadline_after_restart
     assert_eq!(before.len(), 1);
     let receipt = store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.into_iter()
         .find(|claim| claim.body["fields"]["title"].as_str().is_some_and(|title| title.starts_with("Escalation overdue stage"))).unwrap();
-    store.append_claim(&ClaimInput {
-        subject: receipt.subject.clone(), kind: "message.closed".into(), actor: Some("agent/node.reporter".into()),
-        fields: BTreeMap::from([("status".into(), serde_json::json!("closed"))]), evidence: Vec::new(),
-        expected_subject: None, idempotency_key: Some("close-first-escalation".into()),
-    }).unwrap();
+    for status in ["delivered", "read", "closed"] {
+        store.append_claim(&ClaimInput {
+            subject: receipt.subject.clone(), kind: format!("message.{status}"), actor: Some("agent/node.reporter".into()),
+            fields: BTreeMap::from([("status".into(), serde_json::json!(status))]), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: Some(format!("{status}-first-escalation")),
+        }).unwrap();
+    }
     // The real local retirement path must not delete permanent episode-stage authority.
     let retired_at = u64::try_from(since).unwrap() + later;
     let mut retirement = store.retire_closed_mail_step(retired_at).unwrap();

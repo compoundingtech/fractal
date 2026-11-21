@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A valid replica record keeps no bytes of its own: admission and sealing store an empty raw, and after the upgrade the daemon empties the bytes older builds kept and gives the freed pages back. On a copy of a 52 GB member, replica_records went from 9.49 GB to 6.45 GB (3.04 GB freed)",
+  "replay": {
+    "status": "none",
+    "detail": "No replay. Every replica record keeps its row, state, claim, position and repair link; claims, positions and projections are untouched, and the authority and graph digests of the measured copy were equal before and after."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "No new table or column and no storage version change. Valid replica_records rows store an empty raw. Five triggers on replica_records that fired on any UPDATE (resource preparation, completion health and resource observation pending queues) are replaced by triggers under new names (_columns, resource_observations_record_change) that list every column but raw, so emptying the bytes queues no work. A meta cursor (valid_record_bytes_cursor) records the last record the pass read; it stays after the pass, so each start reads only records added since. Only a record that was never admitted as valid keeps its bytes: a valid record later repaired, or marked invalid with its envelope, keeps an empty raw, which no reader takes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule or fleet coordination change. The pass is local to each member and waits on no other member."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, API or harness change. Peers exchange the same envelopes, which still carry each claim's signed bytes; an unknown, invalid or repaired record keeps its bytes, and admission retries re-read the envelope."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "No startup work. After start the daemon empties valid records' bytes a page at a time on the writer queue (at most 512 records read and 10 ms of updates before each page's commit, a cursor committed with each), then gives the freed pages back 128 at a time. Measured on a copy of a 52 GB member with the daemon's WAL checkpointer running: 3.2 M records emptied in 141 s (writer jobs p50 4 ms, p99 19 ms) and 742,497 pages given back in 68 s (p50 9 ms, p99 42 ms). 12 of 31,210 writes took over 100 ms (at most 377 ms); they waited on concurrent WAL checkpoints of up to 335 ms or on a cold read, as any write does at those moments."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No action on a store with incremental auto-vacuum (`PRAGMA auto_vacuum` answers 2; every store made since it became the default): the space returns on its own. A store made before then keeps its file size and holds the freed pages for its own later writes until it is converted with one VACUUM, as docs/st3/retention.md (Giving space back) describes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback to the previous release is supported at any point. It reads no valid record's raw, finds every row it reads, and writes the bytes of the records it admits itself; this build empties those again after the next upgrade. The previous release recreates its unlisted triggers beside the listed ones, which only mark pending work twice, deduplicated. Tested by fleet::previous_release_replicates_and_rolls_back_over_emptied_valid_record_bytes."
+  }
+}

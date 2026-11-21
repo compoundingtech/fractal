@@ -121,6 +121,9 @@ pub struct RosterAttributes {
     reader_acquire_ms: Option<f64>,
 }
 
+/// SDK 0.30 appends repeated keys. Rebuild roots emit their final accumulated attributes once.
+pub struct DeferredRosterAttributes;
+
 thread_local! {
     static ROSTER_SCOPE: std::cell::RefCell<Option<RosterAttributes>> = const { std::cell::RefCell::new(None) };
     static COLLECT_ROSTER_WARM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -222,7 +225,7 @@ pub fn roster_attribute(key: &'static str, value: impl Into<opentelemetry::Value
     let value = value.into();
     tracing::Span::current().set_attribute(key, value.clone());
     let context = opentelemetry::Context::current();
-    if context.span().is_recording() {
+    if context.span().is_recording() && context.get::<DeferredRosterAttributes>().is_none() {
         context.span().set_attribute(KeyValue::new(key, value.clone()));
     }
     ROSTER_SCOPE.with(|slot| {
@@ -914,6 +917,42 @@ pub fn record_mailbox_fence_check(caller: MailboxFenceCaller, elapsed: Duration)
     MAILBOX_FENCE_DURATION.record(elapsed.as_secs_f64(), &attributes);
 }
 
+static MESSAGE_OUTBOX_DELAY: std::sync::LazyLock<opentelemetry::metrics::Histogram<f64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.messages")
+            .f64_histogram("st.messages.outbox.delay")
+            .with_unit("s")
+            .with_description("Time from a message entering the outbox to its delivery, by where it went")
+            .build()
+    });
+
+/// Record how long a message waited in the outbox before the stream or the graph took it.
+pub fn record_message_outbox_delay(to: &'static str, waited: Duration) {
+    if !metrics_enabled() {
+        return;
+    }
+    MESSAGE_OUTBOX_DELAY.record(waited.as_secs_f64(), &[KeyValue::new("to", to)]);
+}
+
+static STREAM_APPEND_FALLBACKS: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.messages")
+            .u64_counter("st.messages.stream.append_fallback")
+            .with_description("Messages routed to the messages shard that went to the graph instead, by error code")
+            .with_unit("{message}")
+            .build()
+    });
+
+/// Record a message routed to the messages shard that was appended to the graph instead:
+/// `site` is `send` when the shard's append failed, `outbox` when the shard refused a queued
+/// message until its retries ran out. `code` comes from a fixed list, so it is a bounded label.
+pub fn record_stream_append_fallback(site: &'static str, code: &'static str) {
+    if !metrics_enabled() {
+        return;
+    }
+    STREAM_APPEND_FALLBACKS.add(1, &[KeyValue::new("site", site), KeyValue::new("code", code)]);
+}
+
 static GITHUB_RESPONSES: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
     std::sync::LazyLock::new(|| {
         opentelemetry::global::meter("st3.github")
@@ -1503,6 +1542,34 @@ mod tests {
     };
     use opentelemetry::{Key, KeyValue, Value};
     use opentelemetry_sdk::Resource;
+
+    #[test]
+    fn deferred_roster_attributes_export_each_final_value_once() {
+        use opentelemetry::trace::{TraceContextExt as _, Tracer as _, TracerProvider as _};
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone()).build();
+        let _export = super::fixture_export_scope();
+        super::roster_collect_warm(|| {
+            super::roster_attribute("st.roster.covered", 0_i64);
+            let context = opentelemetry::Context::new()
+                .with_span(provider.tracer("roster-test").start("st.roster.rebuild"))
+                .with_value(super::DeferredRosterAttributes);
+            let _entered = context.clone().attach();
+            super::roster_attribute("st.roster.covered", 1_i64);
+            super::roster_attribute("st.roster.covered", 2_i64);
+            super::copy_roster_attributes(&context);
+            context.span().end();
+        });
+        let spans = exporter.get_finished_spans().unwrap();
+        let span = spans.iter().find(|span| span.name == "st.roster.rebuild").unwrap();
+        let mut keys = std::collections::BTreeSet::new();
+        for attribute in &span.attributes {
+            assert!(keys.insert(attribute.key.as_str()), "duplicate attribute: {attribute:?}");
+        }
+        assert!(span.attributes.iter().any(|attribute|
+            attribute.key.as_str() == "st.roster.covered" && attribute.value == Value::I64(2)));
+    }
 
     #[test]
     fn subagent_lease_phase_is_exported_on_the_roster_span() {

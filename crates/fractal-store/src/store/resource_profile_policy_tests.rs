@@ -202,25 +202,48 @@ fn historical_tuple_policy_and_membership_survive_reopen() {
     assert_eq!(store.resource_membership_for_grant(&historical_grant).unwrap().request, historical);
     assert_eq!(admit(&store, &historical, 2), historical_grant);
     assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), GIB);
-    assert!(store.retire_resource_membership(&historical_grant, &historical.owner, &runtime, 3).unwrap());
 
     let mut changed_tuple = historical.clone();
     changed_tuple.id = "changed-tuple".into();
     changed_tuple.owner = request("changed-tuple", GIB, 1).owner;
     changed_tuple.capacity.as_mut().unwrap().memory = 2 * GIB;
-    let error = store.request_resource_membership(&changed_tuple, fit(), 4).unwrap_err();
+    let error = store.request_resource_membership(&changed_tuple, fit(), 3).unwrap_err();
     assert!(error.to_string().contains("resource lane policy differs"), "{error:#}");
+    assert!(error.to_string().contains("capacity"), "{error:#}");
 
     let mut keyed = request("keyed", GIB, 1);
     keyed.name = historical.name.clone();
-    let error = store.request_resource_membership(&keyed, fit(), 5).unwrap_err();
+    let error = store.request_resource_membership(&keyed, fit(), 4).unwrap_err();
     assert!(error.to_string().contains("resource lane policy differs"), "{error:#}");
+    assert!(error.to_string().contains("profile"), "{error:#}");
+    assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), GIB);
 
-    let mut matching_tuple = historical.clone();
+    assert!(store.retire_resource_membership(&historical_grant, &historical.owner, &runtime, 5).unwrap());
+    assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), 0);
+    let changed_grant = admit(&store, &changed_tuple, 6);
+    assert_eq!(store.resource_membership_for_grant(&changed_grant).unwrap().request, changed_tuple);
+    assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), 2 * GIB);
+    assert!(store.retire_resource_membership(&changed_grant, &changed_tuple.owner, &runtime, 7).unwrap());
+    assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), 0);
+
+    let mut matching_tuple = changed_tuple.clone();
     matching_tuple.id = "matching-tuple".into();
-    matching_tuple.owner = request("matching-tuple", GIB, 1).owner;
-    let next = admit(&store, &matching_tuple, 6);
+    matching_tuple.owner = request("matching-tuple", 2 * GIB, 1).owner;
+    let next = admit(&store, &matching_tuple, 8);
     assert_eq!(store.resource_membership_for_grant(&next).unwrap().request, matching_tuple);
     assert_eq!(store.resource_membership_for_grant(&historical_grant).unwrap().state, "retired");
+    assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), 2 * GIB);
+
+    let mut old_tuple = historical.clone();
+    old_tuple.id = "old-tuple".into();
+    old_tuple.owner = request("old-tuple", GIB, 1).owner;
+    let error = store.request_resource_membership(&old_tuple, fit(), 9).unwrap_err();
+    assert!(error.to_string().contains("resource lane policy differs"), "{error:#}");
+    assert!(error.to_string().contains("capacity"), "{error:#}");
+    assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), 2 * GIB);
+    assert!(store.retire_resource_membership(&next, &matching_tuple.owner, &runtime, 10).unwrap());
+    assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), 0);
+    let old_grant = admit(&store, &old_tuple, 11);
+    assert_eq!(store.resource_membership_for_grant(&old_grant).unwrap().request, old_tuple);
     assert_eq!(store.held_resource_membership_bytes(HOST, "").unwrap(), GIB);
 }

@@ -252,7 +252,7 @@ describe('typed compile refusals', () => {
   })
 
   it('refuses missing worker bindings and remote exec hosts', () => {
-    expect(() => lower(diamond(), { ...bindings, workers: {} })).toThrow(expect.objectContaining({ construct: 'worker binding', step: 'inspect' }))
+    expect(() => lower(diamond(), { ...bindings, workers: {}, strictWorkers: true })).toThrow(expect.objectContaining({ construct: 'worker binding', step: 'inspect' }))
     expect(() => lower(verify(), { ...bindings, host: 'other' })).toThrow(expect.objectContaining({ construct: 'gate.exec.host', step: 'verify' }))
   })
 
@@ -303,5 +303,98 @@ describe('typed compile refusals', () => {
   it('refuses cyclic graphs at compile time rather than spinning the program', () => {
     const graph = Fractal.mission({ meta, ...base, steps: [{ id: 'a', agentless: true, dependsOn: 'b' }, { id: 'b', agentless: true, dependsOn: 'a' }] })
     expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ construct: 'dependsOn cycle', step: 'a' }))
+  })
+})
+
+describe('standard native worker binding', () => {
+  it.effect('defaults to the published standard mission with full product and input context', () => Effect.gen(function* () {
+    const compiled = lower(review(), { id: bindings.id, host: 'local' })
+    const host = fakeHost({ payload: { head: 'abc' }, child: async ({ key, mission, input }) => {
+      expect({ key, mission }).toEqual({ key: 'review', mission: 'fractal/seat-turn' })
+      expect(input.agent).toBe('agent/example/worker')
+      expect(input.instructions).toBe('Review abc.')
+      expect(JSON.parse(input.context!)).toEqual({ inputs: { head: 'abc' }, products: [
+        { path: 'review/abc/verdict', kind: 'custom.example.verdict', fields: { kind: 'custom.example.verdict', head: 'abc' } },
+        { path: 'review/evidence', kind: 'custom.example.evidence', fields: { kind: 'custom.example.evidence', present: true } },
+      ] })
+      return { _tag: 'Success', value: { run: 'mission-run/native-program', status: 'completed', result: {
+        run: 'mission-run/real-episode', step: 'step-run/real-episode/work', summary: 'Reviewed.', evidence: ['work.completed'],
+        products: {
+          'review/abc/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'GO' },
+          'review/evidence': { kind: 'custom.example.evidence', present: true },
+        },
+      } } }
+    } })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
+  }))
+
+  it.effect('keeps all colliding graph inputs inert and preserves instruction constraints', () => Effect.gen(function* () {
+    const names = ['agent', 'instructions', 'context', 'goal'] as const
+    const graph = Fractal.mission({ meta, ...base,
+      inputs: names.map((name) => Fractal.input.text(name)),
+      constraints: ['Preserve ${input.context}.'],
+      steps: [Fractal.step({ id: 'work', assignedTo: worker, goal: 'Implement ${input.goal}.' })],
+    })
+    const original = { agent: 'not an assignee', instructions: 'not instructions', context: '$(not-shell)', goal: 'requested change' }
+    const host = fakeHost({ payload: original, child: async ({ input }) => {
+      expect(input).toEqual({
+        agent: 'agent/example/worker', instructions: 'Implement requested change.\n\nConstraints:\nPreserve $(not-shell).',
+        context: JSON.stringify({ inputs: original, products: [] }),
+      })
+      return { _tag: 'Success', value: { run: 'mission-run/program', status: 'completed', result: {
+        run: 'mission-run/episode', step: 'step-run/episode/work', summary: 'Done.', evidence: [], products: {},
+      } } }
+    } })
+    expect(yield* start(lower(graph, { id: bindings.id, host: 'local' }), host)).toEqual({ _tag: 'Success', value: null })
+  }))
+
+  it.effect('supports explicit context, agent and report mappings while retaining legacy overrides', () => Effect.gen(function* () {
+    const graph = diamond()
+    const host = fakeHost({ payload: {}, child: async ({ key, mission, input }) => {
+      expect(mission).toBe('example/custom-turn')
+      expect(input.assignee).toBe('agent/example/worker')
+      expect(input.prompt).toBeDefined()
+      expect(JSON.parse(input.data!)).toEqual({ inputs: {}, products: [] })
+      return { _tag: 'Success', value: { run: `mission-run/${key}`, status: 'completed', result: {
+        run: `mission-run/${key}-episode`, step: `step-run/${key}/work`, summary: 'Done.', evidence: [], products: {},
+      } } }
+    } })
+    const compiled = lower(graph, { ...bindings, workers: { 'example/worker': {
+      mission: 'example/custom-turn', goalInput: 'prompt', contextInput: 'data', agentInput: 'assignee', report: true,
+    } } })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
+  }))
+
+  it.effect('preserves prototype-named instruction and agent mappings as own input fields', () => Effect.gen(function* () {
+    for (const mapping of [
+      { goalInput: '__proto__', agentInput: 'assignee' },
+      { goalInput: 'prompt', agentInput: '__proto__' },
+    ]) {
+      const host = fakeHost({ payload: {}, child: async ({ key, input }) => {
+        expect(Object.hasOwn(input, mapping.goalInput)).toBe(true)
+        expect(typeof input[mapping.goalInput]).toBe('string')
+        expect(input[mapping.goalInput]!.length).toBeGreaterThan(0)
+        expect(Object.hasOwn(input, mapping.agentInput)).toBe(true)
+        expect(input[mapping.agentInput]).toBe('agent/example/worker')
+        return completed(key)
+      } })
+      const compiled = lower(diamond(), { ...bindings, workers: { 'example/worker': {
+        mission: 'example/custom-turn', contextInput: 'data', ...mapping,
+      } } })
+      expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
+    }
+  }))
+
+  it.effect('does not accept an unreported child success even when no product was requested', () => Effect.gen(function* () {
+    const host = fakeHost({ payload: {}, child: async ({ key }) => completed(key) })
+    expect(yield* start(lower(diamond(), { id: bindings.id, host: 'local' }), host)).toMatchObject({
+      _tag: 'Failure', error: { _tag: 'Defect' },
+    })
+  }))
+
+  it('refuses ambiguous explicit protocol mappings', () => {
+    expect(() => lower(diamond(), { ...bindings, workers: { 'example/worker': {
+      mission: 'example/custom-turn', goalInput: 'same', contextInput: 'same',
+    } } })).toThrow(expect.objectContaining({ construct: 'worker input binding' }))
   })
 })

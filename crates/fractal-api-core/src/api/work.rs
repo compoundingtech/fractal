@@ -348,6 +348,15 @@ pub async fn wake_work(
             .ok_or_else(|| ApiError::internal("the wake operation message is unavailable"))?;
         return Ok(Json(message));
     }
+    // A wake that went to the stream is no graph operation; its subject names it.
+    if let Some(message) = crate::store::messages_shard::message_view(
+        &state.store,
+        &crate::reconcile::work_wake_subject(&request.idempotency_key),
+    )
+    .map_err(ApiError::internal)?
+    {
+        return Ok(Json(message));
+    }
     if step.status != "ready" {
         return Err(ApiError::bad(FractalError::new(
             "work-not-ready",

@@ -6,6 +6,7 @@ use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, k
 use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+use smallclaims::store::checkpoint_agreement::CheckpointContext;
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
 const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
@@ -290,11 +291,296 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     }).count(), 0);
 }
 
-/// A local cut that deletes in many chunks leaves the roster's generation alone until its run
-/// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
-/// roster's fold before it could publish, all through a run.
+/// A cut still trims the claims of envelopes this member released (`envelope_release`): its
+/// capture reads them by the rowids they had. Each dropped one leaves its released identity for
+/// a tombstone, the readers answer as before, and the inventory still lists every identity once.
 #[test]
-fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
+fn a_local_cut_trims_the_claims_of_released_envelopes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    store.pin_fleet_anchor(key.public()).unwrap();
+    store.set_member_key(Some(key.clone())).unwrap();
+    store.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
+    for n in 0..40 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
+    }
+    store.replication_snapshot().unwrap();
+    while !store.sign_own_claims().unwrap().done {}
+    let before = answers(&store, context.now_unix_ms);
+    let digest = store.replication_snapshot().unwrap().authority_digest.clone();
+    while !store.release_envelopes(0).unwrap().done {}
+    let count = |sql: &str| -> i64 { store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-h12ee733e233d owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
+    let released_observations = count(
+        "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'",
+    );
+    assert!(released_observations > 30, "{released_observations}");
+    assert_eq!(answers(&store, context.now_unix_ms), before);
+
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
+    assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
+    assert!(
+        count("SELECT COUNT(*) FROM checkpoint_envelopes JOIN released_envelopes USING(writer, sequence, envelope_hash)") == 0
+            && count("SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'") <= 2,
+        "a dropped released envelope's identity is its tombstone now"
+    );
+    assert!(count("SELECT COUNT(*) FROM checkpoint_envelopes") >= released_observations - 2);
+    let snapshot = store.replication_snapshot().unwrap();
+    assert_eq!(snapshot.authority_digest, digest, "every identity is still listed");
+    let (full, _) = smallclaims::store::full_compact_replication_inventory(&store.readers.get()).unwrap();
+    assert_eq!((&snapshot.inventory.digest, &snapshot.inventory.payloadless), (&full.digest, &full.payloadless));
+    assert_eq!(full.envelopes.len(), snapshot.inventory.envelopes.len());
+}
+
+/// A member that received another's released envelopes as signed claims (`signed_claims`) holds
+/// them as released with rowids below zero, so its own cut's capture counts them as sealed and
+/// trims their claims as it would those of envelopes it holds.
+#[test]
+fn a_cut_trims_the_claims_a_member_received_as_signed_claims() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    let alder = declared(Store::open_memory("alder").unwrap(), false);
+    alder.pin_fleet_anchor(key.public()).unwrap();
+    alder.set_member_key(Some(key.clone())).unwrap();
+    alder.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
+    for n in 0..40 {
+        apply(&alder, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
+    }
+    alder.replication_snapshot().unwrap();
+    while !alder.sign_own_claims().unwrap().done {}
+    while !alder.release_envelopes(0).unwrap().done {}
+    let count = |store: &Store, sql: &str| -> i64 { store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-ha80fdc3a19b9 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
+    assert!(count(&alder, "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'") > 30);
+    let birch = declared(Store::open_memory("birch").unwrap(), true);
+    birch.pin_fleet_anchor(key.public()).unwrap();
+    for _ in 0..16 {
+        // birch asks as the worker does: with its listing of each range that differs from alder's.
+        let summary = alder.export_replication_summary(TEST_FLEET).unwrap().inventory;
+        let remote = birch.export_replication_exchange(TEST_FLEET, &summary).unwrap().inventory;
+        let exchange = alder.export_replication_exchange(TEST_FLEET, &remote).unwrap();
+        if exchange.envelopes.is_empty() && exchange.signed_envelopes.is_empty() {
+            break;
+        }
+        birch.receive_replication_exchange(&alder.origin, TEST_FLEET, &exchange).unwrap();
+        birch.validate_replication_backlog().unwrap();
+        birch.project_replication_backlog().unwrap();
+    }
+    let received = count(&birch, "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'");
+    assert!(received > 30, "{received}");
+    assert_eq!(count(&birch, "SELECT COUNT(*) FROM released_envelopes WHERE original_rowid >= 0"), 0);
+    let digest = birch.replication_snapshot().unwrap().authority_digest.clone();
+    let before = answers(&birch, context.now_unix_ms);
+    assert_eq!(kinds(&step(&birch, &context)), ["trimmed"]);
+    assert_eq!(answers(&birch, context.now_unix_ms), before, "the readers answer the same");
+    assert_eq!(claims_of(&birch, "observer.observed"), 2, "the newest of each observer stays");
+    assert_eq!(count(&birch, "SELECT COUNT(*) FROM checkpoint_envelopes JOIN released_envelopes USING(writer, sequence, envelope_hash)"), 0);
+    let snapshot = birch.replication_snapshot().unwrap();
+    assert_eq!(snapshot.authority_digest, digest, "every identity is still listed");
+    let (full, _) = smallclaims::store::full_compact_replication_inventory(&birch.readers.get()).unwrap();
+    assert_eq!((&snapshot.inventory.digest, &snapshot.inventory.payloadless), (&full.digest, &full.payloadless));
+}
+
+/// Two members that trim locally, alder and birch, holding the same 20 observations of one
+/// observer. alder has trimmed its cut; birch has not, and learns alder's retired IDs by walking
+/// its claim ranges. birch's own step runs at a time whose due cut drops nothing, so only the
+/// peer's retirements can delete.
+fn retiring_pair(scratch: &std::path::Path) -> (Store, Store, CheckpointContext) {
+    let alder = declared(Store::open_memory("alder").unwrap(), true);
+    let birch = declared(Store::open_memory("birch").unwrap(), true);
+    for n in 0..20 {
+        apply(&alder, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    while sync_into(&alder, &birch) != 0 {}
+    while sync_into(&birch, &alder) != 0 {}
+    assert_eq!(kinds(&step(&alder, &context(scratch, 0))), ["trimmed"]);
+    assert_eq!(claims_of(&alder, "observer.observed"), 1);
+    birch.set_retirement_wins(true);
+    let quiet = CheckpointContext { now_unix_ms: now_ms(), scratch: scratch.to_path_buf() };
+    (alder, birch, quiet)
+}
+
+fn learn_retirements(birch: &Store, alder: &Store) {
+    smallclaims::sync::walk_claim_ranges_in_process(birch, alder, TEST_FLEET, 64).unwrap();
+}
+
+fn retired_ids(store: &Store) -> BTreeSet<String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT lower(hex(id)) FROM retired_claim_ids")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// A peer's retirement deletes the observation this member holds, through its own trim's path,
+/// and the two converge: the same claims, retired IDs and projection digests.
+#[test]
+fn a_peers_retirement_deletes_a_held_observation() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    assert_eq!(claims_of(&birch, "observer.observed"), 20);
+    learn_retirements(&birch, &alder);
+    assert!(kinds(&step(&birch, &quiet)).contains(&"trimmed"));
+    assert_eq!(claims_of(&birch, "observer.observed"), 1, "the peer's retirements deleted 19");
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+    let (a, b) = (alder.replication_snapshot().unwrap(), birch.replication_snapshot().unwrap());
+    assert_eq!(b.projection_digests, a.projection_digests, "claim_sources and operations included");
+    assert_eq!(b.graph_digest, a.graph_digest);
+    assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_kept, 0);
+}
+
+/// No member deletes a person's claim, or a kind its own trim keeps, on a peer's word: such a
+/// retirement is recorded, the claim kept, and the keeping counted.
+#[test]
+fn a_peers_retirement_never_deletes_a_persons_claim_or_a_kind_trim_keeps() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    let person = {
+        let mut connection = alder.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_tx(
+            &transaction, &alder.origin, "observer/watch-0", "observer.observed", Some("person/example"),
+            &json!({"fields": {"status": "ok"}}), &[], None,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        claim.id
+    };
+    let kept_kind: String = alder
+        .readers
+        .get()
+        .query_row("SELECT id FROM claims WHERE kind<>'observer.observed' ORDER BY store_index LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let exchange = alder.export_replication_exchange(TEST_FLEET, &birch.replication_inventory().unwrap()).unwrap();
+    birch.receive_replication_exchange(&alder.origin, TEST_FLEET, &exchange).unwrap();
+    birch.validate_replication_backlog().unwrap();
+    birch.project_replication_backlog().unwrap();
+    // alder retires both, as a member with another rule might.
+    for id in [&person, &kept_kind] {
+        alder.connection.write().execute(&format!(
+            /* sqlite-large-value: allow-for-now lv-h6ba62f2cb117 owner=fractal_store::store::local_trim_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({})", smallclaims::store::retired::identity_sql("?1")
+        ), [id]).unwrap();
+    }
+    learn_retirements(&birch, &alder);
+    step(&birch, &quiet);
+    let held = |id: &str| -> bool {
+        birch.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [id], |row| row.get(0)).unwrap()
+    };
+    assert!(held(&person), "a person's claim stays");
+    assert!(held(&kept_kind), "a kind local trim keeps stays");
+    assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_kept, 2);
+    assert_eq!(claims_of(&birch, "observer.observed"), 2, "the observations alder's cut dropped are gone");
+}
+
+/// A guard refusal keeps the claims a peer retired and stops the trim, as a local cut's does,
+/// and the stop alerts as `local-trim-stopped`.
+#[test]
+fn a_guard_refusal_keeps_what_a_peer_retired() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    learn_retirements(&birch, &alder);
+    birch.set_trim_fault(Some(smallclaims::store::TrimFault::ChangeGraph));
+    let actions = step(&birch, &quiet);
+    assert!(kinds(&actions).contains(&"graph-changed"), "{:?}", kinds(&actions));
+    assert_eq!(claims_of(&birch, "observer.observed"), 20, "nothing is deleted");
+    birch.record_local_trim_stops(&actions).unwrap();
+    let stopped: i64 = birch
+        .readers
+        .get()
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE kind='operational.failure'
+               AND json_extract(body,'$.fields.condition')='local-trim-stopped'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stopped, 1);
+    // A halted member deletes nothing more until a person resumes it.
+    step(&birch, &quiet);
+    assert_eq!(claims_of(&birch, "observer.observed"), 20);
+}
+
+/// Every claim each of `stores` holds, at every other.
+fn sync_all(stores: &[&Store]) {
+    for _ in 0..4 {
+        for from in stores {
+            for to in stores {
+                if from.origin != to.origin {
+                    let exchange = from.export_replication_exchange(TEST_FLEET, &to.replication_inventory().unwrap()).unwrap();
+                    to.receive_replication_exchange(&from.origin, TEST_FLEET, &exchange).unwrap();
+                    to.validate_replication_backlog().unwrap();
+                    to.project_replication_backlog().unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// alder trims 19 of 20 observations it wrote, with their payloads; oak, an older build that
+/// never trims, received them first, and birch, which trims, never did.
+fn unheld_retirements(scratch: &std::path::Path) -> (Store, Store, Store, CheckpointContext) {
+    let alder = declared(Store::open_memory("alder").unwrap(), true);
+    let birch = declared(Store::open_memory("birch").unwrap(), true);
+    let oak = declared(Store::open_memory("oak").unwrap(), false);
+    sync_all(&[&alder, &birch, &oak]);
+    for n in 0..20 {
+        apply(&alder, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    sync_all(&[&alder, &oak]);
+    assert_eq!(kinds(&step(&alder, &context(scratch, 0))), ["trimmed"]);
+    birch.set_retirement_wins(true);
+    let quiet = CheckpointContext { now_unix_ms: now_ms(), scratch: scratch.to_path_buf() };
+    (alder, birch, oak, quiet)
+}
+
+/// A retired claim a member never held is fetched from a peer that still has it, admitted and
+/// retired by its own trim, so its tombstone and every digest match the member that retired it.
+#[test]
+fn a_retired_claim_never_held_is_fetched_from_a_peer_and_retired_with_its_tombstone() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, oak, quiet) = unheld_retirements(scratch.path());
+    learn_retirements(&birch, &alder);
+    let unheld = || birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_unheld;
+    assert_eq!(unheld(), 19, "alder deleted their payloads, so it cannot supply them");
+    learn_retirements(&birch, &oak);
+    assert_eq!(claims_of(&birch, "observer.observed"), 20, "oak supplied them");
+    step(&birch, &quiet);
+    assert_eq!(claims_of(&birch, "observer.observed"), 1);
+    assert_eq!(unheld(), 0);
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+    let (a, b) = (alder.replication_snapshot().unwrap(), birch.replication_snapshot().unwrap());
+    assert_eq!(b.projection_digests, a.projection_digests, "claim_sources and operations included");
+    assert_eq!(b.graph_digest, a.graph_digest);
+}
+
+/// When no peer holds a retired claim this member never held, the gap stays and is counted.
+#[test]
+fn a_retired_claim_no_peer_holds_is_counted_unheld() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, _oak, quiet) = unheld_retirements(scratch.path());
+    learn_retirements(&birch, &alder);
+    step(&birch, &quiet);
+    assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_unheld, 19);
+    assert_eq!(claims_of(&birch, "observer.observed"), 1);
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+    assert_ne!(
+        birch.replication_snapshot().unwrap().projection_digests.get("claim_sources"),
+        alder.replication_snapshot().unwrap().projection_digests.get("claim_sources"),
+        "it lacks those claims' tombstones"
+    );
+}
+
+/// A local cut preserves the roster's publication generation through recording, deletion and
+/// completion, including a capped run resumed the next day. Reductions still release deleted
+/// history, answers stay equivalent, and the final mark still expires old claim cursors.
+#[test]
+fn a_local_cut_preserves_publications_however_many_chunks_it_deletes() {
     let scratch = tempfile::tempdir().unwrap();
     let store = local_member("alder");
     store.set_trim_pause(std::time::Duration::ZERO);
@@ -316,12 +602,8 @@ fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
         let chunks = all.difference(&observer_ids(&store)).count() - deleted;
         let forgets = store.fractal.presented_agents.generation() - generation;
         assert!(chunks > 4, "day {day}: the run deletes in many chunks ({chunks})");
-        // Once when a cut's tombstones are recorded and once when its run stops: the second
-        // day finishes the first cut, then records the next one and stops at the cap.
-        assert!(forgets <= 3, "day {day}: {forgets} forgets for {chunks} chunks");
-        // A stopped run still forgets what the views hold of the claims it deleted, and the
-        // final mark still expires every cursor taken before it.
-        assert!(forgets >= 1, "day {day}: the run's stop forgets the views");
+        assert_eq!(forgets, 0, "day {day}: graph-preserving trim must retain publication generations");
+        // Publication identity survives, but the final trim mark still expires claim cursors.
         assert_eq!(claims_sequence(&store) > sequence, outcome == "trimmed", "day {day}: cursors expire at the final mark");
         assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}: the readers answer the same");
     }
@@ -343,6 +625,7 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
     }
     let fractal = Arc::clone(&store.fractal);
     fractal.presented_agents.start();
+    let initial_generation = fractal.presented_agents.generation();
     let published = Arc::new(Mutex::new(Vec::new()));
     let hook_published = Arc::clone(&published);
     let mut building = None;
@@ -359,7 +642,7 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
                     vec![row], vec![format!("agent/example-{chunk}")],
                 ),
             });
-            hook_published.lock().unwrap().push(done.is_some());
+            hook_published.lock().unwrap().push((done.is_some(), fractal.presented_agents.generation()));
         }
         building = fractal.presented_agents.begin_materialization();
     }));
@@ -367,7 +650,17 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
     store.trim_chunk_hook.lock().unwrap().take();
     let published = published.lock().unwrap();
     assert!(published.len() > 4, "the cut deletes in many chunks ({})", published.len());
-    assert!(published.iter().all(|done| *done), "the agents source reset while materializing its publication: {published:?}");
+    assert!(published.iter().all(|(done, _)| *done), "the agents source reset while materializing its publication: {published:?}");
+    // Recording changes the replication ledger but has not deleted any claims or replaced
+    // projections: it must preserve the same generation the deletion chunks keep serving.
+    let generation = published.first().unwrap().1;
+    assert_eq!(generation, initial_generation, "recording tombstones must not withdraw presentation rows");
+    assert!(published.iter().all(|(_, observed)| *observed == generation),
+        "deletion chunks must preserve their publication generation: {published:?}");
+    assert_eq!(store.fractal.presented_agents.generation(), generation,
+        "finishing a graph-preserving trim must not replace the publication generation");
+    assert!(matches!(store.fractal.presented_agents.current(), super::published_list::ListRead::Served(..)),
+        "the last publication must remain served after the default local trim stops");
 }
 
 /// A local cut's run lets the views refold once the interval is due, keeping the roster's
@@ -881,8 +1174,9 @@ fn opening_a_store_replaces_the_inventory_triggers_and_an_older_build_s_come_bac
     let path = scratch.path().join("claims.sqlite3");
     let store = Store::open(&path, "node").unwrap();
     let names = triggers(&store);
-    assert!(names.contains("replica_envelopes_inventory_DELETE_v2") && names.contains("retired_envelopes_inventory_INSERT_v2"), "{names:?}");
+    assert!(names.contains("replica_envelopes_inventory_DELETE_v3") && names.contains("retired_envelopes_inventory_INSERT_v2"), "{names:?}");
     assert!(!names.contains("replica_envelopes_inventory_DELETE") && !names.contains("retired_envelopes_inventory_INSERT"), "{names:?}");
+    assert!(!names.contains("replica_envelopes_inventory_DELETE_v2"), "{names:?}");
     // As an older build's open creates it.
     store
         .connection
@@ -900,7 +1194,7 @@ fn opening_a_store_replaces_the_inventory_triggers_and_an_older_build_s_come_bac
     let store = Store::open(&path, "node").unwrap();
     let names = triggers(&store);
     assert!(!names.contains("replica_envelopes_inventory_DELETE"), "this build's open drops it again: {names:?}");
-    assert!(names.contains("replica_envelopes_inventory_DELETE_v2"), "{names:?}");
+    assert!(names.contains("replica_envelopes_inventory_DELETE_v3"), "{names:?}");
     // The trigger that counts deleting the newest envelope row is created once, whatever opens
     // the store: an older build's open drops only the two triggers named above, and it already
     // compares the inventory generation this one moves, so it builds its next snapshot from
@@ -2188,4 +2482,77 @@ fn a_retired_citer_leaves_what_the_others_cite() {
     let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
     assert_eq!(scoped, full);
     assert!(scoped.2.iter().any(|answer| answer.contains("cited=1")), "{:?}", scoped.2);
+}
+
+/// The freshness window's forget bound: a local cut keeps a signed claim until its batch is older
+/// than the window and a day, then a later day's cut takes it.
+#[test]
+fn a_local_cut_keeps_signed_claims_inside_the_forget_bound() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    const DAY_MS: u128 = 24 * 60 * 60 * 1_000;
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    store.set_write_clock_at(written).unwrap();
+    for n in 0..20 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
+    }
+    let before = claims_of(&store, "observer.observed");
+    assert!(before > 2);
+    let at = |days: u128| {
+        let now = written + days * DAY_MS;
+        store.set_write_clock_at(now).unwrap();
+        crate::store::checkpoint_agreement::CheckpointContext { now_unix_ms: now, scratch: scratch.path().to_path_buf() }
+    };
+    // Three days on, the day's cut is past them, but they are signed and inside the bound.
+    step(&store, &at(3));
+    assert_eq!(claims_of(&store, "observer.observed"), before, "nothing signed inside the bound goes");
+    // Past the bound, a later day's cut takes them, as it would have.
+    let later = u128::from(FORGET_SIGNED_AFTER_MS) / DAY_MS + 2;
+    step(&store, &at(later));
+    assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
+}
+
+/// The freshness window's forget bound holds on a peer's word too: an observation alder signed
+/// and retired stays at birch while its batch is younger than the window and a day, and birch's
+/// next step past the bound deletes it.
+#[test]
+fn a_peers_retirement_keeps_a_signed_claim_inside_the_forget_bound() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    const DAY_MS: u128 = 24 * 60 * 60 * 1_000;
+    let scratch = tempfile::tempdir().unwrap();
+    let alder = declared(Store::open_memory("alder").unwrap(), true);
+    let birch = declared(Store::open_memory("birch").unwrap(), true);
+    alder.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    let at = |store: &Store, now: u128| {
+        store.set_write_clock_at(now).unwrap();
+        CheckpointContext { now_unix_ms: now, scratch: scratch.path().to_path_buf() }
+    };
+    at(&alder, written);
+    for n in 0..20 {
+        apply(&alder, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    while sync_into(&alder, &birch) != 0 {}
+    while sync_into(&birch, &alder) != 0 {}
+    let past_bound = written + u128::from(FORGET_SIGNED_AFTER_MS) + 2 * DAY_MS;
+    assert!(kinds(&step(&alder, &at(&alder, past_bound))).contains(&"trimmed"));
+    assert_eq!(claims_of(&alder, "observer.observed"), 1);
+    birch.set_retirement_wins(true);
+    learn_retirements(&birch, &alder);
+    // Three days on at birch: signed and inside the bound, so nothing goes and the step goes on.
+    step(&birch, &at(&birch, written + 3 * DAY_MS));
+    assert_eq!(claims_of(&birch, "observer.observed"), 20, "nothing signed inside the bound goes on a peer's word");
+    assert!(!birch.checkpoint_halted().unwrap(), "the bound is skipped, not refused");
+    let set_aside: i64 = birch
+        .readers
+        .get()
+        .query_row("SELECT COUNT(*) FROM checkpoints WHERE state='set-aside'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(set_aside, 0, "no cut is planned over a claim the bound holds, so none is set aside");
+    // Past it, the same retirements delete them.
+    assert!(kinds(&step(&birch, &at(&birch, past_bound))).contains(&"trimmed"));
+    assert_eq!(claims_of(&birch, "observer.observed"), 1);
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
 }

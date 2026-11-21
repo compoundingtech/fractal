@@ -35,7 +35,7 @@ pub use smallclaims::store::Store as GraphStore;
 use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
-pub use smallclaims::store::{CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT, CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction, CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest, CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView, CheckpointProof, CheckpointResumeRequest, CheckpointStatusView, ClaimTombstone, CreatedFleetInvite, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue, FleetInviteView, FleetRedemption, FleetRemoval, PendingCheckpointView, ReplicationAdmission, SealTerms, SealedSet, TRIM_CHUNK_ENVELOPES, TrimFault, VerifiedTerms, certificates, checkpoint_build, checkpoint_cut, checkpoint_name, checkpoint_participants, chosen_certificate, configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut, newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest};
+pub use smallclaims::store::{CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointAction, CheckpointContext, CheckpointManifest, CheckpointManifestCursor, CheckpointManifestPage, CheckpointManifestRequest, CheckpointResumeRequest, TrimStatusView, ClaimTombstone, CreatedFleetInvite, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue, FleetInviteView, FleetRedemption, FleetRemoval, ReplicationAdmission, SealedSet, TRIM_CHUNK_ENVELOPES, TrimFault, checkpoint_build, checkpoint_cut, checkpoint_name, configure_projection_writer, drop_digest, newest_due_cut, valid_fleet_node_name, check_checkpoint_manifest};
 pub use crate::store::runtime_starts::RuntimeStartOperation;
 
 pub use crate::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key, plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key, screen_prompt_undelivered_key};
@@ -298,6 +298,7 @@ impl Store {
         project_replicated_mission_runs(&transaction)?;
         rebuild_planning_tx(&transaction).map_err(internal)?;
         custom::flush(&transaction).map_err(internal)?;
+        escalation::flush(&transaction).map_err(internal)?;
         let accepted_heads = replica_heads(&transaction).map_err(internal)?;
         let accepted_through = accepted_heads.get(&input.peer).copied().unwrap_or(0);
         let missing_sequences = missing_ranges

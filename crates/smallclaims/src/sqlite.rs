@@ -1696,7 +1696,9 @@ impl ReadPool {
 
     fn open_connection(&self) -> Result<ReadConnection> {
         let connection = if let Some(admitted) = &self.admitted {
-            configure_open_read_connection(admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)?)?
+            let connection = admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            crate::store::blob_file::attach_reader(&connection, admitted.database_path())?;
+            configure_open_read_connection(connection)?
         } else {
             open_read_connection(&self.path, self.shared_memory)?
         };
@@ -2418,6 +2420,7 @@ pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connecti
     };
     let connection = Connection::open_with_flags(path, flags)
         .with_context(|| format!("open st read connection {}", path.display()))?;
+    crate::store::blob_file::attach_reader(&connection, path)?;
     configure_open_read_connection(connection)
 }
 
