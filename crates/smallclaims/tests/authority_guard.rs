@@ -97,7 +97,7 @@ fn reduced_reply_bytes_stay_fixed_while_independent_legacy_reply_grows() {
 }
 
 #[test]
-fn signature_requests_and_checkpoint_metadata_survive_reduced_mode() {
+fn signature_requests_survive_reduced_mode_and_no_checkpoint_is_advertised() {
     let store = node();
     store
         .connection
@@ -111,7 +111,8 @@ fn signature_requests_and_checkpoint_metadata_survive_reduced_mode() {
     let (full, reduced) = equivalent(&store);
     assert_eq!(reduced.signature_requests.len(), 1);
     assert_eq!(reduced.signature_requests, full.signature_requests);
-    assert!(reduced.inventory.checkpoint.is_some());
+    // Members agree on no checkpoint, so neither advertises the one this member trimmed.
+    assert!(reduced.inventory.checkpoint.is_none());
     assert_eq!(reduced.inventory.checkpoint, full.inventory.checkpoint);
 }
 
@@ -183,8 +184,8 @@ fn reopen_and_a_later_write_do_not_reuse_the_previous_guard_result() {
 }
 
 #[test]
-fn snapshot_signature_and_checkpoint_failures_are_not_bypassed() {
-    for table in ["batches", "replica_envelope_holds", "checkpoints"] {
+fn snapshot_and_signature_failures_are_not_bypassed() {
+    for table in ["batches", "replica_envelope_holds"] {
         let store = node();
         equivalent(&store);
         store

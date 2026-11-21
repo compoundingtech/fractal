@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Repair the required Clippy and mixed-version rollback checks without changing runtime behavior.",
+  "replay": {"status": "none", "detail": "No runtime changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "The wake rollback test includes closed wake history and applies graph precedence for duplicate subjects, while checking physical stream retention. The conversation rollback test asserts the documented 410 cursor-gap when a newer cursor has more fields than the release supports, checks a full resync retains all supported history, and preserves resume checks for supported cursor shapes."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}

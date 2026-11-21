@@ -7,12 +7,12 @@ use std::time::Duration;
 fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
     let mut db = Connection::open_in_memory().unwrap();
     db.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h175352b3edc3 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
-             accepted_at_unix_ms INTEGER, PRIMARY KEY(writer,sequence,envelope_hash));
+        /* sqlite-large-value: allow-for-now lv-h938f31b4066b owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+             accepted_at_unix_ms INTEGER, checkpoint TEXT, PRIMARY KEY(writer,sequence,envelope_hash));
          CREATE TABLE replica_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              PRIMARY KEY(writer,sequence,envelope_hash));
          CREATE TABLE checkpoint_claims(id TEXT PRIMARY KEY,operation_id TEXT,writer TEXT,
-             sequence INTEGER,envelope_hash TEXT,
+             sequence INTEGER,envelope_hash TEXT, checkpoint TEXT,
              subject TEXT AS ('observer/example'), kind TEXT AS ('observer.observed'));
          CREATE INDEX claim_envelope ON checkpoint_claims(writer,sequence,envelope_hash);
          CREATE TABLE claims(id TEXT PRIMARY KEY);",
@@ -21,7 +21,7 @@ fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
     let tx = db.transaction().unwrap();
     for sequence in 1..=10_001 {
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h9c52ebff18d6 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES('writer',?1,'hash',0)",
+            /* sqlite-large-value: allow-for-now lv-hb3ca2c6445ed owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES('writer',?1,'hash',0,'checkpoint/cut')",
             [sequence],
         )
         .unwrap();
@@ -32,12 +32,12 @@ fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
     )
     .unwrap();
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h8c96c824c32a owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES('a-gone',NULL,'other',1,'other')",
+        /* sqlite-large-value: allow-for-now lv-hd980ad40ca7c owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES('a-gone',NULL,'other',1,'other','checkpoint/cut')",
         [],
     )
     .unwrap();
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h6aaa2338f314 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES('z-held',NULL,'other',2,'other')",
+        /* sqlite-large-value: allow-for-now lv-h46b3f4c0beff owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES('z-held',NULL,'other',2,'other','checkpoint/cut')",
         [],
     )
     .unwrap();
@@ -46,7 +46,10 @@ fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
     tx.commit().unwrap();
     crate::sqlite::observe(&mut db);
     let tx = db.transaction().unwrap();
-    let mut cursor = TrimCursor::default();
+    let mut cursor = TrimCursor {
+        envelopes_done: false,
+        walk: LocalWalk { checkpoint: "checkpoint/cut".into(), envelope: 0, claim: 0 },
+    };
     let work = crate::sqlite::work::SqliteWorkScope::start();
     let first = next_trim_rows(&tx, &mut cursor).unwrap();
     let work = work.finish();
@@ -55,7 +58,7 @@ fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
         "SQLite work instrumentation did not run"
     );
     assert!(matches!(first, Some((None, ref rows)) if rows.is_empty()));
-    assert_eq!(cursor.envelope.1, 1);
+    assert_eq!(cursor.walk.envelope, 1);
     // The old EXISTS-filtered LIMIT 1 traversed all 10,000 absent identities in one loan.
     assert!(
         work.vm_steps < 1_000,
@@ -116,10 +119,14 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
     {
         let mut writer = store.connection.write();
         let tx = writer.transaction().unwrap();
+        // The walk goes by rowid: two candidates already gone come first, one for the
+        // interrupted loan and one for the first resumed loan.
+        for id in ["!already-deleted-a", "!already-deleted-b"] {
+            let mut absent = tombstones[0].clone();
+            absent.id = id.into();
+            record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &[absent]).unwrap();
+        }
         record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &tombstones).unwrap();
-        let mut absent = tombstones[0].clone();
-        absent.id = "!already-deleted".into();
-        record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &[absent]).unwrap();
         tx.commit().unwrap();
     }
     store.set_trim_chunk_envelopes(1);
@@ -194,7 +201,7 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
             .query_row("SELECT count(*) FROM checkpoint_claims", [], |row| row
                 .get::<_, usize>(0))
             .unwrap(),
-        4
+        5
     );
     assert_eq!(graph_digest(&store.readers.get()).unwrap(), before);
     assert!(matches!(
@@ -248,8 +255,8 @@ fn a_local_walk_visits_only_its_own_cuts_tombstones() {
     crate::sqlite::observe(&mut db);
     let tx = db.transaction().unwrap();
     let mut cursor = TrimCursor {
-        local: Some(LocalWalk { checkpoint: "checkpoint/cut".into(), envelope: 10_000, claim: 10_000 }),
-        ..TrimCursor::default()
+        envelopes_done: false,
+        walk: LocalWalk { checkpoint: "checkpoint/cut".into(), envelope: 10_000, claim: 10_000 },
     };
     let work = crate::sqlite::work::SqliteWorkScope::start();
     let mut steps = 0;
@@ -318,7 +325,7 @@ fn a_local_cut_trims_only_its_tombstones_and_goes_on_from_where_it_stopped() {
     assert!(store.finish_trim_paced(cut, &mut actions, |_| {}).is_err());
     // Two chunks deleted two claims; the walk kept its place.
     assert_eq!(claims[1..].iter().filter(|claim| !exists(&claim.id)).count(), 2);
-    let walk = store.local_walk(cut).unwrap().unwrap();
+    let walk = store.local_walk(cut).unwrap();
     let second: i64 = store
         .readers
         .get()

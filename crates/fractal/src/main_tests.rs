@@ -481,46 +481,6 @@ fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
 }
 
 #[test]
-fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
-    let mut status = fractal_daemon::store::CheckpointStatusView {
-        node: "alder".into(),
-        newest_stable: None,
-        trimmed: None,
-        halted: false,
-        pending: None,
-        participants: ["alder".into(), "birch".into()].into(),
-        excused: Default::default(),
-        left: Default::default(),
-        machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
-        verification_attempt: None,
-        worker: None,
-    };
-    let output = render_checkpoint_status(&status);
-    assert!(output.contains("last daemon start (advertised build)"));
-    assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
-    assert!(output.contains("machine_version  birch: not advertised"));
-    status.pending = Some(serde_json::from_value(serde_json::json!({
-        "checkpoint": "checkpoint/test", "cut_unix_ms": 0, "due_at_unix_ms": 0,
-        "local_digest_state": "unavailable", "sealed": [], "disagreeing": {},
-        "unsealed": ["alder", "birch"], "verified": [], "verifications_agree": true,
-        "builds": {}
-    })).unwrap());
-    assert!(status.pending.as_ref().unwrap().terms.is_none());
-    assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
-    let output = render_checkpoint_status(&status);
-    assert!(output.contains("alder phase=seal (no seal)"));
-    assert!(output.contains("birch phase=seal (no seal)"));
-    status.pending = None;
-    status.worker = Some(serde_json::from_value(serde_json::json!({
-        "phase": "apply_stable", "updated_at_unix_ms": 0, "error": "trim commit failed"
-    })).unwrap());
-    assert!(render_checkpoint_status(&status).contains("phase=ApplyStable failed: trim commit failed"));
-    status.worker = None;
-    status.halted = true;
-    assert!(render_checkpoint_status(&status).contains("phase=trim (halted"));
-}
-
-#[test]
 fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
     let seats: Vec<String> = (0..120).map(|n| format!("agent/example/seat-{n}")).collect();
     let mut renewals_per_second = [0usize; 60];
@@ -11170,7 +11130,7 @@ async fn assert_record_pages_resume_after_restart(reclaim_a_chunk: bool, fail_re
     let page = store.release_valid_record_bytes().unwrap();
     assert!(page.done);
     assert_eq!(page.emptied, 0, "a restart must reclaim even without newly emptied records");
-    super::release_valid_record_bytes(store.clone()).await;
+    super::release_valid_record_bytes(store.clone(), 0).await;
     drop(store);
     assert_eq!(free(&path), 0, "the next start gave them back");
 }

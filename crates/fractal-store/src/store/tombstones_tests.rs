@@ -577,7 +577,7 @@ fn tombstones() -> CheckpointManifest {
 fn a_manifest_that_differs_in_any_tombstone_field_is_rejected() {
     let manifest = tombstones();
     let digest = drop_digest(&manifest.envelopes, &manifest.claims);
-    verify_checkpoint_manifest(&manifest, &digest).unwrap();
+    assert_eq!(check_checkpoint_manifest(&manifest).unwrap(), digest);
 
     type Change = fn(&mut CheckpointManifest);
     let changes: [(&str, Change); 25] = [
@@ -656,19 +656,11 @@ fn a_manifest_that_differs_in_any_tombstone_field_is_rejected() {
     for (name, change) in changes {
         let mut changed = manifest.clone();
         change(&mut changed);
-        let error = verify_checkpoint_manifest(&changed, &digest)
-            .expect_err(&format!("a manifest with a changed {name} passed"));
-        assert!(
-            matches!(
-                error.code,
-                "checkpoint-manifest-mismatch" | "checkpoint-manifest-invalid"
-            ),
-            "{name}: {error:?}"
-        );
+        match check_checkpoint_manifest(&changed) {
+            Ok(changed_digest) => assert_ne!(changed_digest, digest, "a changed {name} kept the digest"),
+            Err(error) => assert_eq!(error.code, "checkpoint-manifest-invalid", "{name}: {error:?}"),
+        }
     }
-    // A manifest whose drop differs from the one its participants verified.
-    let error = verify_checkpoint_manifest(&manifest, &"0".repeat(64)).unwrap_err();
-    assert_eq!(error.code, "checkpoint-manifest-mismatch");
     // A page for another checkpoint does not continue a manifest.
     let mut other = manifest.clone();
     assert!(
@@ -784,15 +776,27 @@ fn a_slow_trim_chunk_logs_what_it_deleted_and_where_its_hold_went() {
     let seen = std::sync::Arc::clone(&lines);
     *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
     // Recorded in one transaction, so only the first deletion chunk pays the cost.
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        smallclaims::store::checkpoint::record_checkpoint_tombstones_tx(
+            &transaction, CHECKPOINT, &plan.envelopes, &plan.claims,
+        )
+        .unwrap();
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h21d91b86073e owner=fractal_store::store::tombstones_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, updated_at_unix_ms)
+                 VALUES (?1, ?2, 'trimming', ?3, 0)",
+                rusqlite::params![CHECKPOINT, i64::try_from(cut).unwrap(), plan.drop_digest],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
     store.set_trim_row_cost(smallclaims::store::checkpoint_trim::LOGGED_TRIM_CHUNK);
     store.set_trim_pause(std::time::Duration::ZERO);
     store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
     let mut actions = Vec::new();
-    assert!(
-        store
-            .trim_checkpoint(CHECKPOINT, cut, &plan.drop_digest, &plan.envelopes, &plan.claims, true, &mut actions)
-            .is_err()
-    );
+    assert!(store.finish_trim(CHECKPOINT, &mut actions).is_err());
     let logged = slow_chunks(&lines);
     assert_eq!(logged.len(), 1, "{logged:?}");
     let line = &logged[0];
@@ -847,7 +851,6 @@ fn a_trim_never_makes_a_write_wait_long() {
                     &plan.drop_digest,
                     &plan.envelopes,
                     &plan.claims,
-                    false,
                     &mut actions,
                 )
                 .is_err()
@@ -899,7 +902,6 @@ fn a_trim_never_makes_a_write_wait_long() {
                     &plan.drop_digest,
                     &plan.envelopes,
                     &plan.claims,
-                    false,
                     &mut actions,
                 )
                 .unwrap();
@@ -941,7 +943,8 @@ fn signed_store_with_drops(origin: &str) -> (Store, DropPlan) {
     (store, plan)
 }
 
-/// The signature and verdict rows the store holds for `ids`.
+/// The signature and verdict rows the store holds for `ids`. Verdict links are counted apart:
+/// a trim leaves them, and the orphan link sweep drops them.
 fn signature_and_verdict_rows(store: &Store, ids: &[String]) -> usize {
     let connection = store.readers.get();
     ids.iter()
@@ -949,7 +952,6 @@ fn signature_and_verdict_rows(store: &Store, ids: &[String]) -> usize {
             [
                 "claim_signatures",
                 "claim_verdicts",
-                "claim_verdict_links",
                 "claim_verdict_queue",
                 "claim_verdict_fresh",
             ]
@@ -966,6 +968,23 @@ fn signature_and_verdict_rows(store: &Store, ids: &[String]) -> usize {
             .sum::<usize>()
         })
         .sum()
+}
+
+/// The verdict links the store holds for `ids`.
+fn verdict_links(store: &Store, ids: &[String]) -> usize {
+    let connection = store.readers.get();
+    ids.iter()
+        .map(|id| {
+            connection
+                .query_row("SELECT COUNT(*) FROM claim_verdict_links WHERE claim_id=?1", [id], |row| row.get::<_, usize>(0))
+                .unwrap()
+        })
+        .sum()
+}
+
+/// One whole pass of the orphan verdict-link sweep.
+fn sweep_links(store: &Store) {
+    while !store.sweep_orphan_verdict_links(now_ms() as u64).unwrap().finished {}
 }
 
 /// The claims a trim of `dropped` keeps.
@@ -993,9 +1012,15 @@ fn a_trim_forgets_the_signatures_and_verdicts_of_what_it_drops() {
     let before = authority(&store);
     let graph = smallclaims::store::graph_digest(&store.readers.get()).unwrap();
 
+    let kept_links = verdict_links(&store, &kept);
+    assert!(verdict_links(&store, &dropped) > 0, "judged claims have links");
     trim(&store, &plan);
     assert_eq!(signature_and_verdict_rows(&store, &dropped), 0);
     assert_eq!(signature_and_verdict_rows(&store, &kept), kept_rows);
+    // The trim leaves the dropped claims' links; the orphan sweep takes them, and only them.
+    sweep_links(&store);
+    assert_eq!(verdict_links(&store, &dropped), 0);
+    assert_eq!(verdict_links(&store, &kept), kept_links);
     assert_eq!(authority(&store), before);
     assert_eq!(smallclaims::store::graph_digest(&store.readers.get()).unwrap(), graph);
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
@@ -1050,6 +1075,11 @@ fn the_sweep_forgets_what_an_older_trim_left_behind_once() {
     assert_eq!(store.sweep_trimmed_claim_rows().unwrap(), left);
     assert_eq!(signature_and_verdict_rows(&store, &dropped), 0);
     assert_eq!(signature_and_verdict_rows(&store, &kept), kept_rows);
+    let kept_links = verdict_links(&store, &kept);
+    assert!(verdict_links(&store, &dropped) > 0, "the older trim left the dropped claims' links");
+    sweep_links(&store);
+    assert_eq!(verdict_links(&store, &dropped), 0);
+    assert_eq!(verdict_links(&store, &kept), kept_links, "the sweep keeps every live claim's links");
     assert_eq!(authority(&store), before);
     assert_eq!(smallclaims::store::graph_digest(&store.readers.get()).unwrap(), graph);
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
