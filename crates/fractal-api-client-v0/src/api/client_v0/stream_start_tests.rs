@@ -60,6 +60,154 @@ async fn terminal_authority_idle_stream_delivers_incarnation_change_without_glob
     pty.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_follow_live_grant_changes_cancel_local_and_remote_reads() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::os::unix::fs::PermissionsExt as _;
+    use pty_core::protocol::{encode_geometry, encode_packet, MessageType};
+
+    async fn request_body(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
+        let headers = String::from_utf8(headers).unwrap();
+        let length: usize = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+        }).unwrap();
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).await.unwrap();
+        body
+    }
+
+    for remote in [false, true] {
+        for denial in ["revoked", "scope-removed", "expired"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = super::tests::test_state_named(root.path(), "gateway");
+            let subject = "agent/live-grant";
+            let pairing = |expiry: u128, scopes: Vec<&str>| ClaimInput {
+                subject: "custom/client/live-terminal-browser".into(),
+                kind: "custom.client.pairing-completed".into(), actor: Some("person/alex".into()),
+                fields: serde_json::from_value(json!({
+                    "session_actor":"client/live-terminal-browser", "person_id":"person/alex",
+                    "credential_hash":credential_digest("live-terminal-test"),
+                    "expires_at_unix_ms":expiry, "scopes":scopes,
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            };
+            let expiry = client_now_ms() + 60_000;
+            let paired = state.store.append_client_operation_claim(&pairing(expiry, vec!["terminal.read"])).unwrap();
+            let session = paired_client_session(&state, &paired, "fabric-loopback", false).unwrap();
+            let (pending_tx, pending_rx) = tokio::sync::oneshot::channel();
+            let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+            let server = if remote {
+                let auth = crate::peer::FleetAuth::test("live-grant-test", &[7; 32]);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let secret = root.path().join("secret");
+                std::fs::write(&secret, [7_u8; 32]).unwrap();
+                std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+                state.client_relay = crate::peer::ClientRelay::from_config(&crate::config::Config {
+                    node: "gateway".into(), fleet_id: Some("live-grant-test".into()), shared_secret_file: Some(secret),
+                    peers: vec![crate::config::PeerConfig { name: "owner".into(), url: format!("http://{address}") }],
+                    ..Default::default()
+                }).unwrap();
+                tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let body = request_body(&mut socket).await;
+                    let envelope = crate::model::ApiResponse {
+                        api_version: "st3.v1".into(), request_id: "request/live-grant".into(),
+                        snapshot_host: "owner".into(), store_index: 0,
+                        value: json!({"runtime_incarnation":"one", "revision":"screen/one"}),
+                    };
+                    let bytes = serde_json::to_vec(&envelope).unwrap();
+                    let headers = auth.response_headers_for("/v1/peer/client-read", "owner", &bytes,
+                        &crate::peer::FleetAuth::body_digest(&body)).unwrap();
+                    let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n", bytes.len());
+                    for (name, value) in &headers {
+                        response.push_str(&format!("{}: {}\r\n", name, value.to_str().unwrap()));
+                    }
+                    response.push_str("\r\n");
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.write_all(&bytes).await.unwrap();
+                    socket.shutdown().await.unwrap();
+                    drop(socket);
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let body = request_body(&mut socket).await;
+                    let request: crate::peer::ClientReadRequest = serde_json::from_slice(&body).unwrap();
+                    assert!(matches!(request.request, crate::peer::ClientReadOperation::TerminalScreenChange { .. }));
+                    pending_tx.send(()).unwrap();
+                    // The owner sends no response: cancellation must close the
+                    // pending long-poll transport, not leave its read running.
+                    let mut byte = [0];
+                    assert_eq!(socket.read(&mut byte).await.unwrap(), 0);
+                    closed_tx.send(()).unwrap();
+                })
+            } else {
+                state.store.append_claim(&ClaimInput {
+                    subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+                    fields: serde_json::from_value(json!({
+                        "status":"running", "runtime_id":"live-grant", "incarnation_id":"one", "terminal":true,
+                    })).unwrap(),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                std::fs::create_dir_all(&state.pty_root).unwrap();
+                let listener = tokio::net::UnixListener::bind(
+                    pty_core::registry::socket_path_in(&state.pty_root, "live-grant"),
+                ).unwrap();
+                tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0; 6];
+                    socket.read_exact(&mut request).await.unwrap();
+                    socket.write_all(&encode_geometry(2, 20)).await.unwrap();
+                    socket.write_all(&encode_packet(MessageType::Screen, b"authorized")).await.unwrap();
+                    pending_tx.send(()).unwrap();
+                    let mut byte = [0];
+                    assert_eq!(socket.read(&mut byte).await.unwrap(), 0);
+                    closed_tx.send(()).unwrap();
+                })
+            };
+            let follow = if remote {
+                TerminalFollow::Remote { id: subject.into(), owner: "owner".into(), incarnation: "one".into(), session }
+            } else {
+                TerminalFollow::Local { id: subject.into(), incarnation: "one".into(), session }
+            };
+            let (sender, mut frames) = watch::channel(TerminalFrame::Waiting);
+            let stream_state = state.clone();
+            let stream = tokio::spawn(async move {
+                follow.run(stream_state, TerminalSink::Subscription(sender), None, None).await;
+            });
+            tokio::time::timeout(Duration::from_secs(5), frames.changed()).await.unwrap().unwrap();
+            assert!(matches!(&*frames.borrow_and_update(), TerminalFrame::Screen(_)), "remote={remote}, {denial}");
+            tokio::time::timeout(Duration::from_secs(5), pending_rx).await.unwrap().unwrap();
+            match denial {
+                "revoked" => {
+                    state.store.append_client_operation_claim(&ClaimInput {
+                        subject: paired.subject.clone(), kind: "custom.client.pairing-revoked".into(),
+                        actor: Some("person/alex".into()), fields: Default::default(),
+                        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                    }).unwrap();
+                }
+                "scope-removed" => {
+                    state.store.append_client_operation_claim(&pairing(expiry, Vec::new())).unwrap();
+                }
+                "expired" => {
+                    state.store.append_client_operation_claim(&pairing(client_now_ms() + 200, vec!["terminal.read"])).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            tokio::time::timeout(Duration::from_secs(5), frames.changed()).await.unwrap().unwrap();
+            match &*frames.borrow_and_update() {
+                TerminalFrame::Ended(error) => assert_eq!(error["code"], "forbidden", "remote={remote}, {denial}"),
+                _ => panic!("denied live grant delivered another screen: remote={remote}, {denial}"),
+            }
+            tokio::time::timeout(Duration::from_secs(5), stream).await.unwrap().unwrap();
+            assert!(frames.changed().await.is_err(), "screen sender must be dropped");
+            tokio::time::timeout(Duration::from_secs(5), closed_rx).await.unwrap().unwrap();
+            server.await.unwrap();
+        }
+    }
+}
+
 /// Run alone with ST3_PROFILE_DIR and ST3_PROFILE_SLOW_MS=0 so the real profile
 /// sink can prove completion before the follower's intentional long-poll idle.
 #[tokio::test]
