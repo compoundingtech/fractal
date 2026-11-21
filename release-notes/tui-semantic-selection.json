@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Copy semantic TUI card content without borders, alignment padding or soft wraps; copy tables as TSV",
+  "replay": {"status": "none", "detail": "Rendering and interaction only; no replay."},
+  "schema": {"status": "none", "detail": "No client-v0 schema or generated client changes."},
+  "rules": {"status": "none", "detail": "No authoring or runtime policy changes."},
+  "compatibility": {"status": "changed", "detail": "Plain drag remains app-owned and copies semantic text on release. Outside inputs, conversation typing and existing answer shortcuts, y copies the focused card body. Copy text in the context menu copies the pointed block. Full-width card actions activate on release so dragging does not activate them. Card frames remain unchanged."},
+  "downtime": {"status": "none", "detail": "No restart-time work."},
+  "manual": {"status": "changed", "detail": "Clipboard copy requests use OSC 52 and require terminal clipboard permission; tmux requires clipboard forwarding configuration. Feedback reports a written request, not unobservable clipboard acceptance. Native cell selection remains available through the terminal's mouse-selection override."},
+  "recovery": {"status": "none", "detail": "Revert the rendering and interaction change; no stored data changes."}
+}
