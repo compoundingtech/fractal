@@ -66,6 +66,16 @@ pub(super) fn queue_page(
             ""
         ))?
         .execute(/* sqlite-large-value: allow-for-now lv-h6b1b40cffd79 owner=smallclaims::store::principals::dependencies TODO=trace-statement-and-value-representation */ page)?;
+    // A deleted claim keeps its links (there is no index to find them by claim): a page that
+    // meets one drops it, by its own key.
+    connection
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h00dcdefe45a1 owner=smallclaims::store::principals::dependencies TODO=prepare-body-and-predecessor-values */ "DELETE FROM claim_verdict_links WHERE link=?1 AND claim_id IN (
+                 SELECT claim_id FROM claim_verdict_links WHERE link=?1 AND claim_id>?2
+                 ORDER BY claim_id LIMIT ?3)
+             AND NOT EXISTS(SELECT 1 FROM claims WHERE id=claim_verdict_links.claim_id)",
+        )?
+        .execute(/* sqlite-large-value: allow-for-now lv-h17c1066168bd owner=smallclaims::store::principals::dependencies TODO=trace-statement-and-value-representation */ page)?;
     Ok(last)
 }
 
@@ -97,10 +107,13 @@ mod tests {
             let mut connection = Connection::open_in_memory().unwrap();
             connection.execute_batch(PRINCIPAL_SCHEMA).unwrap();
             connection.execute_batch(SCHEMA).unwrap();
+            // A requeue page drops links whose claim is gone, so the claims exist.
+            connection.execute_batch("CREATE TABLE claims(id TEXT PRIMARY KEY)").unwrap();
             let tx = connection.transaction().unwrap();
             tx.execute("INSERT INTO claim_verdict_dependency_keys VALUES(1,'root')", []).unwrap();
             for index in 0..total {
                 let claim = format!("claim/{index:08}");
+                tx.execute("INSERT INTO claims(id) VALUES (?1)", [&claim]).unwrap();
                 tx.execute("INSERT INTO claim_verdict_links VALUES('root',?1)", [&claim]).unwrap();
                 tx.execute("INSERT INTO claim_verdict_dependency_edges VALUES(1,?1)", [&claim]).unwrap();
             }

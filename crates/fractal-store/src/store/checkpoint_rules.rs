@@ -1,13 +1,13 @@
-//! Fractal's checkpoint rules: which of its claims a stable checkpoint may drop, what a
-//! checkpoint proof compares about each subject, and the attention a stalled checkpoint asks
-//! for. The graph runs checkpoints (`smallclaims::store::checkpoint`) and asks the runtime for
-//! these through `smallclaims::store::Runtime`.
+//! Fractal's checkpoint rules: which of its claims a member's own trim may drop, and what the
+//! answers check compares about each subject. The graph runs the trim
+//! (`smallclaims::store::checkpoint_trim`) and asks the runtime for these through
+//! `smallclaims::store::Runtime`.
 //!
-//! `doc/fleet/smalltalk/checkpoint-design` is the design. Each rule keeps, within a slot, the
-//! claims a reader's answer depends on. It drops a claim only when a later kept claim of the same
-//! slot replaces it for every fold that reads the kind (the claim's witness). The planner is a
-//! pure function of the claims before the cut, in canonical order, so every node that holds the
-//! same claims drops the same ones.
+//! `docs/st3/checkpoints.md` describes the rules. Each rule keeps, within a slot, the claims a
+//! reader's answer depends on. It drops a claim only when a later kept claim of the same slot
+//! replaces it for every fold that reads the kind (the claim's witness). The planner is a pure
+//! function of the claims before the cut, in canonical order, so every node that holds the same
+//! claims drops the same ones.
 
 use super::*;
 use smallclaims::store::checkpoint::DAY_MS;
@@ -1120,8 +1120,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
         sealed_envelopes: sealed.envelopes.len(),
         sealed_claims: first.len(),
         sealed_digest: sealed_digest(sealed),
-        // Cumulative: every tombstone before the cut, from earlier checkpoints and this one. A
-        // node that adopts the checkpoint checks the whole manifest against it.
+        // Cumulative: every tombstone before the cut, from earlier checkpoints and this one.
         drop_digest: drop_digest(
             &[sealed.envelope_tombstones.as_slice(), envelopes.as_slice()].concat(),
             &[sealed.claim_tombstones.as_slice(), tombstones.as_slice()].concat(),
@@ -1205,25 +1204,8 @@ pub fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The answers no one subject holds: the account limits, which fold every seat's readings. The
-/// proof's copy refolds them from its claims, as a node that never trimmed would.
-pub fn global_answers(transaction: &Transaction<'_>) -> Result<Value> {
-    super::limits::refold_limits_tx(transaction)?;
-    Ok(json!({"account_limits": super::limits::account_limits_at(transaction)?}))
-}
-
 /// Every answer about `subject` that a checkpoint must leave unchanged, as of the cut.
 pub fn subject_answers(connection: &Connection, subject: &str, cut: u128) -> Result<Value> {
-    subject_answers_inner(connection, subject, cut, None)
-}
-
-pub fn subject_answers_with_sources(connection: &Connection, subject: &str, cut: u128) -> Result<(Value, CheckpointAnswerSources)> {
-    let mut sources = CheckpointAnswerSources::new();
-    let answer = subject_answers_inner(connection, subject, cut, Some(&mut sources))?;
-    Ok((answer, sources))
-}
-
-fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sources: Option<&mut CheckpointAnswerSources>) -> Result<Value> {
     let mut answers = serde_json::Map::new();
     if subject.starts_with("glass/") {
         let person = fractal_schema::glasses::owner(subject).map_err(anyhow::Error::new)?;
@@ -1253,13 +1235,7 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
     if subject.starts_with("agent/") {
         // Completeness metadata may change deliberately when old claims are tombstoned;
         // every transition still inside the published retention bound must stay identical.
-        let history = if let Some(sources) = sources {
-            let (history, items) = seat_status::history_at_with_sources(connection, subject, cut, i64::MAX as u64)?;
-            sources.insert("status_history".into(), items);
-            history
-        } else {
-            seat_status::history_at(connection, subject, cut, i64::MAX as u64)?
-        };
+        let history = seat_status::history_at(connection, subject, cut, i64::MAX as u64)?;
         answers.insert("status_history".into(), history["items"].clone());
     }
     // Which claim a status shows, its origin, and whether its runtime observations conflict.
@@ -1441,91 +1417,4 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
     Ok(Value::Object(answers))
 }
 
-impl Store {
-    /// The first checkpoint after the newest stable one that is still not stable
-    /// `CHECKPOINT_ATTENTION_AFTER_MS` after it became due. The participant that sorts first
-    /// among those that sealed asks the person to bring the others back or excuse them.
-    pub fn checkpoint_attention_items(
-        &self,
-        person: Option<&str>,
-        as_of: u128,
-    ) -> Result<Vec<AttentionItemView>> {
-        if person.is_some_and(|person| person != "person/operator") {
-            return Ok(Vec::new());
-        }
-        let claims = self.checkpoint_claims()?;
-        let newest_stable = stable_checkpoints(&claims).keys().next_back().copied();
-        let due = newest_due_cut(as_of);
-        let cut = claims
-            .iter()
-            .filter_map(CheckpointClaim::seal_terms)
-            .map(|terms| terms.cut_unix_ms)
-            .filter(|cut| *cut <= due && newest_stable.is_none_or(|stable| *cut > stable))
-            .max();
-        let Some(cut) = cut else {
-            return Ok(Vec::new());
-        };
-        let checkpoint = checkpoint_name(cut);
-        let seals = newest_seals(&claims, &checkpoint);
-        let (current, _) = self.checkpoint_participants(&claims, &[])?;
-        let runtime_rules = rules_digest();
-        let reference = seals.iter().find(|(writer, terms)| {
-            current.contains(*writer) && terms.rules_digest == runtime_rules
-        }).or_else(|| seals.iter().find(|(writer, _)| current.contains(*writer)));
-        let Some((writer, terms)) = reference else {
-            return Ok(Vec::new());
-        };
-        let first_waiting = newest_stable.map_or_else(
-            || {
-                claims
-                    .iter()
-                    .filter_map(CheckpointClaim::seal_terms)
-                    .map(|terms| terms.cut_unix_ms)
-                    .min()
-                    .unwrap_or(cut)
-            },
-            |stable| stable + DAY_MS,
-        );
-        let since = first_waiting + 2 * DAY_MS;
-        if as_of < since + CHECKPOINT_ATTENTION_AFTER_MS {
-            return Ok(Vec::new());
-        }
-        let waiting = terms
-            .participants
-            .intersection(&current)
-            .filter(|writer| seals.get(*writer) != Some(terms))
-            .cloned()
-            .collect::<Vec<_>>();
-        if waiting.is_empty() {
-            return Ok(Vec::new());
-        }
-        Ok(vec![AttentionItemView {
-            deadline_unix_ms: None,
-            default_answer: None,
-            episode: format!("{}:{writer}", checkpoint_name(first_waiting)), priority: "normal".into(), kind: "fault".into(),
-            review_mode: None, subject: checkpoint.clone(), person: "person/operator".into(), requester_id: None,
-            launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None, title: format!("Checkpoints are waiting for {}", waiting.join(", ")),
-            detail: "Bring the waiting machines back, upgrade them, or excuse a machine that stays away.".into(),
-            mission: None, mission_run: None, step: None, targets: vec![checkpoint.clone()], requested_at_unix_ms: since,
-            actions: vec![attention_action("inspect checkpoint", &["st", "replication", "checkpoint", "status"])],
-            request: None,
-        }])
-    }
-}
 
-/// Empty every projection and the local observation log on a checkpoint proof's copy, before
-/// the graph cuts its claims down to the sealed set.
-pub fn clear_projections(transaction: &Transaction<'_>) -> Result<()> {
-    for table in PROJECTION_TABLES {
-        let exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-            [table],
-            |row| row.get(0),
-        )?;
-        if exists {
-            transaction.execute(&format!(/* sqlite-large-value: allow-for-now lv-h72e64e178b66 owner=fractal_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])?;
-        }
-    }
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h45129f3e11a0 owner=fractal_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations;")?;
-    Ok(())
-}

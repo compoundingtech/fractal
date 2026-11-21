@@ -154,21 +154,36 @@ impl Store {
 }
 
 fn tracking(connection: &Connection) -> Result<()> {
+    use smallclaims::store::record_bytes::{RECORD_DELETE_MATTERS, replace_if_changed, replaced_update_trigger, update_event};
     // Persistent body-free queues also capture edits made by another SQLite writer. Flush runs
     // at append/projection/commit boundaries and explicitly before canonical completion inputs.
     for (table, identity) in [("claims", "id"), ("claim_positions", "claim_id"),
         ("replica_records", "claim_id"), ("projection_digest_repaired_claims", "id")] {
         for (event, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"),
             ("UPDATE", "OLD")] {
-            connection.execute_batch(&format!(
-                /* sqlite-large-value: allow-for-now lv-hf1a64465123e owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_{table}_{event}_{row}
-                 AFTER {event} ON {table} BEGIN
+            let (clause, suffix) = if event == "UPDATE" {
+                replaced_update_trigger(connection, table, &format!("completion_health_v1_{table}_{event}_{row}"))?;
+                update_event(table)
+            } else {
+                (event.to_owned(), "")
+            };
+            // A valid record's deletion changes no claim (`record_bytes`).
+            let when = if table == "replica_records" && event == "DELETE" {
+                format!(" WHEN {RECORD_DELETE_MATTERS}")
+            } else {
+                String::new()
+            };
+            let sql = format!(
+                /* sqlite-large-value: allow-for-now lv-h4e91fa11194d owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_{table}_{event}_{row}{suffix}
+                 AFTER {clause} ON {table}{when} BEGIN
                  INSERT INTO local_completion_health_v1_pending(claim_id)
                  SELECT {row}.{identity} WHERE {row}.{identity} IS NOT NULL AND (
                     EXISTS(SELECT 1 FROM claims WHERE id={row}.{identity} AND {RELEVANT})
                     OR EXISTS(SELECT 1 FROM local_completion_health_v1_claims WHERE claim_id={row}.{identity}))
                  AND NOT EXISTS(SELECT 1 FROM local_completion_health_v1_pending WHERE claim_id={row}.{identity});
-                 END;"))?;
+                 END;");
+            replace_if_changed(connection, "TRIGGER", &format!("completion_health_v1_{table}_{event}_{row}{suffix}"), &sql)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7c0d7a38f43c owner=fractal_store::store::completion_state TODO=trace-statement-and-value-representation */ &sql)?;
         }
     }
     for (event, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"), ("UPDATE", "OLD")] {

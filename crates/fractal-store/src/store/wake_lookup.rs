@@ -10,8 +10,8 @@ pub const BACKFILL_PAGE: i64 = 128;
 // Keep both wire tag families: normalization can make them the same candidate.
 // Rust parses the last two numeric fields as u32 (accepting leading zeros and '+').
 // Canonicalize them for the prefix seek; malformed numbers may only overinclude candidates.
-macro_rules! wake_rows {
-    ($claim:literal, $from:literal, $filter:literal) => {
+macro_rules! normalized_wake_rows {
+    ($($candidates:tt)*) => {
         concat!(
             "SELECT recipient,
                 CASE WHEN json_array_length(parts)>=4 THEN
@@ -26,19 +26,44 @@ macro_rules! wake_rows {
              FROM (
                 SELECT recipient,rawtag,claim_id,
                     '['||replace(json_quote(rawtag),'@','\",\"')||']' AS parts
-                FROM (
-                    SELECT json_extract(", $claim, ".body,'$.fields.to') AS recipient,
-                        CASE WHEN substr(tag.value,1,9)='st3-work:' THEN substr(tag.value,10)
-                             ELSE substr(tag.value,14) END AS rawtag, ", $claim, ".id AS claim_id
-                    FROM ", $from, "json_each(", $claim, ".body,'$.fields.tags') AS tag
-                    WHERE ", $claim, ".kind='message.sent'
-                      AND json_type(", $claim, ".body,'$.fields.to')='text'
-                      AND tag.type='text'
-                      AND (substr(tag.value,1,9)='st3-work:' OR substr(tag.value,1,13)='fractal-work:')",
-                      $filter, "
+                FROM (", $($candidates)*, "
                 )
              )"
         )
+    };
+}
+
+macro_rules! wake_rows {
+    ($claim:literal, $from:literal, $filter:literal) => {
+        normalized_wake_rows!(concat!(
+            "SELECT json_extract(", $claim, ".body,'$.fields.to') AS recipient,
+                CASE WHEN substr(tag.value,1,9)='st3-work:' THEN substr(tag.value,10)
+                     ELSE substr(tag.value,14) END AS rawtag, ", $claim, ".id AS claim_id
+            FROM ", $from, "json_each(", $claim, ".body,'$.fields.tags') AS tag
+            WHERE ", $claim, ".kind='message.sent'
+              AND json_type(", $claim, ".body,'$.fields.to')='text'
+              AND tag.type='text'
+              AND (substr(tag.value,1,9)='st3-work:' OR substr(tag.value,1,13)='fractal-work:')",
+              $filter
+        ))
+    };
+}
+
+/// A stream item's wake rows, from its mirror row in `local_stream_sent`. Its subject stands
+/// where a claim id stands: no claim id starts with `message/`. A subject the graph also holds
+/// is the graph's, as the mirror's other folds read it.
+macro_rules! stream_wake_rows {
+    ($row:literal, $from:literal) => {
+        normalized_wake_rows!(concat!(
+            "SELECT json_extract(", $row, ".fields,'$.to') AS recipient,
+                CASE WHEN substr(tag.value,1,9)='st3-work:' THEN substr(tag.value,10)
+                     ELSE substr(tag.value,14) END AS rawtag, ", $row, ".subject AS claim_id
+            FROM ", $from, "json_each(", $row, ".fields,'$.tags') AS tag
+            WHERE json_type(", $row, ".fields,'$.to')='text'
+              AND tag.type='text'
+              AND (substr(tag.value,1,9)='st3-work:' OR substr(tag.value,1,13)='fractal-work:')
+              AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.subject=", $row, ".subject AND claims.kind='message.sent')"
+        ))
     };
 }
 
@@ -74,9 +99,43 @@ const SCHEMA: &str = concat!(
         INSERT OR IGNORE INTO local_work_wake_tags ", wake_rows!("NEW", "", ""), ";
     END;"
 );
+
+/// A work wake for a seat on this member is a stream item (`message_routing::send_work_wake`),
+/// mirrored into `local_stream_sent`; these keep its candidates as the claims triggers keep a
+/// graph wake's. The mirror only ever adds rows, and a restore rebuilds it, so a delete clears
+/// one only if a rebuild of the mirror ever drops it.
+const STREAM_TRIGGERS: &str = concat!(
+    /* sqlite-large-value: allow-for-now lv-h6e7a5f9a2395 owner=fractal_store::store::wake_lookup TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS work_wake_stream_insert AFTER INSERT ON local_stream_sent BEGIN
+        INSERT OR IGNORE INTO local_work_wake_tags ", stream_wake_rows!("NEW", ""), /* sqlite-large-value: allow-for-now lv-he524f34388ab owner=fractal_store::store::wake_lookup TODO=bound-or-reference-values-and-reclamation */ ";
+    END;
+    CREATE TRIGGER IF NOT EXISTS work_wake_stream_delete AFTER DELETE ON local_stream_sent BEGIN
+        DELETE FROM local_work_wake_tags WHERE claim_id=OLD.subject;
+    END;"
+);
+
 /// Install triggers and capture their historical ceiling in the same transaction.
 pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0887fb3c186f owner=fractal_store::store::wake_lookup TODO=trace-statement-and-value-representation */ SCHEMA)?;
+    let streamed: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='work_wake_stream_insert')",
+        [],
+        |row| row.get(0),
+    )?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf006758281b0 owner=fractal_store::store::wake_lookup TODO=trace-statement-and-value-representation */ STREAM_TRIGGERS)?;
+    // Items mirrored before the triggers existed: once, when they are first installed. A build
+    // that rolls back keeps them, since its own schema names neither.
+    if !streamed {
+        stream_fill(transaction)?;
+    }
+    Ok(())
+}
+
+fn stream_fill(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(concat!(
+        /* sqlite-large-value: allow-for-now lv-h16c94ac785b6 owner=fractal_store::store::wake_lookup TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_work_wake_tags(recipient,tag,claim_id) ",
+        stream_wake_rows!("item", "local_stream_sent AS item, "),
+        ";"
+    ))?;
     Ok(())
 }
 
@@ -97,6 +156,7 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
         wake_rows!("claim", "claims AS claim, ", ""),
         ";"
     ))?;
+    stream_fill(transaction)?;
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-h44fbee03ccdd owner=fractal_store::store::wake_lookup TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_wake_backfill SET cursor=ceiling,complete=1 WHERE singleton=1",
         [],

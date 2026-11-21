@@ -446,14 +446,6 @@ impl Runtime for ViewRuntime {
         }
     }
 
-    fn clear_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> Result<()> {
-        self.checkpoint_preflight()
-    }
-
-    fn replay_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> Result<()> {
-        bail!("registered views have no checkpoint retention proof yet")
-    }
-
     fn checkpoint_subject_answers(
         &self,
         _connection: &Connection,

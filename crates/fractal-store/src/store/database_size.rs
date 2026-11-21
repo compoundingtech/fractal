@@ -95,67 +95,20 @@ pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64
 /// real member giving back 9% of its file, chunks of 512 held the writer up to 225 ms and chunks of
 /// 256 up to 106 ms; chunks of 128 held it at most 79 ms (p99 53 ms).
 pub const FREE_PAGE_CHUNK: u64 = 128;
-// The literal in `release_free_pages` spells this chunk.
-const _: () = assert!(FREE_PAGE_CHUNK == 128);
 
-/// Run `work`, whose commits redo themselves after a crash (giving free pages back, retiring
-/// closed mail), without waiting on the disk at commit, then restore the connection's settings.
-/// On a busy host the waits took most of a 100 ms hold:
-/// - synchronous=NORMAL skips the WAL fsync. In WAL mode it is corruption-safe; the writer's
-///   next FULL commit fsyncs the WAL and these frames with it, and a crash before then loses
-///   only work the next pass does again.
-/// - wal_autocheckpoint=0 leaves copying the WAL into the database (and its fsync) to the
-///   daemon's checkpoint thread, which runs off the writer queue every few seconds.
-///
-/// Neither can change inside a transaction, so `work` begins and commits its own. Both are put
-/// back before this returns, on success, on an error and on a panic alike, so the writer's next
-/// ordinary commit runs at the member's own level.
-pub(crate) fn committing_without_fsync<T>(connection: &Connection, work: impl FnOnce() -> Result<T>) -> Result<T> {
-    let mut restore = RestoreDurability {
-        connection,
-        level: connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?,
-        automatic: connection.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))?,
-        armed: true,
-    };
-    connection.pragma_update(None, "synchronous", "NORMAL")?;
-    connection.pragma_update(None, "wal_autocheckpoint", 0)?;
-    let done = work();
-    // An error restoring wins over the work's result: the writer must not stay at NORMAL.
-    restore.now()?;
-    done
-}
-
-/// Puts a connection's synchronous level and checkpoint threshold back.
-struct RestoreDurability<'a> {
-    connection: &'a Connection,
-    level: i64,
-    automatic: i64,
-    armed: bool,
-}
-
-impl RestoreDurability<'_> {
-    fn now(&mut self) -> Result<()> {
-        self.armed = false;
-        self.connection.pragma_update(None, "wal_autocheckpoint", self.automatic)?;
-        self.connection.pragma_update(None, "synchronous", self.level)?;
-        Ok(())
-    }
-}
-
-impl Drop for RestoreDurability<'_> {
-    // Only on an early return or a panic; the ordinary path restores with `now`.
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.now();
-        }
-    }
-}
+pub(crate) use smallclaims::store::durability::committing_without_fsync;
 
 impl Store {
     /// Give up to [`FREE_PAGE_CHUNK`] free pages back to the filesystem in one short write, and
     /// return how many went. Only a store with incremental auto-vacuum can: a fresh one, or one
     /// converted by a VACUUM. Any other store's file never shrinks, so this gives back nothing.
     pub fn release_free_pages(&self) -> Result<u64> {
+        self.release_free_pages_in(FREE_PAGE_CHUNK)
+    }
+
+    /// [`Self::release_free_pages`] with at most `chunk` pages in the write, for a pass that
+    /// gives back many pages in a row and keeps each writer hold short.
+    pub fn release_free_pages_in(&self, chunk: u64) -> Result<u64> {
         let connection = self.connection.write_background();
         let free = || -> Result<u64> {
             Ok(connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?)
@@ -166,9 +119,9 @@ impl Store {
         if mode != 2 || before == 0 {
             return Ok(0);
         }
-        // FREE_PAGE_CHUNK pages. Each step gives back one, so the pragma runs to its end.
+        // `chunk` pages. Each step gives back one, so the pragma runs to its end.
         committing_without_fsync(&connection, || {
-            let mut statement = connection.prepare("PRAGMA incremental_vacuum(128)")?;
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h03a56f82053f owner=fractal_store::store::database_size TODO=trace-statement-and-value-representation */ &format!("PRAGMA incremental_vacuum({chunk})"))?;
             let mut steps = statement.query([])?;
             while steps.next()?.is_some() {}
             Ok(())

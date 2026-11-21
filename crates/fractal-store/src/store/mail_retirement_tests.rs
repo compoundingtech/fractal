@@ -140,7 +140,9 @@ fn closed_escalation_delivery_authority_stays_while_ordinary_mail_retires() {
     let mut notification = sent("message/escalation", "daemon/runtime", RECIPIENT, Vec::new());
     notification.fields.insert("tags".into(), json!(["mission-escalation-v1", "mission-run/example"]));
     let receipt = store.append_claim(&notification).unwrap();
-    store.append_claim(&lifecycle("message/escalation", "message.closed")).unwrap();
+    for kind in ["message.delivered", "message.read", "message.closed"] {
+        store.append_claim(&lifecycle("message/escalation", kind)).unwrap();
+    }
     let ordinary = thread(&store, "message/ordinary", SENDER, RECIPIENT, true);
     assert_eq!(retire_all(&store, now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS).0, 1);
     assert!(claims(&store).contains(&receipt.id));
@@ -316,4 +318,18 @@ fn mail_that_stays_keeps_what_it_cites() {
     retire_all(&store, now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS);
     assert!(retired(&store).is_empty());
     assert!(cited.iter().all(|id| claims(&store).contains(id)));
+}
+
+/// What `warm` reads by claim is an index search on every table, never a scan.
+#[test]
+fn warming_reads_each_table_by_an_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    let reader = store.readers.get();
+    for table in crate::store::mail_retirement::BY_CLAIM {
+        let mut plan = reader.prepare(/* sqlite-large-value: allow-for-now lv-h174c1a7332e1 owner=fractal_store::store::mail_retirement_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN SELECT * FROM {table} WHERE claim_id=?1")).unwrap();
+        let lines = plan.query_map(["claim/example"], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(lines.iter().all(|line| !line.starts_with("SCAN")), "{table}: {lines:?}");
+    }
 }

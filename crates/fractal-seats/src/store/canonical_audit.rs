@@ -17,7 +17,6 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("slo_episode_heads", &[]),
     ("slo_pending", &[]),
     ("operations", &[]),
-    ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
     ("identity_heads", &[]),
@@ -68,6 +67,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "replica_envelopes",
         "replica_records",
         "claim_positions",
+        "claim_member_signatures",
+        "claim_member_signature_pending",
+        "record_repair_lookups",
         "repaired_claim_replacements",
         "retired_claim_ids",
         "retired_envelopes",
@@ -101,6 +103,7 @@ fn every_persistent_table_has_a_projection_scope() {
         // Rebuildable indexed escalation clocks and transaction-local change capture.
         "local_escalation_clocks_v1",
         "local_escalation_pending_v1",
+        "local_escalation_pending_v2",
         "unread_mail",
         "unread_mail_prefixes",
         "unread_mail_pending",
@@ -281,6 +284,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "checkpoint_capture_epoch",
         "checkpoints",
         "checkpoint_capture_epoch",
+        // A blob is bound by the claims that name its hash, and where its bytes live (the row or
+        // the blob file) is local, so it left the projection digest at projection version 2.
+        "blobs",
     ];
     let mut classified = SHARED_TABLES
         .iter()
@@ -378,8 +384,7 @@ pub fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
                 .iter()
                 .filter(|name| !local_columns.contains(&name.as_str()))
                 .map(|name| {
-                    if (*table == "blobs" && name == "bytes")
-                        || (*table == "documents" && name == "binding_key")
+                    if (*table == "documents" && name == "binding_key")
                         || (*table == "glass_heads" && matches!(name.as_str(), "created_key" | "head_key"))
                         || (*table == "person_directive_notes" && name == "head_key")
                         || (matches!(*table, "arrangements" | "arrangement_registers" | "ordered_membership_heads")
@@ -1110,13 +1115,6 @@ fn every_shared_projection_agrees_after_shuffle_restart_and_checkpoint() {
             &format!("{name}/restart-replay"),
             &mut mismatches,
         );
-        let scratch = tempfile::tempdir().unwrap();
-        let (_, _, proof) = target
-            .plan_checkpoint_through(cut, None, scratch.path())
-            .unwrap();
-        if !proof.passed {
-            mismatches.push(format!("{name}/checkpoint proof: {:?}", proof.mismatches));
-        }
         // Use the production tombstone/delete/replay path on isolated stores. Certificate and
         // fleet protocol behavior already has separate tests; this tests the projection boundary.
         let checkpoint_reference = Store::open_memory("cedar").unwrap();

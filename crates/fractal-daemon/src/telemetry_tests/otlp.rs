@@ -465,6 +465,7 @@ async fn omp_admission_fallbacks_export_content_free_logs_and_bounded_delta_coun
         let first = store.append_claim(&input).unwrap();
         assert_eq!(first.id, store.append_claim(&input).unwrap().id);
     }
+    assert_eq!(store.index().unwrap(), 0, "fallback telemetry must not enter replicated history");
     let batch = store.local_observations_after(0, 10).unwrap();
     assert_eq!(batch.len(), 3, "replayed observations must not increment the counter");
     let logs = records(&otlp_logs("node-a", &batch));

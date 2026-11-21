@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "After blob bytes move to their own file, the daemon packs the blobs rows they left behind and gives the freed pages back: on a copy of a real member the blobs table went from 439 MB of sparse pages to 16 MB, and the store shrank 402 MB more, in writer holds under 40 ms.",
+  "replay": {"status": "none", "detail": "No claim, replication or digest change. Rows keep their hash; only their member-local rowid changes."},
+  "schema": {"status": "changed", "detail": "Two member-local meta keys, blob_compact_through and blob_compact_cursor. No table, index or storage version change."},
+  "rules": {"status": "none", "detail": "No rule or authority change."},
+  "compatibility": {"status": "none", "detail": "Rowids of blobs are member-local and nothing outside the blob move reads them; rows are found by hash. Peers, digests and backups see no difference."},
+  "downtime": {"status": "none", "detail": "One pass per store, after the blob move has caught up. Measured on a copy of a real member (208,338 blobs): 208,338 rows packed in about 100 s, 105 writer holds, p50 15 ms, p99 25 ms, max 29 ms beside a one-row control write (p99 34 ms), with the daemon's checkpoint running."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Rolling back to the previous release works: it reads blobs by hash, and the blob file fence (storage version 25) already covers a moved store. store restore-blob-bytes still restores every byte after packing."}
+}
