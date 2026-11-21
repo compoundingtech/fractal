@@ -176,6 +176,9 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
             try:
                 self.assertTrue(select.select([first.stdout], [], [], 10)[0], 'first build never became ready')
                 ready = first.stdout.readline().strip()
+                if not ready:
+                    _, stderr = first.communicate(timeout=10)
+                    self.fail(f'first build exited before readiness ({first.returncode}): {stderr}')
                 self.assertTrue(ready.startswith('READY:'), ready)
                 live_snapshot = Path(ready.removeprefix('READY:')).parents[1]
                 self.assertEqual(live_snapshot.parent, snapshot_root / 'shared')
