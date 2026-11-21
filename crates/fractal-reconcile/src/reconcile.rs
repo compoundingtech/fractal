@@ -4325,12 +4325,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     member,
                                     &observation,
                                 )?;
-                                self.reconcile_claude_trust_screen(
-                                    subject,
-                                    member,
-                                    &observation,
-                                    now_ms(),
-                                )?;
+                                if restart != RequestedRestart::WaitingForPreparation {
+                                    self.reconcile_claude_trust_screen(
+                                        subject,
+                                        member,
+                                        &observation,
+                                        now_ms(),
+                                    )?;
+                                }
                                 self.reconcile_screen_prompt(
                                     subject,
                                     member,

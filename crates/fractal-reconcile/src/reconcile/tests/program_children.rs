@@ -884,7 +884,7 @@ fn native_fresh_context_never_interrupts_an_unrelated_busy_harness_turn() {
     assert_eq!(fixture.store.current_harness(agent).unwrap().unwrap().state, "working");
     let member = fixture.store.desired_subject_with_writer(agent).unwrap().unwrap().0.member.unwrap();
     let leaf = fixture.store.step_run(&episode.steps[0].subject).unwrap().unwrap();
-    assert!(!fixture.reconciler.prepare_fresh_context(agent, "current", &leaf, &member).unwrap());
+    assert!(!fixture.reconciler.prepare_fresh_context(agent, "current", &leaf, &member, RequestedRestart::Continue).unwrap());
     assert!(fixture.reconciler.runtime.stops.lock().unwrap().is_empty());
     assert!(fixture.store.claims_for(agent, Some("runtime.action.requested")).unwrap().is_empty());
 }
