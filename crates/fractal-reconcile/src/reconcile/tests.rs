@@ -25100,6 +25100,7 @@ observer "repo" {
                 fields: BTreeSet::from(["issues".into(), "pull_requests".into()]),
                 cursor: None, previous_facts: None, every_ms: Some(0), refresh: false,
                 webhook_covered: false, workflow_runs: None, github_capture: None,
+                await_prs: Vec::new(),
             };
             let unavailable = observe(request.clone(), &base).await.unwrap();
             store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
