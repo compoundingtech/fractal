@@ -1,7 +1,8 @@
 //! The browser launcher parses state-path values before raw CLI argument scanners.
 use std::process::{Command, Output};
 
-const URL: &str = "http://localhost:7410";
+const TOKEN: &str = "launch-output-regression-secret";
+const URL: &str = "http://localhost:7410/#token=launch-output-regression-secret";
 
 fn web(arguments: &[&str]) -> Output {
     let root = tempfile::tempdir().unwrap();
@@ -10,29 +11,49 @@ fn web(arguments: &[&str]) -> Output {
         .env_clear()
         .env("FRACTAL_SUPPRESS_DEPRECATION", "1")
         .env("HOME", root.path())
-        // No browser opener exists here: opening the URL deterministically prints it.
+        // No browser opener exists here: opening the URL deterministically fails.
         .env("PATH", root.path())
         .env("FRACTAL_WEB_URL", URL)
         .output()
         .unwrap()
 }
 
+fn assert_opener_failure(output: &Output) {
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("could not open the browser"), "{error}");
+}
+
+#[test]
+fn web_opener_failure_never_prints_the_launch_url_or_token() {
+    let output = web(&["web"]);
+    assert_opener_failure(&output);
+    for bytes in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains(TOKEN), "launch token leaked");
+        assert!(!text.contains(URL), "launch URL leaked");
+        assert!(!text.contains("http://"), "launch origin leaked");
+        assert!(!text.contains("https://"), "launch origin leaked");
+    }
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("configure a default browser"), "{error}");
+    assert!(error.contains("`open`") || error.contains("`xdg-open`"), "{error}");
+    assert!(error.contains("run `fractal web` again on this machine"), "{error}");
+}
+
 #[test]
 fn web_state_path_that_looks_like_an_instance_flag_is_not_activated() {
     for directory in ["--instance=INVALID", "--instance", "--instance=example"] {
         let output = web(&["web", "--state-dir", directory]);
-        assert!(output.status.success(), "{directory}: {output:?}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{URL}\n"));
-        assert!(output.stderr.is_empty(), "{directory}: {output:?}");
+        assert_opener_failure(&output);
     }
 }
 
 #[test]
 fn web_state_path_that_looks_like_an_inventory_flag_is_not_scanned() {
     let output = web(&["web", "--state-dir", "--read-contract-inventory-json"]);
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{URL}\n"));
-    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_opener_failure(&output);
 }
 
 #[test]
@@ -117,8 +138,6 @@ fn web_accepts_global_flag_text_as_a_state_path_value_not_as_a_flag() {
         "--read-contract-inventory-json", "--checkpoint-space-gate-capabilities",
     ] {
         let output = web(&["web", "--state-dir", directory]);
-        assert!(output.status.success(), "{directory}: {output:?}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{URL}\n"));
-        assert!(output.stderr.is_empty(), "{directory}: {output:?}");
+        assert_opener_failure(&output);
     }
 }

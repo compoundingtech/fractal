@@ -1010,7 +1010,9 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
         }
         return Ok(session.clone());
     }
-    if session.transport == "unix" && acting_party(session) {
+    // Unix sessions are established by the trusted local transport, including
+    // its anonymous read-only viewer; none requires a browser pairing grant.
+    if session.transport == "unix" {
         return Ok(session.clone());
     }
     // Admission precedes canonical selection; retained records cannot displace a valid grant.
