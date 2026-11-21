@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Publish catch-up test mission definitions in one real publication per burst.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Test setup only; mission, run and catch-up-round coverage is unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery changes."
+  }
+}
