@@ -8340,6 +8340,7 @@ impl Store {
                  AND (SELECT value FROM meta WHERE key=?13) IS ?14
                  AND (NOT ?15 OR NOT EXISTS(SELECT 1 FROM replication_refusals WHERE peer=?1))",
                 ).map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h608c8f9f249f owner=smallclaims::store TODO=trace-statement-and-value-representation */
                 params![relay, input.schema_digest, input.authority_digest, input.graph_digest,
                     i64::try_from(received_at.saturating_sub(PEER_QUIET_EXCHANGE_MS / 2)).map_err(internal)?,
                     i64::try_from(received_at).map_err(internal)?,
