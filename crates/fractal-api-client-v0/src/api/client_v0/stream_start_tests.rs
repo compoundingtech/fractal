@@ -202,8 +202,17 @@ async fn terminal_follow_live_grant_changes_cancel_local_and_remote_reads() {
             }
             tokio::time::timeout(Duration::from_secs(5), stream).await.unwrap().unwrap();
             assert!(frames.changed().await.is_err(), "screen sender must be dropped");
-            tokio::time::timeout(Duration::from_secs(5), closed_rx).await.unwrap().unwrap();
-            server.await.unwrap();
+            if remote {
+                tokio::time::timeout(Duration::from_secs(5), closed_rx).await
+                    .unwrap_or_else(|_| panic!("pending remote read was not cancelled: {denial}")).unwrap();
+                server.await.unwrap();
+            } else {
+                // Local screens come from a shared watcher with a ten-second
+                // reconnect linger. Revoking one viewer closes that viewer, not
+                // the shared PTY connection that other viewers may still use.
+                server.abort();
+                assert!(server.await.unwrap_err().is_cancelled());
+            }
         }
     }
 }
