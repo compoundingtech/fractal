@@ -1,3 +1,5 @@
+use crate::SeatsStore;
+
 use super::*;
 
 fn engine(dir: &Path) -> Arc<ProgramEngine> {
