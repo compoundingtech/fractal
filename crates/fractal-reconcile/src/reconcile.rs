@@ -1510,7 +1510,7 @@ fn first_readiness_since(run: &MissionRunView) -> u128 {
         .max(run.created_at_unix_ms)
 }
 
-type MemberWake = (DesiredSubject, String, MemberSpec);
+type MemberWake = (DesiredSubject, String, MemberSpec, RequestedRestart);
 #[cfg(any(test, feature = "test-support"))]
 pub type WorkWakeObserveHook = Box<dyn FnOnce(&crate::incremental::Incremental, bool) + Send>;
 #[cfg(any(test, feature = "test-support"))]
@@ -4168,6 +4168,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     (**subject).clone(),
                                     incarnation,
                                     member.clone(),
+                                    RequestedRestart::Continue,
                                 ));
                             }
                             return Ok(());
@@ -4204,6 +4205,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     (**subject).clone(),
                                     incarnation.to_owned(),
                                     old,
+                                    RequestedRestart::Continue,
                                 ));
                             }
                             return Ok(());
@@ -4217,19 +4219,24 @@ impl<R: RuntimeControl> Reconciler<R> {
                         )? {
                             return Ok(());
                         }
-                        if self.reconcile_requested_restart(
+                        let restart = self.reconcile_requested_restart(
                             subject,
                             member,
                             observed.as_ref(),
                             blocked.as_ref(),
-                        )? {
+                        )?;
+                        if restart == RequestedRestart::Handled
+                            || (restart == RequestedRestart::WaitingForPreparation
+                                && !observed.as_ref().is_some_and(|item| item.status == "running"))
+                        {
                             return Ok(());
                         }
                         match observed {
                             Some(observation) if observation.status == "running" => {
                                 self.record_member(subject, &observation, true)?;
-                                if let Some(changes) =
-                                    self.declared_launch_changes(subject, &observation)?
+                                if restart != RequestedRestart::WaitingForPreparation
+                                    && let Some(changes) =
+                                        self.declared_launch_changes(subject, &observation)?
                                 {
                                     // Rendering must succeed before we shut down a still-running seat.
                                     if let Some(error) = blocked.take() {
@@ -4356,6 +4363,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         (**subject).clone(),
                                         incarnation.to_owned(),
                                         member.clone(),
+                                        restart,
                                     ));
                                 }
                             }
@@ -4537,7 +4545,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // is recorded with that delivery.
             let deferred = work_message_agents
                 .last()
-                .is_some_and(|(declaration, _, _)| declaration.subject == subject.subject);
+                .is_some_and(|(declaration, _, _, _)| declaration.subject == subject.subject);
             if deferred {
                 evaluated_member_wakes.insert(subject.subject.clone());
                 if let Err(error) = result {
@@ -4636,7 +4644,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             after(&self.incremental, skip_wakes);
         }
         let mut wakes = BTreeSet::new();
-        for (declaration, incarnation, member) in work_message_agents {
+        for (declaration, incarnation, member, restart) in work_message_agents {
             let agent = &declaration.subject;
             let item = format!("wake:{agent}@{incarnation}");
             wakes.insert(item.clone());
@@ -4655,7 +4663,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &item,
                 skip_wakes,
                 || self.owned_desired_check(&declaration),
-                || self.reconcile_work_messages(agent, &incarnation, Some(&member)),
+                || self.reconcile_work_messages(agent, &incarnation, Some(&member), restart),
             );
             let result = match result {
                 ReconcileItemOutcome::Rejected | ReconcileItemOutcome::GuardFailed => {
@@ -6483,6 +6491,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         incarnation: &str,
         step: &StepRunView,
         member: &MemberSpec,
+        restart: RequestedRestart,
     ) -> Result<bool> {
         if !step.fresh_context
             && member.tags.get("st3.fresh_context").map(String::as_str) != Some("true")
@@ -6556,6 +6565,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(format!("{operation}:request")),
             })?;
             self.signal_changed();
+        }
+        // Record context intent so the accepted restart can satisfy it, but let
+        // that restart's acknowledgement/deadline own the physical stop.
+        if restart == RequestedRestart::WaitingForPreparation {
+            return Ok(false);
         }
         let observation = RuntimeObservation {
             runtime_id: member.runtime_id.clone(),
@@ -6691,6 +6705,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         agent: &str,
         incarnation: &str,
         member: Option<&MemberSpec>,
+        restart: RequestedRestart,
     ) -> Result<()> {
         let incarnation_key = harness_incarnation_key(incarnation);
         // Closed work wakes still count as attempts. A closed wake can mean the
@@ -6841,7 +6856,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(());
             }
             if let Some(member) = member
-                && !self.prepare_fresh_context(agent, incarnation, step, member)?
+                && !self.prepare_fresh_context(agent, incarnation, step, member, restart)?
             {
                 return Ok(());
             }
@@ -6864,7 +6879,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             if let Some(member) = member
-                && !self.prepare_fresh_context(agent, incarnation, step, member)?
+                && !self.prepare_fresh_context(agent, incarnation, step, member, restart)?
             {
                 continue;
             }
@@ -9802,16 +9817,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         observation: Option<&RuntimeObservation>,
         blocked: Option<&anyhow::Error>,
-    ) -> Result<bool> {
+    ) -> Result<RequestedRestart> {
         if subject.kind != "agent" {
-            return Ok(false);
+            return Ok(RequestedRestart::Continue);
         }
         let Some(request) = crate::restart::latest_request(&self.store, &subject.subject)?
         else {
-            return Ok(false);
+            return Ok(RequestedRestart::Continue);
         };
         if self.retire_obsolete_failed_restart(subject, now_ms())? {
-            return Ok(true);
+            return Ok(RequestedRestart::Handled);
         }
         // A seat of an ended run is never started again. A request still open when the run ended
         // is retired without a start; one already completed is neither retried nor raised again.
@@ -9820,14 +9835,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             && let Some(ended) = view.ended()
         {
             if self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some() {
-                return Ok(false);
+                return Ok(RequestedRestart::Continue);
             }
             self.retire_restart_request(
                 &subject.subject,
                 &request,
                 &format!("the seat's run {run} has ended ({ended})"),
             )?;
-            return Ok(true);
+            return Ok(RequestedRestart::Handled);
         }
         if self
             .store
@@ -9835,7 +9850,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .as_deref()
             != request.body.pointer("/evidence/0").and_then(Value::as_str)
         {
-            return Ok(false);
+            return Ok(RequestedRestart::Continue);
         }
         let completion = format!("agent-restart-completed:{}", request.id);
         if let Some(result) = self.store.operation_claim(&completion)? {
@@ -9849,7 +9864,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .unwrap_or("the requested restart failed and the seat is parked")
                 );
             }
-            return Ok(false);
+            return Ok(RequestedRestart::Continue);
         }
         let attempted = self
             .store
@@ -9875,7 +9890,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ),
                     ]),
                 )?;
-                return Ok(true);
+                return Ok(RequestedRestart::Handled);
             }
         }
         let previous = request.body["fields"]["incarnation_id"]
@@ -9917,7 +9932,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     )?;
                 }
                 // Keep ordinary observations and prepare-mail delivery running while waiting.
-                return Ok(false);
+                return Ok(RequestedRestart::WaitingForPreparation);
             }
             let episode = format!("agent-restart-handoff:{}", request.id);
             if self.store.operational_failure(&episode)?.is_some_and(|item| item.status == "pending") {
@@ -9975,7 +9990,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     )?;
                 }
                 // The incumbent still receives ordinary observations, work and mail.
-                return Ok(false);
+                return Ok(RequestedRestart::Continue);
             }
             // Persist the quiet boundary before normal shutdown. A daemon restarting between
             // shutdown and launch must finish this same request without requiring a report from
@@ -10061,7 +10076,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             {
                 // Continue ordinary observation and prompt handling while the new wrapper boots.
                 // Launch acceptance alone cannot prove the native provider passed its gate.
-                return Ok(false);
+                return Ok(RequestedRestart::Continue);
             }
             self.store.append_claim(&ClaimInput {
                 subject: subject.subject.clone(),
@@ -10083,7 +10098,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(completion),
             })?;
             self.signal_changed();
-            return Ok(false);
+            return Ok(RequestedRestart::Continue);
         }
         if let Some(observation) = observation.filter(|item| item.status == "running") {
             // Rendering must succeed before we shut down a still-running seat.
@@ -10101,7 +10116,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             if channel_recovery::automatic_request(&request)
                 && observation.incarnation_id.as_deref().is_some_and(|incarnation|
                     crate::delivery_presence::claude_channel_proof_pending(&self.store, &subject.subject, incarnation)) {
-                return Ok(false); // Unknown proof cannot authorize a physical automatic stop.
+                return Ok(RequestedRestart::Continue); // Unknown proof cannot authorize a physical automatic stop.
             }
             if channel_recovery::automatic_request(&request)
                 && observation.incarnation_id.as_deref().is_some_and(|incarnation|
@@ -10116,7 +10131,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     idempotency_key:Some(completion),
                 })?;
                 self.signal_changed();
-                return Ok(false);
+                return Ok(RequestedRestart::Continue);
             }
             // A self-restart that waited for its idle, quiescent boundary was asked for by the
             // seat itself. Asking it to prepare now would wake it into a new turn at that boundary.
@@ -10138,7 +10153,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     },
                         )?
             {
-                return Ok(true);
+                // Keep the incumbent observable and deliver its prepare message, without
+                // allowing declaration drift to start a competing replacement.
+                return Ok(RequestedRestart::WaitingForPreparation);
             }
             self.record_member(subject, observation, true)?;
             self.reconcile_runtime_stop(
@@ -10149,12 +10166,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 member.shutdown_timeout_ms,
                 Some(observation),
             )?;
-            return Ok(true);
+            return Ok(RequestedRestart::Handled);
         }
         if observation
             .is_some_and(|item| !matches!(item.status.as_str(), "exited" | "vanished" | "stopped"))
         {
-            return Ok(true);
+            return Ok(RequestedRestart::Handled);
         }
         if let Some(error) = blocked {
             return self.fail_requested_restart(
@@ -10209,7 +10226,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
             Some(&request),
         ) {
-            Ok(false) => return Ok(true), // Placement or an automatic hold still defers this start.
+            Ok(false) => return Ok(RequestedRestart::Handled), // Placement or an automatic hold still defers this start.
             Err(error) => {
                 return self.fail_requested_restart(
                     subject,
@@ -10223,7 +10240,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A subsequent runtime observation completes the request. This also catches wrappers
         // that exit at startup after the physical launcher accepted the attempt.
         self.signal_changed();
-        Ok(true)
+        Ok(RequestedRestart::Handled)
     }
 
     /// A verified launch receipt belongs to its exact attempt, even if the PTY
@@ -10309,7 +10326,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         request: &crate::model::ClaimRecord,
         detail: &str,
-    ) -> Result<bool> {
+    ) -> Result<RequestedRestart> {
         let reason = self.record_requested_restart_failure(subject, member, request, detail)?;
         anyhow::bail!("{reason}")
     }
@@ -22933,6 +22950,14 @@ fn member_fields(
         ("reachability".into(), Value::String("reachable".into())),
         ("reason".into(), Value::Null),
     ])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestedRestart {
+    Continue,
+    Handled,
+    /// Observe the incumbent and deliver mail/work, but do not act on launch drift.
+    WaitingForPreparation,
 }
 
 enum RestartDecision {
