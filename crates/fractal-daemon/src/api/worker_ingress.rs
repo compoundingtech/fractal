@@ -208,7 +208,7 @@ mod tests {
         for path in ["/v1/internal/replication/receive", "/v1/internal/seat-freshness",
             "/v1/internal/seat-freshness/reads", "/v1/internal/seat-snapshot", crate::peer::CLIENT_READ_FORWARD_PATH] {
             let app = protect(Router::new().route(path, axum::routing::post(|| async { "accepted" })),
-                Arc::new(|| anyhow::bail!("supervisor unavailable")), WorkerIngressGenerationCheck::Observe);
+                WorkerAuthority::new("test-replication.service", || anyhow::bail!("supervisor unavailable")), WorkerIngressGenerationCheck::Observe);
             let response = app.oneshot(Request::post(path).body(Body::empty()).unwrap()).await.unwrap();
             assert_eq!(response.status(), 200, "{path}");
         }
