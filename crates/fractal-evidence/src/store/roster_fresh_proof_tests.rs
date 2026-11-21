@@ -28,6 +28,47 @@ pub fn fixture(history: bool) -> (Store, u64, Arc<Vec<Value>>, u128) {
 }
 
 #[test]
+fn a_replacement_page_order_does_not_withdraw_the_retained_roster_head() {
+    let (store, cut, cards, published_at) = fixture(false);
+    store.cached_agent_page_refs(cut, false, || {
+        Ok(vec![json!({"id": SUBJECT})])
+    }).unwrap();
+    let mut resources = store.fractal.agent_resources_cache.lock().unwrap();
+    // Isolate the bounded-head path: there is no complete publication to answer first.
+    resources.back_mut().unwrap().covered = Some(BTreeSet::from([SUBJECT.to_owned()]));
+    drop(resources);
+    assert_eq!(store.published_agent_roster_head(cut, 1).unwrap().2, *cards);
+
+    // A graph-equivalent trim retains both halves before clearing their fold caches.
+    let mut resources = store.fractal.agent_resources_cache.lock().unwrap();
+    let mut refs = store.fractal.agent_page_refs_cache.lock().unwrap();
+    let retained_cards = resources.pop_back().unwrap();
+    let retained_refs = refs.pop_back().unwrap();
+    let mut replacement_refs = retained_refs.clone();
+    replacement_refs.index += 1;
+    {
+        let mut previous = store.fractal.agent_roster_previous.lock().unwrap();
+        previous.resources.push(retained_cards.clone());
+        previous.page_refs = Some(retained_refs);
+    }
+    drop(refs);
+    drop(resources);
+    assert_eq!(store.published_agent_roster_head(cut, 1).unwrap().0, cut);
+
+    // Refolding publishes its page order before the corresponding bounded cards. That
+    // is not a new ready head, and must not mask the still-readable retained publication.
+    store.fractal.agent_page_refs_cache.lock().unwrap().push_back(replacement_refs);
+    let head = store.published_agent_roster_head(cut + 1, 1)
+        .expect("the previously successful roster barrier remains readable");
+    assert_eq!((head.0, head.2, head.3), (cut, (*cards).clone(), published_at));
+
+    let mut replacement_cards = retained_cards;
+    replacement_cards.index += 1;
+    store.fractal.agent_resources_cache.lock().unwrap().push_back(replacement_cards);
+    assert_eq!(store.published_agent_roster_head(cut + 1, 1).unwrap().0, cut + 1);
+}
+
+#[test]
 fn exact_served_proof_rejects_other_identity_mode_bounds_and_eviction() {
     for history in [false, true] {
         let (store, cut, cards, published_at) = fixture(history);

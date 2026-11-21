@@ -1,5 +1,6 @@
     #![cfg_attr(not(test), allow(unused, dead_code))]
     mod agent_review_loop_branches;
+    mod restart_preparation;
 
 mod native_effect_convergence {
     use super::*;
@@ -8648,10 +8649,10 @@ agent "import/omp/fixture" {{
             .unwrap();
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
-        assert!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        assert_eq!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap(), RequestedRestart::Handled);
         // A later pass finds the request completed: nothing to retire, retry or raise again, and
         // the member pass goes on as usual.
-        assert!(!reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        assert_eq!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap(), RequestedRestart::Continue);
         let retirements = store.claims_for(&seat, Some("runtime.reconcile-decision")).unwrap().into_iter()
             .filter(|claim| claim.body["fields"]["decision"] == "restart-retired-obsolete-request")
             .count();
@@ -12578,6 +12579,32 @@ agent "worker" {
     }
 
     #[test]
+    fn a_declared_checkout_below_a_symlinked_parent_starts_with_one_lease() {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let workspace = alias.join("new/worker");
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"symlink-worker\"; command \"true\"; restart \"never\" }}",
+            workspace.to_str().unwrap(), repository.to_str().unwrap()), "symlinked-checkout");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(std::fs::canonicalize(&workspace).unwrap(), real.join("new/worker"));
+        assert_eq!(runtime.starts.lock().unwrap().len(), 1,
+            "render/start must reuse admission acquired before the checkout existed");
+        assert!(!store.observations_for("agent/node.worker", "runtime.action.succeeded").unwrap().is_empty());
+        assert!(crate::checkout::activation_lease(&workspace, &repository).is_ok(),
+            "the completed pass must release its shared lease");
+    }
+
+    #[test]
     fn a_top_level_checkout_leaves_after_stop_and_workspace_observations_do_not_repeat() {
         let root = crate::test_support::canonical_tempdir();
         let repository = crate::checkout::test_support::repository(root.path());
@@ -12667,8 +12694,9 @@ agent "worker" {
             Arc::new(Notify::new()),
         );
         let workspace = root.path().join("new");
+        let lease = checkout.activation_lease(&workspace).unwrap();
         let failure = reconciler
-            .create_checkout("agent/node.worker", &checkout, &workspace)
+            .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
             .unwrap()
             .unwrap();
         assert!(failure.contains(existing.to_str().unwrap()), "{failure}");
@@ -12677,7 +12705,7 @@ agent "worker" {
         checkout.remove(&existing).unwrap();
         assert_eq!(
             reconciler
-                .create_checkout("agent/node.worker", &checkout, &workspace)
+                .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
                 .unwrap(),
             Some(failure)
         );
@@ -12687,7 +12715,7 @@ agent "worker" {
         };
         assert!(
             reconciler
-                .create_checkout("agent/node.worker", &revised, &workspace)
+                .create_checkout("agent/node.worker", &revised, &workspace, &lease)
                 .unwrap()
                 .is_none()
         );
@@ -30489,7 +30517,7 @@ mission "wake" state="ready" {
         let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), notify.clone());
         let before = store.index().unwrap();
         reconciler
-            .reconcile_work_messages(&desired.subject, "worker-one", None)
+            .reconcile_work_messages(&desired.subject, "worker-one", None, RequestedRestart::Continue)
             .unwrap();
         assert_eq!(store.index().unwrap(), before);
         assert_eq!(
@@ -32189,7 +32217,7 @@ mission "context" state="ready" {
         ordinary.fresh_context = false;
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "old", &ordinary, &member)
+                .prepare_fresh_context(SEAT, "old", &ordinary, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert!(runtime.stops.lock().unwrap().is_empty());
@@ -32200,14 +32228,14 @@ mission "context" state="ready" {
             .insert("st3.fresh_context".into(), "true".into());
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &ordinary, &seat_member)
+                .prepare_fresh_context(SEAT, "old", &ordinary, &seat_member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
 
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &step, &member)
+                .prepare_fresh_context(SEAT, "old", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
@@ -32217,7 +32245,7 @@ mission "context" state="ready" {
         );
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "new", &step, &member)
+                .prepare_fresh_context(SEAT, "new", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(
@@ -32374,13 +32402,13 @@ mission "seat-context" state="ready" {
         assert!(!store.fresh_context_ready(&step, SEAT, "old").unwrap());
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &step, &member)
+                .prepare_fresh_context(SEAT, "old", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "new", &step, &member)
+                .prepare_fresh_context(SEAT, "new", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert!(store.fresh_context_ready(&step, SEAT, "new").unwrap());
@@ -33026,12 +33054,12 @@ mission "queued" state="ready" {
         };
         observe("working");
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         assert!(faults().is_empty(), "do not interrupt a working turn");
         observe("idle");
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         let first = faults();
         assert_eq!(first.len(), 1);
@@ -33041,7 +33069,7 @@ mission "queued" state="ready" {
         );
         assert_eq!(first[0].body["evidence"], serde_json::json!([sent.id]));
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         assert_eq!(faults().len(), 1, "one diagnostic per readiness episode");
         assert_eq!(
@@ -33080,20 +33108,20 @@ mission "queued" state="ready" {
             .into_iter().filter(|claim| claim.body["fields"]["code"] == "work-wake-exhausted").collect::<Vec<_>>();
         failure("old-seat", step.readiness_epoch);
         failure("seat-one", step.readiness_epoch + 1);
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert!(faults().is_empty());
         let current = failure("seat-one", step.readiness_epoch);
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         let raised = faults();
         assert_eq!(raised.len(), 1);
         assert!(raised[0].body["fields"]["reason"].as_str().unwrap().contains("Operation not permitted"));
         assert!(raised[0].body["evidence"].as_array().unwrap().contains(&serde_json::json!(current.id)));
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert_eq!(faults().len(), 1);
         assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), 1);
         assert_eq!(seat.store.step_run(&subject).unwrap().unwrap().status, "ready");
         seat.work(&subject, "claim", "socket-fixed-claim").unwrap();
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert_eq!(faults().len(), 1, "a successful claim must not raise another fault");
     }
 
@@ -33343,7 +33371,7 @@ mission "queued" state="ready" {
                 member.tags.insert("st3.fresh_context".into(), "true".into());
             }
             seat.move_run(&third.subject, "top", None, "person/operator", "context-top").unwrap();
-            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
+            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member), RequestedRestart::Continue).unwrap();
             assert!(!seat.woken().contains(&SeatQueueFixture::step(&third, "work")));
             assert!(seat.reconciler.runtime.stops.lock().unwrap().is_empty());
             assert!(seat.store.observations_for(SEAT, "runtime.action.requested").unwrap().is_empty());
@@ -33351,7 +33379,7 @@ mission "queued" state="ready" {
             seat.work(&held, "complete", "context-complete").unwrap();
             seat.reconciler.reconcile_once().unwrap();
             assert_eq!(seat.store.step_run(&held).unwrap().unwrap().status, "completed");
-            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
+            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member), RequestedRestart::Continue).unwrap();
             assert_eq!(seat.reconciler.runtime.stops.lock().unwrap().len(), 1);
             assert!(seat.store.step_run(&SeatQueueFixture::step(&second, "work")).unwrap().is_some());
         }
