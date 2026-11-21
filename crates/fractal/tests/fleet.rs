@@ -3847,6 +3847,131 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
     wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
 }
 
+/// The storage version of `node`'s store.
+fn user_version(node: &Node) -> u32 {
+    rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("PRAGMA user_version", [], |row| row.get(0))
+    .unwrap()
+}
+
+/// How many valid records of claims `node`'s store holds; a blob's record is not one.
+fn valid_claim_records(node: &Node) -> u64 {
+    rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("SELECT COUNT(*) FROM replica_records WHERE state='valid' AND claim_id IS NOT NULL", [], |row| row.get(0))
+    .unwrap()
+}
+
+/// A release member upgrades in place, and once its rollback window passes this build deletes
+/// its valid records. It keeps replicating with a release peer in both directions, to equal
+/// digests with no record refused. Rolled back, the release refuses the store rather than
+/// look for records it no longer holds.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_that_deletes_its_valid_records_and_refuses_its_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "3e9b7c1d-5a4f-4e2b-8c6d-0f1a2b3c4d5e";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    let mut n = Node::new(root.path(), "n");
+    o.binary = old.clone();
+    n.binary = old.clone();
+    o.legacy_config(fleet_id, &secret, &[("n", n.port)]);
+    n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n] {
+        node.start().await;
+    }
+    let mut expected = BTreeSet::new();
+    for (node, text) in [(&o, "o-0"), (&n, "n-0")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+    }
+    assert!(valid_claim_records(&n) > 0, "the release keeps a record for each valid claim");
+    let released = user_version(&n);
+
+    // Upgrade in place with no rollback window: the daemon deletes the valid records and the
+    // first deletion moves the store to the version the release refuses. The release refuses
+    // an unknown config key, so only the upgraded member names it.
+    n.stop();
+    let config = n.root.join("config/st3/config.toml");
+    let legacy = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("{legacy}\n[store]\nvalid_record_delete_after = \"0s\"\n")).unwrap();
+    n.binary = PathBuf::from(st3());
+    n.start().await;
+    wait_until("the upgraded member deletes its valid records", 90, || async {
+        valid_claim_records(&n) == 0
+    })
+    .await;
+    let deleted = user_version(&n);
+    assert!(
+        deleted >= smallclaims::store::record_bytes::VALID_RECORDS_GONE_VERSION && deleted > released,
+        "from {released} to {deleted}"
+    );
+    wait_for_notes(&n, &expected, 30, &[&o, &n]).await;
+
+    // Replication goes on in both directions, to equal digests with no record refused.
+    for (node, text) in [(&o, "o-after-delete"), (&n, "n-after-delete")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+    }
+    wait_until("both members hold the same envelopes", 90, || async {
+        o.st_json(&["replication", "status"])["authority_digest"] == n.st_json(&["replication", "status"])["authority_digest"]
+    })
+    .await;
+    for node in [&o, &n] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert!(valid_claim_records(&o) > 0, "the release keeps its own records");
+    assert_eq!(valid_claim_records(&n), 0, "what the member admits after the deletion stores no valid record either");
+
+    // The release refuses the store instead of serving it without the records it reads.
+    n.stop();
+    fs::write(&config, &legacy).unwrap();
+    n.binary = old.clone();
+    let mut refused = n
+        .command(&["up", "--web-listen", "off"])
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(n.root.join("refused.log")).unwrap())
+        .stderr(fs::File::create(n.root.join("refused.stderr.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = refused.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            refused.kill().ok();
+            panic!("the release opened a store whose valid records are gone");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(!status.success());
+    let stderr = fs::read_to_string(n.root.join("refused.stderr.log")).unwrap()
+        + &fs::read_to_string(n.root.join("refused.log")).unwrap();
+    assert!(stderr.contains(&format!("schema version {deleted}")), "{stderr}");
+}
+
 fn backup_baseline_graph(old: &Node, directory: &Path) {
     let original = old.state_dir().join("claims.sqlite3");
     let copy = directory.join("baseline-copy.db");

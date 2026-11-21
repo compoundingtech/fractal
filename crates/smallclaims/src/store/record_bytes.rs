@@ -306,10 +306,10 @@ pub fn replace_changed_triggers(connection: &Connection, schema: &str, names: &[
 /// 26 belong to the blob file and signature compaction.)
 pub const VALID_RECORDS_GONE_VERSION: u32 = 27;
 
-/// Whether the daemon deletes valid records. Off until the signature-reference writer turns on by
-/// its own flag rather than at storage version 21 and above (#6765): committing version 27 would
-/// otherwise switch that writer on too.
-pub const VALID_RECORD_DELETION: bool = false;
+/// Whether the daemon deletes valid records, `[store] valid_record_delete_after` after it first
+/// runs a build that does. The signature-reference writer turns on by its own flag (#6876), which
+/// every build that reads version 27 has, so committing 27 switches nothing else on.
+pub const VALID_RECORD_DELETION: bool = true;
 
 /// Whether this store still stores a record for each valid claim.
 pub fn valid_records_kept(connection: &Connection) -> Result<bool> {
