@@ -117,11 +117,11 @@ impl<'a> TrimViews<'a> {
         }
     }
 
-    /// The run stopped: forget the views once, if it deleted anything, and patch the replication
-    /// snapshot, so which payloads it holds and its counts are exact.
+    /// The run stopped: release trimmed-history reductions once, retaining graph-equivalent
+    /// publications, and patch the replication snapshot so its payloads and counts are exact.
     fn stopped(&mut self) {
         if std::mem::take(&mut self.pending) {
-            self.store.runtime.forget_views();
+            self.store.runtime.claims_trim_finished();
             self.patch_snapshot();
         }
     }
