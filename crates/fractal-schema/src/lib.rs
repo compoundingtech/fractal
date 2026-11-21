@@ -1423,6 +1423,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("head", reference()),
                 ("state", string()),
                 ("pull_requests", array()),
+                ("await_prs_not_found", array()),
                 ("issues", array()),
                 ("repository_id", integer()),
                 ("main_performance_failures", array()),
@@ -1480,6 +1481,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("author", string()),
                 ("head", reference()),
                 ("head_sha", string()),
+                ("await_pr_observation", object()),
                 ("branch", string()),
                 ("opened_by", reference()),
                 ("opened_by_run", reference()),
@@ -6097,6 +6099,32 @@ mod tests {
         registry()
             .validate_claim("gate-operation/run/step/gate", "gate.result", &fields)
             .unwrap();
+    }
+
+    #[test]
+    fn native_pr_wait_observation_proofs_are_registered_resource_facts() {
+        for (kind, name, value) in [
+            ("vcs.repository", "await_prs_not_found", serde_json::json!([])),
+            (
+                "vcs.repository",
+                "await_prs_not_found",
+                serde_json::json!([{"pr": 42, "registrations": ["registration"]}]),
+            ),
+            (
+                "vcs.pull-request",
+                "await_pr_observation",
+                serde_json::json!({
+                    "registrations": ["registration"],
+                    "head": "exact-head",
+                    "merged": true,
+                    "merge_commit_sha": "merge-commit",
+                }),
+            ),
+        ] {
+            registry()
+                .validate_resource_facts(kind, &BTreeMap::from([(name.into(), value)]))
+                .unwrap();
+        }
     }
 
     #[test]
