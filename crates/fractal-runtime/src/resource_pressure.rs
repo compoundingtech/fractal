@@ -56,6 +56,11 @@ impl Default for Policy {
 }
 
 impl Policy {
+    /// Leave room for scheduling jitter without weakening the freshness contract.
+    pub fn sample_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis((self.freshness_ms / 4).max(1))
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(!self.rules.is_empty() && self.rules.len() <= 12,
             "PSI brake requires one to twelve signal/window rules");
@@ -169,8 +174,11 @@ impl Brake {
         } else {
             self.recovering_since = None;
         }
-        Decision { blocked: true, reason: Some(self.trip_signal.map_or(
-            Reason::Recovering, Reason::Pressure)) }
+        Decision { blocked: true, reason: Some(if all_below_resume {
+            Reason::Recovering
+        } else {
+            self.trip_signal.map_or(Reason::Recovering, Reason::Pressure)
+        }) }
     }
 }
 
@@ -251,7 +259,7 @@ impl Reader {
     }
 }
 
-/// Driven by the existing host reconciliation deadline; never starts a worker or admits by time.
+/// Shared by the daemon sampler and admission callers; never admits by elapsed time alone.
 pub struct Observer {
     policy: Policy,
     brake: Brake,
@@ -271,7 +279,9 @@ impl Observer {
     pub fn observe(&mut self, policy: &Policy) -> Result<Decision> {
         if &self.policy != policy { *self = Self::new(policy.clone())?; }
         let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-        if self.sampled_at.is_none_or(|at| now.saturating_sub(at) >= 5000) {
+        if self.sampled_at.is_none_or(|at|
+            u128::from(now.saturating_sub(at)) >= self.policy.sample_interval().as_millis())
+        {
             self.sampled_at = Some(now);
             return Ok(match self.reader.read(&self.policy, now) {
                 Ok(readings) => self.brake.observe(readings, now),
