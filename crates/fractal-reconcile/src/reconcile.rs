@@ -5221,6 +5221,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         trigger: &str,
         reason: &str,
     ) -> Result<bool> {
+        if observation.status != "running" {
+            return Ok(true);
+        }
         let Some(incarnation) = observation.incarnation_id.as_deref() else {
             return Ok(true);
         };
@@ -5229,7 +5232,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .current_harness(subject)?
             .is_some_and(|harness| harness.incarnation_id == incarnation && harness.is_ready())
         {
-            return Ok(true);
+            // Readiness admits preparation; losing readiness must not revoke its
+            // already-persisted acknowledgement/deadline boundary.
+            if self.store.operation_claim(&format!("restart-prepare:{subject}:{trigger}"))?.is_none() {
+                return Ok(true);
+            }
         }
         self.prepare_restart(subject, trigger, reason, false)
     }

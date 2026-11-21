@@ -88,14 +88,6 @@ mission "example/work" state="ready" {{
         assert_eq!(reconciler.idle_residency.lock().unwrap().settings.after_ms, None);
         let desired = store.desired_subject_with_writer(AGENT).unwrap().unwrap().0;
         assert!(reconciler.declared_launch_changes(&desired, &running_observation(desired.member.as_ref().unwrap(), &old)).unwrap().is_some());
-        if context == "trust" {
-            // A prompt already diagnosed before readiness must not let recovery steal
-            // the accepted restart's acknowledgement/deadline boundary.
-            claim(&store, "harness.diagnostic", json!({
-                "severity":"error", "status":"blocked",
-                "code":"provider-trust-prompt", "incarnation_id":old
-            }), vec![], "incumbent-trust-prompt");
-        }
         let request = claim(&store, "runtime.action.requested", json!({"action":"restart", "incarnation_id":old}), vec![token], "manager-restart");
         let run = store.create_mission_run(&crate::model::MissionRunRequest {
             mission: "example/work".into(), revision: None, workspace: root.path().display().to_string(),
@@ -115,6 +107,14 @@ mission "example/work" state="ready" {{
         let actual = store.latest_actual_value(AGENT).unwrap().unwrap();
         assert_eq!(actual["status"], "running");
         assert_eq!(actual["incarnation_id"], old);
+        if context == "trust" {
+            // A prompt diagnosed after preparation was admitted must not let recovery
+            // steal the accepted restart's acknowledgement/deadline boundary.
+            claim(&store, "harness.diagnostic", json!({
+                "severity":"error", "status":"blocked",
+                "code":"provider-trust-prompt", "incarnation_id":old
+            }), vec![], "incumbent-trust-prompt");
+        }
         reconciler.reconcile_once().unwrap();
         assert!(runtime.stops.lock().unwrap().is_empty());
         assert_eq!(runtime.starts.lock().unwrap().len(), 1);
@@ -149,5 +149,68 @@ mission "example/work" state="ready" {{
         assert_eq!(runtime.starts.lock().unwrap().len(), 2, "one initial launch and exactly one replacement");
         let context_requests = store.observations_for(AGENT, "runtime.action.requested").unwrap();
         assert_eq!(context_requests.iter().filter(|claim| claim.body["fields"]["action"] == "fresh-context").count(), usize::from(matches!(context, "work" | "seat")));
+    }
+}
+
+#[test]
+fn restart_preparation_state_table() {
+    // Rows: running ready none => prepare/wait; running unready none => proceed;
+    // running either pending => wait; running either acked/expired => proceed.
+    // No running incumbent => proceed without creating or changing preparation.
+    for running in [false, true] {
+        for ready in [false, true] {
+            for preparation in ["none", "pending", "acked", "expired"] {
+                let _clock = Clock;
+                let origin = 1_800_000_000_000;
+                smallclaims::store::set_thread_clock(Some(origin));
+                let store = Arc::new(Store::open_memory("node").unwrap());
+                apply_source(&store, r#"version 2
+agent "example/worker" { workspace "/tmp"; harness "omp" {}; restart "never"; }
+"#, "matrix");
+                let runtime = Arc::new(FakeRuntime::default());
+                let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+                let desired = store.desired_subject_with_writer(AGENT).unwrap().unwrap().0;
+                let mut observation = running_observation(desired.member.as_ref().unwrap(), "old");
+                reconciler.record_member(&desired, &observation, true).unwrap();
+                if ready {
+                    store.append_claim(&ClaimInput {
+                        subject: AGENT.into(), kind: "harness.observed".into(), actor: Some(AGENT.into()),
+                        fields: serde_json::from_value(json!({"state":"idle", "driver":"omp", "incarnation_id":"old"})).unwrap(),
+                        evidence: vec![], expected_subject: None, idempotency_key: Some("idle".into()),
+                    }).unwrap();
+                }
+                assert_eq!(store.current_harness(AGENT).unwrap().is_some_and(|harness| harness.is_ready()), ready);
+                if preparation != "none" {
+                    assert!(!reconciler.prepare_restart(AGENT, "matrix", "matrix", false).unwrap());
+                }
+                match preparation {
+                    "acked" => {
+                        smallclaims::store::set_thread_clock(Some(origin + 1));
+                        store.append_claim(&ClaimInput {
+                            subject: crate::handoff::ready_subject(AGENT),
+                            kind: crate::handoff::READY_KIND.into(), actor: Some(AGENT.into()),
+                            fields: BTreeMap::new(), evidence: vec![], expected_subject: None,
+                            idempotency_key: Some("matrix-ready".into()),
+                        }).unwrap();
+                    }
+                    "expired" => smallclaims::store::set_thread_clock(Some(origin + RESTART_PREPARE_DEADLINE_MS)),
+                    _ => {}
+                }
+                if !running {
+                    observation.status = "exited".into();
+                }
+                let proceed = reconciler.restart_may_proceed(AGENT, &observation, "matrix", "matrix").unwrap();
+                let expected = !running || match preparation {
+                    "none" => !ready,
+                    "pending" => false,
+                    "acked" | "expired" => true,
+                    _ => unreachable!(),
+                };
+                assert_eq!(proceed, expected, "running={running}, ready={ready}, prepare={preparation}");
+                let prepared = store.operation_claim(&format!("restart-prepare:{AGENT}:matrix")).unwrap().is_some();
+                assert_eq!(prepared, preparation != "none" || (running && ready),
+                    "running={running}, ready={ready}, prepare={preparation}");
+            }
+        }
     }
 }
