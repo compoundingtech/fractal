@@ -11,7 +11,7 @@ export const browserBearer = (headers: IncomingHttpHeaders): string | undefined 
   const value = cookieValue(headers, deviceCookie)
   return value !== undefined && /^[A-Za-z0-9_-]{43}$/.test(value) ? value : undefined
 }
-export const browserAuthorization = (headers: IncomingHttpHeaders, fallback: string): string => {
+export const browserAuthorization = (headers: IncomingHttpHeaders, fallback: string | undefined): string | undefined => {
   const bearer = browserBearer(headers)
   return bearer === undefined ? fallback : `Bearer ${bearer}`
 }

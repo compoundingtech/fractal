@@ -6652,11 +6652,12 @@ enum TerminalFollow {
     Local {
         id: String,
         incarnation: String,
+        session: ClientSession,
     },
     Remote {
         id: String,
         owner: String,
-        authority_actor: String,
+        session: ClientSession,
         incarnation: String,
     },
 }
@@ -6665,24 +6666,36 @@ impl TerminalFollow {
     async fn run(
         self,
         state: AppState,
-        sink: TerminalSink,
+        mut sink: TerminalSink,
         upgrade: Option<opentelemetry::trace::SpanContext>,
         first_frame: Option<FirstFrame>,
     ) {
-        match self {
-            Self::Local { id, incarnation } => {
-                terminal_stream_socket(sink, state, id, incarnation, upgrade, first_frame).await;
-            }
-            Self::Remote {
-                id,
-                owner,
-                authority_actor,
-                incarnation,
-            } => {
-                remote_terminal_stream_socket(sink, state, id, owner, authority_actor, incarnation, (upgrade, first_frame))
-                    .await;
-            }
+        let session = match &self {
+            Self::Local { session, .. } | Self::Remote { session, .. } => session.clone(),
+        };
+        if let Err(error) = terminal_authorize(&state, &session).await {
+            sink.fail(&error).await;
+            return;
         }
+        // Watch before reading, and keep the grant alive even while a screen or relay read
+        // is idle. Cancelling the follower also cancels any pending owner long poll.
+        let denied = terminal_authority_ended(&state, &session);
+        let follow = async {
+            match self {
+                Self::Local { id, incarnation, .. } => {
+                    terminal_stream_socket(&mut sink, state.clone(), id, incarnation, &session, (upgrade, first_frame)).await;
+                }
+                Self::Remote { id, owner, incarnation, .. } => {
+                    remote_terminal_stream_socket(&mut sink, state.clone(), id, owner, &session, incarnation, (upgrade, first_frame)).await;
+                }
+            }
+        };
+        let error = tokio::select! {
+            biased;
+            error = denied => error,
+            () = follow => return,
+        };
+        sink.fail(&error).await;
     }
 }
 
@@ -6721,15 +6734,61 @@ fn prepare_terminal_follow(
         TerminalFollow::Remote {
             id: id.to_owned(),
             owner: live.owner_host_id,
-            authority_actor: session.authority_actor.clone(),
+            session: session.clone(),
             incarnation: live.incarnation_id,
         }
     } else {
         TerminalFollow::Local {
             id: id.to_owned(),
             incarnation: live.incarnation_id,
+            session: session.clone(),
         }
     })
+}
+
+/// Resolve the original grant, never another pairing of the same actor.
+async fn terminal_authorize(state: &AppState, session: &ClientSession) -> Result<ClientSession, ApiError> {
+    let store = state.store.clone();
+    let state = state.clone();
+    let session = session.clone();
+    super::read_deadline::store_read(&store, move || {
+        let current = revalidate_session(&state, &session)?;
+        require_scope(&current, "terminal.read")?;
+        Ok(current)
+    }).await.unwrap_or_else(|_| Err(ApiError::internal("terminal session recheck failed")))
+}
+
+/// Revocation and scope changes wake from committed grant changes; expiry has its own
+/// deadline so a quiet terminal cannot retain authority indefinitely.
+async fn terminal_authority_ended(state: &AppState, session: &ClientSession) -> ApiError {
+    let mut grant = state.store.subscribe_runtime_authority(
+        session.pairing_grant.as_deref().unwrap_or(&session.actor),
+    );
+    let mut broad = state.event_notify.subscribe();
+    loop {
+        let current = match terminal_authorize(state, session).await {
+            Ok(current) => current,
+            Err(error) => return error,
+        };
+        let expiry = async {
+            match current.grant_expires_at {
+                Some(expiry) => tokio::time::sleep(Duration::from_millis(
+                    expiry.saturating_sub(client_now_ms()).min(u128::from(u64::MAX)) as u64,
+                )).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            changed = grant.changed() => {
+                if changed.is_err() { return ApiError::internal("terminal grant watch ended"); }
+            }
+            changed = broad.changed(), if session.pairing_grant.is_none()
+                || state.store.runtime_authority_coverage_failed() => {
+                if changed.is_err() { return ApiError::internal("terminal authority watch ended"); }
+            }
+            () = expiry => {}
+        }
+    }
 }
 
 /// The latest thing a terminal subscription has to say: whole screens replace each other, so
@@ -6803,11 +6862,11 @@ impl TerminalSink {
 /// publishes a screen whose revision differs from the last one sent, so an idle terminal
 /// costs one request per relay wait and sends the client nothing.
 async fn remote_terminal_stream_socket(
-    mut sink: TerminalSink,
+    sink: &mut TerminalSink,
     state: AppState,
     id: String,
     owner: String,
-    authority_actor: String,
+    session: &ClientSession,
     incarnation: String,
     (_upgrade, mut first_frame): (
         Option<opentelemetry::trace::SpanContext>, Option<FirstFrame>,
@@ -6822,7 +6881,7 @@ async fn remote_terminal_stream_socket(
     let mut failures = 0_u32;
     loop {
         let request = crate::peer::ClientReadRequest {
-            authority_actor: authority_actor.clone(),
+            authority_actor: session.authority_actor.clone(),
             relay: None,
             request: match sent.clone() {
                 Some(after_revision) => crate::peer::ClientReadOperation::TerminalScreenChange {
@@ -6875,6 +6934,10 @@ async fn remote_terminal_stream_socket(
         };
         if sent.as_deref() == Some(revision.as_str()) {
             continue;
+        }
+        if let Err(error) = terminal_authorize(&state, session).await {
+            sink.fail(&error).await;
+            return;
         }
         let first_span = first_frame.as_ref().map(|first| first.span.clone());
         if !first_frame_work(first_span, sink.send(&terminal_stream_envelope(&state, screen))).await {
@@ -7435,12 +7498,14 @@ fn terminal_error_close_code(code: &str) -> u16 {
 /// later message is a newer screen that replaces it. The shared watcher publishes changes at a
 /// capped rate, and a viewer busy sending reads only the latest screen when it is ready.
 async fn terminal_stream_socket(
-    mut sink: TerminalSink,
+    sink: &mut TerminalSink,
     state: AppState,
     id: String,
     expected_incarnation: String,
-    _upgrade: Option<opentelemetry::trace::SpanContext>,
-    mut first_frame: Option<FirstFrame>,
+    session: &ClientSession,
+    (_upgrade, mut first_frame): (
+        Option<opentelemetry::trace::SpanContext>, Option<FirstFrame>,
+    ),
 ) {
     let subject = terminal_subject(&id);
     let mut graph = state.store.subscribe_runtime_authority(&subject);
@@ -7548,6 +7613,10 @@ async fn terminal_stream_socket(
         };
         if sent.as_deref() == Some(screen.revision()) {
             continue;
+        }
+        if let Err(error) = terminal_authorize(&state, session).await {
+            sink.fail(&error).await;
+            return;
         }
         let value = screen.value(&terminal_id, &live.incarnation_id);
         let first_span = first_frame.as_ref().map(|first| first.span.clone());
@@ -24545,6 +24614,78 @@ mission "example/zero-run" state="ready" {
             let error = remote_terminal_live_session(&gateway, subject, "i").unwrap_err();
             assert_eq!(error.code, code);
             assert_eq!(error.message, message);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_follow_revalidates_browser_grant_while_idle() {
+        for denial in ["revoked", "expired", "scope-removed"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "terminal-grant");
+            let pairing = |expiry: u128, scopes: Vec<&str>| ClaimInput {
+                subject: "custom/client/terminal-browser".into(),
+                kind: "custom.client.pairing-completed".into(),
+                actor: Some("person/alex".into()),
+                fields: serde_json::from_value(json!({
+                    "session_actor":"client/terminal-browser", "person_id":"person/alex",
+                    "credential_hash":credential_digest("terminal-browser-test"),
+                    "expires_at_unix_ms":expiry, "scopes":scopes,
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            };
+            let expiry = client_now_ms() + 60_000;
+            let paired = state.store.append_client_operation_claim(
+                &pairing(expiry, vec!["terminal.read"]),
+            ).unwrap();
+            let session = paired_client_session(&state, &paired, "fabric-loopback", false).unwrap();
+            assert!(terminal_authorize(&state, &session).await.is_ok());
+            // Both follower paths retain this monitor during pending screen/owner reads.
+            let denied = terminal_authority_ended(&state, &session);
+            tokio::pin!(denied);
+            assert!(futures_util::poll!(&mut denied).is_pending());
+            match denial {
+                "revoked" => {
+                    state.store.append_client_operation_claim(&ClaimInput {
+                        subject: paired.subject.clone(), kind: "custom.client.pairing-revoked".into(),
+                        actor: Some("person/alex".into()), fields: Default::default(),
+                        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                    }).unwrap();
+                }
+                "scope-removed" => {
+                    state.store.append_client_operation_claim(&pairing(expiry, Vec::new())).unwrap();
+                }
+                "expired" => {
+                    // Shorten the live grant, then let its clock expire without another
+                    // claim or terminal screen to wake the follower.
+                    state.store.append_client_operation_claim(
+                        &pairing(client_now_ms() + 200, vec!["terminal.read"]),
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let error = tokio::time::timeout(Duration::from_secs(5), denied).await.unwrap();
+            assert_eq!(error.code, "forbidden", "{denial}");
+            for remote in [false, true] {
+                let follow = if remote {
+                    TerminalFollow::Remote {
+                        id: "agent/grant-test".into(), owner: "host/terminal-owner".into(),
+                        incarnation: "grant-test:i1".into(), session: session.clone(),
+                    }
+                } else {
+                    TerminalFollow::Local {
+                        id: "agent/grant-test".into(), incarnation: "grant-test:i1".into(),
+                        session: session.clone(),
+                    }
+                };
+                let (sender, mut frames) = watch::channel(TerminalFrame::Waiting);
+                follow.run(state.clone(), TerminalSink::Subscription(sender), None, None).await;
+                frames.changed().await.unwrap();
+                let TerminalFrame::Ended(error) = frames.borrow().clone() else {
+                    panic!("denied {denial} grant emitted a screen (remote={remote})");
+                };
+                assert_eq!(error["code"], "forbidden", "{denial}, remote={remote}");
+                assert!(!error.to_string().contains("terminal-browser-test"));
+            }
         }
     }
 
