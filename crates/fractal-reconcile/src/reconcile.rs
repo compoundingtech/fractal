@@ -3791,14 +3791,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .flatten();
             let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
                 .or_else(|| crate::repositories::workspace_repository(workspace));
-            let lease_owner = crate::checkout::workspace_worktree(workspace)
-                .unwrap_or_else(|| workspace.to_path_buf());
+            let lease_owner = match fractal_runtime::store_worktree_lease::canonical_owner(
+                &crate::checkout::workspace_worktree(workspace).unwrap_or_else(|| workspace.to_path_buf()),
+            ) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    member_errors.insert(subject.subject.clone(), error);
+                    continue;
+                }
+            };
             if let Some(repository) = repository
                 && !activation_leases.contains_key(&lease_owner)
             {
                 let lease = self.worktree_activation_lease(&lease_owner, &repository);
                 match lease {
-                    Ok(lease) => { activation_leases.insert(lease_owner, lease); }
+                    Ok(lease) => { activation_leases.insert(lease_owner.clone(), lease); }
                     Err(error) => {
                         member_errors.insert(subject.subject.clone(), error);
                         continue;
@@ -3820,7 +3827,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let result = if let Some(checkout) = checkout {
                 self.create_checkout(
                     &subject.subject, &checkout, workspace,
-                    &activation_leases[workspace],
+                    &activation_leases[&lease_owner],
                 )
                     .and_then(|failure| match failure {
                         Some(reason) => Err(anyhow::anyhow!(reason)),
@@ -3875,8 +3882,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             renderable.retain(|subject| {
                 let member = subject.member.as_ref().expect("renderable member");
                 let workspace = Path::new(&member.workspace);
-                let owner = crate::checkout::workspace_worktree(workspace)
-                    .unwrap_or_else(|| workspace.to_path_buf());
+                let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
+                    &crate::checkout::workspace_worktree(workspace).unwrap_or_else(|| workspace.to_path_buf()),
+                ) {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        return false;
+                    }
+                };
                 if activation_leases.contains_key(&owner) {
                     return true;
                 }

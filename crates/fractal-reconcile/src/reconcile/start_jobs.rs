@@ -107,13 +107,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         owner: &Path,
         repository: &Path,
     ) -> Result<ActivationLease> {
+        let owner = fractal_runtime::store_worktree_lease::canonical_owner(owner)?;
         let mut leases = self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner);
         leases.owners.retain(|_, lease| lease.strong_count() != 0);
-        if let Some(lease) = leases.owners.get(owner).and_then(std::sync::Weak::upgrade) {
+        if let Some(lease) = leases.owners.get(&owner).and_then(std::sync::Weak::upgrade) {
             return Ok(lease);
         }
-        let lease = Arc::new(crate::checkout::activation_lease(owner, repository)?);
-        leases.owners.insert(owner.to_path_buf(), Arc::downgrade(&lease));
+        let lease = Arc::new(crate::checkout::activation_lease(&owner, repository)?);
+        leases.owners.insert(owner, Arc::downgrade(&lease));
         Ok(lease)
     }
 

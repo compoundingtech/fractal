@@ -4,7 +4,7 @@
 //! A pipe, not a timeout or an environment token, bounds the holder's lifetime.
 
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 use anyhow::{Context as _, Result};
@@ -13,6 +13,33 @@ pub struct StoreWorktreeLease {
     child: Child,
     input: Option<ChildStdin>,
     owner: PathBuf,
+}
+
+/// Resolve existing ancestors too, so prospective and registered owners share one key.
+pub fn canonical_owner(owner: &Path) -> Result<PathBuf> {
+    anyhow::ensure!(owner.is_absolute(), "activation owner is not an absolute path");
+    let mut ancestor = owner;
+    let mut suffix = Vec::new();
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut resolved) => {
+                for component in suffix.into_iter().rev() {
+                    match component {
+                        Component::Normal(name) => resolved.push(name),
+                        Component::ParentDir => { resolved.pop(); }
+                        Component::CurDir => {}
+                        _ => anyhow::bail!("invalid activation owner {}", owner.display()),
+                    }
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                suffix.push(ancestor.components().next_back().context("activation owner ancestor")?);
+                ancestor = ancestor.parent().context("activation owner parent")?;
+            }
+            Err(error) => return Err(error).with_context(|| format!("resolve activation owner {}", owner.display())),
+        }
+    }
 }
 
 impl StoreWorktreeLease {
@@ -27,9 +54,10 @@ impl StoreWorktreeLease {
             owner.is_absolute() && repository.is_absolute(),
             "activation owner or repository is not an absolute path"
         );
+        let owner = canonical_owner(owner)?;
         let child = command
             .args(["store", "lease", "--owner-path"])
-            .arg(owner)
+            .arg(&owner)
             .arg("--repo-path")
             .arg(repository)
             .args(["--", "sh", "-c", "printf 'leased\\n'; while IFS= read -r line; do :; done"])
@@ -37,20 +65,20 @@ impl StoreWorktreeLease {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .context("start mr store lease (effect-utils f2b187c4 or newer is required)")?;
-        let mut lease = Self { child, input: None, owner: owner.to_path_buf() };
+            .context("start mr store lease (owner/repo-path admission and descendant reentrancy are required)")?;
+        let mut lease = Self { child, input: None, owner };
         lease.input = lease.child.stdin.take();
         let mut output = lease.child.stdout.take().context("mr lease readiness pipe")?;
         let mut ready = [0; 7];
         output.read_exact(&mut ready)
-            .with_context(|| format!("mr refused the activation lease for {}", owner.display()))?;
+            .with_context(|| format!("mr refused the activation lease for {}", lease.owner.display()))?;
         anyhow::ensure!(&ready == b"leased\n", "invalid mr lease readiness");
         Ok(lease)
     }
 
     pub fn ensure_owner(&self, owner: &Path) -> Result<()> {
         anyhow::ensure!(
-            self.owner.as_path() == owner,
+            self.owner == canonical_owner(owner)?,
             "activation lease belongs to {}, not {}", self.owner.display(), owner.display()
         );
         Ok(())
@@ -68,6 +96,21 @@ impl Drop for StoreWorktreeLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prospective_owners_resolve_symlinked_ancestors_before_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let authored = alias.join("new/deep/owner");
+        let expected = std::fs::canonicalize(&real).unwrap().join("new/deep/owner");
+        assert_eq!(canonical_owner(&authored).unwrap(), expected);
+        std::fs::create_dir_all(&expected).unwrap();
+        assert_eq!(canonical_owner(&authored).unwrap(), expected);
+        assert_eq!(canonical_owner(&alias.join("missing/../new/deep/owner")).unwrap(), expected);
+    }
 
     #[test]
     fn concurrent_activation_is_refused_until_transaction_ends() {

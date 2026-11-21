@@ -114,7 +114,7 @@ while ancestor != holder and ancestor > 0 and ancestor not in visited:
     visited.add(ancestor)
     stat = pathlib.Path(f'/proc/{ancestor}/stat').read_text()
     ancestor = int(stat[stat.rfind(')') + 2:].split()[1])
-assert ancestor == holder, 'builder is not a descendant of the native mr lease holder'
+assert ancestor == holder, 'builder bypassed the fixture mr lease holder'
 if os.environ.get('SNAPSHOT_LEASE_HOLD') == '1':
     print('READY:' + os.getcwd(), flush=True)
     with pathlib.Path(os.environ['SNAPSHOT_LEASE_RELEASE']).open() as stream:
@@ -134,15 +134,31 @@ sealed.chmod(0o500)
 ''')
             git.chmod(0o755)
             node.chmod(0o755)
-            # The packaged mr prepends its real Git for admission. Restore the
-            # synthetic tools only in the admitted command, never inside mr.
+            # Model the lease CLI here without an ambient mr installation.
+            # Native protocol/reentrancy coverage lives in the Rust lease tests.
             mr = binary / 'mr'
-            mr.write_text(f'#!{sys.executable}\n' + f'''
-import os, sys
+            mr.write_text(f'#!{sys.executable} -I\n' + '''
+import fcntl, hashlib, json, os, pathlib, subprocess, sys
 args = sys.argv[1:]
-separator = args.index('--') + 1
-os.execv({shutil.which('mr')!r}, [{shutil.which('mr')!r}, *args[:separator],
-         {shutil.which('env')!r}, 'PATH=' + os.environ['PATH'], *args[separator:]])
+assert args[:3] == ['store', 'lease', '--owner-path'], args
+assert args[4] == '--repo-path' and args[6] == '--', args
+owner = pathlib.Path(args[3]).resolve()
+assert (pathlib.Path(args[5]) / '.git').is_dir(), 'prospective owner needs a repository'
+leases = pathlib.Path(os.environ['MEGAREPO_STORE']) / '.state/deletion-leases'
+leases.mkdir(parents=True, exist_ok=True)
+name = hashlib.sha256(str(owner).encode()).hexdigest()
+with (leases / (name + '.lock')).open('a') as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print('fixture mr: deletion lease is held by another holder', file=sys.stderr)
+        raise SystemExit(75)
+    record = leases / (name + '.lease')
+    record.write_text(json.dumps({'ownerPath': str(owner), 'pid': os.getpid()}))
+    try:
+        raise SystemExit(subprocess.run(args[7:]).returncode)
+    finally:
+        record.unlink()
 ''')
             mr.chmod(0o755)
             # Emulate the deployment wrapper's getcwd guard. The old EXIT trap
