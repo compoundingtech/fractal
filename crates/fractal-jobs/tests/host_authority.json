@@ -1,0 +1,30 @@
+{
+  "base": {
+    "known": true, "current": true, "verified": true,
+    "authority_host": "fixture-alpha", "declaration": "claim/membership-one",
+    "existing": null,
+    "signed_binding": {"job_id": "job/fixture-one", "execution_host": "fixture-alpha", "authority_declaration": "claim/membership-one"},
+    "origin": "fixture-alpha", "signer": "host/fixture-alpha", "local": "fixture-alpha",
+    "expected": {"decision": "admit"}
+  },
+  "cases": [
+    {"name": "first binding"},
+    {"name": "identical binding", "existing": {"job_id": "job/fixture-one", "execution_host": "fixture-alpha", "authority_declaration": "claim/membership-one"}},
+    {"name": "unknown host", "known": false, "expected": {"decision": "refuse", "reason": "unknown-host"}},
+    {"name": "wrong host facts", "authority_host": "fixture-beta", "expected": {"decision": "refuse", "reason": "unknown-host"}},
+    {"name": "cannot rebind host", "existing": {"job_id": "job/fixture-one", "execution_host": "fixture-beta", "authority_declaration": "claim/membership-one"}, "expected": {"decision": "refuse", "reason": "conflicting-host"}},
+    {"name": "wrong persisted job", "existing": {"job_id": "job/fixture-two", "execution_host": "fixture-alpha", "authority_declaration": "claim/membership-one"}, "expected": {"decision": "refuse", "reason": "conflicting-host"}},
+    {"name": "signature covers another host", "signed_binding": {"job_id": "job/fixture-one", "execution_host": "fixture-beta", "authority_declaration": "claim/membership-one"}, "expected": {"decision": "refuse", "reason": "conflicting-host"}},
+    {"name": "signature covers another job", "signed_binding": {"job_id": "job/fixture-two", "execution_host": "fixture-alpha", "authority_declaration": "claim/membership-one"}, "expected": {"decision": "refuse", "reason": "conflicting-host"}},
+    {"name": "signature covers another declaration", "signed_binding": {"job_id": "job/fixture-one", "execution_host": "fixture-alpha", "authority_declaration": "claim/membership-old"}, "expected": {"decision": "refuse", "reason": "conflicting-host"}},
+    {"name": "ended incarnation", "current": false, "expected": {"decision": "refuse", "reason": "stale-authority"}},
+    {"name": "replaced authority", "declaration": "claim/membership-new", "expected": {"decision": "refuse", "reason": "stale-authority"}},
+    {"name": "missing declaration", "declaration": "", "expected": {"decision": "refuse", "reason": "stale-authority"}},
+    {"name": "cannot replace pinned authority", "existing": {"job_id": "job/fixture-one", "execution_host": "fixture-alpha", "authority_declaration": "claim/membership-old"}, "expected": {"decision": "refuse", "reason": "stale-authority"}},
+    {"name": "unsigned or unverified writer window", "verified": false, "expected": {"decision": "refuse", "reason": "stale-authority"}},
+    {"name": "remote replica cannot execute", "local": "fixture-beta", "expected": {"decision": "refuse", "reason": "origin-mismatch"}},
+    {"name": "relayed origin", "origin": "fixture-beta", "expected": {"decision": "refuse", "reason": "origin-mismatch"}},
+    {"name": "wrong node signer", "signer": "host/fixture-beta", "expected": {"decision": "refuse", "reason": "origin-mismatch"}},
+    {"name": "non-node signer", "signer": "agent/fixture-alpha", "expected": {"decision": "refuse", "reason": "origin-mismatch"}}
+  ]
+}
