@@ -1112,10 +1112,10 @@ family; missing agent ownership is unknown, never a successful delivery.
 The producer reads retained source metadata in indexed 128-row keyset pages and releases
 each SQLite reader before processing another page or message's lifecycle. No read
 transaction spans the 30-day scan, so WAL RESTART checkpoints can proceed during capture.
-Local change bursts coalesce until at least 60 seconds after the preceding capture ends
-(not a quiet-period debounce). Identity references are resolved once per distinct spelling
-per capture. Pending changes and captures overlapping graph writes remain unknown rather
-than certifying stale coverage or a mixed cut; idle heartbeat and boundary timers remain active.
+Only relevant mail-input changes recapture source data; unrelated API and reconciliation
+notifications do not. There is no cooldown. Identity references are resolved once per distinct
+spelling per capture. Pending relevant changes and overlapping source cuts remain unknown
+rather than certifying stale or mixed observations; idle heartbeat and boundary timers remain active.
 
 `POST /v1/mailbox/receipts` accepts `lifecycle: "accepted"` with
 `input_acceptance: { "accepted_at_unix_ms": ... }`. The native peer, physical provider
@@ -1158,6 +1158,13 @@ can renew its own capture heartbeat without querying mail, but cannot advance a 
 producer frontier. One-shot lifecycle/budget/freshness boundaries wake evaluation; no source
 polling or request-time sampling is used. Native ownership/response declarations bind this
 host row through the existing native indicator mechanism, without a separate alert evaluator.
+
+Mail source publication follows a source-specific committed-input generation, not global
+API or reconciliation notifications. Mail source, acceptance, lifecycle, identity/conflict,
+declared ownership, native runtime/frontier and shard mirror changes invalidate it; unrelated
+notifications do not recapture retained history. Identity/conflict checks remain authoritative
+at each source cut. Incremental keyed maintenance is tracked
+in [#6921](https://github.com/compoundingtech/fractal/issues/6921).
 
 The local acceptance and lifecycle ledgers retain metadata across restarts and source-mark
 retention. They contain recipient identity, source timestamps, sender/tags and lifecycle
