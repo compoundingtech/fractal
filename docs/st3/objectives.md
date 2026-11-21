@@ -202,6 +202,23 @@ Their TypeScript constructors are `Fractal.indicator.githubMergedCount` and
 references, an IANA `timezone`, explicit `cut: 'now' | 'watermark'`, and
 `measurement: 'only' | 'targeted'`. There are no default hosts, repository lists or target values.
 
+Both GitHub indicators optionally accept `authorLogins: ['example-bot', 'example-human']`.
+The DSL emits repeated `author-login "example-bot"` indicator children, lowercases ASCII
+logins, sorts them and removes duplicates. An authored list must be nonempty; omitting it
+retains the intentional all-author default. The selector is part of the objective declaration
+and its revision, not consumer-side policy, repository membership or source acquisition.
+It applies identically to rolling-hour counts, civil-day bars and final-ready samples.
+Login matching is ASCII case-insensitive. Missing PR/author evidence and conflicting canonical
+images remain unknown; known nonmatching authors are excluded. Coverage is still required
+for every effective roster member before an empty selected cohort can be a real zero.
+
+This is a declaration grammar extension only: no claim fields, registry digest, SQLite
+tables/indexes or storage version change, and no new `include_str!` lane inputs. Existing
+generic declaration bodies retain the selector and replay from their authored declarations;
+GitHub facts/projection schemas are unchanged. N-1 readers that lack `author-login` reject
+the declaration as unsupported and show no-data, never silently count all authors. Publish
+selected declarations only to upgraded evaluators; the release adds no observer or activation.
+
 Merged-count requires `PullRequest` and `Merge` coverage; ready-to-merged additionally
 requires `Lifecycle` coverage. The finite evidence horizon is the latest authoritative
 required-family coverage endpoint intersecting effective roster membership. Retired
