@@ -110,6 +110,15 @@ mission "gated" state="ready" report-to="agent/node.reporter" stalled-after="10m
     gate "signal" { field "status" "resource/loop-result" is "ready" }
   }
 }
+mission "queued-exec" state="ready" report-to="agent/node.reporter" {
+  concurrent-runs
+  goal "Wait for external queue admission without synthetic progress."
+  step "check" timeout="2h" {
+    agentless
+    exec "check" { host "node"; workspace "/tmp"; command "true"; restart "never" }
+    gate "check succeeded" { field "exit_code" "exec/${ST_MISSION_RUN}/check" is 0 }
+  }
+}
 mission "loop-parent" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
   concurrent-runs
   goal "Watch progress in child rounds."
@@ -120,15 +129,6 @@ mission "loop-parent" state="ready" report-to="agent/node.reporter" stalled-afte
       completion { when "all-steps-exhausted" }
       step "work" { assigned-to "agent/node.builder" }
     }
-  }
-}
-mission "queued-exec" state="ready" report-to="agent/node.reporter" {
-  concurrent-runs
-  goal "Wait for external queue admission without synthetic progress."
-  step "check" timeout="2h" {
-    agentless
-    exec "check" { host "node"; workspace "/tmp"; command "true"; restart "never" }
-    gate "check succeeded" { field "exit_code" "exec/${ST_MISSION_RUN}/check" is 0 }
   }
 }
 "#;
@@ -727,6 +727,8 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
 
     // A live process must not suppress its independent execution deadline.
     let _expired = Clock::at(&fixture.store, since + 121 * MINUTE);
+    // Deliver the step timer's wake explicitly: this synchronous fixture has no Tokio timers.
+    fixture.reconciler.incremental.touch(&run.steps[0].subject);
     fixture.passes(4);
     assert_eq!(fixture.store.mission_run(&run.id).unwrap().unwrap().status, "failed");
     let reports = fixture.reports(REPORTER);
