@@ -64,8 +64,7 @@ if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
     os.execvp(args[10], args[10:])
 '''+ f'\nos.execv({sys.executable!r}, [{sys.executable!r}, "-I", *args])\n')
             python.chmod(0o755)
-            (source / '.git').mkdir(parents=True)
-            (source / '.git/config').write_text('')
+            subprocess.run([shutil.which('git'), 'init', '-q', str(source)], check=True)
             for relative in ('apps/fractal-web/private/build-live.mjs',
                              'apps/fractal-web/vendor/utils/src/node/cli-build-identity.js',
                              'node_modules/fixture/index.js'):
@@ -80,6 +79,8 @@ if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
 import json, os, pathlib, shutil, sys
 root = pathlib.Path(os.environ['SNAPSHOT_LEASE_FIXTURE'])
 args = sys.argv[1:]
+if args[:2] != ['-c', 'core.hooksPath=/dev/null']:
+    os.execv(os.environ['SNAPSHOT_LEASE_REAL_GIT'], ['git', *args])
 while args[:1] == ['-c']:
     args = args[2:]
 if args[:1] == ['config'] and '--file' in args:
@@ -104,6 +105,16 @@ else:
             node.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
 assert os.environ.get('SNAPSHOT_LEASE_SANDBOX') == '1', 'builder bypassed sandbox CLI'
+owner = pathlib.Path.cwd().parents[1]
+records = [json.loads(path.read_text()) for path in
+           (pathlib.Path(os.environ['MEGAREPO_STORE']) / '.state/deletion-leases').glob('*.lease')]
+holder = next(record['pid'] for record in records if record['ownerPath'] == str(owner))
+ancestor, visited = os.getpid(), set()
+while ancestor != holder and ancestor > 0 and ancestor not in visited:
+    visited.add(ancestor)
+    stat = pathlib.Path(f'/proc/{ancestor}/stat').read_text()
+    ancestor = int(stat[stat.rfind(')') + 2:].split()[1])
+assert ancestor == holder, 'builder is not a descendant of the native mr lease holder'
 if os.environ.get('SNAPSHOT_LEASE_HOLD') == '1':
     print('READY:' + os.getcwd(), flush=True)
     with pathlib.Path(os.environ['SNAPSHOT_LEASE_RELEASE']).open() as stream:
@@ -123,6 +134,17 @@ sealed.chmod(0o500)
 ''')
             git.chmod(0o755)
             node.chmod(0o755)
+            # The packaged mr prepends its real Git for admission. Restore the
+            # synthetic tools only in the admitted command, never inside mr.
+            mr = binary / 'mr'
+            mr.write_text(f'#!{sys.executable}\n' + f'''
+import os, sys
+args = sys.argv[1:]
+separator = args.index('--') + 1
+os.execv({shutil.which('mr')!r}, [{shutil.which('mr')!r}, *args[:separator],
+         {shutil.which('env')!r}, 'PATH=' + os.environ['PATH'], *args[separator:]])
+''')
+            mr.chmod(0o755)
             # Emulate the deployment wrapper's getcwd guard. The old EXIT trap
             # removed its own cwd before this command and therefore failed.
             rm = binary / 'rm'
@@ -164,6 +186,7 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 'FRACTAL_BUILD_SNAPSHOT_ROOT': str(snapshot_root),
                 'FRACTAL_DEP_CACHE': str(cache),
                 'FRACTAL_BUILD_ADMISSION': 'fallback',
+                'MEGAREPO_STORE': str(fixture / 'mr-store'),
             }
             first_sha, second_sha = 'a' * 40, 'b' * 40
             first_env = {**base_env, 'FRACTAL_BUILD_ROOT': str(fixture / 'build-root-a'),
@@ -174,6 +197,9 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
             try:
                 self.assertTrue(select.select([first.stdout], [], [], 10)[0], 'first build never became ready')
                 ready = first.stdout.readline().strip()
+                if not ready:
+                    _, stderr = first.communicate(timeout=10)
+                    self.fail(f'first build exited before readiness ({first.returncode}): {stderr}')
                 self.assertTrue(ready.startswith('READY:'), ready)
                 live_snapshot = Path(ready.removeprefix('READY:')).parents[1]
                 self.assertEqual(live_snapshot.parent, snapshot_root / 'shared')
@@ -181,6 +207,13 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 with Path(str(live_snapshot) + '.lock').open() as lease:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                forbidden = fixture / 'contender-ran'
+                contender = subprocess.run(
+                    ['mr', 'store', 'lease', '--owner-path', str(live_snapshot),
+                     '--repo-path', str(source), '--', 'touch', str(forbidden)],
+                    env=base_env, capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(contender.returncode, 0, contender.stdout + contender.stderr)
+                self.assertFalse(forbidden.exists(), 'competing activation bypassed the store lease')
                 key = install_key(source)
                 generation = cache / DEPENDENCY_POLICY / key
                 self.assertFalse((cache / key).exists(), 'sandbox reused an unnamespaced parent generation')

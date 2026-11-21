@@ -239,7 +239,7 @@ fn schedule_last_reached(store: &Store, schedule: &DesiredSubject) -> Result<Opt
 }
 
 /// On a fleet member's cold start, occurrence history may still be elsewhere. Require a fresh
-/// complete exchange before admitting schedules, then hold while known history is missing.
+/// exchange before admitting schedules, then hold missing history or unhealthy admission.
 fn schedule_admission_ready(
     store: &Store,
     host: &str,
@@ -249,7 +249,8 @@ fn schedule_admission_ready(
 ) -> Result<bool> {
     // Include the due callback: an armed timer cannot bypass a staged or conflicting owner.
     store.owned_desired_guard(schedule).map_err(anyhow::Error::new)?;
-    if store.replication_projection_deferred()
+    if !store.replication_admission_healthy()?
+        || store.replication_projection_deferred()
         || store.replication_catching_up()
         || store
             .first_sync()?
@@ -262,9 +263,36 @@ fn schedule_admission_ready(
         return Ok(true);
     }
     let sync = store.replication_peer_sync(&peers);
-    let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
-        && schedule_requires_complete_history(store, schedule)?;
-    Ok(schedule_progress_ready(sync.values(), since, strict))
+    let strict = schedule_requires_complete_history(store, schedule)?;
+    if strict && sync.len() != peers.len() { return Ok(false); }
+    // Membership can arrive through another peer before this peer exchanges again. Never
+    // let a replaced incarnation's samples authorize its successor, even while still fresh.
+    let membership = store.fleet_membership()?;
+    let inventory_generation = store.replication_snapshot()?.inventory_generation;
+    let mut progress = store.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+    for name in sync.keys() {
+        let Some(sample) = progress.get_mut(name) else { return Ok(false) };
+        if strict || sync[name].peer_only_envelopes == 0 || !sample.schedule_progress_since(since) {
+            continue;
+        }
+        let current_key = match membership.state(name) {
+            crate::fleet::MemberState::Current(member) => Some(member.member_key.as_str()),
+            crate::fleet::MemberState::NotMember => None,
+            _ => {
+                sample.schedule_measurements = [0; 3];
+                return Ok(false);
+            },
+        };
+        if sample.measured_member_key.as_deref() != current_key
+            || sample.window_basis.local_inventory_generation != inventory_generation
+        {
+            sample.schedule_measurements = [0; 3];
+            return Ok(false);
+        }
+    }
+    Ok(schedule_progress_ready(sync.iter().map(|(name, peer)| {
+        (peer, progress.get(name).is_some_and(|sample| sample.schedule_progress_since(since)))
+    }), since, strict))
 }
 
 fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) -> Result<Vec<String>> {
@@ -297,14 +325,18 @@ fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) 
 }
 
 fn schedule_progress_ready<'a>(
-    sync: impl IntoIterator<Item = &'a smallclaims::replication::ReplicationPeerSync>,
+    sync: impl IntoIterator<Item = (&'a smallclaims::replication::ReplicationPeerSync, bool)>,
     since: u128,
     strict: bool,
 ) -> bool {
     let mut complete = false;
-    for peer in sync {
-        if peer.peer_only_envelopes > 0 && (strict || !peer.stale) { return false; }
-        complete |= peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0;
+    for (peer, progressing) in sync {
+        // Only fresh peers can use the bounded traffic fallback. Strict history still holds
+        // a stale peer. Ownership moves and standby also require a complete exchange:
+        // shared run identity cannot undo duplicate external effects.
+        let ready = !peer.stale && (peer.peer_only_envelopes == 0 || (progressing && !strict));
+        if !ready && (strict || !peer.stale) { return false; }
+        complete |= ready && peer.measured_at_unix_ms >= since;
     }
     complete
 }
@@ -594,6 +626,11 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         anyhow::bail!("runtime does not support finite resource retirement")
     }
+    fn retire_shell_resource_lane(&self, store: Arc<Store>, request: &crate::store::resource_membership::LaneRequest,
+        execution: Option<&str>, _wake: Arc<dyn Fn() + Send + Sync>) -> Result<bool> {
+        if execution.is_some() { anyhow::bail!("runtime does not support nested shell retirement"); }
+        self.retire_resource_lane(&store, request)
+    }
     fn recover_resource_lanes(&self, _store: &Store, _host: &str, _now_ms: u64) -> Result<usize> {
         anyhow::bail!("runtime does not support finite resource recovery")
     }
@@ -614,6 +651,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
     }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
+    }
+    /// Request SIGKILL without waiting for exit or releasing execution custody.
+    fn kill_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
+        anyhow::bail!("runtime does not support generation-fenced payload killing")
     }
     fn launch_contract(
         &self,
@@ -708,11 +749,14 @@ pub trait RuntimeControl: Send + Sync + 'static {
     }
 }
 
+type ShellRetirements = Arc<Mutex<BTreeMap<(String, Option<String>), Option<Result<bool>>>>>;
+
 pub struct NativeRuntime {
     pty: fractal_runtime::PtyRuntime,
     exec: fractal_runtime::ExecRuntime,
     /// Goes first on every member's PATH so its `git` and `gh` calls are recorded.
     recorder: Option<PathBuf>,
+    shell_retirements: ShellRetirements,
 }
 
 impl NativeRuntime {
@@ -726,6 +770,7 @@ impl NativeRuntime {
             .with_binary(pty_binary.to_string_lossy()),
             exec: fractal_runtime::ExecRuntime::new(state_dir.join("exec"), state_dir.join("logs")),
             recorder: None,
+            shell_retirements: Default::default(),
         }
     }
     pub fn with_recorder(mut self, directory: Option<PathBuf>) -> Self {
@@ -1027,6 +1072,44 @@ impl RuntimeControl for NativeRuntime {
             state => anyhow::bail!("unknown resource membership state {state}"),
         }
     }
+    fn retire_shell_resource_lane(&self, store: Arc<Store>, request: &crate::store::resource_membership::LaneRequest,
+        execution: Option<&str>, wake: Arc<dyn Fn() + Send + Sync>) -> Result<bool> {
+        let record = store.resource_membership_record(&request.id, &request.owner)?;
+        let Some(grant) = record.grant else { return self.retire_resource_lane(&store, request); };
+        let key = (grant.generation.clone(), execution.map(str::to_owned));
+        let root = execution.map(|id| -> Result<_> {
+            let root = record.roots.iter().find(|root| root.runtime_id == id).context("shell root missing")?;
+            Ok((id.to_owned(), root.execution.as_ref().context("shell generation missing")?.generation_id.clone()))
+        }).transpose()?;
+        let mut jobs = self.shell_retirements.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(result) = jobs.get_mut(&key) {
+            let Some(result) = result.take() else { return Ok(false); };
+            jobs.remove(&key);
+            return result;
+        }
+        if matches!(record.state.as_str(), "retired" | "refused" | "withdrawn") { return Ok(true); }
+        jobs.insert(key.clone(), None);
+        let jobs = self.shell_retirements.clone();
+        let runtime = self.exec.clone();
+        let owner = request.owner.clone();
+        std::thread::spawn(move || {
+            let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+            let result = if let Some((id, generation)) = root {
+                runtime.retire_if(&id, &generation).and_then(|_| {
+                    store.end_resource_execution(&grant, &id, now)?;
+                    Ok(true)
+                })
+            } else {
+                store.cancel_resource_membership(&grant, &owner, now)
+                    .and_then(|()| store.retire_resource_membership(&grant, &owner, &runtime, now))
+            };
+            // A pending linked child supplies its own native wake; avoid a busy loop.
+            let changed = !matches!(result, Ok(false));
+            jobs.lock().unwrap_or_else(PoisonError::into_inner).insert(key, Some(result));
+            if changed { wake(); }
+        });
+        Ok(false)
+    }
     fn recover_resource_lanes(&self, store: &Store, host: &str, now_ms: u64) -> Result<usize> {
         store.recover_resource_memberships(host, &self.exec, now_ms)
     }
@@ -1072,6 +1155,9 @@ impl RuntimeControl for NativeRuntime {
         let generation = root.execution.as_ref().context("resource execution preparation is uncertain; custody retained")?;
         self.exec.retire_if(id, &generation.generation_id)?;
         store.end_resource_execution(record.grant.as_ref().context("resource generation missing")?, id, u64::try_from(now_ms()).unwrap_or(u64::MAX))
+    }
+    fn kill_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+        self.exec.signal_if(id, Some(generation), libc::SIGKILL)
     }
     fn launch_contract(
         &self,
@@ -3661,6 +3747,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
         );
         let mut member_errors = BTreeMap::new();
+        // Keep every prepared worktree fenced through rendering, runtime initialization and
+        // publication later in this pass, including reuse of an existing checkout.
+        let mut activation_leases = BTreeMap::new();
         for subject in &active {
             if subject.kind == "stop" {
                 continue;
@@ -3700,6 +3789,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             let checkout = (subject.kind == "agent")
                 .then(|| Checkout::from_desired(&subject.desired))
                 .flatten();
+            let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
+                .or_else(|| crate::repositories::workspace_repository(workspace));
+            let lease_owner = crate::checkout::workspace_worktree(workspace)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            if let Some(repository) = repository
+                && !activation_leases.contains_key(&lease_owner)
+            {
+                let lease = self.worktree_activation_lease(&lease_owner, &repository);
+                match lease {
+                    Ok(lease) => { activation_leases.insert(lease_owner, lease); }
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        continue;
+                    }
+                }
+            }
             if workspace.is_dir() {
                 if let Some(checkout) = &checkout
                     && let Err(error) = checkout.validate_workspace(workspace)
@@ -3713,7 +3818,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             let result = if let Some(checkout) = checkout {
-                self.create_checkout(&subject.subject, &checkout, workspace)
+                self.create_checkout(
+                    &subject.subject, &checkout, workspace,
+                    &activation_leases[workspace],
+                )
                     .and_then(|failure| match failure {
                         Some(reason) => Err(anyhow::anyhow!(reason)),
                         None => Ok(()),
@@ -3732,7 +3840,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.observe_agent_workspace(&subject.subject, member)?;
             }
         }
-        let renderable = active
+        let mut renderable = active
             .iter()
             .copied()
             .filter(|subject| {
@@ -3763,6 +3871,31 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .incremental
                         .needs(&format!("member:{}", subject.subject), now_ms())
             });
+        if render_needed {
+            renderable.retain(|subject| {
+                let member = subject.member.as_ref().expect("renderable member");
+                let workspace = Path::new(&member.workspace);
+                let owner = crate::checkout::workspace_worktree(workspace)
+                    .unwrap_or_else(|| workspace.to_path_buf());
+                if activation_leases.contains_key(&owner) {
+                    return true;
+                }
+                let Some(repository) = crate::repositories::workspace_repository(workspace) else {
+                    return true;
+                };
+                let lease = self.worktree_activation_lease(&owner, &repository);
+                match lease {
+                    Ok(lease) => {
+                        activation_leases.insert(owner, lease);
+                        true
+                    }
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        false
+                    }
+                }
+            });
+        }
         // A render panic faults this host's members; stops never render, so they still run.
         let mut render_span = crate::reconcile_telemetry::phase("pass/render");
         render_span.items(renderable.len());
@@ -7614,6 +7747,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         checkout: &Checkout,
         workspace: &Path,
+        lease: &fractal_runtime::store_worktree_lease::StoreWorktreeLease,
     ) -> Result<Option<String>> {
         let declaration = self.store.newest_claim_index(subject, "intent.desired")?;
         {
@@ -7642,7 +7776,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(Some(failure.clone()));
         }
-        match checkout.create(workspace) {
+        match checkout.create_leased(workspace, lease) {
             Ok(warnings) => {
                 self.checkout_retries
                     .lock()
@@ -8413,6 +8547,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             )?;
             self.signal_changed();
         }
+        let _activation_lease = self.member_activation_lease(member)?;
         let workspace = Path::new(&member.workspace);
         if workspace.exists() {
             anyhow::ensure!(
@@ -8757,8 +8892,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Adopt only a fresh physical observation of this operation's exact
         // incarnation. This includes command-only seats and one-shots that
         // already ended; readiness and restart completion remain separate.
+        // Observe the launched member, whose tags carry this operation's provenance.
         let observation = if let Some(incarnation) = incarnation.as_deref() {
-            self.runtime.observe_start(member)?.filter(|observation| {
+            self.runtime.observe_start(&prepared.launch_member)?.filter(|observation| {
                 observation.incarnation_id.as_deref() == Some(incarnation)
                     && matches!(observation.status.as_str(), "running" | "exited" | "stopped" | "vanished")
             })
@@ -13001,6 +13137,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut owner_runs = BTreeSet::from([run.subject.clone()]);
         owner_runs.extend(self.store.descendant_mission_run_subjects(&run.generation)?);
         smallclaims::touched::note_read(|| format!("children:{}", run.root_mission_run));
+        // Shell drivers are durable resource executions, not desired subjects. Their
+        // cancellation and receipts are driven by the execution host's shell sweep.
+        // Bound the run's wait, but retain unconfirmed execution custody for later sweeps.
+        for owner in &owner_runs {
+            smallclaims::touched::note_read(|| format!("shell-resources:{owner}"));
+        }
+        let mut shells_live = Vec::new();
+        let mut shells_cancelled = false;
+        for execution in self.store.shell_resources(&self.host, true)? {
+            let owner = &execution.command.lane.owner;
+            if !owner_runs.contains(&owner.run) { continue; }
+            let Some(step) = self.store.step_run(&owner.step)? else { continue; };
+            if step.run != owner.run || owner.attempt > step.attempt { continue; }
+            shells_live.push(execution.command.id.clone());
+            if !execution.cancel {
+                self.store.cancel_shell_resource(&execution.command.id)?;
+                shells_cancelled = true;
+            }
+        }
+        if shells_cancelled { self.signal_changed(); }
         let mut owned = owner_runs
             .iter()
             .map(|owner| self.store.desired_subjects_for_owner_run(owner))
@@ -13083,13 +13239,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             let response = self
                 .store
                 .apply_internal(&intent, &format!("cleanup-mission-run:{}", run.generation))?;
-            return Ok(response.changed || intake_stopped);
+            return Ok(response.changed || intake_stopped || shells_cancelled);
         }
         // Cleanup waits for each owned runtime to stop, but not forever. A runtime on a host that
         // never answers, or one that cannot be killed, would otherwise hold the run and its slot.
         // Its stop declaration stays, so stopping continues after the run ends.
         let mut unstopped = None;
-        if !live.is_empty() {
+        if !live.is_empty() || !shells_live.is_empty() {
             let since = self
                 .store
                 .latest_claim(&run.subject, Some("mission-run.state"))?
@@ -13101,7 +13257,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let deadline = since.saturating_add(self.cleanup_deadline.as_millis());
             if now_ms() < deadline {
                 self.arm_restart(&format!("cleanup:{}", run.subject), deadline);
-                return Ok(intake_stopped);
+                return Ok(intake_stopped || shells_cancelled);
             }
             unstopped = Some(format!(
                 "{}: {}",
@@ -13111,13 +13267,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                     "cleanup ended at its deadline with runtimes still live"
                 },
                 live.iter()
-                    .map(|subject| subject.subject.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                    .map(|subject| subject.subject.clone())
+                    .chain(shells_live.iter().map(|id| format!("execution custody unconfirmed: {id}")))
+                    .collect::<Vec<_>>().join(", ")
             ));
             // A superseding run shares this workspace. Expiring cleanup releases
             // neither execution authority nor its runtime-confirmation dependency.
-            if supersession_cleanup {
+            if supersession_cleanup && !live.is_empty() {
                 self.record_fault(
                     &run.subject,
                     "cleanup-runtime-quiescence",

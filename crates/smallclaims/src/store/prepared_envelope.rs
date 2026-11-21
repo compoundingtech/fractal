@@ -259,6 +259,19 @@ fn finish_claim_check(
     Ok(admission)
 }
 
+/// Every check `validate_replicated_claim` makes of one claim of `batch`, with stored state: its
+/// batch and writer, its content hash, the runtime's classification and, for a valid claim, its
+/// blobs. Signed claims (`signed_claims`) are judged by it as envelope admission judges them.
+pub(crate) fn classify_claim_tx(
+    transaction: &Connection,
+    batch: &ReplicaBatch,
+    claim: &ClaimRecord,
+    runtime: &dyn Runtime,
+) -> Result<ReplicatedClaimAdmission, FractalError> {
+    let check = check_claim(batch, claim, runtime);
+    finish_claim_check(transaction, batch, claim, runtime, check)
+}
+
 /// Admit a prepared envelope: the reads of stored state and the writes, in the order
 /// `validate_and_admit_envelope_tx` has always made them, under the key and with the runtime it
 /// was prepared from. `outcome.verify` is not charged for the preparation here; the caller adds
@@ -289,6 +302,9 @@ pub fn admit_prepared_envelope_tx(
     } = content?;
     let batch = &payload.batch;
     let now = now_ms().to_string();
+    // Once a store keeps no valid record (`record_bytes`), a valid claim or blob stores none,
+    // and a record an earlier attempt kept for it goes.
+    let keep_valid = super::record_bytes::valid_records_kept(transaction).map_err(internal)?;
     // Record timestamps track semantic changes, not repeated validation attempts.
     // Compare the effective assignments below so repaired states and errors keep their meaning.
     let mut degraded = false;
@@ -304,14 +320,24 @@ pub fn admit_prepared_envelope_tx(
             .query_row(/* sqlite-large-value: allow-for-now lv-hd6a8db95b2e0 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ [record_ref], |row| row.get::<_, String>(0))
             .optional()
             .map_err(internal)?;
-        if *valid {
+        // A valid blob is stored whatever the store keeps of its record.
+        let stored = if *valid {
             transaction
                 .prepare_cached(
                     /* sqlite-large-value: allow-for-now lv-h2f7c5050108a owner=smallclaims::store::prepared_envelope TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
                 )
                 .map_err(internal)?
                 .execute(/* sqlite-large-value: allow-for-now lv-h68968259fe58 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![hash, bytes, bytes.len() as u64])
+                .map_err(internal)?
+        } else {
+            0
+        };
+        if *valid && !keep_valid {
+            super::record_bytes::drop_kept_record_tx(transaction, record_ref, previous_state.as_deref())
                 .map_err(internal)?;
+            outcome.valid += 1;
+            outcome.changed |= stored != 0 || previous_state.as_deref().is_some_and(|state| state != "valid");
+        } else if *valid {
             transaction
                 .prepare_cached(
                     /* sqlite-large-value: allow-for-now lv-h7a78994a2ddd owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
@@ -466,6 +492,23 @@ pub fn admit_prepared_envelope_tx(
                 // record of a claim it retired stays deleted.
                 let retired_here =
                     tombstoned && super::retired::authoritative(transaction).map_err(internal)?;
+                if !retired_here && !keep_valid {
+                    // A repair waiting for this record gets it back; otherwise the claim keeps
+                    // none.
+                    let awaited = super::record_bytes::restore_awaited_record_tx(
+                        transaction, &record_ref, &envelope.writer, envelope.sequence, &envelope.hash,
+                        position, &claim.id,
+                    )
+                    .map_err(internal)?;
+                    if !awaited {
+                        super::record_bytes::drop_kept_record_tx(transaction, &record_ref, previous_state.as_deref())
+                            .map_err(internal)?;
+                    }
+                    outcome.valid += 1;
+                    outcome.changed |= inserted != 0
+                        || previous_state.as_deref().is_some_and(|state| state != "valid");
+                    continue;
+                }
                 if !retired_here {
                     transaction
                         .prepare_cached(

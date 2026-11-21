@@ -367,15 +367,22 @@ impl CheckpointConfig {
 /// looks; the first move takes the store to a storage version that release refuses until
 /// `fractal store restore-blob-bytes` copies them back, so lengthen it to keep that rollback open
 /// longer.
+/// `valid_record_delete_after` is the same for deleting the valid replica records this member
+/// holds once it runs a build that keeps none (`3d` unless set): until then a rollback finds every
+/// record it reads, and the first deletion moves the store to a storage version that release
+/// refuses.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StoreConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blob_move_after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_record_delete_after: Option<String>,
 }
 
 impl StoreConfig {
     pub const DEFAULT_BLOB_MOVE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
+    pub const DEFAULT_VALID_RECORD_DELETE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
 
     pub fn is_default(&self) -> bool {
         self == &Self::default()
@@ -386,6 +393,14 @@ impl StoreConfig {
         self.blob_move_after.as_deref().map_or(
             Ok(Self::DEFAULT_BLOB_MOVE_AFTER_MS),
             |value| parse_duration_ms(value, "store.blob_move_after"),
+        )
+    }
+
+    /// How long after this member first runs the build it starts deleting valid records.
+    pub fn valid_record_delete_after_ms(&self) -> Result<u64> {
+        self.valid_record_delete_after.as_deref().map_or(
+            Ok(Self::DEFAULT_VALID_RECORD_DELETE_AFTER_MS),
+            |value| parse_duration_ms(value, "store.valid_record_delete_after"),
         )
     }
 }
@@ -1358,6 +1373,7 @@ impl Config {
         }
         self.limits.validate()?;
         self.trim.validate()?;
+        self.store.valid_record_delete_after_ms()?;
         self.store.blob_move_after_ms()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {

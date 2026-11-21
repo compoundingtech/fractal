@@ -99,6 +99,13 @@ pub fn cargo_test(gate: &CargoTest<'_>) -> GateAnswer {
         Ok(lock) => lock,
         Err(error) => return GateAnswer::Broken(format!("{error:#}")),
     };
+    // Retain the deletion barrier through checkout/reuse, compilation and the test receipt.
+    let _lease = match fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire(
+        &worktree, &top,
+    ) {
+        Ok(lease) => lease,
+        Err(error) => return GateAnswer::Broken(format!("{error:#}")),
+    };
     if let Err(error) = checkout(&top, &worktree, &sha) {
         return GateAnswer::Broken(format!(
             "git cannot check {short} out in {}: {error}",

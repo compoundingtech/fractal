@@ -229,6 +229,56 @@ impl Store {
 mod tests {
     use super::*;
 
+    #[test]
+    fn canonical_position_upserts_coalesce_pending_receipts_and_keep_the_minimum() {
+        let mut db = database();
+        let tx = db.transaction().unwrap();
+        insert(&tx, 1, 10, "ready", false);
+        insert(&tx, 2, 10, "working", false);
+        canonical::record_position_tx(&tx, "claim-1", 10).unwrap();
+        canonical::record_position_tx(&tx, "claim-2", 20).unwrap();
+        // Both receipts are already pending. A duplicate-envelope join must not
+        // inherit the outer UPSERT's conflict policy and reject the pending key.
+        canonical::record_position_tx(&tx, "claim-2", 1).unwrap();
+        canonical::record_position_tx(&tx, "claim-2", 0).unwrap();
+        canonical::record_position_tx(&tx, "claim-2", 30).unwrap();
+        let pending: u64 = tx.query_row("SELECT COUNT(*) FROM local_escalation_pending_v2",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(pending, 2);
+        let position: u64 = tx.query_row("SELECT position FROM claim_positions WHERE claim_id='claim-2'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(position, 0);
+        flush(&tx).unwrap();
+        assert_eq!(entry(&tx), "claim-1");
+        let ordering: Vec<u8> = tx.query_row("SELECT ordering FROM local_escalation_clocks_v1 WHERE claim_id='claim-2'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(ordering, canonical::sortable_key(&canonical::claim_key(&tx, "claim-2").unwrap()));
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn reopen_replaces_legacy_pending_triggers() {
+        let mut db = database();
+        db.execute_batch("DROP TRIGGER local_escalation_position_v2;
+            CREATE TRIGGER local_escalation_position_v1 AFTER UPDATE ON claim_positions
+            WHEN OLD.position<>NEW.position BEGIN
+            INSERT OR IGNORE INTO local_escalation_pending_v1
+            SELECT store_index FROM claims WHERE id=NEW.claim_id; END;").unwrap();
+        let tx = db.transaction().unwrap();
+        open(&tx).unwrap();
+        let legacy: u64 = tx.query_row("SELECT COUNT(*) FROM sqlite_schema
+            WHERE type='trigger' AND name='local_escalation_position_v1'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(legacy, 0);
+        insert(&tx, 1, 10, "ready", false);
+        canonical::record_position_tx(&tx, "claim-1", 10).unwrap();
+        canonical::record_position_tx(&tx, "claim-1", 1).unwrap();
+        canonical::record_position_tx(&tx, "claim-1", 0).unwrap();
+        flush(&tx).unwrap();
+        assert_eq!(entry(&tx), "claim-1");
+        tx.commit().unwrap();
+    }
+
     fn database() -> Connection {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);

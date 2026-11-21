@@ -89,8 +89,20 @@ fn cancellation_apply_with_many_claimants_has_one_selector_commit_allowance() {
     ).unwrap();
     store.apply(&intent, &planned.subject_tokens, "cancel-batch").unwrap();
     assert_commit_budget(&store);
-    assert!(store.client_message_selectors_pending().unwrap());
+    // Cancellation queues its notices in the same transaction. The daemon sends
+    // them after COMMIT, so no selector work for those notices exists yet.
+    assert!(fractal_store::store::message_outbox::pending(&store.readers.get()).unwrap());
+    let (queued, queued_count) = fractal_store::store::message_outbox::queued(
+        &store.readers.get(), count as i64,
+    ).unwrap();
+    assert_eq!(queued_count, count as i64);
+    assert_eq!(queued.len(), count);
+    assert!(queued.iter().all(|subject| subject.starts_with("message/mission-cancelled-")));
+    assert!(!store.client_message_selectors_pending().unwrap());
     assert_eq!(paged_backfill_rows(&store, None, None, true), baseline);
+    assert_eq!(fractal_store::store::message_outbox::drain(&store).unwrap(), count);
+    assert_commit_budget(&store);
+    assert!(!fractal_store::store::message_outbox::pending(&store.readers.get()).unwrap());
     let cancellation_claims: usize = store.readers.get().query_row(
         "SELECT COUNT(*) FROM claims WHERE kind='message.sent' AND subject LIKE 'message/mission-cancelled-%'",
         [], |row| row.get(0),
