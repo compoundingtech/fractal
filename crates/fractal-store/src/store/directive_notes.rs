@@ -16,7 +16,7 @@ pub struct DirectiveNote {
 pub const CURRENT_QUERY: &str = "SELECT c.id,c.store_index,c.batch_id,c.subject,c.kind,c.origin,c.actor,c.body,c.predecessors,c.accepted_at_unix_ms
     FROM person_directive_notes n JOIN claims c ON c.id=n.claim_id WHERE n.person=?1";
 
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h01afe75cd96c owner=fractal_store::store::directive_notes TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3e69e7348e8f owner=fractal_store::store::directive_notes TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS person_directive_notes (
     person TEXT PRIMARY KEY,
     claim_id TEXT NOT NULL,
@@ -97,7 +97,7 @@ WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id
         AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
 END;
 CREATE TRIGGER IF NOT EXISTS directive_note_record_delete AFTER DELETE ON replica_records
-WHEN OLD.claim_id IS NOT NULL BEGIN
+WHEN OLD.claim_id IS NOT NULL AND OLD.state<>'valid' BEGIN
     INSERT OR IGNORE INTO local_directive_note_dirty
     SELECT subject FROM claims WHERE id=OLD.claim_id AND kind='person.directive-note-set'
         AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=OLD.claim_id)

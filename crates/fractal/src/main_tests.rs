@@ -11130,7 +11130,7 @@ async fn assert_record_pages_resume_after_restart(reclaim_a_chunk: bool, fail_re
     let page = store.release_valid_record_bytes().unwrap();
     assert!(page.done);
     assert_eq!(page.emptied, 0, "a restart must reclaim even without newly emptied records");
-    super::release_valid_record_bytes(store.clone()).await;
+    super::release_valid_record_bytes(store.clone(), 0).await;
     drop(store);
     assert_eq!(free(&path), 0, "the next start gave them back");
 }

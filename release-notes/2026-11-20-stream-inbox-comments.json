@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Correct two comments that still said nothing routes on messages_stream_inbox; senders have routed on it since 4c-2b",
+  "replay": {"status": "none", "detail": "Comment-only change."},
+  "schema": {"status": "none", "detail": "No database, claim or API change."},
+  "rules": {"status": "none", "detail": "No rule or authority change."},
+  "compatibility": {"status": "none", "detail": "No behaviour change."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Nothing persisted."}
+}
