@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Restore Workspace CI declaration checks after native-turn validation and independent prerequisite routing changes. The kernel test-input declaration covers the channel path found by the conservative scanner. Runner-policy tests distinguish hosted/owned controls from independent receipt-verification and picker jobs, pinning their existing small shape, queue priority and run affinity.",
+  "replay": {"status": "none", "detail": "CI declarations and regression coverage only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Existing runner routing remains unchanged; policy checks enforce the independent prerequisite capacity introduced in #6917."},
+  "downtime": {"status": "none", "detail": "No runtime code changes."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

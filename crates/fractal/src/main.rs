@@ -2574,6 +2574,9 @@ struct SubjectDesiredArgs {
 #[derive(Args)]
 struct SubjectShowArgs {
     subject: String,
+    /// Read only runtime status, workspace and host, without replaying provenance or harness history.
+    #[arg(long, conflicts_with_all = ["kdl", "references", "source"])]
+    activity_summary: bool,
     /// Print the current managed agent declaration as canonical KDL v2.
     #[arg(long)]
     kdl: bool,
@@ -8117,6 +8120,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone(), config.store.valid_record_delete_after_ms()?)));
+    if smallclaims::store::envelope_release::ENVELOPE_RELEASE {
+        tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_release", release_old_envelopes(store.clone())));
+    }
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.record_repairs", resolve_record_repairs(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_signatures", sign_own_claims(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
@@ -12758,6 +12764,13 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
+            if args.activity_summary {
+                anyhow::ensure!(args.subject.starts_with("agent/"), "--activity-summary requires an agent subject");
+                let status: Value = client.get(&format!(
+                    "/v1/status?subject={}&activity_summary=true", urlencoding::encode(&args.subject)
+                )).await?;
+                return print_value(&json!({ "status": status }), json_output);
+            }
             if args.source {
                 return source_cli::show(client, &args.subject, args.revision.as_deref(), args.node.as_deref(), json_output).await;
             }
@@ -22579,21 +22592,49 @@ async fn release_valid_record_bytes(store: Arc<Store>, delete_after_ms: u64) {
     }
 }
 
-/// Find the records repairs wait for once valid records are gone (`record_bytes`): a page at a
-/// time while any waits, otherwise a look every ten minutes.
-async fn resolve_record_repairs(store: Arc<Store>) {
+/// Old envelopes lose their payloads once every claim they carry has its writer's signature
+/// (`envelope_release`), a page per writer batch, each committing its cursor; the pages they held
+/// then go back to the filesystem, one short write at a time. A walk that reaches envelopes too
+/// young to release, or that waits for the signature migration, goes on within the hour. A failed
+/// page retries, including after a daemon restart.
+async fn release_old_envelopes(store: Arc<Store>) {
+    use smallclaims::store::{envelope_release::ENVELOPE_RELEASE_AGE_MS, record_bytes::FREE_PAGES_PER_WRITE};
     loop {
-        let page_store = store.clone();
-        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.record_repairs", || page_store.resolve_record_repairs())).await;
-        let pause = match result {
-            Ok(Ok(report)) if report.waiting == 0 || report.done => Duration::from_secs(10 * 60),
-            Ok(Ok(_)) => Duration::from_millis(50),
-            error => {
-                stderr_message("fractal", format_args!("finding repaired records failed: {error:?}"));
-                Duration::from_secs(60)
+        let mut released = 0;
+        loop {
+            let page_store = store.clone();
+            let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.envelope_release", || page_store.release_envelopes(ENVELOPE_RELEASE_AGE_MS))).await;
+            match result {
+                Ok(Ok(report)) => {
+                    released += report.released;
+                    if report.done {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                error => {
+                    stderr_message("fractal", format_args!("releasing envelopes failed: {error:?}"));
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
             }
-        };
-        tokio::time::sleep(pause).await;
+        }
+        if released > 0 {
+            let mut pages = 0;
+            loop {
+                let vacuum_store = store.clone();
+                match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.envelope_release", || vacuum_store.release_free_pages_in(FREE_PAGES_PER_WRITE))).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(freed)) => pages += freed,
+                    error => {
+                        stderr_message("fractal", format_args!("giving released envelope pages back stopped: {error:?}"));
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            stderr_message("fractal", format_args!("released {released} envelopes and gave {pages} free pages back"));
+        }
+        tokio::time::sleep(Duration::from_secs(60 * 60)).await;
     }
 }
 
@@ -22614,6 +22655,24 @@ async fn sign_own_claims(store: Arc<Store>) {
             Ok(Ok(_)) => Duration::from_millis(50),
             error => {
                 stderr_message("fractal", format_args!("signing own claims failed: {error:?}"));
+                Duration::from_secs(60)
+            }
+        };
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// Find the records repairs wait for once valid records are gone (`record_bytes`): a page at a
+/// time while any waits, otherwise a look every ten minutes.
+async fn resolve_record_repairs(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.record_repairs", || page_store.resolve_record_repairs())).await;
+        let pause = match result {
+            Ok(Ok(report)) if report.waiting == 0 || report.done => Duration::from_secs(10 * 60),
+            Ok(Ok(_)) => Duration::from_millis(50),
+            error => {
+                stderr_message("fractal", format_args!("finding repaired records failed: {error:?}"));
                 Duration::from_secs(60)
             }
         };

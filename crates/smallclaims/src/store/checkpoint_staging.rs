@@ -1227,13 +1227,37 @@ impl StagedSet {
         Ok(())
     }
 
+    /// The claims the plan could still drop that were accepted after `cutoff_unix_ms`, from
+    /// `from_unix_ms` on: candidates for the forget bound of the freshness window.
+    pub fn unprotected_younger_than(&self, cutoff_unix_ms: u64, from_unix_ms: u64) -> Result<Vec<String>> {
+        Ok(self.staging
+            .prepare("SELECT DISTINCT id FROM claims WHERE protected=0 AND accepted_at>?1 AND accepted_at>=?2")?
+            .query_map(params![i64::try_from(cutoff_unix_ms).unwrap_or(i64::MAX), i64::try_from(from_unix_ms).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Keep these claims, and forget any plan made without that.
+    pub fn protect_ids(&self, ids: &[String]) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        {
+            let mut protect = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-hec01ad462496 owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET protected=1 WHERE id=?1")?;
+            for id in ids {
+                protect.execute(/* sqlite-large-value: allow-for-now lv-hf96af6b8d191 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ [id])?;
+            }
+        }
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0c9cd59bf805 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Let the plan drop a claim whose envelope it keeps, and forget any plan made without that.
     /// Only a member that trims locally does: the envelope stays whole and servable, and only
     /// this member's own copies of the claim go. A shared checkpoint's envelopes stay atomic.
     pub fn split_envelopes(&self) -> Result<()> {
         let transaction = self.staging.unchecked_transaction()?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h38a606664b66 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO split_envelopes(id) VALUES (1)", [])?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0c9cd59bf805 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hd0c5e669ec1a owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
         transaction.commit()?;
         Ok(())
     }

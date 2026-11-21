@@ -8700,16 +8700,31 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     assert_eq!(history["page"]["has_more"], false, "{history}");
     let reopened_messages = history["items"].as_array().unwrap();
     let reopened = reopened["next_cursor"].as_str().unwrap().to_owned();
-    let mut expected_reopened = BTreeSet::from([first.as_str(), graph_reply.as_str(), unseen.as_str()]);
-    if release_reads_stream {
-        expected_reopened.extend([stream, this_reply, release_reply]);
-    }
+    let expected_reopened = [
+        (first.as_str(), PERSON, "graph mail release-first", false),
+        (stream, "agent/fleet-sender", "through the stream", true),
+        (this_reply, "agent/fleet-sender", "through the stream", true),
+        (graph_reply.as_str(), "agent/fleet-sender", "graph mail graph-reply", false),
+        (release_reply, "agent/fleet-sender", "through the stream", true),
+        (unseen.as_str(), "agent/fleet-sender", "graph mail graph-unseen", false),
+    ].into_iter().filter(|(_, _, _, stream)| release_reads_stream || !stream);
+    let mut reopened_entries = reopened_messages.iter()
+        .filter(|item| matches!(item["type"].as_str(), Some("message" | "content")));
     assert_eq!(
-        reopened_messages.iter().filter(|item| item["type"] == "message")
-            .map(|item| item["body"]["message_id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
-        expected_reopened,
-        "the full read after rollback retains every message the release supports"
+        reopened_entries.clone().count(), expected_reopened.clone().count() * 2,
+        "the full read has exactly one header and body per supported message: {history}"
     );
+    for (id, sender, text, _) in expected_reopened {
+        let message = reopened_entries.next().unwrap();
+        assert_eq!(message["type"], "message", "{history}");
+        assert_eq!(message["body"]["message_id"], id, "{history}");
+        assert_eq!(message["body"]["from"], sender, "{history}");
+        assert_eq!(message["body"]["to"], reader, "{history}");
+        let content = reopened_entries.next().unwrap();
+        assert_eq!(content["type"], "content", "{history}");
+        assert_eq!(content["body"]["message_id"], id, "{history}");
+        assert_eq!(content["body"]["text"], text, "{history}");
+    }
     let later = send(&o, "rolled-back", PERSON, reader).await;
     let (_, after_rollback) = changes(&o, Some(reopened)).await;
     assert_eq!(after_rollback.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [later]);
