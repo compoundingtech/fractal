@@ -8323,7 +8323,40 @@ fn record_legacy_poll(
 }
 
 /// Generation authority supplied by the replication worker's supervisor.
-pub type WorkerAuthority = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
+#[derive(Clone)]
+pub struct WorkerAuthority {
+    observe: Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>,
+    supervisor: Arc<str>,
+}
+
+impl WorkerAuthority {
+    pub fn new(supervisor: impl Into<Arc<str>>, observe: impl Fn() -> anyhow::Result<u32> + Send + Sync + 'static) -> Self {
+        Self { observe: Arc::new(observe), supervisor: supervisor.into() }
+    }
+}
+
+impl std::ops::Deref for WorkerAuthority {
+    type Target = dyn Fn() -> anyhow::Result<u32> + Send + Sync;
+    fn deref(&self) -> &Self::Target { &*self.observe }
+}
+
+// One process-wide warning per minute, independent of connector PID or error text.
+// A changing caller must not bypass the limit.
+fn worker_warning_due(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    if last.is_some_and(|last| now.duration_since(last) < std::time::Duration::from_secs(60)) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+fn warn_worker_authorization(connector_pid: Option<u32>, supervisor: &str, error: &dyn std::fmt::Display) {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if worker_warning_due(&mut last, std::time::Instant::now()) {
+        tracing::warn!(connector_pid, supervisor, error = %error, "replication worker authorization failed");
+    }
+}
 
 pub fn worker_route(path: &str) -> bool {
     path.starts_with("/v1/internal/replication/")
@@ -8405,11 +8438,17 @@ async fn guard_bound_actor(
         && let Some(worker) = worker
     {
         let peer = request.extensions().get::<LocalPeer>().cloned();
-        if matches!(tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await, Ok(Ok(()))) {
-            // The supervised worker runs in no harness. Its live generation is stronger
-            // evidence than an unreadable service-manager environment.
-            request.extensions_mut().insert(HarnessAncestry::Person);
-            request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
+        let connector_pid = peer.as_ref().map(|peer| peer.pid);
+        let supervisor = worker.supervisor.clone();
+        match tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await {
+            Ok(Ok(())) => {
+                // The supervised worker runs in no harness. Its live generation is stronger
+                // evidence than an unreadable service-manager environment.
+                request.extensions_mut().insert(HarnessAncestry::Person);
+                request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
+            }
+            Ok(Err(error)) => warn_worker_authorization(connector_pid, &supervisor, &format_args!("{error:#}")),
+            Err(error) => warn_worker_authorization(connector_pid, &supervisor, &error),
         }
     }
     let verified_worker = request.extensions().get::<ancestry_diagnostics::VerifiedWorkerFallback>().is_some();
