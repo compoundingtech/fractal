@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Build the dependency-free storage-version library and its unit/integration test harnesses with the pinned native Buck2 toolchain, and require Buck2/nextest inventory parity in the Workspace test producer. Unchanged compilation uses Buck2's local action cache; the full nextest suite and test execution remain required.",
+  "replay": {"status": "none", "detail": "Build tooling only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product contract change."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}
