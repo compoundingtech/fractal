@@ -11461,6 +11461,40 @@ async fn client_agents_agent_roster_retains_current_during_history_publications(
     assert_agent_roster_survives_other_mode_publications(false).await;
 }
 
+#[tokio::test]
+async fn trim_completion_retains_initial_head_and_complete_roster_publications() {
+    assert!(crate::config::TrimConfig::default().local);
+    for complete in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.store = Arc::new(roster_followup_store());
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        if complete {
+            refresh_agent_roster(store, false).unwrap();
+            refresh_agent_roster(store, true).unwrap();
+        } else {
+            agent_roster_snapshot(store, |index| client_agent_roster_head(store, index)).unwrap();
+        }
+        let histories: &[bool] = if complete { &[false, true] } else { &[false] };
+        for &history in histories {
+            let query = ClientListQuery { history, ..ClientListQuery::default() };
+            let (Extension(before_cut), Json(before)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)), Query(query.clone()),
+            ).await.unwrap();
+            // Exercise the callback used when the default startup trim stops, before any
+            // background owner can publish again. Repeating it must not lose retained rows.
+            store.runtime.claims_trim_finished();
+            store.runtime.claims_trim_finished();
+            let (Extension(after_cut), Json(after)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)), Query(query),
+            ).await.expect("a graph-preserving trim must not withdraw the published roster");
+            assert_eq!(before_cut.store_index, after_cut.store_index);
+            assert_eq!(before.items, after.items);
+        }
+    }
+}
+
 #[test]
 fn agent_roster_refresh_never_folds_more_than_a_chunk_in_one_call() {
     let root = tempfile::tempdir().unwrap();
