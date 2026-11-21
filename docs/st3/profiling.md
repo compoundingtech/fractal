@@ -77,6 +77,24 @@ envelopes prepared during admission, including retries. `envelopes_prepared`,
 costs within the phase's writer hold, not additional elapsed time; shared group-finalizer
 costs retain their separate shared-event attribution.
 
+`st.replication.receives` and `st.replication.receive.commits` count completed handlers and
+their managed durable commits from that same summary snapshot. Labels are bounded:
+`exchange_class=empty|nonempty` (whether any envelopes or signatures were offered) and
+`outcome=ok|deferred|contended|error`. The summary includes `exchange_class` and
+`metric_outcome`; its existing `outcome` retains detailed error codes. Neither peer names
+nor error codes are metric labels.
+
+An unchanged empty receipt opens no transaction. Peer metadata, advertised inventory
+acknowledgements and route-refusal transitions still persist immediately. Timestamp-only
+peer receipts checkpoint every 17.5 seconds (half the 35-second missed-exchange deadline).
+The durable row remains authoritative: an exact process-local receipt extends only its
+matching durable checkpoint, is discarded on external timestamp changes, and starts empty
+after restart. This preserves sub-checkpoint schedule-standby takeover deadlines as well as
+live peer liveness without rewriting the row for each heartbeat.
+`transport.observed` up claims already coalesce at 15 minutes, well before the two-hour
+`transport_links_at` evidence lifetime. Changed observations and deferred projection drains
+remain ordinary writes; these counters measure their cost even when an exchange is empty.
+
 
 Writer waits are measured at actual acquisition, not inferred from phase wall time. Independent
 loans measure borrower ownership through transaction finalization and postcommit observer

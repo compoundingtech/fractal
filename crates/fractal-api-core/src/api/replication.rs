@@ -201,6 +201,12 @@ pub async fn replication_receive(
     let correlation_id = correlation.to_string();
     let peer = request.peer.clone();
     let envelopes_offered = request.exchange.envelopes.len();
+    use smallclaims::receive_metrics::{ExchangeClass, Outcome};
+    let exchange_class = if request.exchange.envelopes.is_empty()
+        && request.exchange.signatures.is_empty()
+        && request.exchange.claim_member_signatures.is_empty()
+        && request.exchange.signed_envelopes.is_empty()
+    { ExchangeClass::Empty } else { ExchangeClass::Nonempty };
     let metrics = smallclaims::receive_metrics::RequestMetrics::new(correlation_id.clone());
     let result = replication_receive_inner(state, request, metrics.clone(), correlation).await;
     let counters = metrics.snapshot();
@@ -211,10 +217,19 @@ pub async fn replication_receive(
         Ok(_) if counters.contended => "contended",
         Ok(_) => counters.projection_error.unwrap_or(if counters.deferred { "deferred" } else { "ok" }),
     };
+    let metric_outcome = match outcome {
+        "ok" => Outcome::Ok,
+        "deferred" => Outcome::Deferred,
+        "contended" => Outcome::Contended,
+        _ => Outcome::Error,
+    };
+    smallclaims::receive_metrics::record_summary(exchange_class, metric_outcome, &counters);
     tracing::info!(
         correlation_id = %correlation_id,
         peer = %peer,
         envelopes_offered,
+        exchange_class = exchange_class.as_str(),
+        metric_outcome = metric_outcome.as_str(),
         envelopes_admitted = counters.envelopes_admitted,
         envelopes_prepared = counters.envelopes_prepared,
         envelope_claims = counters.envelope_claims,
