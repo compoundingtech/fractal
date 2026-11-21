@@ -2444,7 +2444,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         // reuses its durable queue; cancellation never leaves an orphan consumer.
         tokio::select! {
             () = self.clone().run_passes() => {},
-            () = self.consume_start_results() => {},
+            () = self.clone().consume_start_results() => {},
+            () = self.sample_resource_pressure() => {},
         }
     }
 

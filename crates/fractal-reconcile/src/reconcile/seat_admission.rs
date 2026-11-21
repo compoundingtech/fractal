@@ -35,6 +35,45 @@ pub struct LaneHost {
 pub const BURST_LANE: fractal_runtime::Capacity = fractal_runtime::Capacity { cores: 8, memory: 24 << 30 };
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Scoped to the daemon's reconciler run, but independent of serialized passes and
+    /// writer admission. Only decision transitions invalidate admission work.
+    pub(super) async fn sample_resource_pressure(self: &Arc<Self>) {
+        if !cfg!(target_os = "linux") {
+            std::future::pending::<()>().await;
+        }
+        let period = self.seat_admission.finite_policy.psi_brake.sample_interval();
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut previous = None;
+        loop {
+            interval.tick().await;
+            let this = self.clone();
+            let decision = match tokio::task::spawn_blocking(move || {
+                crate::task_cpu::blocking("resource.pressure", || this.seat_admission.pressure_decision())
+            }).await {
+                Ok(decision) => decision,
+                Err(error) => {
+                    tracing::error!(%error, "PSI sampler task failed");
+                    continue;
+                }
+            };
+            match decision {
+                Ok(decision) if previous != Some(decision) => {
+                    if previous.is_some() && decision.blocked {
+                        tracing::warn!(reason = ?decision.reason, "host PSI brake blocked admission");
+                    } else {
+                        tracing::debug!(blocked = decision.blocked, reason = ?decision.reason, "host PSI brake decision");
+                    }
+                    previous = Some(decision);
+                    self.incremental.touch("host-lane-pressure");
+                    self.signal_changed();
+                }
+                Ok(_) => {}
+                Err(error) => tracing::error!(%error, "invalid native admission PSI policy"),
+            }
+        }
+    }
+
     /// Configure observation without reading the state file on the async startup path.
     pub fn with_seat_admission(mut self, config: Option<Config>, status: Arc<Status>) -> Self {
         let dirty = Arc::new(AtomicBool::new(true));
@@ -78,22 +117,6 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn refresh_seat_admission_at(&self, now: u64) {
         let admission = &self.seat_admission;
-        // Both logical finite admission and enforced lanes consult the Linux PSI brake.
-        // Keep sampling while supported finite custody can need admission or recovery,
-        // but never turn an otherwise idle host into a five-second full-pass poller.
-        if cfg!(target_os = "linux") && self.store.has_live_finite_resource_memberships(&self.host)
-            .unwrap_or_else(|error| {
-                tracing::error!(%error, "reading finite pressure observation demand");
-                true
-            })
-        {
-            if let Err(error) = admission.pressure_decision() {
-                tracing::error!(%error, "invalid native admission PSI policy");
-            }
-            self.incremental.touch("host-lane-pressure");
-            self.arm_deadline_at("resource-pressure", u128::from(now.saturating_add(5)) * 1000,
-                crate::reconcile_telemetry::WakeCause::Other);
-        }
         if let Some(host) = admission.lanes {
             let observation = (host.outside)();
             let mut previous = admission.outside_observation.lock().unwrap_or_else(PoisonError::into_inner);
