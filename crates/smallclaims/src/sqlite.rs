@@ -1468,9 +1468,9 @@ pub struct ReadGuard<'a> {
     pub connection: Option<ReadConnection>,
     /// The connection `Store::read_snapshot` pinned for this thread, shared by every read in it.
     pub pinned: Option<Rc<ReadConnection>>,
-    /// Declared last, so it ends after the connection is returned. `None` for a read inside a
-    /// pinned snapshot, which `Store::read_snapshot` already registers.
-    _live: Option<LiveReadToken>,
+    /// Declared last, so it ends after the connection is returned. Borrowing an existing
+    /// snapshot or request loan creates no second physical-loan token.
+    pub(crate) _live: Option<LiveReadToken>,
 }
 
 thread_local! {
@@ -1596,6 +1596,9 @@ pub struct PinnedRead<'a> {
     pub registered: bool,
     /// Times the read transaction until it ends, and names who held one past its target.
     pub transaction: Option<crate::windows::holds::ReadHold>,
+    /// An owned checkout follows its connection through pin cleanup. Borrowed request
+    /// readers retain their token in the enclosing loan instead.
+    pub(crate) _live: Option<LiveReadToken>,
 }
 
 impl Drop for PinnedRead<'_> {
@@ -3077,6 +3080,7 @@ mod tests {
         let pool = ReadPool::new(&path, false).unwrap();
         let mut guard = pool.get();
         let connection = Rc::new(guard.connection.take().unwrap());
+        let live = guard._live.take();
         drop(guard);
         let escaped = connection.clone();
         drop(PinnedRead {
@@ -3084,6 +3088,7 @@ mod tests {
             connection: Some(connection),
             registered: false,
             transaction: None,
+            _live: live,
         });
         assert_eq!((pool.usage().open, pool.usage().idle), (1, 0));
         drop(escaped);
