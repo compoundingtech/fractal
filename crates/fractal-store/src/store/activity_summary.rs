@@ -60,7 +60,7 @@ impl Store {
 fn bounded_actual(connection: &Connection, subject: &str, cut: u64) -> Result<(Option<Value>, bool, Vec<&'static str>)> {
     // Bound index entries BEFORE filtering repairs, historical cuts, or canonical tie sorting.
     // This keeps an old cut or a long repaired prefix from turning into an unbounded scan.
-    let mut rows = connection.prepare_cached(&candidate_sql())?
+    let mut rows = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf1ddc10f46d2 owner=fractal_store::store::activity_summary TODO=trace-statement-and-value-representation */ &candidate_sql())?
         .query_map(params![subject, CANDIDATES + 1], |row| Ok((row.get::<_,String>(0)?,
             row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,u64>(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -72,14 +72,14 @@ fn bounded_actual(connection: &Connection, subject: &str, cut: u64) -> Result<(O
         rows.retain(|row| row.2 != boundary);
     }
     let mut candidates = Vec::with_capacity(rows.len());
-    let mut keys = connection.prepare_cached(STORED_KEY_SQL)?;
+    let mut keys = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2f93cc0d062b owner=fractal_store::store::activity_summary TODO=trace-statement-and-value-representation */ STORED_KEY_SQL)?;
     for (id, kind, _, index) in rows {
         if index > cut || kind.as_bytes().get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"harness.")) { continue; }
         let repaired: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
             [&id], |row| row.get(0))?;
         if !repaired {
-            let (prefix, position) = keys.query_row([&id], |row| Ok((
+            let (prefix, position) = keys.query_row(/* sqlite-large-value: allow-for-now lv-h58276482e453 owner=fractal_store::store::activity_summary TODO=trace-statement-and-value-representation */ [&id], |row| Ok((
                 (row.get::<_,usize>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?,
                  row.get::<_,Option<i64>>(3)?, row.get::<_,String>(4)?),
                 row.get::<_,Option<i64>>(5)?,
@@ -102,7 +102,7 @@ fn bounded_actual(connection: &Connection, subject: &str, cut: u64) -> Result<(O
     let registry = fractal_schema::registry();
     let mut body_query = connection.prepare_cached("SELECT body FROM claims WHERE id=?1")?;
     for ((_, _, id), kind) in candidates {
-        let body: String = body_query.query_row([id], |row| row.get(0))?;
+        let body: String = body_query.query_row(/* sqlite-large-value: allow-for-now lv-hbfc641a2239f owner=fractal_store::store::activity_summary TODO=trace-statement-and-value-representation */ [id], |row| row.get(0))?;
         #[cfg(any(test, feature = "test-support"))]
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
         seen = true;

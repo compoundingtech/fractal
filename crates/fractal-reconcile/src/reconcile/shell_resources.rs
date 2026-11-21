@@ -12,6 +12,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 tracing::warn!(execution = %execution.command.id, %error, "retaining newer-class execution until the execution host is upgraded");
                 continue;
             }
+            if !execution.cancel && self.store.shell_resource_owner_cancelled(&execution.command.lane.owner)? {
+                self.store.cancel_shell_resource(&execution.command.id)?;
+                execution.cancel = true;
+            }
+            let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+            if let Some(deadline) = execution.retirement_retry_at_unix_ms.filter(|deadline| *deadline > now) {
+                // Re-arm even on unrelated wakes or after restart: a worker's pending
+                // result is not guaranteed to produce another native event.
+                self.arm_restart(&format!("shell-retirement:{}", execution.command.id), u128::from(deadline));
+                continue;
+            }
             if let Err(error) = self.drive_shell_resource(&mut execution) {
                 let launched = execution.started_at.is_some() || self.store.resource_memberships_for_host(&self.host)?.into_iter()
                     .flat_map(|member| member.roots).any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some());
@@ -36,11 +47,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if execution.started_at.is_none() {
                     execution.queue_wait_ms = self.store.shell_resource_queue_wait_ms(&execution, now);
                 }
+                self.incremental.touch(&format!("shell-resources:{}", execution.command.lane.owner.run));
                 self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != execution.command.lane.id);
                 self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
                 execution.command.environment.clear();
+            } else if execution.cancellation_kill_generation.is_some()
+                || matches!(execution.state.as_str(), "finishing" | "finishing-refused" | "retiring" | "failing")
+            {
+                execution.retirement_retry_delay_ms = execution.retirement_retry_delay_ms.saturating_mul(2).clamp(1_000, 300_000);
+                let deadline = u64::try_from(now_ms()).unwrap_or(u64::MAX).saturating_add(execution.retirement_retry_delay_ms);
+                execution.retirement_retry_at_unix_ms = Some(deadline);
+                self.arm_restart(&format!("shell-retirement:{}", execution.command.id), u128::from(deadline));
             }
-            if self.store.update_shell_resource(&execution)? { self.signal_changed(); }
+            if self.store.update_shell_resource(&execution)? {
+                self.incremental.touch(&format!("shell-resources:{}", execution.command.lane.owner.run));
+                self.signal_changed();
+            }
         }
         Ok(())
     }
@@ -55,7 +77,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(member) = member else { return Ok(true); };
         if execution.command.parent.is_some() {
             if member.roots.iter().any(|root| root.runtime_id == execution.command.id) {
-                self.runtime.retire_resource_exec(&self.store, request, &execution.command.id)?;
+                let notify = self.notify.clone(); let event_notify = self.event_notify.clone();
+                return self.runtime.retire_shell_resource_lane(self.store.clone(), request, Some(&execution.command.id),
+                    Arc::new(move || signal_changed(&notify, &event_notify)));
             }
             return Ok(true);
         }
@@ -72,7 +96,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(false);
         }
-        let retired = self.runtime.retire_resource_lane(&self.store, request)?;
+        let notify = self.notify.clone(); let event_notify = self.event_notify.clone();
+        let retired = self.runtime.retire_shell_resource_lane(self.store.clone(), request, None,
+            Arc::new(move || signal_changed(&notify, &event_notify)))?;
         if retired {
             self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
             self.incremental.touch("seat-admission");
@@ -408,17 +434,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let began = *execution.cancellation_started_at.get_or_insert(elapsed);
                 let remaining = 5_000_u64.saturating_sub(elapsed.saturating_sub(began));
                 if remaining == 0 {
+                    if execution.cancellation_kill_generation.as_deref() == Some(generation.generation_id.as_str()) {
+                        return Ok(());
+                    }
                     // Preserve observations while the cgroup still exists, even if the helper
                     // is stuck or never installed its SIGTERM handler.
                     execution.result = Some(self.shell_payload_observation(execution, &generation.generation_id, now)?);
+                    // Persist the generation-bound kill intent before the OS side effect.
+                    // Rechecks retain custody but must never repeatedly signal this generation.
+                    execution.cancellation_kill_generation = Some(generation.generation_id.clone());
                     if self.store.update_shell_resource(execution)? { self.signal_changed(); }
-                    let killing = std::time::Instant::now();
-                    self.runtime.retire_resource_exec(&self.store, &request, &execution.command.id)?;
-                    if let Some(result) = &mut execution.result {
-                        result.wall_duration_ms = result.wall_duration_ms.saturating_add(
-                            u64::try_from(killing.elapsed().as_millis()).unwrap_or(u64::MAX));
-                    }
-                    return self.drive_shell_resource(execution);
+                    // Signal only: a stuck task must not block the writer/reconcile loop.
+                    // The exit watch and subsequent sweeps confirm retirement separately.
+                    self.runtime.kill_resource_exec(&execution.command.id, &generation.generation_id)?;
+                    return Ok(());
                 }
                 self.arm_restart(&format!("shell-cancel:{}", execution.command.id), now_ms().saturating_add(u128::from(remaining)));
                 if execution.cancellation_started_at == Some(elapsed) {
