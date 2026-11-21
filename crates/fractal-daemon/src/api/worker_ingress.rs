@@ -39,18 +39,18 @@ pub fn worker_observer(pid: Option<u32>) -> anyhow::Result<Observe> {
             anyhow::ensure!(!crate::service::daemon_is_service_managed()?,
                 "service-managed daemons cannot enroll a foreground worker");
             let generation = fractal_runtime::PeerProcessIdentity::capture_pid(pid)?;
-            Ok(Arc::new(move || { generation.validate()?; Ok(generation.pid()) }))
+            Ok(WorkerAuthority::new(format!("foreground process {pid}"), move || { generation.validate()?; Ok(generation.pid()) }))
         }
-        None => Ok(pin_supervised(crate::service::replication_worker_pid)),
+        None => Ok(pin_supervised(crate::service::replication_worker_supervisor(), crate::service::replication_worker_pid)),
     }
 }
 
 /// A supervisor replaces its worker only after that process ends, so one observation answers
 /// for as long as the observed generation validates. Requests then cost a process-table read
 /// instead of service-manager commands; the lock admits one re-observation at a time.
-fn pin_supervised(observe: impl Fn() -> anyhow::Result<u32> + Send + Sync + 'static) -> Observe {
+fn pin_supervised(supervisor: impl Into<Arc<str>>, observe: impl Fn() -> anyhow::Result<u32> + Send + Sync + 'static) -> Observe {
     let pinned = std::sync::Mutex::new(None::<fractal_runtime::PeerProcessIdentity>);
-    Arc::new(move || {
+    WorkerAuthority::new(supervisor, move || {
         let mut pinned = pinned.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(worker) = pinned.as_ref().filter(|worker| worker.validate().is_ok()) {
             return Ok(worker.pid());
@@ -127,7 +127,7 @@ mod tests {
         let mut second = std::process::Command::new("sleep").arg("60").spawn().unwrap();
         let named = Arc::new(AtomicU32::new(first.id()));
         let observations = Arc::new(AtomicU32::new(0));
-        let observe = pin_supervised({
+        let observe = pin_supervised("test-replication.service", {
             let (named, observations) = (named.clone(), observations.clone());
             move || {
                 observations.fetch_add(1, Ordering::SeqCst);
@@ -162,7 +162,7 @@ mod tests {
         let mut first = std::process::Command::new("sleep").arg("60").spawn().unwrap();
         let mut second = std::process::Command::new("sleep").arg("60").spawn().unwrap();
         let names = std::sync::Mutex::new(vec![second.id(), second.id(), second.id(), first.id()]);
-        let observe = pin_supervised(move || Ok(names.lock().unwrap().pop().unwrap()));
+        let observe = pin_supervised("test-replication.service", move || Ok(names.lock().unwrap().pop().unwrap()));
         assert!(authorize(Some(&process(first.id())), &*observe).is_err());
         assert!(authorize(Some(&process(second.id())), &*observe).is_ok());
         first.kill().unwrap();
@@ -188,7 +188,7 @@ mod tests {
         let current = observed.clone();
         let app = protect(Router::new().route("/v1/internal/replication/receive",
             axum::routing::post(|_: axum::body::Bytes| async { "accepted" })),
-            Arc::new(move || Ok(current.load(Ordering::SeqCst))), WorkerIngressGenerationCheck::Enforce);
+            WorkerAuthority::new("test-replication.service", move || Ok(current.load(Ordering::SeqCst))), WorkerIngressGenerationCheck::Enforce);
         let request = |body| {
             let mut request = Request::post("/v1/internal/replication/receive").body(body).unwrap();
             request.extensions_mut().insert(peer.clone());
