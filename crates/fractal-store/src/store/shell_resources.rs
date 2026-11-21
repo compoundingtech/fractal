@@ -1042,7 +1042,7 @@ mod tests {
                 VALUES(?1,'work/owner','g','build','hash','ready',1,'[]','1','1')", [step])?;
             append_receipt_claim_tx(tx, store.origin(), step, "work.claimed", Some(agent),
                 &json!({"fields":{"attempt":1,"readiness_epoch":0,"claimant":agent,
-                    "claim_incarnation":"exact","lease_expires_at_unix_ms":now_ms() + 60_000}}),
+                    "claim_incarnation":"exact","claim_expires_at_unix_ms":now_ms() + 60_000}}),
                 &[], None, "claim-owner")?;
             Ok(())
         }).unwrap().unwrap();
