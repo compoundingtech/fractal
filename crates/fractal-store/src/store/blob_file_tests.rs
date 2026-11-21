@@ -285,7 +285,7 @@ fn a_store_at_26_opens_and_reads_its_moved_blob_bytes() {
     assert_eq!(restore_all(&store, later + DAY_MS), 2);
     assert_eq!(user_version(&store), 26, "a restore lowers only its own fence, 25");
     assert_eq!(store.get_document("doc/example/later", &other).unwrap().as_deref(), Some(&more[..]));
-    assert!(smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION >= 26, "this build reads a store at 26");
+    const { assert!(smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION >= 26, "this build reads a store at 26") };
 }
 
 /// Storage versions only rise: a store at the valid-record version (27, above the blob file's 25)
