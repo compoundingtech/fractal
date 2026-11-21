@@ -1775,6 +1775,55 @@ async fn next_json_frame(
     }).await.expect("deterministic first/change frame")
 }
 
+/// Keep the actual first frame for trace assertions. A precise not-ready resync must recover
+/// on this same subscription within the original first-frame deadline, never by resubscribing.
+#[cfg(target_os = "linux")]
+async fn subscription_first_frame_and_ready(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    id: &str,
+    conversation: bool,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (first, _) = next_json_frame(socket).await;
+        assert_eq!(first["id"], id, "{first}");
+        if conversation {
+            assert_eq!(first["kind"], "conversation", "{first}");
+        } else if first["kind"] == "resync" {
+            assert_eq!(first["code"], "mission-list-not-ready", "{first}");
+            assert_eq!(first["retryable"], true, "{first}");
+            let (ready, _) = next_json_frame(socket).await;
+            assert_eq!(ready["id"], id, "{ready}");
+            assert_eq!(ready["kind"], "snapshot", "{ready}");
+        } else {
+            assert_eq!(first["kind"], "snapshot", "{first}");
+        }
+        first
+    }).await.expect("first frame and same-subscription readiness within the original deadline")
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn subscription_context_fixture_keeps_resync_first_and_requires_same_subscription_snapshot() {
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+    let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
+    let mut writer = tokio_tungstenite::WebSocketStream::from_raw_socket(writer, Role::Server, None).await;
+    let mut reader = tokio_tungstenite::WebSocketStream::from_raw_socket(reader, Role::Client, None).await;
+    let ((), first) = tokio::join!(
+        async {
+            for frame in [
+                serde_json::json!({"kind":"resync", "id":"sampled",
+                    "code":"mission-list-not-ready", "retryable":true}),
+                serde_json::json!({"kind":"snapshot", "id":"sampled", "items":[]}),
+            ] {
+                writer.send(Message::Text(frame.to_string().into())).await.unwrap();
+            }
+        },
+        subscription_first_frame_and_ready(&mut reader, "sampled", false),
+    );
+    assert_eq!(first["kind"], "resync", "trace assertions must use the actual first frame");
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_request_id_and_roster_stages_match_response() {
@@ -1935,8 +1984,8 @@ async fn subscribe_frame_context_is_lenient_and_continues_action_trace() {
     let root = tempfile::tempdir().unwrap();
     seed_roster(root.path(), "agent/otel-test.observed");
     let mut daemon = ExportDaemon::start(&collector, root.path());
-    // Each missions window's first frame must be its snapshot (see collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans).
-    daemon.await_collections(&["missions"]).await;
+    // Context belongs to the actual first frame, including the protocol's not-ready resync.
+    // A held mission subscription must then deliver its snapshot without resubscribing.
     let mut socket = daemon.websocket("/v1/client/collections/stream",
         "st3.client.collections.v0", UPGRADE).await;
     let upgrade = daemon.await_span(root.path(), |span| {
@@ -1965,8 +2014,7 @@ async fn subscribe_frame_context_is_lenient_and_continues_action_trace() {
             "collection": if *id == "conversation" { "conversation" } else { "missions" },
             "conversation":"agent/otel-test.observed", "trace":trace
         }).to_string().into())).await.unwrap();
-        let (frame, _) = next_json_frame(&mut socket).await;
-        assert_eq!(frame["kind"], if *id == "conversation" { "conversation" } else { "snapshot" }, "{frame}");
+        let frame = subscription_first_frame_and_ready(&mut socket, id, *id == "conversation").await;
         assert_eq!(frame["id"], *id);
         let first = daemon.await_span(root.path(), |span| {
             span["name"] == "st.subscription.first_frame"

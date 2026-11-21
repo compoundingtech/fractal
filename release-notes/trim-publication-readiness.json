@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Keep published agent rosters and collection views available while a graph-preserving local trim records tombstones and finishes, including the initial bounded roster head. Recording invalidates only the replication inventory; completion atomically retains roster rows and clears claim-dependent caches under the publication locks so a concurrent first history publication cannot be erased. Telemetry fixtures wait on collection publication events rather than another list's readiness or retired checkpoint claims.",
+  "summary": "Keep published agent rosters and collection views available while a graph-preserving local trim records tombstones and finishes, including the initial bounded roster head. Recording invalidates only the replication inventory; completion atomically retains roster rows and clears claim-dependent caches under the publication locks so a concurrent first history publication cannot be erased. Walkthrough fixtures await both roster and work publications. Telemetry checks trace context on the actual first frame and require recovery snapshots on the same held subscription within the original deadline, without polling or resubscribing.",
   "replay": {"status": "none", "detail": "No replay changes; replaced projections still invalidate their publications."},
   "schema": {"status": "none", "detail": "No persistent schema changes."},
   "rules": {"status": "none", "detail": "Retention rules and graph-equivalence checks are unchanged."},
