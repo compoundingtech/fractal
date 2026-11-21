@@ -3,7 +3,7 @@
 use super::*;
 
 pub const PAGE: usize = 64;
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hca5f3097fccd owner=fractal_store::store::publication_facts TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h80e0c5f83966 owner=fractal_store::store::publication_facts TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_publication_claims (
     claim_id TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -117,7 +117,8 @@ CREATE TRIGGER IF NOT EXISTS publication_record_insert AFTER INSERT ON replica_r
       AND kind IN ('runtime.observed','runtime.action.succeeded')
       AND NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=claims.id);
 END;
-CREATE TRIGGER IF NOT EXISTS publication_record_delete AFTER DELETE ON replica_records BEGIN
+CREATE TRIGGER IF NOT EXISTS publication_record_delete AFTER DELETE ON replica_records
+WHEN OLD.state<>'valid' BEGIN
     INSERT INTO local_publication_pending SELECT id FROM claims WHERE id=OLD.claim_id
       AND kind IN ('runtime.observed','runtime.action.succeeded')
       AND NOT EXISTS(SELECT 1 FROM local_publication_pending WHERE claim_id=claims.id);
@@ -168,6 +169,8 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
              DROP TRIGGER IF EXISTS publication_repair_delete;",
         )?;
     }
+    // A valid record's deletion wakes the record trigger no longer (`record_bytes`).
+    smallclaims::store::record_bytes::replace_changed_triggers(connection, SCHEMA, &["publication_record_delete"])?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h59314c13323c owner=fractal_store::store::publication_facts TODO=trace-statement-and-value-representation */ SCHEMA)?;
     let repairs:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='projection_digest_repaired_claims' AND type='table')",[],|row|row.get(0))?;
     if repairs {

@@ -53,13 +53,15 @@ const BLOB_FILE_TABLE: &str = /* sqlite-large-value: allow-for-now lv-hca561fb42
     hash TEXT PRIMARY KEY, bytes BLOB NOT NULL, size INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blob_file.meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)";
 
-/// The bytes of the `blobs` row aliased `$alias`: its own, or the blob file's once they moved.
+/// The bytes of the `blobs` row aliased `$alias`: its own, or the blob file's once they moved. A
+/// moved row whose copy is missing reads as NULL, also when a reader stands the store's own file
+/// in for a missing blob file (`attach_reader`), whose row for it is the emptied one.
 #[macro_export]
 macro_rules! blob_bytes {
     ($alias:literal) => {
         concat!(
             "CASE WHEN ", $alias, ".size>0 AND length(", $alias, ".bytes)=0 THEN (SELECT moved.bytes FROM blob_file.blobs AS moved WHERE moved.hash=",
-            $alias, ".hash) ELSE ", $alias, ".bytes END"
+            $alias, ".hash AND length(moved.bytes)=moved.size) ELSE ", $alias, ".bytes END"
         )
     };
 }
@@ -85,6 +87,12 @@ pub fn location(database: &Path) -> String {
 
 /// Attach the blob file to the store's writer, creating it with incremental auto-vacuum.
 pub fn attach_writer(connection: &Connection, database: &Path) -> Result<()> {
+    // An admitted store's connection may not create files (`AdmittedStore::open_connection`
+    // drops SQLITE_OPEN_CREATE once its database exists), and an attach inherits that.
+    let blob_file = location(database);
+    if blob_file != ":memory:" && !blob_file.starts_with("file:") && !Path::new(&blob_file).exists() {
+        create(&blob_file)?;
+    }
     connection.execute(/* sqlite-large-value: allow-for-now lv-h2e95b3b64cc3 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS blob_file", [location(database)])?;
     // Only an empty file takes a vacuum mode, so set it before the first table.
     let fresh: bool =
@@ -97,20 +105,37 @@ pub fn attach_writer(connection: &Connection, database: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Attach the blob file to a reader. A store whose writer has not yet run this build has no blob
-/// file, and none of its bytes moved: an empty stand-in answers the same.
+/// Attach the blob file to a reader, which never writes. A store whose writer has not yet run
+/// this build has no blob file, and none of its rows' bytes moved: the reader then attaches the
+/// store's own file under the blob file's name, whose `blobs` and `meta` tables have the blob
+/// file's columns, so every statement naming the blob file compiles, a moved-bytes lookup runs for
+/// no row, and a cursor reads as unset. An in-memory stand-in can't do that: on a read-only
+/// connection it is read-only too, and could not take the tables. A private in-memory store has no
+/// file to share, so its reader keeps an in-memory stand-in.
 pub fn attach_reader(connection: &Connection, database: &Path) -> Result<()> {
     let location = location(database);
-    let present = location == ":memory:" || location.starts_with("file:") || Path::new(&location).exists();
-    if present {
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h86d6852c28d8 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS blob_file", [&location])?;
-        if location != ":memory:" {
-            return Ok(());
-        }
-    } else {
+    if location == ":memory:" {
         connection.execute(/* sqlite-large-value: allow-for-now lv-hb2d3b2648e1d owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ':memory:' AS blob_file", [])?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hedea69cc751c owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ BLOB_FILE_TABLE)?;
+        return Ok(());
     }
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hedea69cc751c owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ BLOB_FILE_TABLE)?;
+    let attached = if location.starts_with("file:") || Path::new(&location).exists() {
+        location
+    } else {
+        database.to_string_lossy().into_owned()
+    };
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h5219554f400a owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS blob_file", [&attached])?;
+    Ok(())
+}
+
+/// Create the empty blob file at `location` with the writer's settings. Two at once are harmless:
+/// the vacuum mode only takes on an empty file, and the table is created if it doesn't exist.
+fn create(location: &str) -> Result<()> {
+    let connection = Connection::open(location)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA auto_vacuum = INCREMENTAL")?;
+    connection.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h12063254abf6 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ &BLOB_FILE_TABLE.replace("blob_file.", "main."))?;
     Ok(())
 }
 
@@ -475,4 +500,69 @@ pub fn restore_page(connection: &Connection, now_ms: u64) -> Result<BlobBytes> {
     transaction.commit()?;
     done.hold = started.elapsed();
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Store, runtime::Plain};
+    use std::sync::Arc;
+
+    /// A store none of whose rows moved, with no blob file beside it: as one whose writer hasn't
+    /// run this build, or that a reader opens first.
+    fn without_blob_file(directory: &Path) -> std::path::PathBuf {
+        let path = directory.join("claims.sqlite3");
+        drop(Store::open(&path, "writer", Arc::new(Plain)).unwrap());
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", location(&path)));
+        }
+        path
+    }
+
+    #[test]
+    fn a_read_only_open_before_any_blob_file_compiles_every_blob_statement_and_writes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = without_blob_file(directory.path());
+        let reader = crate::sqlite::open_read_connection(&path, false).unwrap();
+        // Every statement naming the blob file compiles and runs.
+        let rows: i64 = reader
+            .query_row(concat!("SELECT COUNT(*) FROM (SELECT ", blob_bytes!("b"), " FROM blobs AS b)"), [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        let copied: i64 = reader
+            .query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM blob_file.meta WHERE key=?1), 0)", [COPIED], |row| row.get(0))
+            .unwrap();
+        assert_eq!(copied, 0);
+        assert!(!Path::new(&location(&path)).exists(), "a reader created no blob file");
+    }
+
+    #[test]
+    fn a_moved_row_whose_blob_file_is_gone_reads_as_null_not_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = without_blob_file(directory.path());
+        let reader = crate::sqlite::open_read_connection(&path, false).unwrap();
+        // The stand-in's row for a moved blob is the emptied one: size set, bytes empty.
+        let bytes: Option<Vec<u8>> = reader
+            .query_row(
+                concat!("SELECT ", blob_bytes!("b"), " FROM (SELECT 'gone' AS hash, x'' AS bytes, 3 AS size) AS b"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bytes, None);
+    }
+
+    #[test]
+    fn a_writer_creates_the_blob_file_its_connection_may_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = without_blob_file(directory.path());
+        // As an admitted store's connection, once its database exists: no SQLITE_OPEN_CREATE.
+        let connection = rusqlite::Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+        attach_writer(&connection, &path).unwrap();
+        let mode: i64 = connection.query_row("PRAGMA blob_file.auto_vacuum", [], |row| row.get(0)).unwrap();
+        assert_eq!(mode, 2, "incremental, set before the first table");
+        let journal: String = connection.query_row("PRAGMA blob_file.journal_mode", [], |row| row.get(0)).unwrap();
+        assert_eq!(journal, "wal");
+        connection.execute("INSERT INTO blob_file.blobs(hash, bytes, size) VALUES ('fixture', x'01', 1)", []).unwrap();
+    }
 }

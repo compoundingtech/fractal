@@ -1593,7 +1593,37 @@ async fn fresh_explicit_store_fleet_create_resolves_identity_under_admission_loc
         assert_eq!(node.st_json(&["fleet", "status"])["node"], expected);
         assert!(store_dir.join("claims.sqlite3").exists());
         assert!(!node.state_dir().join("claims.sqlite3").exists());
+        // Reopened as a store from before blob files (none beside it; nothing moved yet), the
+        // existing store's admitted connection may no longer create files: the daemon still
+        // creates and attaches its blob file, and a document's bytes read back.
+        let database = store_dir.join("claims.sqlite3");
+        let blob_file = smallclaims::store::blob_file::location(&database);
+        let remove_blob_file = || {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = fs::remove_file(format!("{blob_file}{suffix}"));
+            }
+        };
+        let file = node.root.join("fixture-document.txt");
+        fs::write(&file, "explicit store bytes").unwrap();
+        node.st_ok(&["documents", "put", file.to_str().unwrap(), "--as", "doc/fixture/explicit-store"]);
         node.stop();
+        remove_blob_file();
+        node.start().await;
+        assert!(std::path::Path::new(&blob_file).exists());
+        let document = node.st_ok(&["documents", "get", "doc/fixture/explicit-store"]);
+        assert!(document.contains("explicit store bytes"), "{document}");
+        node.stop();
+        // A read-only open of a store with no blob file beside it (a reader before any writer of
+        // a build with blob files) reads and writes nothing.
+        remove_blob_file();
+        let reader = smallclaims::sqlite::open_read_connection(&database, false).unwrap();
+        let blobs: i64 = reader.query_row(
+            concat!("SELECT COUNT(*) FROM (SELECT ", smallclaims::blob_bytes!("b"), " FROM blobs AS b)"),
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(blobs >= 1);
+        assert!(!std::path::Path::new(&blob_file).exists(), "a reader created no blob file");
     }
 }
 
@@ -6859,6 +6889,191 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
         rows(&o, "SELECT COUNT(*) FROM claim_signature_judging") == 0
     })
     .await;
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "re-upgrade");
+}
+
+/// Verdict links without their index by claim: a previous-release member and a new one
+/// replicate signed claims both ways; the previous release upgraded in place drops the index
+/// without changing a verdict or the replicated set; rolled back, it rebuilds the index at open
+/// and reads, signs and replicates as before; upgraded again, the index goes again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "2e7a9c4f-5b1d-4e3a-8f6c-1d9b7a5e3c2f";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([11_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    const INDEXED: &str = "SELECT COUNT(*) FROM sqlite_schema WHERE name='claim_candidate_verdict_links_claim_index'";
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n = Node::new(root.path(), "n");
+    o.legacy_config(fleet_id, &secret, &[("n", n.port)]);
+    n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    o.start().await;
+    n.start().await;
+    let rows = |node: &Node, sql: &str| -> i64 {
+        rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(sql, [], |row| row.get(0))
+        .unwrap()
+    };
+    // Every signed claim's verdict. A peer's claims read held here, since the legacy fleet does not
+    // enroll node keys; what matters is that no verdict changes across upgrade and rollback.
+    let verdicts = |node: &Node| -> BTreeMap<String, String> {
+        let connection = rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare("SELECT s.claim_id, COALESCE(v.verdict, 'none') FROM claim_signatures s
+                      LEFT JOIN claim_verdicts v USING(claim_id)")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    // Settled: nothing queued for judgment, every signed claim has a verdict, and the node's own
+    // claims read verified.
+    let unsettled = |node: &Node| {
+        rows(node, &format!(
+            "SELECT (SELECT COUNT(*) FROM claim_verdict_queue)
+                  + (SELECT COUNT(*) FROM claim_signatures s LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE v.verdict IS NULL)
+                  + (SELECT COUNT(*) FROM claim_signatures s JOIN claims c ON c.id = s.claim_id
+                     LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE c.origin = '{}' AND v.verdict IS NOT 'verified')",
+            node.name,
+        ))
+    };
+    macro_rules! settle {
+        ($node:expr) => {{
+            let node: &Node = $node;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while unsettled(node) != 0 {
+                assert!(Instant::now() < deadline, "{}: verdicts did not settle: {:?}", node.name, verdicts(node));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }};
+    }
+    let kept = |before: &BTreeMap<String, String>, after: &BTreeMap<String, String>, stage: &str| {
+        for (claim, verdict) in before {
+            assert_eq!(after.get(claim), Some(verdict), "{stage}: verdict of {claim} changed");
+        }
+    };
+    // Node-signed notes: no actor, so they need no verified caller ancestry on any host.
+    let note = |node: &Node, text: &str| {
+        let client = node.client();
+        let text = text.to_owned();
+        async move {
+            let _: Value = client
+                .post("/v1/claims", &ClaimInput {
+                    subject: format!("custom/fleet-test/{text}"),
+                    kind: NOTE.into(),
+                    actor: None,
+                    fields: [("text".to_owned(), Value::String(text))].into_iter().collect(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .await
+                .unwrap();
+        }
+    };
+    let mut expected = BTreeSet::new();
+    for text in ["o-0", "o-1", "o-2"] {
+        note(&o, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for text in ["n-0", "n-1"] {
+        note(&n, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        settle!(node);
+    }
+    // The new member keeps no index by claim; the previous release keeps one.
+    assert_eq!(rows(&n, INDEXED), 0);
+    assert_eq!(rows(&o, INDEXED), 1);
+    assert!(rows(&n, "SELECT COUNT(*) FROM claim_verdict_links") > 0);
+
+    // Upgrade in place: the open drops the release's index, verdicts and the set stay.
+    let judged = verdicts(&o);
+    let before: BTreeSet<String> =
+        o.claims().await.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    assert_eq!(rows(&o, INDEXED), 0);
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "upgrade");
+    let after: BTreeSet<String> =
+        o.claims().await.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
+    assert!(before.is_subset(&after), "upgrade lost history");
+    for (node, text) in [(&o, "o-upgraded"), (&n, "n-after-upgrade")] {
+        note(node, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        settle!(node);
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // Roll back: the release rebuilds its index at open, then reads every verdict, signs and
+    // replicates as before.
+    let judged = verdicts(&o);
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    assert_eq!(rows(&o, INDEXED), 1);
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "rollback");
+    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-after-rollback")] {
+        note(node, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        settle!(node);
+    }
+
+    // Upgrade again: the index goes again.
+    let judged = verdicts(&o);
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    assert_eq!(rows(&o, INDEXED), 0);
     settle!(&o);
     kept(&judged, &verdicts(&o), "re-upgrade");
 }
