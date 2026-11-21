@@ -184,8 +184,14 @@ pub(super) fn advance(
             (String::new(), None, false)
         }
     };
-    let texts=connection.prepare_cached("SELECT signature FROM claim_signature_candidates WHERE claim_id=?1 AND signature>?2 ORDER BY signature LIMIT ?3")?
+    let mut texts=connection.prepare_cached("SELECT signature FROM claim_signature_candidates WHERE claim_id=?1 AND signature>?2 ORDER BY signature LIMIT ?3")?
         .query_map(params![claim_id,last,budget as i64],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    // A compacted claim's facade is its single candidate.
+    if texts.is_empty() && last.is_empty() && budget > 0
+        && let Some(text) = compaction::facade(connection, claim_id)?
+    {
+        texts.push(text);
+    }
     let candidates = texts
         .iter()
         .map(|text| Ok(serde_json::from_str::<ClaimSignature>(text)?))
@@ -193,6 +199,12 @@ pub(super) fn advance(
     let (verdict, links, signature) =
         judge_candidates(connection, roots, row, candidates, 0, memo)?;
     blocked |= matches!(&verdict,Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:"));
+    // Final once found: later batches only add constraints, and a forgotten one must not undo it.
+    if matches!(&verdict, Verdict::Invalid(reason) if reason == crate::principal::BATCH_DISORDER) {
+        connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-he263347cc8da owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_batch_disorder(claim_id) VALUES (?1)")?
+            .execute(/* sqlite-large-value: allow-for-now lv-h81fa36b9b7b4 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id])?;
+    }
     for link in &links {
         connection
             .prepare_cached(
@@ -240,7 +252,7 @@ pub(super) fn advance(
     if !finished {
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8ef495ef23ca owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)")?
-            .execute(/* sqlite-large-value: allow-for-now lv-h81fa36b9b7b4 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-hbacf8f94aea6 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id])?;
         return Ok((None, texts.len()));
     }
     if count != 0 && best.is_none() {

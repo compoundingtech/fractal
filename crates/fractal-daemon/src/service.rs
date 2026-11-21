@@ -1233,10 +1233,7 @@ pub(crate) fn replication_worker_pid() -> Result<u32> {
         let snapshot = fractal_runtime::systemd::snapshot()?;
         static WORKER: std::sync::Mutex<Option<WorkerResolution>> = std::sync::Mutex::new(None);
         let mut worker = WORKER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        cached_worker_pid(&mut worker, snapshot, |snapshot| {
-            let service = lookup::systemd(snapshot)?.replication;
-            snapshot.worker_identity(&service.name)
-        }, |identity| {
+        cached_worker_pid(&mut worker, snapshot, lookup::replication_worker_identity, |identity| {
             identity.validate()?;
             Ok(identity.pid())
         })
