@@ -1047,6 +1047,11 @@ mod tests {
             Ok(())
         }).unwrap().unwrap();
         let owner = store.shell_resource_agent_owner(agent).unwrap();
+        let prior_identity = json!(["work/owner", step, 1, 0, agent, "exact", null]);
+        let prior_invocation = format!("invocation/turn-{}",
+            hex::encode(Sha256::digest(prior_identity.to_string().as_bytes())));
+        assert_eq!(owner.invocation.as_deref(), Some(prior_invocation.as_str()),
+            "canonical owner_run must not change the pre-fix claim invocation identity");
         assert_eq!(owner.run, "mission-run/work/owner");
         store.shell_resource_owner_live(&owner).unwrap();
 

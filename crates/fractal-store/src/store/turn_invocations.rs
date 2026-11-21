@@ -18,10 +18,8 @@ fn operation_id(run: &str, step: &str, attempt: u32, epoch: u32, agent: &str,
 
 fn receipt_tx(tx: &Transaction<'_>, run: &str, step: &str, attempt: u32, epoch: u32,
     agent: &str, incarnation: &str) -> Result<InvocationReceipt> {
-    // Wake views already carry the subject prefix; work claims read the raw SQL ID.
-    let run = format!("mission-run/{}", mission_run_id(run));
     let prior = latest_claim_of_kind_tx(tx, step, "work.claimed")?;
-    let operation = operation_id(&run, step, attempt, epoch, agent, incarnation,
+    let operation = operation_id(run, step, attempt, epoch, agent, incarnation,
         prior.as_ref().map(|claim| claim.id.as_str()));
     // Only exact verified launch provenance establishes parentage. Never use the
     // latest launch, desired declaration, or an inherited invocation environment.
@@ -40,7 +38,8 @@ fn receipt_tx(tx: &Transaction<'_>, run: &str, step: &str, attempt: u32, epoch: 
         params![agent, format!("invocation/{operation}")], |row| row.get(0)).optional()?;
     Ok(serde_json::from_value(json!({
         "invocation_id":format!("invocation/{operation}"), "operation_id":operation,
-        "phase":"observed", "agent":agent, "owner_run":run, "owner_step":step,
+        // Wake views carry the prefix; claims read raw SQL IDs. Keep operation identity unchanged.
+        "phase":"observed", "agent":agent, "owner_run":format!("mission-run/{}", mission_run_id(run)), "owner_step":step,
         "owner_attempt":attempt, "incarnation":incarnation, "parent_invocation_id":parent,
         "trace_context":trace.map(|trace| serde_json::from_str::<Value>(&trace)).transpose()?,
         "freshness":{"source":"native-work-turn"}
