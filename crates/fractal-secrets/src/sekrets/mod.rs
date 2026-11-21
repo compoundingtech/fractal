@@ -7,6 +7,8 @@
 //! the command's output and exit status reach the caller. See `docs/st3/sekrets.md`.
 
 pub mod authorized;
+/// Disposable provenance experiment; not enrolled, routed, or activated by the daemon.
+pub mod c4;
 pub mod cli;
 pub mod client;
 pub mod files;
