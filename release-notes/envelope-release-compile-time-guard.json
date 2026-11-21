@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Check the disabled envelope-release gate at compile time instead of asserting a constant in a test.",
+  "replay": { "status": "none", "detail": "Only a test assertion changes; runtime replay is unchanged." },
+  "schema": { "status": "none", "detail": "No storage or wire schema changes." },
+  "rules": { "status": "none", "detail": "No admission or authorization changes." },
+  "compatibility": { "status": "none", "detail": "Envelope release remains disabled; peer behavior is unchanged." },
+  "downtime": { "status": "none", "detail": "No runtime behavior changes or restart requirements." },
+  "manual": { "status": "none", "detail": "No operator action is required." },
+  "recovery": { "status": "none", "detail": "No persistent state changes or recovery steps." }
+}
