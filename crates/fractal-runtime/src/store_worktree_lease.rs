@@ -4,8 +4,11 @@
 //! A pipe, not a timeout or an environment token, bounds the holder's lifetime.
 
 use std::io::Read as _;
+use std::os::fd::AsRawFd as _;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 
@@ -13,6 +16,67 @@ pub struct StoreWorktreeLease {
     child: Child,
     input: Option<ChildStdin>,
     owner: PathBuf,
+}
+
+const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The executable identity is an immutable build input, not the login-shell PATH.
+pub fn mr_executable() -> Result<&'static str> {
+    let executable = option_env!("FRACTAL_MR_BIN")
+        .context("Fractal was built without its pinned FRACTAL_MR_BIN input")?;
+    anyhow::ensure!(Path::new(executable).is_absolute(), "compiled mr path is not absolute");
+    Ok(executable)
+}
+
+#[derive(Debug)]
+pub struct LeaseAdmissionTimeout {
+    pub owner: PathBuf,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Display for LeaseAdmissionTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "mr activation admission timed out after {:?} for {}; retry after store reclamation completes", self.timeout, self.owner.display())
+    }
+}
+
+impl std::error::Error for LeaseAdmissionTimeout {}
+
+fn read_ready(output: &mut ChildStdout, timeout: Duration) -> std::io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut ready = [0; 7];
+    let mut received = 0;
+    while received < ready.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        let mut descriptor = libc::pollfd {
+            fd: output.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe {
+            libc::poll(&mut descriptor, 1, remaining.as_millis().clamp(1, i32::MAX as u128) as i32)
+        };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted { continue; }
+            return Err(error);
+        }
+        if result == 0 { continue; }
+        match output.read(&mut ready[received..]) {
+            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(count) => received += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    if &ready != b"leased\n" {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid mr lease readiness"));
+    }
+    Ok(())
 }
 
 /// Resolve existing ancestors too, so prospective and registered owners share one key.
@@ -46,10 +110,14 @@ impl StoreWorktreeLease {
     /// `repository` must already exist; `owner` need not exist yet.
     /// Callers keep this guard until initialization and publication have finished.
     pub fn acquire(owner: &Path, repository: &Path) -> Result<Self> {
-        Self::acquire_with(Command::new("mr"), owner, repository)
+        Self::acquire_with(Command::new(mr_executable()?), owner, repository)
     }
 
-    pub fn acquire_with(mut command: Command, owner: &Path, repository: &Path) -> Result<Self> {
+    pub fn acquire_with(command: Command, owner: &Path, repository: &Path) -> Result<Self> {
+        Self::acquire_before(command, owner, repository, ADMISSION_TIMEOUT)
+    }
+
+    fn acquire_before(mut command: Command, owner: &Path, repository: &Path, timeout: Duration) -> Result<Self> {
         anyhow::ensure!(
             owner.is_absolute() && repository.is_absolute(),
             "activation owner or repository is not an absolute path"
@@ -64,18 +132,23 @@ impl StoreWorktreeLease {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            // Cancellation must also terminate mr's helper/holder descendants.
+            .process_group(0)
             .spawn()
             .context("start mr store lease (owner/repo-path admission and descendant reentrancy are required)")?;
         let mut lease = Self { child, input: None, owner };
         lease.input = lease.child.stdin.take();
         let mut output = lease.child.stdout.take().context("mr lease readiness pipe")?;
-        let mut ready = [0; 7];
-        output.read_exact(&mut ready)
-            .with_context(|| format!(
+        if let Err(error) = read_ready(&mut output, timeout) {
+            lease.terminate();
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                return Err(LeaseAdmissionTimeout { owner: lease.owner.clone(), timeout }.into());
+            }
+            return Err(error).with_context(|| format!(
                 "store repository missing or unidentifiable: {}; mr refused the activation lease for {}",
                 repository.display(), lease.owner.display()
-            ))?;
-        anyhow::ensure!(&ready == b"leased\n", "invalid mr lease readiness");
+            ));
+        }
         Ok(lease)
     }
 
@@ -86,19 +159,75 @@ impl StoreWorktreeLease {
         );
         Ok(())
     }
+
+    fn terminate(&mut self) {
+        unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL); }
+        let _ = self.child.wait();
+    }
 }
 
 impl Drop for StoreWorktreeLease {
     fn drop(&mut self) {
         // EOF lets the command exit normally, so mr releases its own lease on all exits.
         drop(self.input.take());
-        let _ = self.child.wait();
+        let deadline = Instant::now() + RELEASE_TIMEOUT;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                _ => { self.terminate(); return; }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclusive_reclamation_lock_times_out_and_the_holder_is_reaped() {
+        use std::os::fd::AsRawFd as _;
+        let root = tempfile::tempdir().unwrap();
+        let store = std::fs::canonicalize(root.path()).unwrap();
+        let repository = store.join("repository/.bare");
+        assert!(Command::new("git").args(["init", "--bare", "-q"])
+            .arg(&repository).status().unwrap().success());
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+            .open(store.join("repository/.bare.mr-container.lock")).unwrap();
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let owner = store.join("repository/worktrees/prospective");
+        let command = || {
+            let mut command = Command::new(mr_executable().unwrap());
+            command.env("MEGAREPO_STORE", &store);
+            command
+        };
+        let started = Instant::now();
+        let error = StoreWorktreeLease::acquire_before(
+            command(), &owner, &repository, Duration::from_secs(1),
+        ).err().expect("exclusive reclamation must refuse admission");
+        assert!(error.downcast_ref::<LeaseAdmissionTimeout>().is_some(), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(!owner.exists());
+        drop(lock);
+        // No abandoned waiter may acquire admission after the failed call returns.
+        let lease = StoreWorktreeLease::acquire_with(command(), &owner, &repository).unwrap();
+        drop(lease);
+    }
+
+    #[test]
+    fn releasing_a_holder_that_ignores_eof_is_bounded_and_reaps_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'leased\\n'; exec sleep 60", "--"]);
+        let lease = StoreWorktreeLease::acquire_with(command, root.path(), root.path()).unwrap();
+        let pid = lease.child.id() as i32;
+        let started = Instant::now();
+        drop(lease);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
 
     #[test]
     fn prospective_owners_resolve_symlinked_ancestors_before_creation() {

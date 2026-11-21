@@ -434,6 +434,7 @@
           src = self;
           dontCargoUseSystemLibs = true;
           LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
+          FRACTAL_MR_BIN = "${megarepoPackage}/bin/mr";
           # Embedded hooks are published into immutable runtime hook sets. The
           # sandbox has no /usr/bin/env; patch before compilation for package/check.
           postPatch = ''
@@ -592,7 +593,6 @@
           nativeBuildInputs = [
             pkgs.git
             pkgs.installShellFiles
-            pkgs.makeWrapper
             pkgs.pkg-config
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           buildInputs = [ libghosttyVT ];
@@ -641,8 +641,6 @@
             $out/bin/fractal completions zsh > _fractal
             $out/bin/fractal completions fish > fractal.fish
             installShellCompletion --cmd fractal --bash fractal.bash --zsh _fractal --fish fractal.fish
-            wrapProgram "$out/bin/fractal" \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ megarepoPackage ]}
           '';
           meta = {
             description = "Fractal claims-graph runtime, terminal UI, and KDL migration tool";
@@ -2265,6 +2263,7 @@
           # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
+          FRACTAL_MR_BIN = "${megarepoPackage}/bin/mr";
           shellHook = sccacheShellHook + cargoDebugShellHook + ''
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               source ${./scripts/ci-cargo-tools-env} || exit $?

@@ -17,11 +17,18 @@ pub fn activation_lease(
     workspace: &Path,
     repository: &Path,
 ) -> Result<fractal_runtime::store_worktree_lease::StoreWorktreeLease> {
-    let command = crate::environment::command("mr")?;
+    let command = activation_command(&crate::environment::snapshot()?)?;
     #[cfg(any(test, feature = "test-support"))]
     let command = test_support::lease_command(command, repository);
     fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
         command, workspace, repository,
+    )
+}
+
+fn activation_command(environment: &std::collections::BTreeMap<String, String>) -> Result<std::process::Command> {
+    crate::environment::command_in(
+        fractal_runtime::store_worktree_lease::mr_executable()?,
+        environment,
     )
 }
 
@@ -384,6 +391,18 @@ pub fn workspace_repository(workspace: &Path) -> Option<PathBuf> {
 mod tests {
     use super::test_support::{git, repository};
     use super::*;
+
+    #[test]
+    fn activation_uses_the_compiled_mr_despite_a_reset_login_path() {
+        let environment = std::collections::BTreeMap::from([
+            ("PATH".into(), "/host-with-an-old-mr:/nonexistent".into()),
+        ]);
+        let command = activation_command(&environment).unwrap();
+        assert_eq!(command.get_program(), Path::new(
+            fractal_runtime::store_worktree_lease::mr_executable().unwrap(),
+        ).as_os_str());
+        assert!(Path::new(command.get_program()).is_absolute());
+    }
 
     #[test]
     fn checkout_fixture_leases_use_only_their_own_store() {
