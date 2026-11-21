@@ -205,6 +205,8 @@
         ptyPackage = pty.packages.${system}.default.overrideAttrs (_: {
           doCheck = false;
         });
+        # Activation admission is a production dependency, not an ambient host tool.
+        megarepoPackage = effect-utils.packages.${system}.megarepo;
         libghosttyVT =
           let
             bindings = (builtins.fromTOML (builtins.readFile ./crates/fractal/Cargo.toml)).dependencies;
@@ -590,6 +592,7 @@
           nativeBuildInputs = [
             pkgs.git
             pkgs.installShellFiles
+            pkgs.makeWrapper
             pkgs.pkg-config
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           buildInputs = [ libghosttyVT ];
@@ -616,6 +619,7 @@
             # Program steps run on a Bun host; the engine tests start a real one.
             pkgs.bun
             ptyPackage
+            megarepoPackage
             effect-utils.packages.${system}.otelite
             messagingCompat
           ]
@@ -637,6 +641,8 @@
             $out/bin/fractal completions zsh > _fractal
             $out/bin/fractal completions fish > fractal.fish
             installShellCompletion --cmd fractal --bash fractal.bash --zsh _fractal --fish fractal.fish
+            wrapProgram "$out/bin/fractal" \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ megarepoPackage ]}
           '';
           meta = {
             description = "Fractal claims-graph runtime, terminal UI, and KDL migration tool";
@@ -2242,6 +2248,7 @@
             # not bundle rust-lld the way the rustup toolchain does.
             pkgs.lld
             ptyPackage
+            megarepoPackage
             libghosttyVT
             # Local Fractal OTLP export tests use the same collector as Nix checks.
             effect-utils.packages.${system}.otelite
