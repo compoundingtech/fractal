@@ -1442,6 +1442,7 @@ struct ResolvedConversation {
     snapshot: ClientSnapshot,
     local_position: u64,
     stream_position: u64,
+    receipt_position: u64,
     managed: Option<super::ManagedSessionOwner>,
     routing_owner: Option<super::ManagedSessionOwner>,
 }
@@ -1451,6 +1452,8 @@ fn resolve_conversation(
 ) -> Result<(String, ResolvedConversation), ApiError> {
     let local_position = local_latest_position(state)?;
     let stream_position = stream_latest_position(state)?;
+    // Before the page is read, so a receipt recorded meanwhile is reported again, never missed.
+    let receipt_position = receipt_latest_position(state)?;
     let snapshot = new_client_snapshot(state);
     let (session_id, managed) = if target.starts_with("agent/") {
         let owner = state.store.conversation_owner_at(target, snapshot.store_index)
@@ -1472,7 +1475,7 @@ fn resolve_conversation(
     } else {
         managed.clone()
     };
-    Ok((session_id, ResolvedConversation { snapshot, local_position, stream_position, managed, routing_owner }))
+    Ok((session_id, ResolvedConversation { snapshot, local_position, stream_position, receipt_position, managed, routing_owner }))
 }
 
 /// Where a conversation is read: here, or on the host that owns its session.
@@ -1698,7 +1701,7 @@ fn conversation_open_local_marked(
         Some(resolved) => resolved,
         None => resolve_conversation(state, session_id)?.1,
     };
-    let ResolvedConversation { snapshot, local_position, stream_position, managed, .. } = resolved;
+    let ResolvedConversation { snapshot, local_position, stream_position, receipt_position, managed, .. } = resolved;
     #[cfg(test)]
     AFTER_CONVERSATION_SNAPSHOT.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
@@ -1736,6 +1739,7 @@ fn conversation_open_local_marked(
         native_sequence: native_latest_sequence(&page).max(suppressed_sequence)
             .max(extent.native_latest()),
         source_generation,
+        receipt_position,
     });
     remember_cursor(&cursor, mark.transcript_seen);
     Ok((json!({"next_cursor":cursor}), page, mark))
@@ -4802,11 +4806,14 @@ struct ConversationPosition {
     stream_position: u64,
     native_sequence: u64,
     source_generation: u64,
+    /// How far into this member's stream lifecycle record the read saw native receipts, which
+    /// can give a delivered native entry a delivery link (0 for a cursor from before it).
+    receipt_position: u64,
 }
 
 fn conversation_cursor(state: &AppState, session_id: &str, position: ConversationPosition) -> String {
     format!(
-        "conversation-cursor/{}/{}/{}.{}.{}.{}.{}",
+        "conversation-cursor/{}/{}/{}.{}.{}.{}.{}.{}",
         state.node,
         session_id.trim_start_matches("session/"),
         position.store_index,
@@ -4814,6 +4821,7 @@ fn conversation_cursor(state: &AppState, session_id: &str, position: Conversatio
         position.native_sequence,
         position.source_generation,
         position.stream_position,
+        position.receipt_position,
     )
 }
 
@@ -4837,10 +4845,15 @@ fn conversation_position(
                 native_sequence: parts.next()?.parse().ok()?,
                 source_generation: parts.next()?.parse().ok()?,
                 stream_position: 0,
+                receipt_position: 0,
             };
             // A cursor from before the stream has no stream part: it has read none of the stream.
             if let Some(stream) = parts.next() {
                 result.stream_position = stream.parse().ok()?;
+            }
+            // One from before stream receipts has seen none of them.
+            if let Some(receipts) = parts.next() {
+                result.receipt_position = receipts.parse().ok()?;
             }
             parts.next().is_none().then_some(result)
         })
@@ -5093,6 +5106,7 @@ fn conversation_read_now_unbounded(
 ) -> Result<Value, ApiError> {
     // Read before the page, so the next cursor never passes a stream item the page missed.
     let stream_latest = stream_latest_position(state)?;
+    let receipt_latest = receipt_latest_position(state)?;
     let snapshot = new_client_snapshot(state);
     let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
         .map_err(ApiError::internal)?;
@@ -5119,6 +5133,7 @@ fn conversation_read_now_unbounded(
         if position.store_index > snapshot.store_index
             || position.local_position > local_latest
             || position.stream_position > stream_latest
+            || position.receipt_position > receipt_latest
             || position.native_sequence > native_latest
         {
             return Err(conversation_replay_gap(
@@ -5143,14 +5158,16 @@ fn conversation_read_now_unbounded(
     let mut message_indexes = BTreeSet::new();
     let mut retention_changed = false;
     let mut scan_remaining = CONVERSATION_REPLAY_SCAN_LIMIT;
-    if let Some(ConversationPosition { store_index, local_position, stream_position, .. }) = position {
+    if let Some(ConversationPosition { store_index, local_position, stream_position, receipt_position, .. }) = position {
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
         if session.conversation_delivery_links && native_replay
             && let Some(owner) = owner.as_deref()
-            && state.store.conversation_delivery_changed(owner, store_index, snapshot.store_index)
+            && (state.store.conversation_delivery_changed(owner, store_index, snapshot.store_index)
                 .map_err(ApiError::internal)?
+                || state.store.conversation_stream_delivery_changed(owner, receipt_position, receipt_latest)
+                    .map_err(ApiError::internal)?)
         {
             return Err(conversation_replay_gap(session_id, "delivery-link-changed",
                 "a native consumption receipt changed; refresh the conversation page"));
@@ -5314,6 +5331,7 @@ fn conversation_read_now_unbounded(
         stream_position: stream_latest,
         native_sequence: native_latest,
         source_generation,
+        receipt_position: receipt_latest,
     });
     let mut value = json!({"kind":"conversation-changes", "session_id":session_id, "items":items, "next_cursor":next_cursor});
     if let Some(header) = page.get("header") {
@@ -5477,6 +5495,12 @@ fn local_latest_position(state: &AppState) -> Result<u64, ApiError> {
 /// stream, beside its graph and local positions.
 fn stream_latest_position(state: &AppState) -> Result<u64, ApiError> {
     crate::store::messages_shard::stream_reads::conversation_position(&state.store).map_err(ApiError::internal)
+}
+
+/// This member's stream lifecycle position, past every native receipt a read can see now.
+fn receipt_latest_position(state: &AppState) -> Result<u64, ApiError> {
+    let position = crate::store::messages_shard::mailbox_reads::position(&state.store).map_err(ApiError::internal)?;
+    Ok(u64::try_from(position.lifecycle).unwrap_or(0))
 }
 
 async fn conversation_changes_local(
@@ -6628,11 +6652,12 @@ enum TerminalFollow {
     Local {
         id: String,
         incarnation: String,
+        session: ClientSession,
     },
     Remote {
         id: String,
         owner: String,
-        authority_actor: String,
+        session: ClientSession,
         incarnation: String,
     },
 }
@@ -6641,24 +6666,36 @@ impl TerminalFollow {
     async fn run(
         self,
         state: AppState,
-        sink: TerminalSink,
+        mut sink: TerminalSink,
         upgrade: Option<opentelemetry::trace::SpanContext>,
         first_frame: Option<FirstFrame>,
     ) {
-        match self {
-            Self::Local { id, incarnation } => {
-                terminal_stream_socket(sink, state, id, incarnation, upgrade, first_frame).await;
-            }
-            Self::Remote {
-                id,
-                owner,
-                authority_actor,
-                incarnation,
-            } => {
-                remote_terminal_stream_socket(sink, state, id, owner, authority_actor, incarnation, (upgrade, first_frame))
-                    .await;
-            }
+        let session = match &self {
+            Self::Local { session, .. } | Self::Remote { session, .. } => session.clone(),
+        };
+        if let Err(error) = terminal_authorize(&state, &session).await {
+            sink.fail(&error).await;
+            return;
         }
+        // Watch before reading, and keep the grant alive even while a screen or relay read
+        // is idle. Cancelling the follower also cancels any pending owner long poll.
+        let denied = terminal_authority_ended(&state, &session);
+        let follow = async {
+            match self {
+                Self::Local { id, incarnation, .. } => {
+                    terminal_stream_socket(&mut sink, state.clone(), id, incarnation, &session, (upgrade, first_frame)).await;
+                }
+                Self::Remote { id, owner, incarnation, .. } => {
+                    remote_terminal_stream_socket(&mut sink, state.clone(), id, owner, &session, incarnation, (upgrade, first_frame)).await;
+                }
+            }
+        };
+        let error = tokio::select! {
+            biased;
+            error = denied => error,
+            () = follow => return,
+        };
+        sink.fail(&error).await;
     }
 }
 
@@ -6697,15 +6734,68 @@ fn prepare_terminal_follow(
         TerminalFollow::Remote {
             id: id.to_owned(),
             owner: live.owner_host_id,
-            authority_actor: session.authority_actor.clone(),
+            session: session.clone(),
             incarnation: live.incarnation_id,
         }
     } else {
         TerminalFollow::Local {
             id: id.to_owned(),
             incarnation: live.incarnation_id,
+            session: session.clone(),
         }
     })
+}
+
+/// Resolve the original grant, never another pairing of the same actor.
+async fn terminal_authorize(state: &AppState, session: &ClientSession) -> Result<ClientSession, ApiError> {
+    let store = state.store.clone();
+    let state = state.clone();
+    let session = session.clone();
+    super::read_deadline::store_read(&store, move || {
+        // Trusted Unix viewers consume read-only terminal capabilities without a
+        // browser grant. Keep this exemption terminal-specific: other projections
+        // may require a concrete acting identity even on the local transport.
+        let current = if session.transport == "unix" {
+            session
+        } else {
+            revalidate_session(&state, &session)?
+        };
+        require_scope(&current, "terminal.read")?;
+        Ok(current)
+    }).await.unwrap_or_else(|_| Err(ApiError::internal("terminal session recheck failed")))
+}
+
+/// Revocation and scope changes wake from committed grant changes; expiry has its own
+/// deadline so a quiet terminal cannot retain authority indefinitely.
+async fn terminal_authority_ended(state: &AppState, session: &ClientSession) -> ApiError {
+    let mut grant = state.store.subscribe_runtime_authority(
+        session.pairing_grant.as_deref().unwrap_or(&session.actor),
+    );
+    let mut broad = state.event_notify.subscribe();
+    loop {
+        let current = match terminal_authorize(state, session).await {
+            Ok(current) => current,
+            Err(error) => return error,
+        };
+        let expiry = async {
+            match current.grant_expires_at {
+                Some(expiry) => tokio::time::sleep(Duration::from_millis(
+                    expiry.saturating_sub(client_now_ms()).min(u128::from(u64::MAX)) as u64,
+                )).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            changed = grant.changed() => {
+                if changed.is_err() { return ApiError::internal("terminal grant watch ended"); }
+            }
+            changed = broad.changed(), if session.pairing_grant.is_none()
+                || state.store.runtime_authority_coverage_failed() => {
+                if changed.is_err() { return ApiError::internal("terminal authority watch ended"); }
+            }
+            () = expiry => {}
+        }
+    }
 }
 
 /// The latest thing a terminal subscription has to say: whole screens replace each other, so
@@ -6779,11 +6869,11 @@ impl TerminalSink {
 /// publishes a screen whose revision differs from the last one sent, so an idle terminal
 /// costs one request per relay wait and sends the client nothing.
 async fn remote_terminal_stream_socket(
-    mut sink: TerminalSink,
+    sink: &mut TerminalSink,
     state: AppState,
     id: String,
     owner: String,
-    authority_actor: String,
+    session: &ClientSession,
     incarnation: String,
     (_upgrade, mut first_frame): (
         Option<opentelemetry::trace::SpanContext>, Option<FirstFrame>,
@@ -6798,7 +6888,7 @@ async fn remote_terminal_stream_socket(
     let mut failures = 0_u32;
     loop {
         let request = crate::peer::ClientReadRequest {
-            authority_actor: authority_actor.clone(),
+            authority_actor: session.authority_actor.clone(),
             relay: None,
             request: match sent.clone() {
                 Some(after_revision) => crate::peer::ClientReadOperation::TerminalScreenChange {
@@ -6851,6 +6941,10 @@ async fn remote_terminal_stream_socket(
         };
         if sent.as_deref() == Some(revision.as_str()) {
             continue;
+        }
+        if let Err(error) = terminal_authorize(&state, session).await {
+            sink.fail(&error).await;
+            return;
         }
         let first_span = first_frame.as_ref().map(|first| first.span.clone());
         if !first_frame_work(first_span, sink.send(&terminal_stream_envelope(&state, screen))).await {
@@ -7411,12 +7505,14 @@ fn terminal_error_close_code(code: &str) -> u16 {
 /// later message is a newer screen that replaces it. The shared watcher publishes changes at a
 /// capped rate, and a viewer busy sending reads only the latest screen when it is ready.
 async fn terminal_stream_socket(
-    mut sink: TerminalSink,
+    sink: &mut TerminalSink,
     state: AppState,
     id: String,
     expected_incarnation: String,
-    _upgrade: Option<opentelemetry::trace::SpanContext>,
-    mut first_frame: Option<FirstFrame>,
+    session: &ClientSession,
+    (_upgrade, mut first_frame): (
+        Option<opentelemetry::trace::SpanContext>, Option<FirstFrame>,
+    ),
 ) {
     let subject = terminal_subject(&id);
     let mut graph = state.store.subscribe_runtime_authority(&subject);
@@ -7524,6 +7620,10 @@ async fn terminal_stream_socket(
         };
         if sent.as_deref() == Some(screen.revision()) {
             continue;
+        }
+        if let Err(error) = terminal_authorize(&state, session).await {
+            sink.fail(&error).await;
+            return;
         }
         let value = screen.value(&terminal_id, &live.incarnation_id);
         let first_span = first_frame.as_ref().map(|first| first.span.clone());
@@ -19947,6 +20047,35 @@ mission "example/zero-run" state="ready" {
         assert!(delta["items"].as_array().unwrap().iter().any(|item| item["body"]["text"] == "committed during OPEN"), "{delta}");
     }
 
+
+    #[test]
+    fn a_conversation_cursor_carries_its_receipt_position_and_an_older_cursor_still_parses() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "receipt-cursor");
+        let session_id = "session/external-0123456789abcdef01234567";
+        let position = ConversationPosition {
+            store_index: 7,
+            local_position: 3,
+            stream_position: 5,
+            native_sequence: 11,
+            source_generation: 2,
+            receipt_position: 13,
+        };
+        let cursor = conversation_cursor(&state, session_id, position);
+        let parsed = conversation_position(&state, session_id, &cursor).unwrap();
+        assert_eq!(parsed.receipt_position, 13);
+        assert_eq!((parsed.store_index, parsed.stream_position, parsed.native_sequence), (7, 5, 11));
+        // A cursor from before receipt positions, and one from before the stream, read as having
+        // seen none: the first replay then reports a changed delivery, if any, once.
+        let older = cursor.rsplit_once('.').unwrap().0.to_owned();
+        assert_eq!(conversation_position(&state, session_id, &older).unwrap().receipt_position, 0);
+        let oldest = older.rsplit_once('.').unwrap().0.to_owned();
+        let oldest = conversation_position(&state, session_id, &oldest).unwrap();
+        assert_eq!((oldest.stream_position, oldest.receipt_position), (0, 0));
+        // Anything longer is another format: a full resync.
+        assert_eq!(conversation_position(&state, session_id, &format!("{cursor}.1")).unwrap_err().code, "cursor-gap");
+    }
+
     #[tokio::test]
     async fn conversation_open_replays_local_rows_that_follow_a_newer_graph_cut() {
         let root = tempfile::tempdir().unwrap();
@@ -20098,6 +20227,7 @@ mission "example/zero-run" state="ready" {
             stream_position: 0,
             native_sequence: 0,
             source_generation: 0,
+            receipt_position: 0,
         });
         conversation_changes_local(&owner, &session, &session_id, Some(&unknown), 0)
             .await
@@ -24491,6 +24621,78 @@ mission "example/zero-run" state="ready" {
             let error = remote_terminal_live_session(&gateway, subject, "i").unwrap_err();
             assert_eq!(error.code, code);
             assert_eq!(error.message, message);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_follow_revalidates_browser_grant_while_idle() {
+        for denial in ["revoked", "expired", "scope-removed"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "terminal-grant");
+            let pairing = |expiry: u128, scopes: Vec<&str>| ClaimInput {
+                subject: "custom/client/terminal-browser".into(),
+                kind: "custom.client.pairing-completed".into(),
+                actor: Some("person/alex".into()),
+                fields: serde_json::from_value(json!({
+                    "session_actor":"client/terminal-browser", "person_id":"person/alex",
+                    "credential_hash":credential_digest("terminal-browser-test"),
+                    "expires_at_unix_ms":expiry, "scopes":scopes,
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            };
+            let expiry = client_now_ms() + 60_000;
+            let paired = state.store.append_client_operation_claim(
+                &pairing(expiry, vec!["terminal.read"]),
+            ).unwrap();
+            let session = paired_client_session(&state, &paired, "fabric-loopback", false).unwrap();
+            assert!(terminal_authorize(&state, &session).await.is_ok());
+            // Both follower paths retain this monitor during pending screen/owner reads.
+            let denied = terminal_authority_ended(&state, &session);
+            tokio::pin!(denied);
+            assert!(futures_util::poll!(&mut denied).is_pending());
+            match denial {
+                "revoked" => {
+                    state.store.append_client_operation_claim(&ClaimInput {
+                        subject: paired.subject.clone(), kind: "custom.client.pairing-revoked".into(),
+                        actor: Some("person/alex".into()), fields: Default::default(),
+                        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                    }).unwrap();
+                }
+                "scope-removed" => {
+                    state.store.append_client_operation_claim(&pairing(expiry, Vec::new())).unwrap();
+                }
+                "expired" => {
+                    // Shorten the live grant, then let its clock expire without another
+                    // claim or terminal screen to wake the follower.
+                    state.store.append_client_operation_claim(
+                        &pairing(client_now_ms() + 200, vec!["terminal.read"]),
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let error = tokio::time::timeout(Duration::from_secs(5), denied).await.unwrap();
+            assert_eq!(error.code, "forbidden", "{denial}");
+            for remote in [false, true] {
+                let follow = if remote {
+                    TerminalFollow::Remote {
+                        id: "agent/grant-test".into(), owner: "host/terminal-owner".into(),
+                        incarnation: "grant-test:i1".into(), session: session.clone(),
+                    }
+                } else {
+                    TerminalFollow::Local {
+                        id: "agent/grant-test".into(), incarnation: "grant-test:i1".into(),
+                        session: session.clone(),
+                    }
+                };
+                let (sender, mut frames) = watch::channel(TerminalFrame::Waiting);
+                follow.run(state.clone(), TerminalSink::Subscription(sender), None, None).await;
+                frames.changed().await.unwrap();
+                let TerminalFrame::Ended(error) = frames.borrow().clone() else {
+                    panic!("denied {denial} grant emitted a screen (remote={remote})");
+                };
+                assert_eq!(error["code"], "forbidden", "{denial}, remote={remote}");
+                assert!(!error.to_string().contains("terminal-browser-test"));
+            }
         }
     }
 

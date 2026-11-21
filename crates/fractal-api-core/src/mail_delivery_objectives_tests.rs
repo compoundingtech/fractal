@@ -327,3 +327,99 @@ fn expired_audit_history_is_not_materialized_on_unrelated_events() {
     let snapshot = capture(&store, expired).unwrap();
     assert_eq!(snapshot.source_work, [1, 0, 0]);
 }
+
+#[test]
+fn capture_releases_readers_between_pages_and_lifecycle_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("graph.db"), "example-host").unwrap();
+    declared(&store);
+    let mut sent = 0;
+    for index in 0..SOURCE_PAGE + 1 {
+        sent = send(&store, &format!("message/checkpoint-{index:04}"), json!([]));
+    }
+    frontier(&store, sent);
+    let mut checkpoints = 0;
+    let snapshot = capture_with_progress(&store, sent, || {
+        // A real write after each read ensures RESTART must pass the active
+        // reader, rather than succeeding vacuously on an empty WAL.
+        let connection = store.connection.write();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h5024471c81ae owner=fractal_api_core::mail_delivery_objectives_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('mail_checkpoint_test',?1)",
+            [checkpoints.to_string()]).unwrap();
+        let (busy, frames, checkpointed): (i64, i64, i64) = connection.query_row(
+            "PRAGMA wal_checkpoint(RESTART)", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(busy, 0, "capture pinned a reader at boundary {checkpoints}");
+        assert!(frames > 0);
+        assert_eq!(frames, checkpointed);
+        checkpoints += 1;
+    }).unwrap();
+    assert_eq!(snapshot.samples.len(), SOURCE_PAGE + 1);
+    assert_eq!(snapshot.unknown, 0);
+    assert!(checkpoints >= SOURCE_PAGE + 5, "must traverse multiple source pages and every message");
+}
+
+#[tokio::test(start_paused = true)]
+async fn change_bursts_coalesce_until_the_previous_capture_has_rested() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = crate::api::tests_shared::state(root.path());
+    state.store = std::sync::Arc::new(Store::open_memory("example-host").unwrap());
+    declared(&state.store);
+    let sent = send(&state.store, "message/example-burst", json!([]));
+    frontier(&state.store, sent);
+    let publication = state.store.extension::<Publication>();
+    start(&state);
+    publication.captured.notified().await;
+    assert_eq!(publication.captures.load(Ordering::SeqCst), 1);
+
+    for burst in 1..=2 {
+        for generation in (burst - 1) * 128 + 1..=burst * 128 {
+            state.event_notify.send_replace(generation);
+            tokio::task::yield_now().await;
+        }
+        // Pending changes remain honest unknowns, not a renewed coverage claim.
+        assert_eq!(rows(&state.store, sent).unwrap()[0]["status"], "no-data");
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(FRESHNESS / 2 - 1),
+            publication.captured.notified(),
+        ).await.is_err(), "no source capture may run during the minimum rest interval");
+        assert_eq!(publication.captures.load(Ordering::SeqCst), burst as usize);
+
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        publication.captured.notified().await;
+        assert_eq!(publication.captures.load(Ordering::SeqCst), burst as usize + 1);
+        let guard = publication.snapshot.lock().unwrap();
+        let snapshot = guard.as_ref().unwrap();
+        assert_eq!(snapshot.generation, burst * 128);
+        assert_eq!(snapshot.source_work, [1, 0, 0]);
+    }
+}
+
+#[test]
+fn unrelated_graph_claims_during_capture_keep_coverage_unknown() {
+    let store = Store::open_memory("example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-concurrent-graph", json!([]));
+    frontier(&store, sent);
+    let mut writes = 0;
+    let snapshot = capture_with_progress(&store, sent, || {
+        writes += 1;
+        store.append_claim(&ClaimInput {
+            subject: "agent/example-unrelated".into(), kind: "runtime.observed".into(),
+            actor: Some("agent/example-unrelated".into()),
+            fields: serde_json::from_value(json!({"status":"running",
+                "runtime_id":"example-unrelated-runtime","incarnation_id":format!("unrelated-{writes}")})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }).unwrap();
+    assert!(writes > 0);
+    assert!(store.index().unwrap() > snapshot.source_cut);
+    assert_eq!(snapshot.source_work, [1, 0, 0]);
+    assert_eq!(snapshot.unknown, 1);
+    let publication = store.extension::<Publication>();
+    let (_sender, receiver) = tokio::sync::watch::channel(0);
+    *publication.changed.lock().unwrap() = Some(receiver);
+    *publication.snapshot.lock().unwrap() = Some(snapshot);
+    assert_eq!(rows(&store, sent).unwrap()[0]["status"], "no-data");
+    // A later capture without overlapping writes can recover.
+    assert_eq!(capture(&store, sent).unwrap().unknown, 0);
+}

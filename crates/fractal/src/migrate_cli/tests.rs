@@ -340,7 +340,7 @@ async fn nested_store_cutover_moves_the_whole_root_and_preserves_endpoint_and_pt
         }
         Ok::<_, anyhow::Error>(())
     });
-    let mut api = native::Native::new(Endpoint::Unix(config.client_socket()), "test-host".into(), &config);
+    let mut api = native::Native::new(Endpoint::Unix(config.client_socket()), "test-host".into());
     api.probe().await?;
     let before = fixture.snapshot()?;
     let dry_run = fixture.run(true, false).await?;

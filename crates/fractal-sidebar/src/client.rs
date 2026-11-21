@@ -22,11 +22,15 @@ fn frontier(token: &Token, state: &OrderedMembershipState, epoch: &str) -> Optio
     (state.container == token.scope.container && !epoch.is_empty() && state.live_count <= 4096)
         .then(|| Frontier { epoch: epoch.into(), changed_index: state.changed_index, live_count: state.live_count })
 }
+// docs/st3/client-v0/schemas/client-v0.schema.json: $defs.Envelope.properties.api_version.
+const ADMITTED_API_VERSIONS: &[&str] = &["st3.client.v0", "fractal.client.v0"];
 /// Convert a complete HTTP envelope, retaining provenance and leaving pagination checks to the reducer.
 pub fn membership_page(token: Token, response: Envelope<MembershipPage>) -> Event {
-    let Envelope { snapshot, value, .. } = response;
+    let Envelope { api_version, snapshot, value, .. } = response;
     let MembershipPage { page, membership } = value;
-    if page.collection != "ordered-memberships" || page.filters.get("person") != Some(&token.scope.owner)
+    // The collection schema admits page limits 1..=200; the host may request any of them.
+    if !ADMITTED_API_VERSIONS.contains(&api_version.as_str()) || page.kind != "page" || !(1..=200).contains(&page.page.limit)
+        || page.collection != "ordered-memberships" || page.filters.get("person") != Some(&token.scope.owner)
         || page.filters.get("subject") != Some(&token.scope.container) {
         return Event::Refused(token);
     }
@@ -131,8 +135,8 @@ mod tests {
         let [Effect::SubscribeAndRead(token)] = effects.as_slice() else { panic!("expected read") }; token.clone()
     }
     fn wire() -> Value {
-        json!({"api_version":"0", "request_id":"request/test", "snapshot":{"id":"snapshot/test", "host_id":"host/test", "store_index":99, "projection_version":"1", "created_at":"created", "published_at":"published"},
-            "value":{"kind":"collection", "collection":"ordered-memberships", "filters":{"person":"person/test", "subject":"arrangement/test"},
+        json!({"api_version":"fractal.client.v0", "request_id":"request/test", "snapshot":{"id":"snapshot/test", "host_id":"host/test", "store_index":99, "projection_version":"1", "created_at":"created", "published_at":"published"},
+            "value":{"kind":"page", "collection":"ordered-memberships", "filters":{"person":"person/test", "subject":"arrangement/test"},
                 "membership":{"container":"arrangement/test", "epoch":"epoch/test", "changed_index":2, "live_count":1},
                 "items":[{"id":"agent/test", "container":"arrangement/test", "member":"agent/test", "revision":"revision/test", "position":{"bucket":null,"key":"a0"}}],
                 "page":{"limit":200,"has_more":false,"next_cursor":null}}})
@@ -154,6 +158,36 @@ mod tests {
         }
         let mut legacy = wire(); legacy["value"]["membership"].as_object_mut().unwrap().remove("epoch");
         assert!(serde_json::from_value::<Envelope<MembershipPage>>(legacy).is_err());
+    }
+    #[test]
+    fn page_accepts_each_schema_admitted_api_version() {
+        for version in ["st3.client.v0", "fractal.client.v0"] {
+            let mut value = wire(); value["api_version"] = json!(version);
+            let mut state = Paging::new(None); let token = refresh(&mut state);
+            assert_eq!(state.reduce(membership_page(token, serde_json::from_value(value).unwrap())),
+                vec![Effect::PersistBase], "{version}");
+            assert_eq!(state.complete().unwrap().members[0].revision, "revision/test");
+        }
+    }
+    #[test]
+    fn page_refuses_wrong_kind_version_limit_and_oversized_frontier() {
+        for (path, replacement) in [
+            ("/value/kind", json!("collection")),
+            ("/api_version", json!("0")),
+            ("/api_version", json!("future")),
+            ("/api_version", json!("fractal.client.v1")),
+            ("/value/page/limit", json!(0)),
+            ("/value/page/limit", json!(201)),
+            ("/value/membership/live_count", json!(4097)),
+        ] {
+            let mut value = wire(); *value.pointer_mut(path).unwrap() = replacement;
+            assert!(matches!(membership_page(ready().1, serde_json::from_value(value).unwrap()), Event::Refused(_)), "{path}");
+        }
+        for limit in [1, 200] {
+            let mut value = wire(); value["value"]["page"]["limit"] = json!(limit);
+            value["value"]["membership"]["live_count"] = json!(4096);
+            assert!(matches!(membership_page(ready().1, serde_json::from_value(value).unwrap()), Event::Page(_, _)));
+        }
     }
     #[test]
     fn every_status_code_pair_maps_exactly_and_terminal_failures_keep_stale_base() {
@@ -290,7 +324,7 @@ mod write_tests {
         assert_eq!(state.reduce(crate::edits::Event::Persisted(id(1))), vec![Effect::Send(Delivery::First)]);
         // HTTP 500/internal after the layout commit cannot prove non-application.
         state.reduce(write_result(state.request().unwrap(), Delivery::First, Err(failure(ErrorCode::Internal, None))));
-        assert_eq!(state.status, Status::UnknownDelivery);
+        assert_eq!(state.status(), Status::UnknownDelivery);
         assert!(state.reduce(crate::edits::Event::Retry).is_empty());
         let (mut state, effects) = Edits::restore(&state.journal().unwrap(), &base(1).scope).unwrap();
         assert_eq!(effects, vec![Effect::PersistPending]); assert_eq!(wire(&state), first);
@@ -299,13 +333,13 @@ mod write_tests {
         assert_eq!(*delivery, Delivery::Replay);
         assert_eq!(wire(&state), first);
         assert_eq!(state.reduce(write_result(state.request().unwrap(), *delivery, Err(failure(ErrorCode::Forbidden, None)))), vec![Effect::PersistPending]);
-        assert_eq!(state.status, Status::UnknownDelivery); assert_eq!(wire(&state), first);
+        assert_eq!(state.status(), Status::UnknownDelivery); assert_eq!(wire(&state), first);
         // No automatic send: persistence acknowledgements cannot replay UnknownDelivery.
         assert!(state.reduce(crate::edits::Event::Persisted(id(1))).is_empty());
         assert!(state.reduce(crate::edits::Event::Retry).is_empty());
         assert_eq!(state.reduce(crate::edits::Event::Replay), vec![Effect::Send(Delivery::Replay)]);
         state.reduce(write_result(state.request().unwrap(), Delivery::Replay, Ok(receipt("action/1", "completed"))));
-        assert_eq!(state.status, Status::AwaitingObservation);
+        assert_eq!(state.status(), Status::AwaitingObservation);
         assert!(state.reduce(crate::edits::Event::Fresh(base(2), Ok(members()))).is_empty());
         state.reduce(crate::edits::Event::Observed(id(1)));
         assert_eq!(state.reduce(crate::edits::Event::CompletionPersisted(id(1))), vec![Effect::ReadBase]);

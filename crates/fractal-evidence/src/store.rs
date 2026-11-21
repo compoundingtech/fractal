@@ -63,18 +63,13 @@ use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
 pub use smallclaims::store::{
-    CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
-    CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction,
-    CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest,
-    CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView, CheckpointProof,
-    CheckpointResumeRequest, CheckpointStatusView, ClaimTombstone, CreatedFleetInvite, DropCount,
+    CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointAction, CheckpointContext, CheckpointManifest,
+    CheckpointManifestCursor, CheckpointManifestPage, CheckpointManifestRequest,
+    CheckpointResumeRequest, TrimStatusView, ClaimTombstone, CreatedFleetInvite, DropCount,
     DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue, FleetInviteView,
-    FleetRedemption, FleetRemoval, PendingCheckpointView, ReplicationAdmission, SealTerms,
-    SealedSet, TRIM_CHUNK_ENVELOPES, TrimFault, VerifiedTerms, certificates, checkpoint_build,
-    checkpoint_cut, checkpoint_name, checkpoint_participants, chosen_certificate,
-    configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
-    newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
+    FleetRedemption, FleetRemoval, ReplicationAdmission, SealedSet, TRIM_CHUNK_ENVELOPES,
+    TrimFault, checkpoint_build, checkpoint_cut, checkpoint_name, configure_projection_writer,
+    drop_digest, newest_due_cut, valid_fleet_node_name, check_checkpoint_manifest,
 };
 pub use fractal_attention::store::runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeStartLock};
 pub use fractal_attention::store::roster_admission::AdmissionGuard;
@@ -104,7 +99,7 @@ pub use fractal_attention::store::*;
 pub use fractal_attention::store::{AgentResourcesChange, AgentResourcesDelta, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, DesiredRow, DiscoveredItem, GATE_BROKEN_CONDITION, HumanAttention};
 pub use fractal_attention::store::{IdempotencyConflict, MAX_STEP_WAIT_MS, MailboxWatermark, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUN_REPORT_KIND, StepLabel, StepTiming, Store, SubjectCache, USAGE_RESPONSE_HORIZON_MS};
 pub use fractal_attention::store::{UsageFold, UsageFolds, ViewEntry, WORK_NUDGED_KIND, accounts, adhoc_work, agent_messages, agent_queue_values, agent_view, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx};
-pub use fractal_attention::store::{append_claim_with_commit_context, arrangements, assistant_write, attention, attention_snapshot, backup, backup_format, card_fold, check_mailbox_fence, checkpoint, checkpoint_rules, checkpoint_status};
+pub use fractal_attention::store::{append_claim_with_commit_context, arrangements, assistant_write, attention, attention_snapshot, backup, backup_format, card_fold, check_mailbox_fence, checkpoint, checkpoint_rules};
 pub use fractal_attention::store::{claim_append_error, claim_log_order, client_summary, conversation_reads, coordination, custom, database_size, declarations, delegation, delivery, desired_from_row, directive_notes};
 pub use fractal_attention::store::{end_watch_tx, fold_step_clock, fold_step_timing, format_wait_span, generation_id_from_subject, git_change_tables, github_post_agent_tx, github_workflow_failures, glass_heads, glasses, harness_questions, idle_mail};
 pub use fractal_attention::store::{lanes, limits, loop_run_views_tx, mailbox_changes, mailbox_lease, mailbox_wakes, message_bodies, message_subscriptions, migrate_local_usage_seen, mission_eligibility, mission_ivm, mission_list};

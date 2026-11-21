@@ -14,7 +14,6 @@ use crate::claim::{ClaimInput, ReplicaEnvelopeId};
 use crate::fleet::handshake::JoinRequest;
 use crate::replication::{ReplicationExportResponse, ReplicationReceiveResponse};
 use crate::store::runtime::Plain;
-use crate::store::{CheckpointAction, CheckpointManifestNeed};
 use crate::store::{Runtime as _, Store};
 use crate::sync::Local;
 
@@ -860,6 +859,7 @@ async fn the_peer_route_accepts_an_exchange_above_axums_default_body_limit() {
     let exchange = ReplicationExchange {
         build: None,
         claim_ranges: None,
+        claim_member_signatures: Vec::new(),
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: fleet.into(),
@@ -873,6 +873,8 @@ async fn the_peer_route_accepts_an_exchange_above_axums_default_body_limit() {
         envelopes: Vec::new(),
         signature_requests: Vec::new(),
         signatures: Vec::new(),
+        signed_envelopes: Vec::new(),
+        unservable_released: Default::default(),
     };
     let mut body = serde_json::to_vec(&exchange).unwrap();
     body.resize(2 * 1024 * 1024 + 1, b' ');
@@ -973,6 +975,7 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
     let exchange = ReplicationExchange {
         build: None,
         claim_ranges: None,
+        claim_member_signatures: Vec::new(),
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: fleet.into(),
@@ -986,6 +989,8 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
         envelopes: Vec::new(),
         signature_requests: Vec::new(),
         signatures: Vec::new(),
+        signed_envelopes: Vec::new(),
+        unservable_released: Default::default(),
     };
     let body = serde_json::to_vec(&exchange).unwrap();
     let request_digest = FleetAuth::body_digest(&body);
@@ -4809,21 +4814,6 @@ impl Backend for SlowExport {
         self.receives
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(result)
-    }
-    async fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> Result<CheckpointManifestPage> {
-        self.local.checkpoint_manifest(request).await
-    }
-    async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
-        self.local.checkpoint_need().await
-    }
-    async fn adopt_checkpoint(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>> {
-        self.local.adopt_checkpoint(manifest).await
     }
     async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {
         self.local.publish_endpoints(mode, endpoints).await

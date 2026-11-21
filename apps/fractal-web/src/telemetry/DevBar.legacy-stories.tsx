@@ -16,7 +16,7 @@ const meta = {
       <h1>Developer transport bar</h1>
       <p>
         The composable developer shell shows live frame, long-frame and approximate JS-heap meters
-        alongside meters for the actual st3 SDK HTTP and collections WebSocket transport. Counters and Meters
+        alongside meters for the actual Fractal SDK HTTP and collections WebSocket transport. Counters and Meters
         open independent panels. Mod Backquote toggles the selected panel; Mod Shift B toggles visibility.
       </p>
       <p>

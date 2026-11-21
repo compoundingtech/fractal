@@ -21,13 +21,12 @@ serialized admission decision, the admitted generation, process placement, and r
 owns enforcement. Graph observations describe those facts; a replicated grant-shaped claim cannot
 launch a process. No standing lane worker or replicated graph semaphore grants resource capacity.
 
-A named lane policy binds an execution host, `maxMembers`, a workload profile key (or historical
-raw CPU/memory declaration), and required coverage. There is no implicit finite-execution
-footprint: an unresolved declaration without complete raw values is refused. The host refuses a
-conflicting policy for an existing name. Every request has a class: `landing`, `check` or `agent` (the default). Classes
-are served in that order. Within a class, FIFO is preferred, but a fitting later ticket may
-backfill a head that does not fit until that head has waited 15 minutes. A lower class never
-bypasses a higher-class head. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
+A named lane policy binds an execution host, `maxMembers`, a workload profile key and required
+coverage. Roll B refuses raw declarations and unknown keys. The host refuses a conflicting
+policy for an existing name. Classes are served in order: `recovery`, `landing`, `check`, `agent`
+(the default). Within a class, FIFO is preferred, but a fitting later ticket may backfill a head
+that does not fit until that head has waited 15 minutes. A lower class never bypasses a
+higher-class head. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
 generation. Independent roots consume room once in the accountant shared with seats and their
 raises/bursts, including CI and shell work. A child run without an OS process reserves no memory.
 
@@ -58,8 +57,7 @@ key, not mutable seed revisions. Clients cannot supply `profile_estimate`.
 
 Disk location is separate: CLI `--disk-path` defaults to the caller's working directory for a
 keyed root; Effect `diskPath` and KDL `disk-path` must be explicit when the seed reserves disk.
-Until the raw-caller cutover, no-key raw declarations remain supported, and an unknown key
-requires a complete explicit raw declaration. There are no fleet-host defaults or client lookups.
+There are no fleet-host defaults or client lookups; missing or unknown keys are refused.
 Seed estimates expose their seed revision, declared source/reason, zero memory/disk samples and
 no learned revision. Optional seed `memoryHigh` is copied as `memory_high_bytes`; without it no
 MemoryHigh is synthesized. Charged/enforced memory maximum remains the seed's `memory`. Learned
@@ -69,6 +67,125 @@ child slice. CPU/memory limits (and any explicit MemoryHigh) apply per generatio
 bounds never shrink below live launch, admitted or retiring snapshots. Both levels enable IO
 accounting, and enforced launch verifies the actual parent/child controls before payload release.
 
+### Learning, pressure and recovery
+
+`learningCoverage` defaults to `client-only`; no keys currently have certified full coverage.
+Only explicit `full` coverage, confirmed retirement and untruncated measurements can train the
+learner. Untruncated means the entire cgroup was already `populated=0` before teardown, not
+merely empty after forced cleanup. OOM/limit events, cancellation, timeout, missing measurements
+and unknown retirement are excluded; natural test failures are not excluded just for failing.
+Receipts retain the evidence and learning decision. Estimates use per-key p95 with a 6/5 memory
+maximum; host `profileReadiness` attestations (`nixPerBuildCgroups`, `ioAccounting`,
+`diskMeasurement`) must all be true before learning can lower declared seeds.
+
+On Linux, `psiBrake` observes every five seconds: memory `full avg60 >= 1%` or IO
+`some avg60 >= 25%` sustained for 60 seconds pauses new admissions without killing holders.
+Resume requires both memory below 0.5% and IO below 10% for 120 seconds. Missing, malformed or
+stale observations hold admission rather than count as healthy. Darwin admission is unchanged.
+
+`recovery` requires an operator-declared `recoveryCapable` profile and a measured filesystem
+observation. At most one recovery execution holds the host recovery slot. It bypasses only
+the disk floor/reservation check; CPU, memory, PSI, holds, membership and IO limits still apply.
+Execution state and both durable/file receipts preserve `admissionDecision`, including the
+`disk-floor` exemption, admission timestamp (`atMs`) and measured free bytes
+(`freeBytesAtAdmission`). These observations remain frozen across replay and retirement.
+Class contention weights are 1000 for recovery and landing, 100 for check and 10 for agent;
+priority does not create extra capacity.
+
+
+## Lane names, priorities and Darwin allocation
+
+Resource lane names and scheduling classes are separate axes. On Linux, `resources exec
+--lane NAME` selects a named resource policy; `--class landing|check|agent` selects its
+admission priority, not a physical slot pool. Linux lane names are not restricted to the
+Darwin allocation below. Requests still declare their CPU/memory profile, disk peak and IO
+needs; naming a lane does not supply a footprint.
+
+Do not mechanically copy legacy gate-slot flags. Its `--class heavy|gate|eval` selects
+physical workload capacity, unlike the resource API's scheduling class. Its `--lane build`
+selects normal heavy capacity, while `--lane check` (also spelled `--class heavy
+--expect-short`) selects separate short-heavy capacity with a 300-second admission bound.
+Neither means native `--class check`, and short-heavy work is not the gate pool. For example,
+`scripts/web-check` uses that legacy short-heavy lane, not a gate-class allocation.
+A Linux cutover must preserve the intended named policy, profile and time budgets explicitly;
+the legacy short FIFO and slots are not implied by a native lane's spelling.
+
+Darwin shell execution uses these canonical lane names and a fixed custody slot inventory:
+
+| Native lane | Maximum members | Custody slot | Dedicated user | UID | Job root |
+| --- | --- | --- | --- | --- | --- |
+| `heavy` | 1 | `heavy1` | `_fractal-heavy1` | 471 | `/Users/Shared/fractal-jobs/heavy1` |
+| `gate` | 3 | `gate1` | `_fractal-gate1` | 472 | `/Users/Shared/fractal-jobs/gate1` |
+| `gate` | 3 | `gate2` | `_fractal-gate2` | 473 | `/Users/Shared/fractal-jobs/gate2` |
+| `gate` | 3 | `gate3` | `_fractal-gate3` | 474 | `/Users/Shared/fractal-jobs/gate3` |
+| `eval` | 1 | `eval1` | `_fractal-eval1` | 475 | `/Users/Shared/fractal-jobs/eval1` |
+
+UID 476 is spare, not additional admitted capacity. Gate's three rows describe one
+capacity-three lane, not three policies each allowing three members. Shell callers choose
+the lane and priority, never a UID or slot number. The host derives the canonical member
+limit and eligible slots from the same inventory, validates that policy, and atomically
+allocates one free slot when admitting a membership. A queued request owns no slot.
+Each admitted independent root consumes its declared shared host footprint once; multiple
+gate members still compete for memory, disk and IO room. A slot remains occupied through
+preparation, execution, cancellation and uncertain retirement until positive UID-custody
+retirement proof permits reuse. Payload exit alone does not free it, and nesting must inherit
+the existing membership rather than acquire a second slot.
+
+After admission the host creates a per-execution workspace at `<slot-root>/<job-id>/`,
+exports it as `FRACTAL_JOB_WORKSPACE`, and uses it as the default working directory.
+An explicit shell `--cwd` must remain within the admitted slot root; otherwise launch refuses
+with `darwin-custody-cwd`. Workspace cleanup follows confirmed retirement; a cleanup or ACL
+failure reports the leftover rather than claiming it was removed.
+
+Source access is an operator-provisioned, read-only ACL on a configured repository/worktree
+store for every slot user. The caller's home receives only a non-inheriting `search` ACE:
+this permits traversal to the store without listing or reading the home. The store grants
+`list,search,readattr,readextattr,readsecurity` (including file `read`) with
+`file_inherit,directory_inherit`, covering both existing descendants and new children.
+All worktrees in that store are readable by every slot; this is an accepted source visibility
+trade-off, not per-repository isolation. The provisioner reconciles its own ACEs without
+duplicating them or removing unrelated ACLs, and revokes grants when a slot is retired.
+Admission itself does not edit home or source ACLs. Symlinks outside the configured store
+need separately provisioned read access; the provisioner must not follow them recursively.
+
+Payload writes belong in `FRACTAL_JOB_WORKSPACE`, not the source store. Recommended settings:
+
+```sh
+export GIT_OPTIONAL_LOCKS=0
+export CARGO_TARGET_DIR="$FRACTAL_JOB_WORKSPACE/target"
+export XDG_CACHE_HOME="$FRACTAL_JOB_WORKSPACE/cache"
+export TMPDIR="$FRACTAL_JOB_WORKSPACE/tmp"
+mkdir -p "$CARGO_TARGET_DIR" "$XDG_CACHE_HOME" "$TMPDIR"
+```
+
+Read-only Git inspection can otherwise try to refresh the index. Mutating Git operations
+(checkout, commit, fetch, submodule initialization) require a job-local writable checkout;
+`GIT_OPTIONAL_LOCKS=0` does not make them read-only. Git may also reject the different source
+owner: if needed, pass `-c safe.directory=<exact-approved-worktree>` for that invocation,
+never trust every directory globally. Cargo may write `Cargo.lock` in the source tree:
+use `--locked` for an existing lockfile or a job-local checkout. Tools that insist on
+in-tree output (`target/`, `node_modules/.cache`, generated files, test snapshots, or package
+installation) need explicit workspace output/cache flags or a job-local source copy.
+`XDG_CACHE_HOME` alone does not redirect every tool. The login-less slot identity has no
+writable user home; do not rely on the caller's home caches or credentials. These allow ACEs
+grant no write permissions; operators must also ensure no pre-existing mode/group/ACL
+grant independently gives a slot write access to the store.
+
+Provisioned roots are owned by the slot user with group `staff` and mode `2770`;
+the slot user's primary group is `nobody`. Cross-UID access uses inherited ACLs, not
+group membership. The root's inheritable caller ACE needs `list`, `add_file`, `search`,
+`add_subdirectory`, `delete_child`, `readattr`, `writeattr`, `readextattr`, `writeextattr`,
+and `readsecurity`, with `file_inherit,directory_inherit`: the caller creates job directories,
+reads results written by the payload and removes the retired job tree. Fractal adds the
+same inheritable rights for the admitted slot user on the caller-created job directory,
+without changing the caller's home or source-tree ACLs.
+
+The resource scheduling class remains `landing`, `check` or `agent` for every Darwin lane;
+it does not change the eligible slot set. `build` and `check` are not Darwin shell lane
+aliases. The slot-backed shell path does not change program/DSL lane execution: those
+Darwin lanes retain logical coverage and their existing named policies. UID custody proves
+process retirement, not Linux-equivalent CPU/memory limits; neither path promises enforced
+coverage on Darwin.
 
 ## Shell callers
 
@@ -151,6 +268,8 @@ check below. No custody layout or configurable cgroup root is exposed.
 released root, live grant, enforced coverage and execution generation, then verifies the running
 runtime binding and exact kernel cgroup path. Parent slices, sibling generations, ended roots,
 retiring memberships and logical-only execution are not proof of a live enforced member.
+This cgroup proof endpoint is Linux-only; Darwin UID custody does not make `member-scope`
+available, even when shell execution is admitted.
 
 A root helper must independently read its own unified `/proc/self/cgroup` entry and require
 **exact equality** with the reported `cgroupPath` for `FRACTAL_RESOURCE_MEMBER_EXEC_ID`; prefix matching
@@ -163,10 +282,13 @@ or a closed argument enum. Do not grant root shells, `systemd-run`, arbitrary ma
 or another escape from the admitted user member. This inspection API grants no sudo permission.
 
 Linux defaults to enforced coverage: a transient scope beneath `app-lanes.slice` with memory and
-CPU limits. macOS refuses `resources exec` before launch with `unsupported-platform` because it
-has no whole-tree retirement proof; `ls`, `show`, `hold` and `release` remain available.
-A nested resource exec validates and inherits its parent's membership through an environment
-marker instead of reserving a second footprint; custody lasts until every execution root retires.
+CPU limits. macOS shell execution uses the canonical `heavy`, `gate` and `eval` lanes above with
+logical coverage and dedicated-UID custody. Unsupported lanes or unavailable custody refuse
+before payload launch; there is no detached-process fallback.
+On Linux a nested resource exec validates and inherits its parent's membership through an
+environment marker instead of reserving a second footprint; custody lasts until every execution
+root retires. Darwin shell custody refuses nested roots with `darwin-custody-nested`: a second
+helper cannot bind an occupied UID slot. Invoke child commands directly inside the admitted job.
 Disk accounting uses declared reservations, not measured disk peaks; memory peaks come from cgroup
 `memory.peak` on enforced hosts and are absent on logical-only hosts.
 
@@ -443,11 +565,13 @@ absence still requires an inactive unit with no cgroup and a snapshot newer than
 join. PTY launcher acknowledgement and observed pre-migration process membership complete that
 join boundary before the old scope can disappear.
 
-Darwin offers host-local logical exclusivity and scoped cancellation, not Linux-equivalent
-whole-tree CPU/memory enforcement. Required `enforced` coverage returns `UnsupportedCoverage`.
-Logical-only execution does not imply an enforced resource cap. Detached process groups cannot
-prove quiescence of escaped descendants; uncertain retirement retains custody instead of promising
-safe successor execution. Arbitrary shell SSH is not a remote target mutation fence.
+Darwin offers host-local admission and cancellation, not Linux-equivalent whole-tree CPU/memory
+enforcement. Required `enforced` coverage returns `UnsupportedCoverage`; logical coverage does
+not imply an enforced resource cap. Slot-backed shell execution uses dedicated-UID custody
+to prove retirement, including descendants that escape the original process group.
+Program/DSL logical execution retains its existing process-group boundary, which cannot prove
+quiescence of escaped descendants. In either path uncertain retirement retains custody instead
+of promising safe successor execution. Arbitrary shell SSH is not a remote target mutation fence.
 
 ## FACTORY integration boundary
 
