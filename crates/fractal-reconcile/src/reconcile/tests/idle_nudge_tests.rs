@@ -156,7 +156,7 @@ impl Idle {
     fn evaluate(&self) {
         self.seat
             .reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
     }
 

@@ -631,25 +631,36 @@ impl ExportDaemon {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
-    /// Waits until the published mission list answers. Readiness does not wait for its first publication, and a
-    /// missions window opened before it resyncs first and records that frame on its first-frame span too.
-    fn await_mission_list(&self) {
-        use std::io::{Read as _, Write as _};
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let mut socket = std::os::unix::net::UnixStream::connect(&self.socket).unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            write!(socket, "GET /v1/client/missions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
-                x-st3-client: fractal\r\nx-st3-person: person/ada\r\n\r\n").unwrap();
-            let mut response = String::new();
-            socket.read_to_string(&mut response).unwrap();
-            if response.starts_with("HTTP/1.1 200 ") {
-                return;
-            }
-            assert!(response.contains("mission-list-not-ready") && Instant::now() < deadline,
-                "mission list: {response}\n{}", self.diagnostics());
-            std::thread::sleep(Duration::from_millis(50));
+    /// A listener's readiness is not a materialized collection publication. Hold a real
+    /// subscription until its owner publishes, rather than polling or assuming missions
+    /// readiness implies attention/agents/work readiness.
+    async fn await_collections(&self, collections: &[&str]) {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        let mut socket = self.websocket("/v1/client/collections/stream",
+            "st3.client.collections.v0",
+            "00-01af7651916cd43dd8448eb211c80319-b7ad6b7169203301-01").await;
+        for collection in collections {
+            let id = format!("readiness-{collection}");
+            socket.send(Message::Text(serde_json::json!({
+                "kind":"subscribe", "id":id, "collection":collection, "limit":2,
+                "person": if *collection == "arrangements" { Some("person/ada") } else { None },
+            }).to_string().into())).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let (frame, _) = next_json_frame(&mut socket).await;
+                    assert_eq!(frame["id"], id, "{frame}");
+                    if frame["kind"] == "snapshot" {
+                        break;
+                    }
+                    assert!(frame["kind"] == "resync" && frame["retryable"] == true, "{frame}");
+                }
+            }).await.expect("collection owner must publish after its readiness resync");
+            socket.send(Message::Text(serde_json::json!({
+                "kind":"unsubscribe", "id":id
+            }).to_string().into())).await.unwrap();
         }
+        socket.close(None).await.unwrap();
     }
 
     fn health(&self, traceparent: Option<&str>) {
@@ -1764,6 +1775,55 @@ async fn next_json_frame(
     }).await.expect("deterministic first/change frame")
 }
 
+/// Keep the actual first frame for trace assertions. A precise not-ready resync must recover
+/// on this same subscription within the original first-frame deadline, never by resubscribing.
+#[cfg(target_os = "linux")]
+async fn subscription_first_frame_and_ready(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    id: &str,
+    conversation: bool,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (first, _) = next_json_frame(socket).await;
+        assert_eq!(first["id"], id, "{first}");
+        if conversation {
+            assert_eq!(first["kind"], "conversation", "{first}");
+        } else if first["kind"] == "resync" {
+            assert_eq!(first["code"], "mission-list-not-ready", "{first}");
+            assert_eq!(first["retryable"], true, "{first}");
+            let (ready, _) = next_json_frame(socket).await;
+            assert_eq!(ready["id"], id, "{ready}");
+            assert_eq!(ready["kind"], "snapshot", "{ready}");
+        } else {
+            assert_eq!(first["kind"], "snapshot", "{first}");
+        }
+        first
+    }).await.expect("first frame and same-subscription readiness within the original deadline")
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn subscription_context_fixture_keeps_resync_first_and_requires_same_subscription_snapshot() {
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+    let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
+    let mut writer = tokio_tungstenite::WebSocketStream::from_raw_socket(writer, Role::Server, None).await;
+    let mut reader = tokio_tungstenite::WebSocketStream::from_raw_socket(reader, Role::Client, None).await;
+    let ((), first) = tokio::join!(
+        async {
+            for frame in [
+                serde_json::json!({"kind":"resync", "id":"sampled",
+                    "code":"mission-list-not-ready", "retryable":true}),
+                serde_json::json!({"kind":"snapshot", "id":"sampled", "items":[]}),
+            ] {
+                writer.send(Message::Text(frame.to_string().into())).await.unwrap();
+            }
+        },
+        subscription_first_frame_and_ready(&mut reader, "sampled", false),
+    );
+    assert_eq!(first["kind"], "resync", "trace assertions must use the actual first frame");
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_request_id_and_roster_stages_match_response() {
@@ -1855,8 +1915,15 @@ async fn daemon_request_id_and_roster_stages_match_response() {
     // The seeded undeclared seat appears only in history. Await that one-card cold
     // publication, not the startup diagnostic reader's unadmitted empty current roster.
     let cold_publication = daemon.await_span(root.path(), |span| {
-        span["name"] == "st.roster.rebuild"
-            && string_attribute(span, "st.roster.invalidation") == Some("cold")
+        if span["name"] != "st.roster.rebuild" {
+            return false;
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for attribute in span["attributes"].as_array().expect("exported rebuild attributes") {
+            assert!(keys.insert(attribute["key"].as_str().unwrap()),
+                "rebuild attribute keys must be unique: {span}");
+        }
+        string_attribute(span, "st.roster.invalidation") == Some("cold")
             && int_attribute(span, "st.roster.covered") == Some(1)
     });
     let spans = daemon.captured_spans(root.path());
@@ -1924,8 +1991,8 @@ async fn subscribe_frame_context_is_lenient_and_continues_action_trace() {
     let root = tempfile::tempdir().unwrap();
     seed_roster(root.path(), "agent/otel-test.observed");
     let mut daemon = ExportDaemon::start(&collector, root.path());
-    // Each missions window's first frame must be its snapshot (see collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans).
-    daemon.await_mission_list();
+    // Context belongs to the actual first frame, including the protocol's not-ready resync.
+    // A held mission subscription must then deliver its snapshot without resubscribing.
     let mut socket = daemon.websocket("/v1/client/collections/stream",
         "st3.client.collections.v0", UPGRADE).await;
     let upgrade = daemon.await_span(root.path(), |span| {
@@ -1954,8 +2021,7 @@ async fn subscribe_frame_context_is_lenient_and_continues_action_trace() {
             "collection": if *id == "conversation" { "conversation" } else { "missions" },
             "conversation":"agent/otel-test.observed", "trace":trace
         }).to_string().into())).await.unwrap();
-        let (frame, _) = next_json_frame(&mut socket).await;
-        assert_eq!(frame["kind"], if *id == "conversation" { "conversation" } else { "snapshot" }, "{frame}");
+        let frame = subscription_first_frame_and_ready(&mut socket, id, *id == "conversation").await;
         assert_eq!(frame["id"], *id);
         let first = daemon.await_span(root.path(), |span| {
             span["name"] == "st.subscription.first_frame"
@@ -1999,7 +2065,7 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     let mut daemon = ExportDaemon::start(&collector, root.path());
     // Each window's first frame must be its snapshot (a resync before it is covered by
     // daemon_collection_stream_without_export_delivers_first_frame).
-    daemon.await_mission_list();
+    daemon.await_collections(&["missions", "attention", "agents", "work", "glasses", "arrangements"]).await;
     let mut socket = daemon.websocket("/v1/client/collections/stream",
         "st3.client.collections.v0", TRACEPARENT).await;
     let upgrade = daemon.await_span(root.path(), |span| {
@@ -2071,7 +2137,8 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     daemon.await_span(root.path(), |span| span["traceId"] == "51af7651916cd43dd8448eb211c80319"
         && span["name"] == "GET /v1/health");
     let spans = daemon.captured_spans(root.path());
-    let first: Vec<_> = spans.iter().filter(|span| span["name"] == "st.subscription.first_frame").collect();
+    let first: Vec<_> = spans.iter().filter(|span| span["name"] == "st.subscription.first_frame"
+        && !string_attribute(span, "st.subscription.id").is_some_and(|id| id.starts_with("readiness-"))).collect();
     assert_eq!(first.len(), 6, "changes must not start more first-frame spans: {first:?}");
     for collection in ["missions", "attention", "agents", "work", "glasses", "arrangements"] {
         assert_eq!(first.iter().filter(|span| string_attribute(span, "st.subscription.id") == Some(collection)).count(), 1);
@@ -2131,11 +2198,17 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     const NEW: &str = "00-81af7651916cd43dd8448eb211c80319-b7ad6b7169203336-01";
     const DUPLICATE: &str = "00-91af7651916cd43dd8448eb211c80319-b7ad6b7169203337-01";
     const HEARTBEAT: &str = "00-a1af7651916cd43dd8448eb211c80319-b7ad6b7169203338-01";
-    const SETTLE: &str = "00-b1af7651916cd43dd8448eb211c80319-b7ad6b7169203339-01";
     let Some(collector) = otelite("replication_projection_is_linked_root_only_for_new_data") else { return };
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
+    // This test isolates receive/projection span ownership, including a duplicate receive
+    // against an otherwise idle store. Local trimming is independently exercised with defaults
+    // in trim_completion_retains_initial_head_and_complete_roster_publications. It must not be
+    // a concurrent writer here, and local trims no longer advertise checkpoint.sealed claims.
+    let config = root.path().join("config/st3/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(config, "[trim]\nlocal = false\n").unwrap();
     let target = fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
     target.bind_fleet(FLEET).unwrap();
     target.project_replication_backlog().unwrap();
@@ -2156,21 +2229,6 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     assert!(heartbeat.envelopes.is_empty());
     drop(target);
     let mut daemon = ExportDaemon::start(&collector, root.path());
-    // The daemon seals its first checkpoint in the background just after it starts. A seal that
-    // commits while the first receive projects moves the store past that projection's target, so
-    // the projection stays deferred and the duplicate receive below projects again, with a root of
-    // its own. Wait for the seal, so that the receives meet a store nothing else is writing to.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let (page, _) = daemon.request("GET", "/v1/claims?after_index=0&limit=500", None, SETTLE, None).await;
-        if page["value"]["claims"].as_array().is_some_and(|claims| {
-            claims.iter().any(|claim| claim["kind"] == "checkpoint.sealed")
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the first checkpoint was never sealed: {page}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
     let payload = serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":exchange});
     let (received, _) = daemon.request("POST", "/v1/internal/replication/receive",
         Some(payload.clone()), NEW, None).await;

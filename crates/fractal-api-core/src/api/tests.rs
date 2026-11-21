@@ -11461,6 +11461,84 @@ async fn client_agents_agent_roster_retains_current_during_history_publications(
     assert_agent_roster_survives_other_mode_publications(false).await;
 }
 
+#[tokio::test]
+async fn trim_completion_retains_initial_head_and_complete_roster_publications() {
+    assert!(crate::config::TrimConfig::default().local);
+    for complete in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.store = Arc::new(roster_followup_store());
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        if complete {
+            refresh_agent_roster(store, false).unwrap();
+            refresh_agent_roster(store, true).unwrap();
+        } else {
+            agent_roster_snapshot(store, |index| client_agent_roster_head(store, index)).unwrap();
+        }
+        let histories: &[bool] = if complete { &[false, true] } else { &[false] };
+        for &history in histories {
+            let query = ClientListQuery { history, ..ClientListQuery::default() };
+            let (Extension(before_cut), Json(before)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)), Query(query.clone()),
+            ).await.unwrap();
+            // Exercise the callback used when the default startup trim stops, before any
+            // background owner can publish again. Repeating it must not lose retained rows.
+            store.runtime.claims_trim_finished();
+            store.runtime.claims_trim_finished();
+            let (Extension(after_cut), Json(after)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)), Query(query),
+            ).await.expect("a graph-preserving trim must not withdraw the published roster");
+            assert_eq!(before_cut.store_index, after_cut.store_index);
+            assert_eq!(before.items, after.items);
+        }
+    }
+}
+
+#[tokio::test]
+async fn retired_identity_activation_preserves_a_successful_roster_barrier() {
+    assert!(crate::config::TrimConfig::default().local);
+    for populated in [false, true] {
+        for complete in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = state(root.path());
+            state.store = Arc::new(if populated {
+                roster_followup_store()
+            } else {
+                Store::open_memory("node").unwrap()
+            });
+            let store = &state.store;
+            // Startup enables local trimming before its paced retirement import finishes.
+            store.trim_locally(true).unwrap();
+            let _wake = store.start_agent_roster_refresher().unwrap();
+            if complete {
+                refresh_agent_roster(store, false).unwrap();
+            } else {
+                agent_roster_snapshot(store, |index| client_agent_roster_head(store, index)).unwrap();
+            }
+            let (Extension(before_cut), Json(before)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Query(ClientListQuery { min_cut: Some(0), ..ClientListQuery::default() }),
+            ).await.expect("the fixture's read-after-publication barrier succeeds");
+            let revision = store.agent_roster_revision();
+
+            // Complete the exact background startup transition after that barrier, without
+            // allowing the refresher to republish and conceal an availability regression.
+            store.import_retired_identities_paced(|_| {}).unwrap();
+            assert!(store.retired_identity_import_done().unwrap());
+            let (Extension(after_cut), Json(after)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Query(ClientListQuery::default()),
+            ).await.expect("an ordinary read after the barrier must remain ready");
+            assert_eq!(after_cut.store_index, before_cut.store_index);
+            assert_eq!(after_cut.published_at, before_cut.published_at);
+            assert_eq!(after.items, before.items);
+            assert_eq!(store.agent_roster_revision(), revision,
+                "retirement authority changes replication inventory, not roster inputs");
+        }
+    }
+}
+
 #[test]
 fn agent_roster_refresh_never_folds_more_than_a_chunk_in_one_call() {
     let root = tempfile::tempdir().unwrap();

@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Tracer } from 'effect'
 import { createFractalWebServer, type FractalWebServer, type AdmissionIdentity } from './core.mts'
-import { checkTagAuthorization } from './tagAuthorization.mts'
+import { checkPublisherAuthorization, checkTagAuthorization } from './tagAuthorization.mts'
 
 /**
  * Loopback trust boundary: only the identity-stripping published-surface filter is a legitimate
@@ -161,6 +161,7 @@ export const readHostConfig = (env: NodeJS.ProcessEnv, files: SecretFiles = loca
 export const startHost = async (config: HostConfig, readText: (path: string) => string = (path) => readFileSync(path, 'utf8')): Promise<FractalWebServer> => {
   const gateway = { socketPath: config.socketPath, host: '127.0.0.1', authorization: config.authorization, tagAuthorization: config.tagAuthorization, timeoutMs: 30_000 }
   if (config.tags.length > 0) await checkTagAuthorization(gateway)
+  await checkPublisherAuthorization(gateway)
   const buildIdentity: unknown = JSON.parse(readText(join(config.dist, 'build-identity.json')))
   let listening: string | undefined
   const served = createFractalWebServer({

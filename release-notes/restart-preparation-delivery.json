@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep incumbent observation and work delivery running while an explicit restart waits for preparation, without starting a competing launch-drift replacement.",
+  "replay": { "status": "none", "detail": "No claim formats or replay behavior change." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "Restart authority and admission rules are unchanged." },
+  "compatibility": { "status": "changed", "detail": "An idle incumbent continues receiving ordinary ready-work messages while an explicit restart waits for preparation. Launch drift, fresh-context work, and Claude trust-prompt replacement cannot bypass that preparation; the accepted replacement satisfies pending fresh-context intent. Plain restarts retain their acknowledgment-or-two-minute-deadline behavior; fresh sessions still require their handoff." },
+  "downtime": { "status": "none", "detail": "No upgrade restart or downtime requirement is introduced." },
+  "manual": { "status": "none", "detail": "No manual migration is required." },
+  "recovery": { "status": "none", "detail": "Rollback requires no state conversion; pending restart claims remain readable." }
+}
