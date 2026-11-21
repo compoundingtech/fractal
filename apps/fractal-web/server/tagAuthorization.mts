@@ -3,7 +3,7 @@ import { Schema } from 'effect'
 import type { GatewayOptions } from './gateway.mts'
 
 const Capabilities = Schema.fromJsonString(Schema.Struct({
-  api_version: Schema.Literal('st3.client.v0'),
+  api_version: Schema.Literals(['st3.client.v0', 'fractal.client.v0']),
   value: Schema.Struct({ kind: Schema.Literal('capabilities'), capabilities: Schema.Array(Schema.Struct({
     id: Schema.String, state: Schema.Literals(['granted', 'ungranted', 'unavailable']),
   })) }),
