@@ -19,6 +19,10 @@ struct Publication {
     snapshot: Mutex<Option<Snapshot>>,
     changed: Mutex<Option<tokio::sync::watch::Receiver<u64>>>,
     incarnation: Mutex<Option<String>>,
+    #[cfg(test)]
+    captures: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    captured: tokio::sync::Notify,
 }
 #[derive(Debug)]
 struct Snapshot {
@@ -40,8 +44,9 @@ fn now() -> u64 {
         .map_or(0, |duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
 }
 
-/// One subscription owns source capture. Timers renew the producer heartbeat and wake the
-/// objective evaluator at actual lifecycle/budget boundaries; they never poll source tables.
+/// One subscription owns source capture. Changes coalesce during a minimum rest after each
+/// capture. Timers renew the producer heartbeat and wake the objective evaluator at actual
+/// lifecycle/budget boundaries without continuously recomputing retained history.
 pub fn start(state: &crate::api::AppState) {
     let publication = state.store.extension::<Publication>();
     if publication.started.swap(true, Ordering::AcqRel) { return; }
@@ -51,12 +56,11 @@ pub fn start(state: &crate::api::AppState) {
     *publication.changed.lock().unwrap_or_else(PoisonError::into_inner) = Some(changed.clone());
     tokio::spawn(async move {
         loop {
-            // A fixed batching window coalesces bursts without waiting for a quiet source.
-            // The watch receiver retains the latest generation, not a queue of captures.
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let generation = *changed.borrow_and_update();
             let store = state.store.clone();
             let captured = tokio::task::spawn_blocking(move || capture(&store, now())).await;
+            let recapture_after = tokio::time::Instant::now()
+                + std::time::Duration::from_millis(FRESHNESS / 2);
             let mut snapshot = match captured {
                 Ok(Ok(snapshot)) => snapshot,
                 error => Snapshot { observed_ms: now(), generation, samples: Vec::new(), held: 0, unknown: 1,
@@ -67,6 +71,11 @@ pub fn start(state: &crate::api::AppState) {
             };
             snapshot.generation = generation;
             *publication.snapshot.lock().unwrap_or_else(PoisonError::into_inner) = Some(snapshot);
+            #[cfg(test)]
+            {
+                publication.captures.fetch_add(1, Ordering::SeqCst);
+                publication.captured.notify_one();
+            }
             let store = state.store.clone();
             let state_dir = state.state_dir.clone();
             let reported = tokio::task::spawn_blocking(move || {
@@ -89,6 +98,9 @@ pub fn start(state: &crate::api::AppState) {
                 tokio::select! {
                     result = changed.changed() => {
                         if result.is_err() { return; }
+                        // Rest after capture ENDS, not after it starts. The next
+                        // borrow_and_update coalesces all changes during this interval.
+                        tokio::time::sleep_until(recapture_after).await;
                         break;
                     }
                     () = tokio::time::sleep(std::time::Duration::from_millis(delay.max(1))) => {
@@ -167,9 +179,12 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
     Ok(vec![row])
 }
 
-fn canonical(connection: &rusqlite::Connection, recipient: &str) -> anyhow::Result<String> {
-    Ok(crate::store::identities::resolve_reference_conn(connection,
-        &crate::store::normalize_message_party(recipient))?)
+fn canonical(connection: &rusqlite::Connection, cache: &mut BTreeMap<String, String>, recipient: &str) -> anyhow::Result<String> {
+    if let Some(canonical) = cache.get(recipient) { return Ok(canonical.clone()); }
+    let canonical = crate::store::identities::resolve_reference_conn(connection,
+        &crate::store::normalize_message_party(recipient))?;
+    cache.insert(recipient.to_owned(), canonical.clone());
+    Ok(canonical)
 }
 
 fn native_frontier(store: &Store, connection: &rusqlite::Connection, recipient: &str) -> anyhow::Result<Option<u64>> {
@@ -252,8 +267,11 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
         let mut source_through_ms = now;
         let mut checked_recipients = std::collections::BTreeSet::new();
         let mut uncovered_recipients = std::collections::BTreeSet::new();
+        // Resolve each distinct reference once per capture. Concurrent graph changes
+        // invalidate the publication below, including any cached identity mapping.
+        let mut identities = BTreeMap::new();
         for (message, recipient, sent, fields) in raw {
-            let recipient = canonical(&connection, &recipient)?;
+            let recipient = canonical(&connection, &mut identities, &recipient)?;
             if !recipient.starts_with("agent/") { continue; }
             covered_from_ms = covered_from_ms.min(sent);
             let expiry = sent.saturating_add(DEADLINE).saturating_add(HORIZON).saturating_add(FRESHNESS).saturating_add(1);
@@ -298,7 +316,7 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
             #[cfg(test)]
             { source_work[1] += raw.len(); }
             for (recipient, at) in raw {
-                let key = (message.clone(), canonical(&connection, &recipient)?);
+                let key = (message.clone(), canonical(&connection, &mut identities, &recipient)?);
                 accepted.entry(key).and_modify(|first| *first = (*first).min(at)).or_insert(at);
             }
             let raw = step_query.query_map([message], |row| Ok((row.get::<_, String>(0)?,
@@ -310,7 +328,7 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
                 // before any harness handoff; its actor is not the target input consumer.
                 let consumer = if consumer.is_empty() || matches!(kind.as_str(), "message.closed" | "message.expired") {
                     String::new()
-                } else { canonical(&connection, &consumer)? };
+                } else { canonical(&connection, &mut identities, &consumer)? };
                 steps.entry((message.clone(), consumer)).or_default().entry(kind)
                     .and_modify(|first| *first = (*first).min(at)).or_insert(at);
             }

@@ -357,3 +357,69 @@ fn capture_releases_readers_between_pages_and_lifecycle_messages() {
     assert_eq!(snapshot.unknown, 0);
     assert!(checkpoints >= SOURCE_PAGE + 5, "must traverse multiple source pages and every message");
 }
+
+#[tokio::test(start_paused = true)]
+async fn change_bursts_coalesce_until_the_previous_capture_has_rested() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = crate::api::tests_shared::state(root.path());
+    state.store = std::sync::Arc::new(Store::open_memory("example-host").unwrap());
+    declared(&state.store);
+    let sent = send(&state.store, "message/example-burst", json!([]));
+    frontier(&state.store, sent);
+    let publication = state.store.extension::<Publication>();
+    start(&state);
+    publication.captured.notified().await;
+    assert_eq!(publication.captures.load(Ordering::SeqCst), 1);
+
+    for burst in 1..=2 {
+        for generation in (burst - 1) * 128 + 1..=burst * 128 {
+            state.event_notify.send_replace(generation);
+            tokio::task::yield_now().await;
+        }
+        // Pending changes remain honest unknowns, not a renewed coverage claim.
+        assert_eq!(rows(&state.store, sent).unwrap()[0]["status"], "no-data");
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(FRESHNESS / 2 - 1),
+            publication.captured.notified(),
+        ).await.is_err(), "no source capture may run during the minimum rest interval");
+        assert_eq!(publication.captures.load(Ordering::SeqCst), burst as usize);
+
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        publication.captured.notified().await;
+        assert_eq!(publication.captures.load(Ordering::SeqCst), burst as usize + 1);
+        let guard = publication.snapshot.lock().unwrap();
+        let snapshot = guard.as_ref().unwrap();
+        assert_eq!(snapshot.generation, burst * 128);
+        assert_eq!(snapshot.source_work, [1, 0, 0]);
+    }
+}
+
+#[test]
+fn unrelated_graph_claims_during_capture_keep_coverage_unknown() {
+    let store = Store::open_memory("example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-concurrent-graph", json!([]));
+    frontier(&store, sent);
+    let mut writes = 0;
+    let snapshot = capture_with_progress(&store, sent, || {
+        writes += 1;
+        store.append_claim(&ClaimInput {
+            subject: "agent/example-unrelated".into(), kind: "runtime.observed".into(),
+            actor: Some("agent/example-unrelated".into()),
+            fields: serde_json::from_value(json!({"status":"running",
+                "runtime_id":"example-unrelated-runtime","incarnation_id":format!("unrelated-{writes}")})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }).unwrap();
+    assert!(writes > 0);
+    assert!(store.index().unwrap() > snapshot.source_cut);
+    assert_eq!(snapshot.source_work, [1, 0, 0]);
+    assert_eq!(snapshot.unknown, 1);
+    let publication = store.extension::<Publication>();
+    let (_sender, receiver) = tokio::sync::watch::channel(0);
+    *publication.changed.lock().unwrap() = Some(receiver);
+    *publication.snapshot.lock().unwrap() = Some(snapshot);
+    assert_eq!(rows(&store, sent).unwrap()[0]["status"], "no-data");
+    // A later capture without overlapping writes can recover.
+    assert_eq!(capture(&store, sent).unwrap().unknown, 0);
+}

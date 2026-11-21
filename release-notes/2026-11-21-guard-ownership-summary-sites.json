@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Register the runtime ownership summary's SQLite sites (#6959) in the large-value inventory, so the required freshness check passes on main again.",
+  "replay": {"status": "none", "detail": "No runtime changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Test markers and inventory only."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}

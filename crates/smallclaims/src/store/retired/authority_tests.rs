@@ -13,6 +13,28 @@ fn member(origin: &str) -> Store {
     store
 }
 
+#[test]
+fn changing_retirement_authority_invalidates_the_replication_inventory() {
+    let store = member("oak");
+    let before = store.replication_snapshot().unwrap();
+    let generation = store.replica_generation.load(Ordering::Acquire);
+
+    store.trim_locally(true).unwrap();
+    assert!(authoritative(&store.readers.get()).unwrap());
+    assert!(store.replica_generation.load(Ordering::Acquire) > generation);
+    let enabled = store.replication_snapshot().unwrap();
+    assert!(enabled.inventory_generation > before.inventory_generation);
+    assert!(!Arc::ptr_eq(&before, &enabled));
+
+    let generation = store.replica_generation.load(Ordering::Acquire);
+    store.trim_locally(false).unwrap();
+    assert!(!authoritative(&store.readers.get()).unwrap());
+    assert!(store.replica_generation.load(Ordering::Acquire) > generation);
+    let disabled = store.replication_snapshot().unwrap();
+    assert!(disabled.inventory_generation > enabled.inventory_generation);
+    assert!(!Arc::ptr_eq(&enabled, &disabled));
+}
+
 fn note(store: &Store, subject: &str) -> String {
     store
         .append_claim(&ClaimInput {

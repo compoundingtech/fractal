@@ -1112,8 +1112,10 @@ family; missing agent ownership is unknown, never a successful delivery.
 The producer reads retained source metadata in indexed 128-row keyset pages and releases
 each SQLite reader before processing another page or message's lifecycle. No read
 transaction spans the 30-day scan, so WAL RESTART checkpoints can proceed during capture.
-Local change bursts are coalesced in a fixed 100ms window (not a quiet-period debounce);
-a capture overlapping graph writes remains unknown rather than certifying a mixed cut.
+Local change bursts coalesce until at least 60 seconds after the preceding capture ends
+(not a quiet-period debounce). Identity references are resolved once per distinct spelling
+per capture. Pending changes and captures overlapping graph writes remain unknown rather
+than certifying stale coverage or a mixed cut; idle heartbeat and boundary timers remain active.
 
 `POST /v1/mailbox/receipts` accepts `lifecycle: "accepted"` with
 `input_acceptance: { "accepted_at_unix_ms": ... }`. The native peer, physical provider

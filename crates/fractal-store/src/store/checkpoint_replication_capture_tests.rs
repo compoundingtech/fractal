@@ -172,7 +172,7 @@ fn replicated_admission_duplicate_reoffers_and_projection_leave_older_capture_un
     assert_eq!(expected.claims.len(), ROUNDS);
     assert_eq!(expected.envelopes.len(), ROUNDS);
     assert!(expected.claims.iter().all(|claim| claim.claim.accepted_at_unix_ms == 100));
-    let identities = checkpoint::SealedIdentities::of(&expected);
+    let identities = checkpoint::sealed_digest(&expected);
     let expected_epoch = epoch(&target);
 
     let (reached, at_page_boundary) = mpsc::sync_channel(1);
@@ -252,7 +252,7 @@ fn replicated_admission_duplicate_reoffers_and_projection_leave_older_capture_un
     let captured = capture.join().unwrap().unwrap().expect("ordinary replication must not exhaust capture retries");
     assert_eq!(pause.pauses.load(Ordering::Acquire), ROUNDS);
     assert_eq!(epoch(&target), expected_epoch);
-    assert_eq!(checkpoint::SealedIdentities::of(&captured), identities);
+    assert_eq!(checkpoint::sealed_digest(&captured), identities);
     assert_eq!(format!("{:?}", captured.claims), format!("{:?}", expected.claims));
     assert!(captured.envelopes.iter().all(|envelope| envelope.accepted_at_unix_ms == 100));
 }

@@ -201,8 +201,8 @@ test('splitting 200KB of Markdown stays within a streaming frame', () => {
 })
 
 test('a daemon prompt renders its command as code, not literal backticks', () => {
-  const html = prompt('A mission step is ready: step-run/w-1/work. Run `st work claim step-run/w-1/work --as agent/demo/one` to read and claim it.')
-  assert.match(html, /<code[^>]*>st work claim step-run\/w-1\/work --as agent\/demo\/one<\/code>/)
+  const html = prompt('A mission step is ready: step-run/w-1/work. Run `fractal work claim step-run/w-1/work --as agent/demo/one` to read and claim it.')
+  assert.match(html, /<code[^>]*>fractal work claim step-run\/w-1\/work --as agent\/demo\/one<\/code>/)
   assert.doesNotMatch(html, /`/)
 })
 
@@ -393,9 +393,9 @@ test('prompts load no remote image and drop unsafe link protocols', () => {
 
 test('inline Markdown is phrasing only, with links as words by default', () => {
   const inline = props => renderToStaticMarkup(h(InlineMarkdown, { ...props, text: markdownInline(props.text) }))
-  const html = inline({ text: '# Run `st x` **now** [here](https://example.test) ![alt](https://example.test/i.png)\n\nnext' })
+  const html = inline({ text: '# Run `fractal x` **now** [here](https://example.test) ![alt](https://example.test/i.png)\n\nnext' })
   assert.doesNotMatch(html, /<(?:h1|p|div|img|a)\b/)
-  assert.match(html, /<code[^>]*>st x<\/code>/)
+  assert.match(html, /<code[^>]*>fractal x<\/code>/)
   assert.match(html, /<strong[^>]*>now<\/strong>/)
   assert.match(html, /here/)
   assert.match(html, /alt/)
@@ -405,7 +405,7 @@ test('inline Markdown is phrasing only, with links as words by default', () => {
 
 test('plain text of inline Markdown keeps the words a label needs', async () => {
   const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
-  assert.equal(markdownPlainText('Run `st work claim **x**` for **the** _first_ [step](https://example.test) ![chart](u.png)'), 'Run st work claim **x** for the first step chart')
+  assert.equal(markdownPlainText('Run `fractal work claim **x**` for **the** _first_ [step](https://example.test) ![chart](u.png)'), 'Run fractal work claim **x** for the first step chart')
   assert.equal(markdownPlainText('## Ship snake_case_names and 2*3*4'), 'Ship snake_case_names and 2*3*4')
   assert.equal(markdownPlainText('- [x] done\nnext line'), 'done next line')
   assert.equal(markdownPlainText('escaped \\*star\\* and ~~gone~~'), 'escaped *star* and gone')

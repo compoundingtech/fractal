@@ -86,6 +86,16 @@ pub struct SummaryList {
 }
 
 impl SummaryList {
+    /// Recompute shared inputs after graph-preserving history cleanup, keeping the rows
+    /// windows already serve. Fence in-flight computations just as a replacement does.
+    /// The attention owner's existing wake/roster notification schedules the next fold.
+    pub fn refold(&self) {
+        let mut lists = self.lists.lock().unwrap_or_else(PoisonError::into_inner);
+        self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
+        lists.shared = None;
+        lists.machines = None;
+    }
+
     pub fn forget(&self) {
         let mut lists = self.lists.lock().unwrap_or_else(PoisonError::into_inner);
         self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
@@ -94,6 +104,40 @@ impl SummaryList {
         for selection in lists.selections.values_mut() {
             selection.row = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refold_fences_old_computations_and_keeps_rows_until_replacement() {
+        let list = SummaryList::default();
+        let row = json!({"id": "summary/current"});
+        {
+            let mut lists = list.lists.lock().unwrap();
+            lists.selections.insert(None, Selection {
+                read_at: 1,
+                row: Some(SummaryRow { cut: 1, published_at_unix_ms: 1, row: row.clone() }),
+                failed: false,
+            });
+            lists.shared = Some((Arc::new(SummaryShared {
+                cut: 1, evaluated_at_unix_ms: 1, published_at_unix_ms: 1,
+                missions: Vec::new(), working_agents: 0, machines: json!({}), agents_as_of: None,
+            }), SummaryInputs { cut: 1, roster: 1, period: 1 }));
+        }
+        let generation = list.forgotten.load(AtomicOrdering::Acquire);
+        list.refold();
+        assert_eq!(list.forgotten.load(AtomicOrdering::Acquire), generation + 1);
+        {
+            let lists = list.lists.lock().unwrap();
+            assert!(lists.shared.is_none());
+            assert_eq!(lists.selections[&None].row.as_ref().unwrap().row, row);
+        }
+        list.forget();
+        assert!(list.lists.lock().unwrap().selections[&None].row.is_none(),
+            "actual projection replacement must still withdraw old rows");
     }
 }
 

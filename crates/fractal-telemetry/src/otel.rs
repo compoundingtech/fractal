@@ -121,6 +121,9 @@ pub struct RosterAttributes {
     reader_acquire_ms: Option<f64>,
 }
 
+/// SDK 0.30 appends repeated keys. Rebuild roots emit their final accumulated attributes once.
+pub struct DeferredRosterAttributes;
+
 thread_local! {
     static ROSTER_SCOPE: std::cell::RefCell<Option<RosterAttributes>> = const { std::cell::RefCell::new(None) };
     static COLLECT_ROSTER_WARM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -222,7 +225,7 @@ pub fn roster_attribute(key: &'static str, value: impl Into<opentelemetry::Value
     let value = value.into();
     tracing::Span::current().set_attribute(key, value.clone());
     let context = opentelemetry::Context::current();
-    if context.span().is_recording() {
+    if context.span().is_recording() && context.get::<DeferredRosterAttributes>().is_none() {
         context.span().set_attribute(KeyValue::new(key, value.clone()));
     }
     ROSTER_SCOPE.with(|slot| {
@@ -1539,6 +1542,34 @@ mod tests {
     };
     use opentelemetry::{Key, KeyValue, Value};
     use opentelemetry_sdk::Resource;
+
+    #[test]
+    fn deferred_roster_attributes_export_each_final_value_once() {
+        use opentelemetry::trace::{TraceContextExt as _, Tracer as _, TracerProvider as _};
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone()).build();
+        let _export = super::fixture_export_scope();
+        super::roster_collect_warm(|| {
+            super::roster_attribute("st.roster.covered", 0_i64);
+            let context = opentelemetry::Context::new()
+                .with_span(provider.tracer("roster-test").start("st.roster.rebuild"))
+                .with_value(super::DeferredRosterAttributes);
+            let _entered = context.clone().attach();
+            super::roster_attribute("st.roster.covered", 1_i64);
+            super::roster_attribute("st.roster.covered", 2_i64);
+            super::copy_roster_attributes(&context);
+            context.span().end();
+        });
+        let spans = exporter.get_finished_spans().unwrap();
+        let span = spans.iter().find(|span| span.name == "st.roster.rebuild").unwrap();
+        let mut keys = std::collections::BTreeSet::new();
+        for attribute in &span.attributes {
+            assert!(keys.insert(attribute.key.as_str()), "duplicate attribute: {attribute:?}");
+        }
+        assert!(span.attributes.iter().any(|attribute|
+            attribute.key.as_str() == "st.roster.covered" && attribute.value == Value::I64(2)));
+    }
 
     #[test]
     fn subagent_lease_phase_is_exported_on_the_roster_span() {
