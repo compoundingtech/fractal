@@ -3,7 +3,7 @@
   "summary": "Keep PSI brake recovery independent of slow reconciliation passes",
   "replay": {"status": "none", "detail": "No claim or replay changes."},
   "schema": {"status": "none", "detail": "No client schema, generated code or API shape changes."},
-  "rules": {"status": "changed", "detail": "A daemon-scoped sampler observes Linux PSI every quarter of the configured freshness interval. Slow reconciliation no longer resets healthy recovery. Missing, stale, malformed or interrupted observations still close admission; pressure thresholds and recovery durations are unchanged."},
+  "rules": {"status": "changed", "detail": "A daemon-scoped sampler observes Linux PSI every quarter of the configured freshness interval. An atomic dirty signal hands decision changes to reconciliation without waiting on its store or incremental locks, so slow reconciliation no longer resets healthy recovery. Missing, stale, malformed or interrupted observations still close admission; pressure thresholds and recovery durations are unchanged."},
   "compatibility": {"status": "none", "detail": "Existing PSI policy configuration remains valid. Decision transition logs distinguish pressure, recovery and unavailable observations."},
   "downtime": {"status": "none", "detail": "The sampler takes effect after daemon restart."},
   "manual": {"status": "none", "detail": "No manual migration is required."},

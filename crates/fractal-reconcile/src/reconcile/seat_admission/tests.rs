@@ -45,6 +45,82 @@ async fn daemon_sampler_observes_without_a_pass_or_native_lanes() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sampler_recovers_while_incremental_observe_holds_its_lock_past_freshness() {
+    use crate::incremental::{ChangeFeed, ChangeSource};
+    use fractal_runtime::resource_pressure::{Policy, Reason, Rule, Signal, Window};
+    use std::time::Instant;
+
+    struct StalledFeed {
+        entered: tokio::sync::mpsc::UnboundedSender<Instant>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl ChangeSource for StalledFeed {
+        fn changes_since(&self, _: u64, _: i64) -> Result<ChangeFeed> {
+            self.entered.send(Instant::now()).unwrap();
+            self.release.recv_timeout(Duration::from_secs(30)).unwrap();
+            Ok(ChangeFeed::default())
+        }
+    }
+
+    let mut reconciler = reconciler();
+    // Read real kernel PSI, with thresholds near 100% so ordinary host activity is healthy.
+    // An intentional observation gap below closes the real Brake before recovery begins.
+    reconciler.seat_admission.finite_policy.psi_brake = Policy {
+        rules: vec![Rule { signal: Signal::MemoryFull, window: Window::Avg10,
+            threshold_millipercent: 100000, resume_millipercent: 99999 }],
+        sustained_ms: 1, resume_ms: 2000, freshness_ms: 1000,
+    };
+    assert!(!reconciler.seat_admission.pressure_decision().unwrap().blocked);
+    let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
+    reconciler.seat_admission.pressure_samples.set(samples).unwrap();
+    let reconciler = Arc::new(reconciler);
+    let incremental = reconciler.incremental.clone();
+    let (entered, mut entering) = tokio::sync::mpsc::unbounded_channel();
+    let (release, stalled) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        incremental.observe(&StalledFeed { entered, release: stalled }).unwrap();
+    });
+    let held_since = entering.recv().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    let sampler = reconciler.sample_resource_pressure();
+    tokio::pin!(sampler);
+    let mut previous = None;
+    let mut count = 0;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let (at, decision) = tokio::select! {
+                () = &mut sampler => panic!("sampler ended while the feed was stalled"),
+                sample = sampled.recv() => sample.unwrap(),
+            };
+            if let Some(previous) = previous {
+                assert!(at.duration_since(previous) <= Duration::from_millis(1000),
+                    "incremental observation stalled the independent sampling cadence");
+            }
+            previous = Some(at);
+            count += 1;
+            if count == 1 {
+                assert_eq!(decision.reason, Some(Reason::UnknownObservation));
+            } else if decision.blocked {
+                assert_eq!(decision.reason, Some(Reason::Recovering));
+            } else {
+                break;
+            }
+        }
+    }).await.expect("the real Brake did not recover while changes_since held the incremental lock");
+    assert!(count >= 10, "recovery requires continued periodic healthy observations");
+    assert!(held_since.elapsed() > Duration::from_millis(1000));
+    assert!(reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
+
+    release.send(()).unwrap();
+    observer.join().unwrap();
+    // Only the next pass drains the signal and takes incremental's lock.
+    reconciler.refresh_seat_admission_at(0);
+    assert!(!reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
+}
+
 #[test]
 fn changed_host_memory_observation_wakes_waiters_without_an_envelope_file() {
     use fractal_runtime::host::HostMemoryObservation;

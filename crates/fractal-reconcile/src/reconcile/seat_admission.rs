@@ -17,6 +17,11 @@ pub struct Controller {
     pub lanes: Option<LaneHost>,
     pub finite_policy: fractal_runtime::host::FinitePolicy,
     pub pressure: Mutex<Option<fractal_runtime::resource_pressure::Observer>>,
+    pressure_dirty: AtomicBool,
+    #[cfg(test)]
+    pressure_samples: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(
+        std::time::Instant, fractal_runtime::resource_pressure::Decision,
+    )>>,
 }
 
 /// The room a host gives lanes, and how to read unreclaimable host memory outside lanes
@@ -57,6 +62,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     continue;
                 }
             };
+            #[cfg(test)]
+            if let (Ok(decision), Some(samples)) = (&decision, self.seat_admission.pressure_samples.get()) {
+                let _ = samples.send((std::time::Instant::now(), *decision));
+            }
             match decision {
                 Ok(decision) if previous != Some(decision) => {
                     if previous.is_some() && decision.blocked {
@@ -65,7 +74,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         tracing::debug!(blocked = decision.blocked, reason = ?decision.reason, "host PSI brake decision");
                     }
                     previous = Some(decision);
-                    self.incremental.touch("host-lane-pressure");
+                    // The pass owns incremental/store locks; the sampling clock never waits on them.
+                    self.seat_admission.pressure_dirty.store(true, Ordering::Release);
                     // Sampling changes admission inputs, not the durable graph event stream.
                     self.notify.notify_one();
                 }
@@ -108,6 +118,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             _watcher: watcher, lanes: self.seat_admission.lanes,
             finite_policy: self.seat_admission.finite_policy,
             pressure: Mutex::new(None),
+            pressure_dirty: AtomicBool::new(false),
+            #[cfg(test)]
+            pressure_samples: Default::default(),
         };
         self
     }
@@ -118,6 +131,9 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn refresh_seat_admission_at(&self, now: u64) {
         let admission = &self.seat_admission;
+        if admission.pressure_dirty.swap(false, Ordering::AcqRel) {
+            self.incremental.touch("host-lane-pressure");
+        }
         if let Some(host) = admission.lanes {
             let observation = (host.outside)();
             let mut previous = admission.outside_observation.lock().unwrap_or_else(PoisonError::into_inner);
@@ -174,6 +190,8 @@ impl<R: RuntimeControl> Reconciler<R> {
 
 impl Controller {
     pub fn pressure_decision(&self) -> Result<fractal_runtime::resource_pressure::Decision> {
+        // This guard covers only the Observer's kernel PSI read and pure Brake update.
+        // Never acquire store, incremental or other reconciliation locks inside it.
         let mut pressure = self.pressure.lock().unwrap_or_else(PoisonError::into_inner);
         if pressure.is_none() {
             *pressure = Some(fractal_runtime::resource_pressure::Observer::new(self.finite_policy.psi_brake.clone())?);
