@@ -528,10 +528,11 @@ impl Store {
             anyhow::ensure!(receipt.incarnation.as_deref() == Some(harness.incarnation_id.as_str())
                 && !matches!(harness.state.as_str(), "ended" | "indeterminate"), "shell owner invocation is no longer live");
         }
-        if owner.run.starts_with("mission-run/") || owner.invocation.as_deref()
+        if owner.run.starts_with("mission-run/") || owner.step.starts_with("step-run/") || owner.invocation.as_deref()
             .is_some_and(|invocation| invocation.starts_with("invocation/") && owner.step != invocation) {
             let step = self.step_run(&owner.step)?.context("shell owner step disappeared")?;
-            anyhow::ensure!(step.run == owner.run && step.attempt == owner.attempt
+            anyhow::ensure!(super::turn_invocations::mission_run_id(&step.run) == super::turn_invocations::mission_run_id(&owner.run)
+                && step.attempt == owner.attempt
                 && super::run_credentials::LIVE_STEP_STATES.contains(&step.status.as_str()), "shell owner attempt is no longer live");
         }
         Ok(())
@@ -1015,6 +1016,67 @@ mod tests {
     }
 
     #[test]
+    fn claimed_work_agent_owner_accepts_canonical_and_stored_raw_runs() {
+        use crate::store::invocation_receipts::append_receipt_tx;
+        let store = Store::open_memory("host-a").unwrap();
+        let agent = "agent/host-a/worker";
+        let step = "step-run/work/owner/g/build";
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"worker","incarnation_id":"exact"})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":"exact"})),
+        ] {
+            store.append_claim(&ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+                fields:serde_json::from_value(fields).unwrap(), evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
+        }
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute("INSERT INTO mission_runs
+                (id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,
+                 workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
+                VALUES('work/owner','mission/test','rev','g','rev','work/owner','{}','person/test','{}','once','running','execution','1','1')", [])?;
+            tx.execute("INSERT INTO run_generations
+                (id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
+                VALUES('g','work/owner','rev','running',?1,'test','1','1')", [agent])?;
+            tx.execute("INSERT INTO step_runs
+                (subject,run_id,generation_id,step_path,definition_hash,status,attempt,goals,
+                 created_at_unix_ms,updated_at_unix_ms)
+                VALUES(?1,'work/owner','g','build','hash','ready',1,'[]','1','1')", [step])?;
+            append_receipt_claim_tx(tx, store.origin(), step, "work.claimed", Some(agent),
+                &json!({"fields":{"attempt":1,"readiness_epoch":0,"claimant":agent,
+                    "claim_incarnation":"exact","claim_expires_at_unix_ms":now_ms() + 60_000}}),
+                &[], None, "claim-owner")?;
+            Ok(())
+        }).unwrap().unwrap();
+        let owner = store.shell_resource_agent_owner(agent).unwrap();
+        let prior_identity = json!(["work/owner", step, 1, 0, agent, "exact", null]);
+        let prior_invocation = format!("invocation/turn-{}",
+            hex::encode(Sha256::digest(prior_identity.to_string().as_bytes())));
+        assert_eq!(owner.invocation.as_deref(), Some(prior_invocation.as_str()),
+            "canonical owner_run must not change the pre-fix claim invocation identity");
+        assert_eq!(owner.run, "mission-run/work/owner");
+        store.shell_resource_owner_live(&owner).unwrap();
+
+        // Persist an actual old-format receipt, rather than only changing an Owner.
+        let mut legacy = store.agent_invocation_receipts(agent).unwrap().pop().unwrap();
+        legacy.owner_run = Some("work/owner".into());
+        legacy.event_key = Some("legacy-owner".into());
+        store.connection.batched(|tx| append_receipt_tx(tx, store.origin(), &legacy)).unwrap().unwrap();
+        let legacy_owner = store.shell_resource_agent_owner(agent).unwrap();
+        assert_eq!(legacy_owner.run, "work/owner");
+        store.shell_resource_owner_live(&legacy_owner).unwrap();
+        let mut without_invocation = legacy_owner.clone();
+        without_invocation.invocation = None;
+        store.shell_resource_owner_live(&without_invocation).unwrap();
+
+        store.connection.batched(|tx| tx.execute(
+            "UPDATE step_runs SET status='completed' WHERE subject=?1", [step])).unwrap().unwrap();
+        for owner in [&owner, &legacy_owner, &without_invocation] {
+            assert!(store.shell_resource_owner_live(owner).unwrap_err().to_string()
+                .contains("shell owner attempt is no longer live"));
+        }
+        assert!(store.shell_resource_agent_owner(agent).is_err());
+    }
+
+    #[test]
     fn agent_owner_is_native_invocation_custody_not_mutable_launch_environment() {
         use crate::store::invocation_receipts::{append_receipt_tx, native_receipt};
         use fractal_schema::invocation::InvocationPhase;
@@ -1044,6 +1106,7 @@ mod tests {
         let mut ended = receipt.clone(); ended.phase = InvocationPhase::Ended;
         store.connection.batched(|transaction| append_receipt_tx(transaction, store.origin(), &ended)).unwrap().unwrap();
         assert!(store.shell_resource_owner_live(&owner).is_err(), "native invocation end fences even a stale ready harness view");
+        assert!(store.shell_resource_agent_owner(agent).is_err(), "latest ended receipt must not fall back to an older live owner");
         store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.observed".into(), actor:None,
             fields:serde_json::from_value(json!({"state":"ended","driver":"omp","incarnation_id":"exact"})).unwrap(),
             evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
