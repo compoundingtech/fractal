@@ -4,7 +4,9 @@
   review [--head REV] [--base REV] [--harness NAME] [--model M] [--author-family F] [--out FILE] [--previous FILE] [--round N]
 
 Reads git diff BASE...HEAD in the current repository (BASE defaults to origin/main, HEAD to HEAD). The deterministic risk floor
-(scripts/review-risk) and the per-file patch-ids are computed here, with no model. The agent CLI named by review-harness.json
+(scripts/review-risk) and the per-file patch-ids are computed here, with no model. A change that adds or drops a table, index,
+trigger or view first runs scripts/schema-checks (the base's copy): the tests that list every schema object, which hosted CI does not
+run for every pull request; a failing one stops the review before any model is asked. The agent CLI named by review-harness.json
 (claude or codex; omp is refused until it can confine its reads) reads the standard and the diff in a detached checkout of the head with read-only tools and answers the
 parts that need judgement; the script assembles the full verdict, takes risk.final as the higher of the two scores, and runs
 scripts/review-validate on it. A verdict that does not validate is not written: the review fails and nothing is signed.
@@ -540,6 +542,21 @@ def deterministic_floor(repo, base, head, paths, folder):
     return json.loads(done.stdout)
 
 
+def schema_checks(repo, base, head, folder):
+    """scripts/schema-checks as BASE has it: a change that adds or drops a table, index, trigger or view runs the tests that list
+    them all, and a failing one stops the review before any model is asked. A base without the script runs nothing."""
+    script = base_script(repo, base, "schema-checks", folder)
+    if not script:
+        return
+    done = subprocess.run([sys.executable, str(script), "--base", base, "--head", head, "--repo", str(repo)],
+                          cwd=repo, capture_output=True, text=True)
+    for line in done.stdout.splitlines():
+        print(line, file=sys.stderr)
+    if done.returncode != 0:
+        print(done.stderr, file=sys.stderr, end="")
+        raise Failed("schema checks failed (scripts/schema-checks); fix them before asking for a review")
+
+
 def carry(previous, *, head, base, patch, digest, deterministic, merge_base):
     """A new head that differs from the reviewed ancestor by nothing but a clean merge of main keeps its verdict."""
     verdict = json.loads(json.dumps(previous))
@@ -596,6 +613,7 @@ def review(args, repo, tools):
         raise Failed("the head has no change against main")
     patch = patch_ids(repo, merge_base, head, paths)
     deterministic = deterministic_floor(repo, base, head, paths, tools)
+    schema_checks(repo, base, head, tools)
     text, digest = standard(repo, base)
     previous = latest_record(repo, head, merge_base, args.previous)
     engine_path = base_script(repo, base, "classify-risk", tools)

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""scripts/schema-checks runs its checks only for a change that adds or drops a schema object, and fails when one fails."""
+import importlib.machinery
+import importlib.util
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader('schema_checks', str(ROOT / 'scripts/schema-checks'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+def git(repo, *args):
+    subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.com', *args], cwd=repo, check=True, capture_output=True)
+
+
+def commit(repo, path, text, message):
+    target = Path(repo) / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', message)
+    return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+
+with tempfile.TemporaryDirectory() as repo:
+    git(repo, 'init', '-q', '-b', 'main')
+    base = commit(repo, 'crates/example/src/lib.rs', 'fn main() {}\n', 'base')
+    plain = commit(repo, 'crates/example/src/lib.rs', 'fn main() { let x = 1; }\n', 'no schema')
+    assert module.schema_lines(repo, base, plain) == [], 'an ordinary change has no schema line'
+    tested = commit(repo, 'crates/example/src/tests.rs', 'const T: &str = "CREATE TABLE t(x)";\n', 'a table in a test file under src')
+    table = commit(repo, 'crates/example/src/store.rs', 'const S: &str = "CREATE TABLE IF NOT EXISTS claim_new(id TEXT)";\n', 'a table')
+    found = module.schema_lines(repo, plain, table)
+    assert sorted(path for path, _ in found) == ['crates/example/src/store.rs', 'crates/example/src/tests.rs'], found
+    dropped = commit(repo, 'crates/example/src/store.rs', 'const S: &str = "DROP TRIGGER IF EXISTS old_v1";\n', 'a drop')
+    assert module.schema_lines(repo, table, dropped), 'a dropped trigger counts'
+    outside = commit(repo, 'docs/schema.md', 'CREATE TABLE in prose\n', 'docs')
+    assert module.schema_lines(repo, dropped, outside) == [], 'only crate sources count'
+
+    # Nothing to run: success without touching cargo.
+    module.CHECKS = [('never', ['false'])]
+    assert module.run(repo, base, plain) == 0
+    # A schema change runs the checks; a failing one fails the run, a passing one passes.
+    assert module.run(repo, plain, outside) == 1
+    module.CHECKS = [('passes', ['true'])]
+    assert module.run(repo, plain, outside) == 0
+    # The checks run in the checkout, so it must be at the head.
+    assert module.run(repo, plain, table) == 2
+print('schema-checks-test: ok')
