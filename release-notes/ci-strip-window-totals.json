@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Select visible tab windows with linear running totals instead of repeatedly summing overlapping intervals.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Window selection and clipping remain equivalent; exhaustive window assertions are preserved."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery changes."
+  }
+}
