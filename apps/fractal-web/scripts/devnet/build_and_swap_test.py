@@ -105,6 +105,16 @@ else:
             node.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
 assert os.environ.get('SNAPSHOT_LEASE_SANDBOX') == '1', 'builder bypassed sandbox CLI'
+owner = pathlib.Path.cwd().parents[1]
+records = [json.loads(path.read_text()) for path in
+           (pathlib.Path(os.environ['MEGAREPO_STORE']) / '.state/deletion-leases').glob('*.lease')]
+holder = next(record['pid'] for record in records if record['ownerPath'] == str(owner))
+ancestor, visited = os.getpid(), set()
+while ancestor != holder and ancestor > 0 and ancestor not in visited:
+    visited.add(ancestor)
+    stat = pathlib.Path(f'/proc/{ancestor}/stat').read_text()
+    ancestor = int(stat[stat.rfind(')') + 2:].split()[1])
+assert ancestor == holder, 'builder is not a descendant of the native mr lease holder'
 if os.environ.get('SNAPSHOT_LEASE_HOLD') == '1':
     print('READY:' + os.getcwd(), flush=True)
     with pathlib.Path(os.environ['SNAPSHOT_LEASE_RELEASE']).open() as stream:
@@ -124,6 +134,17 @@ sealed.chmod(0o500)
 ''')
             git.chmod(0o755)
             node.chmod(0o755)
+            # The packaged mr prepends its real Git for admission. Restore the
+            # synthetic tools only in the admitted command, never inside mr.
+            mr = binary / 'mr'
+            mr.write_text(f'#!{sys.executable}\n' + f'''
+import os, sys
+args = sys.argv[1:]
+separator = args.index('--') + 1
+os.execv({shutil.which('mr')!r}, [{shutil.which('mr')!r}, *args[:separator],
+         {shutil.which('env')!r}, 'PATH=' + os.environ['PATH'], *args[separator:]])
+''')
+            mr.chmod(0o755)
             # Emulate the deployment wrapper's getcwd guard. The old EXIT trap
             # removed its own cwd before this command and therefore failed.
             rm = binary / 'rm'
