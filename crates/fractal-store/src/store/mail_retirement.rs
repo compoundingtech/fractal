@@ -18,7 +18,7 @@
 //! a time inside a writer hold bounded by a time budget, and never touches envelopes,
 //! checkpoints or seals. Stream mail lives in the messages shard and is not touched here.
 use super::*;
-use smallclaims::store::checkpoint::{ClaimTombstone, delete_dropped_rows_tx};
+use smallclaims::store::checkpoint::{ClaimTombstone, delete_dropped_rows_tx, young_signed_claim_tx};
 use std::time::{Duration, Instant};
 
 /// A closed thread stays this long before it retires: 7 days.
@@ -117,6 +117,14 @@ impl Store {
                 // one waits behind the cursor for the next step.
                 let finished = !cut
                     && match judgement {
+                        // The forget bound still holds a claim of it: name it, defer the thread
+                        // and go on, rather than fail the step on it every time.
+                        Judgement::Retire(claims) if let Some(young) = young_signed_claim_tx(&transaction, &[],
+                            &claims.iter().map(|(id, operation, _)| tombstone(id, operation.clone())).collect::<Vec<_>>())? => {
+                            eprintln!("fractal: mail retirement deferred {subject}: signed claim {young} is inside the freshness window's forget bound");
+                            still_deferred.push(subject.clone());
+                            true
+                        }
                         Judgement::Retire(claims) => delete_thread(&transaction, claims, started, budget, &mut done)?,
                         Judgement::Keep => true,
                         Judgement::Defer => {

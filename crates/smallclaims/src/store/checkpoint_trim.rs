@@ -1059,6 +1059,24 @@ impl Store {
                 };
                 body_bytes += stages.time("body_bytes", || claim_body_bytes(&transaction, &envelope_claims))?;
                 // The runtime's work around the delete is what the hook took beyond its statements.
+                // The forget bound holds a signed claim this cut would delete (a trim planned before
+                // the bound, resumed now): set the cut aside and name it, so the next day's cut,
+                // which keeps such claims, goes on instead of this one failing every step.
+                if let Some(young) = super::checkpoint::young_signed_claim_tx(&transaction, envelope.as_slice(), &envelope_claims)? {
+                    transaction.rollback()?;
+                    drop(connection);
+                    self.set_checkpoint_state(checkpoint, 0, "set-aside")?;
+                    self.checkpoint_diagnostic(
+                        "checkpoint-trim-young-signed-claim",
+                        &format!(
+                            "{checkpoint} would delete signed claim {young}, whose batch is inside the \
+                             freshness window's forget bound; the cut is set aside and the next day's \
+                             cut keeps such claims"
+                        ),
+                        checkpoint,
+                    )?;
+                    return Ok(());
+                }
                 let hooked = std::time::Instant::now();
                 let (deleted, deletes) = timing_deletes(|| {
                     self.runtime.delete_trimmed_claims_tx(&transaction, &envelope_claims, &mut || {

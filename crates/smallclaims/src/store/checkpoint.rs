@@ -320,15 +320,15 @@ fn forget_clock(connection: &Connection) -> u64 {
     u64::try_from(now.max(0)).unwrap_or(u64::MAX)
 }
 
-/// The forget bound of the freshness window: no path forgets a signed claim whose batch is younger
-/// than `principal::FORGET_SIGNED_AFTER_MS`. Planners keep such claims; this refuses the whole
-/// deletion, so a planner that gets it wrong fails loudly and drops nothing. Batches timed before
-/// the window could first matter (the cutover less the window) are judged as before and not held.
-fn refuse_young_signed_claims_tx(
+/// The first signed claim among these that the forget bound of the freshness window still holds:
+/// its batch is younger than `principal::FORGET_SIGNED_AFTER_MS` by the store's write clock.
+/// Batches timed before the window could first matter (the cutover less the window) are not held.
+/// A planner asks before it deletes, so it can skip the item and go on.
+pub fn young_signed_claim_tx(
     transaction: &Transaction<'_>,
     envelopes: &[EnvelopeTombstone],
     claims: &[ClaimTombstone],
-) -> Result<()> {
+) -> Result<Option<String>> {
     use crate::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS, FRESHNESS_WINDOW_MS};
     let now = forget_clock(transaction);
     let youngest_forgettable = now.saturating_sub(FORGET_SIGNED_AFTER_MS);
@@ -342,7 +342,7 @@ fn refuse_young_signed_claims_tx(
         if let Some(time) = by_claim.query_row(/* sqlite-large-value: allow-for-now lv-h3c5dadd92175 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, i64>(0)).optional()?
             && young(time)
         {
-            anyhow::bail!("refusing to forget signed claim {}: its batch is younger than the forget bound", claim.id);
+            return Ok(Some(claim.id.clone()));
         }
     }
     let mut by_envelope = transaction.prepare_cached(
@@ -357,8 +357,21 @@ fn refuse_young_signed_claims_tx(
             .optional()?
             && young(time)
         {
-            anyhow::bail!("refusing to forget signed claim {id}: its batch is younger than the forget bound");
+            return Ok(Some(id));
         }
+    }
+    Ok(None)
+}
+
+/// The deletion's own backstop: refuse the whole deletion when the forget bound holds one of its
+/// signed claims, and drop nothing. Planners ask `young_signed_claim_tx` first and skip the item.
+fn refuse_young_signed_claims_tx(
+    transaction: &Transaction<'_>,
+    envelopes: &[EnvelopeTombstone],
+    claims: &[ClaimTombstone],
+) -> Result<()> {
+    if let Some(id) = young_signed_claim_tx(transaction, envelopes, claims)? {
+        anyhow::bail!("refusing to forget signed claim {id}: its batch is younger than the forget bound");
     }
     Ok(())
 }

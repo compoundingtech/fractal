@@ -381,3 +381,30 @@ fn a_late_claim_after_the_close_defers_the_thread_until_it_is_past_the_bound() {
     assert!(ids.iter().all(|id| claims(&store).contains(id)));
     assert_eq!(at(late + FORGET_SIGNED_AFTER_MS + DAY_MS / 2), 1, "once every claim is past the bound it retires");
 }
+
+/// If the planner ever judges a thread retirable while the forget bound still holds a claim of it,
+/// the step defers that thread and retires the rest, rather than failing on it every step.
+#[test]
+fn a_thread_the_bound_still_holds_is_deferred_and_the_step_goes_on() {
+    use smallclaims::principal::FRESHNESS_FROM_UNIX_MS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    // An old thread, from before the window could matter.
+    store.set_write_clock_at(u128::from(FRESHNESS_FROM_UNIX_MS - 30 * DAY_MS)).unwrap();
+    let old = thread(&store, "message/old", SENDER, RECIPIENT, true);
+    // A thread in a young batch whose claims read old, so the planner judges it retirable.
+    let young_at = FRESHNESS_FROM_UNIX_MS + 60_000;
+    store.set_write_clock_at(u128::from(young_at)).unwrap();
+    let held = thread(&store, "message/held", SENDER, RECIPIENT, true);
+    store.replication_snapshot().unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h2893cb7603a8 owner=fractal_store::store::mail_retirement_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE subject='message/held'",
+        [(young_at - 9 * DAY_MS).to_string()]).unwrap();
+    let now = young_at + 2 * DAY_MS;
+    store.set_write_clock_at(u128::from(now)).unwrap();
+    let (threads, _) = retire_all(&store, now);
+    assert_eq!(threads, 1, "the old thread retires in the same steps");
+    assert!(old.iter().all(|id| retired(&store).contains(id)));
+    assert!(held.iter().all(|id| claims(&store).contains(id)), "the held thread stays");
+}
