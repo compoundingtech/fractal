@@ -866,6 +866,7 @@ use super::*;
         let store = Arc::new(super::super::Store::open(&root.path().join("claims.sqlite"), "node").unwrap());
         let worker_store = store.clone();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _runtime = runtime.enter();
         let budget = ReadBudget::new("/v1/read-probe", Duration::from_secs(10));
         let _origin = telemetry::enter_origin(telemetry::route_origin("GET", "/v1/read-probe"));
         with_store(Some(store), || read_budget::with(Some(budget), || runtime.block_on(
