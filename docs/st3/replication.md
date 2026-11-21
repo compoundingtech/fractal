@@ -154,7 +154,7 @@ it supplies no generation witness and cannot authorize a same-UID process.
 Unreadable same-UID processes, unknown ownership, exited or changed processes fail closed.
 A completed same-UID walk without any identity variable is a person.
 On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
-Failed inspection denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER`
+Failed inspection denies backup/proof exports, attributed internal routes, `LOCAL_PERSON_HEADER`
 sessions and actor/requester body impersonation; it does not deny every public request.
 The same macOS PID-reuse residual risk applies to this ancestry inspection.
 
@@ -165,8 +165,17 @@ Operator fleet routes retain their existing local authority boundary.
 
 
 Adapters that retain a departing member's transport must instead make their
-decision from one `GET /v1/internal/fleet/leave-state` response:
+decision from one `GET /v1/internal/fleet/leave-state` response.
 
+This read-only snapshot requires only local same-UID access, not an agent identity.
+An unreadable ancestor does not refuse this GET/HEAD read; person headers still require
+verified attribution, and identified agent/run callers remain excluded from internal
+routes. No service-manager environment exception or companion credential is needed.
+If the snapshot read fails (including HTTP 422), the Fabric adapter records an error
+status and tries again after its configured interval without contacting Fabric or
+changing existing grants. Grants therefore remain stale until a read succeeds.
+
+Snapshot shape:
 ```json
 {
   "fleet_id": "fleet-id",
