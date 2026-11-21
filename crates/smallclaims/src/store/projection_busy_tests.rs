@@ -372,6 +372,45 @@ fn serialized_checkpoint_defers_for_a_reader_and_recycles_after_release() {
 }
 
 #[test]
+fn wal_journal_size_limit_reclaims_a_checkpointed_high_water_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    // Reopen too: journal_size_limit is connection-local, not persisted in the database.
+    drop(Store::open(&path, "node", Arc::new(Plain)).unwrap());
+    let store = Store::open(&path, "node", Arc::new(Plain)).unwrap();
+    let writer = store.connection.write();
+    for schema in [rusqlite::DatabaseName::Main, rusqlite::DatabaseName::Attached("blob_file")] {
+        assert_eq!(
+            writer.pragma_query_value(Some(schema), "journal_size_limit", |row| row.get::<_, i64>(0)).unwrap(),
+            super::WAL_JOURNAL_SIZE_LIMIT,
+        );
+    }
+    // Exercise SQLite's real reset semantics with a small limit instead of writing 512 MiB.
+    const TEST_LIMIT: u64 = 64 * 1024;
+    writer.pragma_update(None, "journal_size_limit", TEST_LIMIT).unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer.execute_batch("CREATE TABLE wal_limit_test(value BLOB);
+        INSERT INTO wal_limit_test VALUES(zeroblob(262144));").unwrap();
+    let wal = path.with_extension("sqlite3-wal");
+    assert!(std::fs::metadata(&wal).unwrap().len() > TEST_LIMIT);
+    let (busy, frames, copied): (i32, i32, i32) = writer.query_row(
+        "PRAGMA wal_checkpoint(PASSIVE)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(busy, 0);
+    assert_eq!(frames, copied);
+    // PASSIVE copies but does not truncate. The next writer resets and enforces the limit.
+    assert!(std::fs::metadata(&wal).unwrap().len() > TEST_LIMIT);
+    writer.execute("INSERT INTO wal_limit_test VALUES(NULL)", []).unwrap();
+    assert!(std::fs::metadata(&wal).unwrap().len() <= TEST_LIMIT);
+    drop(writer);
+    // The daemon's existing zero-busy-timeout TRUNCATE path can reclaim it immediately too.
+    let checkpoint = Connection::open(&path).unwrap();
+    assert!(store.checkpoint_idle_wal(&checkpoint).unwrap());
+    assert_eq!(std::fs::metadata(wal).unwrap().len(), 0);
+    assert_eq!(checkpoint.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
 fn truncate_requests_the_fifo_writer_before_changing_the_wal() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claims.sqlite3");
