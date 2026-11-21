@@ -50,6 +50,7 @@ pub use isolate::{
     initialize_isolation, mode as isolation_mode, scope_unit, signal_scope, systemd_user_available,
     warn_if_degraded, wrap as wrap_isolated,
 };
+pub use isolate::darwin_slot;
 pub use priority::{
     BACKGROUND_IO_LEVEL, BACKGROUND_NICE, LIVE_WEIGHT, PRIORITY_ENV, SeatPriority, ServerPlacement,
     protect_server, protect_servers, report as priority_report, server_unit,
