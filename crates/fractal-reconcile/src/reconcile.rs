@@ -1510,7 +1510,7 @@ fn first_readiness_since(run: &MissionRunView) -> u128 {
         .max(run.created_at_unix_ms)
 }
 
-type MemberWake = (DesiredSubject, String, MemberSpec);
+type MemberWake = (DesiredSubject, String, MemberSpec, RequestedRestart);
 #[cfg(any(test, feature = "test-support"))]
 pub type WorkWakeObserveHook = Box<dyn FnOnce(&crate::incremental::Incremental, bool) + Send>;
 #[cfg(any(test, feature = "test-support"))]
@@ -4168,6 +4168,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     (**subject).clone(),
                                     incarnation,
                                     member.clone(),
+                                    RequestedRestart::Continue,
                                 ));
                             }
                             return Ok(());
@@ -4204,6 +4205,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     (**subject).clone(),
                                     incarnation.to_owned(),
                                     old,
+                                    RequestedRestart::Continue,
                                 ));
                             }
                             return Ok(());
@@ -4361,6 +4363,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         (**subject).clone(),
                                         incarnation.to_owned(),
                                         member.clone(),
+                                        restart,
                                     ));
                                 }
                             }
@@ -4542,7 +4545,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // is recorded with that delivery.
             let deferred = work_message_agents
                 .last()
-                .is_some_and(|(declaration, _, _)| declaration.subject == subject.subject);
+                .is_some_and(|(declaration, _, _, _)| declaration.subject == subject.subject);
             if deferred {
                 evaluated_member_wakes.insert(subject.subject.clone());
                 if let Err(error) = result {
@@ -4641,7 +4644,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             after(&self.incremental, skip_wakes);
         }
         let mut wakes = BTreeSet::new();
-        for (declaration, incarnation, member) in work_message_agents {
+        for (declaration, incarnation, member, restart) in work_message_agents {
             let agent = &declaration.subject;
             let item = format!("wake:{agent}@{incarnation}");
             wakes.insert(item.clone());
@@ -4660,7 +4663,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &item,
                 skip_wakes,
                 || self.owned_desired_check(&declaration),
-                || self.reconcile_work_messages(agent, &incarnation, Some(&member)),
+                || self.reconcile_work_messages(agent, &incarnation, Some(&member), restart),
             );
             let result = match result {
                 ReconcileItemOutcome::Rejected | ReconcileItemOutcome::GuardFailed => {
@@ -6488,6 +6491,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         incarnation: &str,
         step: &StepRunView,
         member: &MemberSpec,
+        restart: RequestedRestart,
     ) -> Result<bool> {
         if !step.fresh_context
             && member.tags.get("st3.fresh_context").map(String::as_str) != Some("true")
@@ -6561,6 +6565,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(format!("{operation}:request")),
             })?;
             self.signal_changed();
+        }
+        // Record context intent so the accepted restart can satisfy it, but let
+        // that restart's acknowledgement/deadline own the physical stop.
+        if restart == RequestedRestart::WaitingForPreparation {
+            return Ok(false);
         }
         let observation = RuntimeObservation {
             runtime_id: member.runtime_id.clone(),
@@ -6696,6 +6705,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         agent: &str,
         incarnation: &str,
         member: Option<&MemberSpec>,
+        restart: RequestedRestart,
     ) -> Result<()> {
         let incarnation_key = harness_incarnation_key(incarnation);
         // Closed work wakes still count as attempts. A closed wake can mean the
@@ -6846,7 +6856,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(());
             }
             if let Some(member) = member
-                && !self.prepare_fresh_context(agent, incarnation, step, member)?
+                && !self.prepare_fresh_context(agent, incarnation, step, member, restart)?
             {
                 return Ok(());
             }
@@ -6869,7 +6879,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             if let Some(member) = member
-                && !self.prepare_fresh_context(agent, incarnation, step, member)?
+                && !self.prepare_fresh_context(agent, incarnation, step, member, restart)?
             {
                 continue;
             }
@@ -22942,7 +22952,7 @@ fn member_fields(
     ])
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestedRestart {
     Continue,
     Handled,

@@ -38,17 +38,23 @@ fn join_launch(reconciler: &Reconciler<FakeRuntime>, runtime: &FakeRuntime) -> S
 
 #[test]
 fn plain_restart_preparation_keeps_idle_omp_observable_until_ack_or_deadline() {
-    for acknowledge in [true, false] {
+    for (acknowledge, context) in [
+        (true, "ordinary"), (false, "ordinary"),
+        (true, "work"), (false, "work"),
+        (true, "seat"), (false, "seat"),
+    ] {
         let _clock = Clock;
         let origin = 1_800_000_000_000;
         smallclaims::store::set_thread_clock(Some(origin));
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let seat_context = if context == "seat" { "fresh-context" } else { "" };
+        let work_context = if context == "work" { "fresh-context" } else { "" };
         let source = |revision: &str| format!(r#"version 2
-agent "example/worker" {{ workspace {:?}; harness "omp" {{}}; env {{ REVISION "{revision}" }}; restart "never" }}
+agent "example/worker" {{ workspace {:?}; harness "omp" {{}}; env {{ REVISION "{revision}" }}; restart "never"; {seat_context} }}
 mission "example/work" state="ready" {{
   goal "Keep work delivery available during restart preparation."
-  step "work" {{ assigned-to "agent/example/worker" }}
+  step "work" {{ assigned-to "agent/example/worker"; {work_context} }}
 }}
 "#, root.path().display().to_string());
         apply_source(&store, &source("one"), "initial");
@@ -92,7 +98,10 @@ mission "example/work" state="ready" {{
         assert_eq!(deadline, origin + RESTART_PREPARE_DEADLINE_MS);
         let inbox = store.messages(Some(AGENT), true).unwrap();
         assert!(inbox.iter().any(|message| message.title.as_deref() == Some("Prepare for restart")), "prepare must reach the incumbent: {inbox:?}");
-        assert!(inbox.iter().any(|message| message.content.contains(&run.steps[0].subject)), "ready work must still reach the incumbent: {inbox:?}");
+        assert_eq!(inbox.iter().any(|message| message.content.contains(&run.steps[0].subject)), context == "ordinary",
+            "ordinary work stays deliverable; fresh-context work waits for replacement: {context}: {inbox:?}");
+        assert_eq!(run.steps[0].fresh_context, context == "work");
+        assert_eq!(desired.member.as_ref().unwrap().tags.get("st3.fresh_context").map(String::as_str) == Some("true"), context == "seat");
         let actual = store.latest_actual_value(AGENT).unwrap().unwrap();
         assert_eq!(actual["status"], "running");
         assert_eq!(actual["incarnation_id"], old);
@@ -128,5 +137,7 @@ mission "example/work" state="ready" {{
         assert_eq!(store.latest_actual_value(AGENT).unwrap().unwrap()["status"], "running");
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
         assert_eq!(runtime.starts.lock().unwrap().len(), 2, "one initial launch and exactly one replacement");
+        let context_requests = store.observations_for(AGENT, "runtime.action.requested").unwrap();
+        assert_eq!(context_requests.iter().filter(|claim| claim.body["fields"]["action"] == "fresh-context").count(), usize::from(context != "ordinary"));
     }
 }
