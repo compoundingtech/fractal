@@ -354,3 +354,30 @@ fn a_signed_thread_stays_until_the_forget_bound() {
     assert_eq!(at(FORGET_SIGNED_AFTER_MS + DAY_MS / 2), 1, "past the bound it retires");
     assert!(ids.iter().all(|id| retired(&store).contains(id)));
 }
+
+/// A claim written after the close (a late read) keeps the thread until it too is past the bound:
+/// the deletion would refuse it otherwise, and stop retirement on every step.
+#[test]
+fn a_late_claim_after_the_close_defers_the_thread_until_it_is_past_the_bound() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let written = FRESHNESS_FROM_UNIX_MS + 60_000;
+    store.set_write_clock_at(u128::from(written)).unwrap();
+    let ids = thread(&store, "message/late-read", SENDER, RECIPIENT, true);
+    // The read came six days after the close: date it so, as a late arrival would be.
+    let late = written + 6 * DAY_MS;
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h28bf96438147 owner=fractal_store::store::mail_retirement_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE subject='message/late-read' AND kind='message.read'",
+        [late.to_string()]).unwrap();
+    let at = |now: u64| {
+        store.set_write_clock_at(u128::from(now)).unwrap();
+        retire_all(&store, now).0
+    };
+    // The close is past the bound, the late read is not: the thread waits, and the step does
+    // not fail.
+    assert_eq!(at(written + FORGET_SIGNED_AFTER_MS + DAY_MS / 2), 0);
+    assert!(ids.iter().all(|id| claims(&store).contains(id)));
+    assert_eq!(at(late + FORGET_SIGNED_AFTER_MS + DAY_MS / 2), 1, "once every claim is past the bound it retires");
+}

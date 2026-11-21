@@ -309,7 +309,6 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h98693fb60771 owner=smallclai
     Ok(())
 }
 
-/// Delete dropped claims and their envelopes from a store. The trim uses the same code.
 /// The clock a forget is judged by: the store's write clock, which a simulation can fix or shift
 /// (`Store::set_write_clock_at`), otherwise this host's.
 fn forget_clock(connection: &Connection) -> u64 {
@@ -364,6 +363,7 @@ fn refuse_young_signed_claims_tx(
     Ok(())
 }
 
+/// Delete dropped claims and their envelopes from a store. The trim uses the same code.
 pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn delete_dropped_rows_tx(
     transaction: &Transaction<'_>,
     envelopes: &[EnvelopeTombstone],

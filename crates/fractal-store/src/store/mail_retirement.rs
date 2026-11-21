@@ -67,7 +67,8 @@ enum Judgement {
     Retire(Vec<(String, Option<String>, String)>),
     /// A person's thread, a cited one, or one already gone.
     Keep,
-    /// Closed, but its sent claim has not arrived: judge it again later.
+    /// Closed, but its sent claim has not arrived, or a claim of it is younger than the cutoff:
+    /// judge it again later.
     Defer,
 }
 
@@ -83,8 +84,9 @@ impl Store {
         }
         // Citations live in claim bodies; the cache answers who cites a thread without reading them.
         self.catch_up_local_trim_citations()?;
-        // A week after the close, and never inside the freshness window's forget bound: the close
-        // is a thread's newest claim, and a claim is accepted no earlier than its batch.
+        // A week after the close, and never inside the freshness window's forget bound. `judge`
+        // also waits for every claim of the thread to pass it; a claim is accepted no earlier
+        // than its batch.
         let cutoff = now_ms.saturating_sub(RETAIN_AFTER_CLOSE_MS.max(smallclaims::principal::FORGET_SIGNED_AFTER_MS));
         let (after, mut deferred) = self.retirement_progress()?;
         // Deferred threads first, the oldest first; one still deferred goes to the back.
@@ -330,6 +332,13 @@ fn judge(
     });
     if depth > 0 && !old_enough {
         return Ok(Judgement::Keep);
+    }
+    // The close is not always the newest claim: a delivery or a read can be written or arrive
+    // after it. Every claim must be past the cutoff, which is never inside the freshness
+    // window's forget bound, or the deletion would refuse the thread on every step.
+    let all_old = claims.iter().all(|(_, _, _, _, _, accepted, _)| accepted.parse::<u64>().is_ok_and(|accepted| accepted <= cutoff));
+    if !all_old {
+        return Ok(if depth == 0 { Judgement::Defer } else { Judgement::Keep });
     }
     let own: std::collections::BTreeSet<&str> = claims.iter().map(|(id, ..)| id.as_str()).collect();
     for (id, ..) in &claims {
