@@ -48,9 +48,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         loop {
             interval.tick().await;
             let this = self.clone();
-            let decision = tokio::task::spawn_blocking(move || {
+            let decision = match tokio::task::spawn_blocking(move || {
                 crate::task_cpu::blocking("resource.pressure", || this.seat_admission.pressure_decision())
-            }).await.expect("PSI sampler panicked");
+            }).await {
+                Ok(decision) => decision,
+                Err(error) => {
+                    tracing::error!(%error, "PSI sampler task failed");
+                    continue;
+                }
+            };
             match decision {
                 Ok(decision) if previous != Some(decision) => {
                     tracing::info!(blocked = decision.blocked, reason = ?decision.reason, "host PSI brake decision");
