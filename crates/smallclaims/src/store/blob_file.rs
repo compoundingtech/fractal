@@ -40,6 +40,12 @@ pub const FENCED_FROM: &str = "blob_file_fenced_from";
 /// in the blob file, so it commits with the copies it counts.
 pub const COPIED: &str = "copied_through";
 
+/// `meta`: the rowid at or below which compaction relocates emptied rows, fixed when it starts:
+/// the move's cursor then, so every row it covers has already let go of its bytes.
+pub const COMPACT_THROUGH: &str = "blob_compact_through";
+/// `meta`: the last rowid compaction has dealt with.
+pub const COMPACT_CURSOR: &str = "blob_compact_cursor";
+
 /// Rows one step considers.
 const PAGE: i64 = 64;
 
@@ -154,6 +160,17 @@ pub fn copy_beside(database: &Path, shared_memory: bool, copy: &Path) -> Result<
     attach_reader(&connection, database)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h1145b31da060 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "VACUUM blob_file INTO ?1", [&target])?;
     Ok(())
+}
+
+/// What one compaction step did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BlobCompaction {
+    /// Rows given a rowid past every other.
+    pub relocated: usize,
+    /// The step's writer hold.
+    pub hold: Duration,
+    /// Whether rows up to the frontier remain.
+    pub more: bool,
 }
 
 /// What one step of moving or restoring did.
@@ -301,6 +318,104 @@ impl Store {
         Ok(done)
     }
 
+    /// Pack the `blobs` rows whose bytes moved, one bounded writer hold a step. SQLite doesn't
+    /// merge pages when a row shrinks, so once the move has emptied them the rows sit sparse on
+    /// their old pages. Each step gives the next of them, in rowid order up to [`COMPACT_THROUGH`],
+    /// a rowid past every other, which packs them densely at the table's end and leaves their old
+    /// pages to the freelist, for the caller's paced incremental vacuum to give back. Updating
+    /// only the rowid keeps the hash, so `documents.hash` and every lookup by hash are untouched.
+    /// It waits while the move is between a copy and its emptying, and refuses a table with a
+    /// trigger, which a rowid update would fire. A blob of zero bytes, which has no bytes to move,
+    /// is packed the same way. The rows to relocate are read before the writer is taken, and each
+    /// relocation re-checks that its row has no bytes. Call again while `more`.
+    pub fn compact_blob_rows_step(&self, batch: usize, budget: Duration) -> Result<BlobCompaction> {
+        let reader = self.readers.get();
+        let triggers: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM main.sqlite_schema WHERE type='trigger' AND tbl_name='blobs'",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(triggers == 0, "blobs has {triggers} trigger(s), which relocating its rows would fire");
+        let (emptied, copied, through, cursor): (i64, i64, Option<i64>, i64) = reader.query_row(
+            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?1), 0),
+                    COALESCE((SELECT CAST(value AS INTEGER) FROM blob_file.meta WHERE key=?2), 0),
+                    (SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?3),
+                    COALESCE((SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?4), 0)",
+            params![CURSOR, COPIED, COMPACT_THROUGH, COMPACT_CURSOR],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let mut done = BlobCompaction::default();
+        // Nothing has let go of its bytes yet, or the move holds copies it has yet to empty.
+        if emptied == 0 || copied > emptied {
+            return Ok(done);
+        }
+        let through = through.unwrap_or(emptied);
+        if cursor >= through {
+            return Ok(done);
+        }
+        let page: Vec<i64> = reader
+            .prepare_cached(
+                "SELECT rowid FROM blobs WHERE rowid>?1 AND rowid<=?2 AND length(bytes)=0 ORDER BY rowid LIMIT ?3",
+            )?
+            .query_map(params![cursor, through, i64::try_from(batch).unwrap_or(i64::MAX)], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(reader);
+        let connection = self.connection.write_background();
+        let started = Instant::now();
+        super::durability::committing_without_fsync(&connection, || {
+            let transaction = connection.unchecked_transaction()?;
+            // The move has dealt with every row there is: the relocated rows, empty, need none
+            // of its passes, so its cursors move past them rather than page through them again.
+            // Read under the writer, as the move's own steps write them.
+            let caught_up: bool = transaction.query_row(
+                "SELECT COALESCE((SELECT MAX(rowid) FROM blobs), 0)<=moved AND copied>=moved
+                 FROM (SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?1), 0) AS moved,
+                              COALESCE((SELECT CAST(value AS INTEGER) FROM blob_file.meta WHERE key=?2), 0) AS copied)",
+                params![CURSOR, COPIED],
+                |row| row.get(0),
+            )?;
+            let mut last = if page.len() < batch { through } else { *page.last().unwrap_or(&through) };
+            {
+                let mut relocating = transaction.prepare_cached(
+                    /* sqlite-large-value: allow-for-now lv-hd0083a887d5d owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "UPDATE blobs SET rowid=(SELECT MAX(rowid)+1 FROM blobs) WHERE rowid=?1 AND length(bytes)=0",
+                )?;
+                for (n, &rowid) in page.iter().enumerate() {
+                    if n > 0 && started.elapsed() >= budget {
+                        last = page[n - 1];
+                        break;
+                    }
+                    done.relocated += relocating.execute(/* sqlite-large-value: allow-for-now lv-h6fc82c88c317 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])?;
+                }
+            }
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h591299972bff owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO main.meta(key, value) VALUES (?1, ?2)",
+                params![COMPACT_THROUGH, through.to_string()],
+            )?;
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h33d0c971f40a owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
+                params![COMPACT_CURSOR, last.to_string()],
+            )?;
+            if caught_up {
+                let end: i64 = transaction.query_row("SELECT COALESCE(MAX(rowid), 0) FROM blobs", [], |row| row.get(0))?;
+                // Two files, each committing on its own: either cursor alone past the relocated
+                // rows is safe, since both passes skip a row without bytes.
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-hf64a77d17140 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
+                    params![CURSOR, end.to_string()],
+                )?;
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h092b1cde716b owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO blob_file.meta(key, value) VALUES (?1, ?2)",
+                    params![COPIED, end.to_string()],
+                )?;
+            }
+            done.more = last < through;
+            transaction.commit()?;
+            Ok(())
+        })?;
+        done.hold = started.elapsed();
+        Ok(done)
+    }
+
     /// Whether everything committed to the blob file is on disk: a PASSIVE checkpoint, from a
     /// connection of its own so the writer is not held, copied every frame of its WAL into the
     /// file and synced it. A private in-memory store's blob file has no disk to wait on.
@@ -379,7 +494,7 @@ pub fn restore_page(connection: &Connection, now_ms: u64) -> Result<BlobBytes> {
         )?;
         for &(rowid, size) in &page {
             anyhow::ensure!(
-                restoring.execute(/* sqlite-large-value: allow-for-now lv-h6fc82c88c317 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])? == 1,
+                restoring.execute(/* sqlite-large-value: allow-for-now lv-h954b3095a645 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])? == 1,
                 "blob row {rowid} has no bytes here or in the blob file; the store can't be restored"
             );
             done.rows += 1;
