@@ -36,7 +36,7 @@ fn inline_ask(mut text: &str, base: Style, theme: &Theme) -> Vec<Run> {
             runs.push(run(c.to_string(), base));
             consumed = 1 + c.len_utf8();
         } else if text.starts_with("![") {
-            // An image remains source, including its destination; never register a link.
+            // An image remains readable source; its visible HTTP(S) address is linkable.
             if let Some(end) = text.find(')') {
                 consumed = end + 1;
                 runs.push(run(&text[..consumed], base));
@@ -56,8 +56,8 @@ fn inline_ask(mut text: &str, base: Style, theme: &Theme) -> Vec<Run> {
                 let url = &target[..end];
                 consumed = 1 + label_end + 2 + end + 1;
                 if url.starts_with("https://") || url.starts_with("http://") {
-                    let style = link_style(base.fg(theme.blue).add_modifier(Modifier::UNDERLINED), url);
-                    runs.extend(inline_ask(&after[..label_end], style, theme));
+                    let style = base.fg(theme.blue).add_modifier(Modifier::UNDERLINED);
+                    runs.extend(inline_ask(&after[..label_end], style, theme).into_iter().map(|run| link(run.text, url, run.style)));
                 } else {
                     runs.push(run(&text[..consumed], base));
                 }
@@ -81,7 +81,7 @@ fn inline_ask(mut text: &str, base: Style, theme: &Theme) -> Vec<Run> {
         if consumed == 0 {
             let c = text.chars().next().unwrap_or_default();
             consumed = c.len_utf8();
-            if let Some(last) = runs.last_mut().filter(|last| last.style == base) {
+            if let Some(last) = runs.last_mut().filter(|last| last.style == base && last.link.is_none()) {
                 last.text.push(c);
             } else {
                 runs.push(run(c.to_string(), base));
@@ -172,7 +172,10 @@ mod tests {
                 let (lines, links) = super::super::ask_markdown_with_links(case["source"].as_str().unwrap(), width, Style::default(), &Theme::default());
                 assert!(!lines.is_empty());
                 assert!(links.iter().all(|link| link.url.starts_with("http://") || link.url.starts_with("https://")));
-                if case["name"] == "unsupported" { assert!(links.is_empty()); }
+                if case["name"] == "unsupported" {
+                    assert!(!links.is_empty(), "visible raw URLs retain their full targets");
+                    assert!(links.iter().all(|link| matches!(link.url.as_str(), "https://example.com/no-fetch.png" | "https://example.com/not-auto-linked")));
+                }
                 if let Some(expected) = case["expected_text"].as_str() {
                     assert_eq!(lines.iter().map(plain).collect::<String>(), expected);
                 }
@@ -199,7 +202,7 @@ mod tests {
             assert!(inline_ask(source, Style::default(), &theme).iter().any(|run| run.text == "both" && run.style.add_modifier.contains(Modifier::BOLD | Modifier::ITALIC)));
         }
         let (_, links) = super::super::ask_markdown_with_links("![x](https://x) [no](javascript:alert) https://x", 100, Style::default(), &theme);
-        assert!(links.is_empty());
+        assert_eq!(links.iter().map(|link| link.url.as_str()).collect::<Vec<_>>(), ["https://x", "https://x"]);
         for text in ["| **literal** |", "<b>literal</b>", "# **literal**", "> literal", "- [x] task", "~~literal~~"] {
             assert_eq!(markdown(text, 100, Style::default(), &theme).iter().map(plain).collect::<String>(), text);
         }

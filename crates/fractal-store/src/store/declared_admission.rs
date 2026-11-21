@@ -29,6 +29,54 @@ const DECLARED_ATTENTION: FleetFeature = FleetFeature {
     ..DECLARED_ADMISSION
 };
 
+const MISSION_ESCALATION: FleetFeature = FleetFeature {
+    keys: &["mission-escalation-v1"],
+    code: "mission-escalation-feature-barrier",
+    carries: "mission escalation",
+};
+
+fn mission_escalates(mission: &MissionSpec) -> bool {
+    !mission.escalation.is_inherit() || mission.steps.values().any(|step| {
+        !step.escalation.is_inherit()
+            || step.nested_mission.as_deref().is_some_and(mission_escalates)
+            || step.loop_spec.as_ref().is_some_and(|loop_spec| {
+                mission_escalates(&loop_spec.round)
+                    || loop_spec.on_keep.as_deref().is_some_and(mission_escalates)
+                    || loop_spec.on_discard.as_deref().is_some_and(mission_escalates)
+            })
+    })
+}
+// Inspect the persisted JSON as well as typed publications, including nested missions and
+// loop branches. Disabling inheritance is also a declaration older readers must understand.
+fn declares_escalation(value: &Value) -> bool {
+    fn scope(value: &Value) -> bool {
+        value.get("escalation").is_some_and(|policy| !policy.is_null() && policy["_tag"] != "inherit")
+            || value.get("declarations_kdl").and_then(Value::as_str).is_some_and(|source| {
+                fn contains(document: &kdl::KdlDocument) -> bool {
+                    document.nodes().iter().any(|node| {
+                        let kind = node.name().value();
+                        matches!(kind, "mission" | "step" | "loop" | "round" | "on-keep" | "on-discard" | "finally")
+                            && node.children().is_some_and(|children| {
+                                (matches!(kind, "mission" | "step" | "round" | "on-keep" | "on-discard")
+                                    && children.nodes().iter().any(|child| child.name().value() == "escalation"))
+                                    || contains(children)
+                            })
+                    })
+                }
+                source.parse::<kdl::KdlDocument>().is_ok_and(|document| contains(&document))
+            })
+    }
+    scope(value) || value.get("steps").and_then(Value::as_object).is_some_and(|steps| {
+        steps.values().any(|step| {
+            scope(step)
+                || step.get("nested_mission").is_some_and(declares_escalation)
+                || ["round", "on_keep", "on_discard"].iter().any(|branch| {
+                    step.get("loop_spec").and_then(|spec| spec.get(branch)).is_some_and(declares_escalation)
+                })
+        })
+    })
+}
+
 fn declares_fields(value: &Value, attention_only: bool) -> bool {
     if attention_only {
         return value.get("declared_budgets").and_then(|b| b.get("attention"))
@@ -142,6 +190,9 @@ pub(super) fn validate_publication(
     origin: &str,
     intent: &NormalizedIntent,
 ) -> Result<(), FractalError> {
+    if intent.missions.values().any(mission_escalates) {
+        validate_fleet(connection, origin, &MISSION_ESCALATION)?;
+    }
     let declared = intent.subjects.values().any(|desired| {
         (desired.kind == "agent" && declares_children(&desired.desired, false))
             || desired.member.as_ref().is_some_and(|member| {
@@ -165,6 +216,12 @@ pub(super) fn validate_claim(
     kind: &str,
     body: &Value,
 ) -> Result<(), FractalError> {
+    if kind == "mission.published"
+        && fractal_missions_base::declared_admission::claim_payload_candidates(body)
+            .any(declares_escalation)
+    {
+        validate_fleet(connection, origin, &MISSION_ESCALATION)?;
+    }
     // The writer persists the whole body, and desired/mission projection decodes that
     // body even when schema_fields_for_body selects an explicit `fields` object.
     // Mission capacity validation also reads `fields.body`. Inspect a conservative

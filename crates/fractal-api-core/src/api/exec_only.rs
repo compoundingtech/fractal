@@ -18,19 +18,19 @@ pub(super) fn cards(
 ) -> anyhow::Result<BTreeMap<String, Card>> {
     let mut declarations = BTreeMap::new();
     for root in roots.iter().filter(|root| root.kind == "agent" && root.member.is_none()) {
-        let Some(children) = root.desired.get("children").and_then(Value::as_array) else { continue };
-        let tasks = children.iter().filter(|child| {
+        let tasks = root.desired.get("children").and_then(Value::as_array)
+            .into_iter().flatten().filter(|child| {
             matches!(child["name"].as_str(), Some("exec" | "pty"))
         }).filter_map(|child| {
             let kind = child["name"].as_str()?;
             let name = child["arguments"][0].as_str()?;
             Some((format!("{kind}/{}/{name}", root.subject.strip_prefix("agent/")?), child))
         }).collect::<Vec<_>>();
-        if !tasks.is_empty() { declarations.insert(root.subject.clone(), (root, tasks)); }
+        declarations.insert(root.subject.clone(), (root, tasks));
     }
     let names = declarations.values().flat_map(|(_, tasks)| tasks.iter().map(|(name, _)| name.clone()))
         .collect::<BTreeSet<_>>();
-    if names.is_empty() { return Ok(BTreeMap::new()); }
+    if declarations.is_empty() { return Ok(BTreeMap::new()); }
     let desired = store.desired_subjects_named(&names.iter().cloned().collect::<Vec<_>>())?
         .into_iter().map(|child| (child.subject.clone(), child)).collect::<BTreeMap<_, _>>();
     let statuses = store.agent_card_status_for_generic_reads_at(Some(&names), index, true)?.subjects

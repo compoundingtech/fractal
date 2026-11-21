@@ -53,6 +53,31 @@ class PublicRepositoryCheck(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(self.findings(text))
 
+    def test_macos_shared_directory_is_not_a_personal_home(self):
+        shared = Path("/Users") / "Shared"
+        for path in [shared, shared / "fractal-jobs" / "heavy1"]:
+            for text in [str(path), f'"{path}"', f"`{path}`"]:
+                with self.subTest(text=text):
+                    self.assertEqual(self.findings(text), [])
+        for name in ["alice", "SharedX", "shared"]:
+            with self.subTest(name=name):
+                self.assertTrue(self.findings(str(Path("/Users") / name / "work")))
+        for tail in ["../alice", "nested/../../alice", ".."]:
+            with self.subTest(tail=tail):
+                self.assertTrue(self.findings(str(shared / tail)))
+        self.assertTrue(self.findings(str(Path("/home") / "Shared" / "work")))
+
+    def test_shared_path_whitespace_does_not_hide_parent_traversal(self):
+        shared = Path("/Users") / "Shared"
+        for directory in ["some folder", r"some\ folder", "some\tfolder", r'some\"folder']:
+            clean = str(shared / directory / "work")
+            traversal = str(shared / directory / ".." / ".." / "alice" / "private")
+            for wrap in [lambda path: path, lambda path: f'"{path}"',
+                         lambda path: f"'{path}'", lambda path: f"`{path}`"]:
+                with self.subTest(directory=directory, text=wrap(traversal)):
+                    self.assertEqual(self.findings(wrap(clean)), [])
+                    self.assertTrue(self.findings(wrap(traversal)))
+
     def test_legacy_provider_templates_allow_only_invented_accounts(self):
         self.assertEqual(self.findings('person/discord-{id} person/discord-404 person/discord-606'), [])
         self.assertTrue(self.findings('person' + '/discord-123456789012345678'))

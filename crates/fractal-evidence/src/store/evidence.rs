@@ -214,7 +214,7 @@ impl EvidenceStore for Store {
         if cut == index {
             return Ok(true);
         }
-        Ok(match self.changed_agent_resources(cut, index, &items)? {
+        Ok(match self.changed_agent_resources(cut, index, items.iter())? {
             AgentResourcesChange::Delta(delta) => delta.subjects.is_empty() && !delta.queues && !delta.membership,
             AgentResourcesChange::Invalidated { .. } => false,
         })
@@ -265,11 +265,6 @@ impl EvidenceStore for Store {
         ) -> Option<PublishedRosterHead> {
         self.fractal.agent_roster_refresh.get()?;
         self.warn_if_agent_roster_overdue();
-        let current = self.fractal.agent_page_refs_cache.lock()
-            .expect("agent page refs cache poisoned").iter()
-            .filter(|entry| !entry.history && entry.index <= index)
-            .max_by_key(|entry| entry.index)
-            .map(|entry| (entry.index, Arc::clone(&entry.items)));
         let head_at = |cut: u64, refs: &Arc<Vec<Value>>, entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
             .filter(|entry| entry.index == cut && !entry.history)
             .find_map(|entry| {
@@ -281,23 +276,30 @@ impl EvidenceStore for Store {
                     .collect::<Option<Vec<_>>>()
                     .map(|head| (head, entry.published_at_unix_ms))
             });
-        let (cut, refs, head) = match current {
-            Some((cut, refs)) => {
-                let head = head_at(cut, &refs, &mut self.fractal.agent_resources_cache.lock()
-                    .expect("agent resources cache poisoned").iter())?;
-                (cut, refs, head)
-            }
-            // While a projection catching up refolds the roster, readers keep the head they had:
-            // its page order and the cards at the same cut.
-            None => {
-                let previous = self.fractal.agent_roster_previous.lock()
-                    .expect("previous agent roster poisoned");
-                let refs = previous.page_refs.as_ref().filter(|entry| entry.index <= index)?;
-                let (cut, refs) = (refs.index, Arc::clone(&refs.items));
-                let head = head_at(cut, &refs, &mut previous.resources.iter())?;
-                (cut, refs, head)
-            }
+        // Capture both halves under the same lock order as trim retention. Otherwise a
+        // trim can move the cards to `previous` after we captured their live page order.
+        let current = {
+            let resources = self.fractal.agent_resources_cache.lock()
+                .expect("agent resources cache poisoned");
+            let refs = self.fractal.agent_page_refs_cache.lock()
+                .expect("agent page refs cache poisoned");
+            refs.iter().filter(|entry| !entry.history && entry.index <= index)
+                .max_by_key(|entry| entry.index)
+                .and_then(|entry| {
+                    head_at(entry.index, &entry.items, &mut resources.iter())
+                        .map(|head| (entry.index, Arc::clone(&entry.items), head))
+                })
         };
+        // A replacement page order is not a publication until its cards are ready.
+        // Keep serving the retained head throughout that assembly, not just when refs
+        // happen to be empty.
+        let (cut, refs, head) = current.or_else(|| {
+            let previous = self.fractal.agent_roster_previous.lock()
+                .expect("previous agent roster poisoned");
+            let refs = previous.page_refs.as_ref().filter(|entry| entry.index <= index)?;
+            let head = head_at(refs.index, &refs.items, &mut previous.resources.iter())?;
+            Some((refs.index, Arc::clone(&refs.items), head))
+        })?;
         crate::otel::record_roster("hit", head.0.len());
         Some((cut, refs, head.0, head.1))
     }

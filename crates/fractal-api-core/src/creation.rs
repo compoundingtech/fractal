@@ -28,7 +28,7 @@ pub fn validate_agent_checkout(args: &fractal_client::AgentCreateParameters) -> 
 /// plugins st2's marketplace shipped off.
 pub const CLAUDE_SEAT_SETTINGS: &str = r#"{"enabledPlugins":{"st2-channel@st2":false,"st3-channel@st2":false,"st3-channel@st3":false,"st-channel@st":true}}"#;
 
-/// The declaration `st agents new` publishes: what a person writes by hand for a fleet seat.
+/// The declaration `fractal agents new` publishes: what a person writes by hand for a fleet seat.
 /// Claude and Codex seats get the harness defaults the fleet's existing seats run with.
 pub fn agent_document(
     args: &fractal_client::AgentCreateParameters,
@@ -360,13 +360,10 @@ mod tests {
         let intent = crate::graph::parse_intent(&source, "example").unwrap();
         let checkout =
             Checkout::from_desired(&intent.subjects.values().next().unwrap().desired).unwrap();
-        assert!(
-            checkout
-                .create(&workspace)
-                .unwrap_err()
-                .to_string()
-                .contains("failed")
-        );
+        let error = checkout.create(&workspace).unwrap_err().to_string();
+        assert!(error.contains(&checkout.repository.display().to_string()), "{error}");
+        assert!(error.contains("store repository missing or unidentifiable"), "{error}");
+        assert!(error.contains("mr refused the activation lease"), "{error}");
         assert!(!workspace.exists());
         let plain = fractal_client::AgentCreateParameters {
             repo: None,

@@ -233,7 +233,7 @@ statement wall time includes row processing, and concurrent statement times over
 Doctor also counts requests by client over the same window: the total request count and rate,
 the twenty clients that sent the most requests, and the twenty client and request-kind pairs with
 the most requests, each with total wall time and CPU. A local client is named by its first command
-words under the agent it is bound to, such as `agent/example · st3 driver claude`; requests from
+words under the agent it is bound to, such as `agent/example · fractal driver claude`; requests from
 fabric or TCP peers count as `(tcp)`. Idle load is usually many cheap requests, so these rows are
 sorted by count.
 

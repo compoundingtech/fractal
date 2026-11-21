@@ -22,7 +22,7 @@ fn run(store: &Store, key: &str) -> MissionRunView {
         .create_mission_run(&MissionRunRequest {
             mission: "eta".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: None,
             mode: Some("run".into()),
             inputs: BTreeMap::new(),

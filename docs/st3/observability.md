@@ -74,7 +74,7 @@ so a healthy daemon exports no log stream, while WARN/ERROR diagnostics still ex
 
 With no `OTEL_EXPORTER_OTLP_ENDPOINT`, initialization builds no telemetry subscriber,
 SDK providers, exporters, or threads. An atomic enabled gate returns before span construction.
-The lines the daemon writes itself (prefixed `st3:` or `fractal:`) still reach stderr, but with no
+The lines the daemon writes itself (including those prefixed `fractal:`) still reach stderr, but with no
 subscriber a `tracing` event anywhere in its code is written nowhere. `[logging] stderr_warnings
 = true` in the daemon's config installs a stderr subscriber at WARN for that case, so warnings such
 as a writer hold over a second reach the journal; it is off by default, and does nothing when
@@ -359,6 +359,7 @@ values map to `other`; routes are matched templates, not raw paths.
 | Replication `peer` | Fleet node membership |
 | Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
 | Projection `collection` | `missions`, `agents`, `attention`, else `other` |
+| Stream fallback `site`, `code` | `send`, `outbox`; the fixed code list in its section, else `other` |
 | Delivery and mailbox `st.agent` | Full declared subject of each managed agent owned by the local host |
 | Delivery `st.delivery.state` | `live`, `stale`, `refused` |
 | Delivery `st.delivery.reason` | Empty unless refused; the fixed refusal-code vocabulary below |
@@ -602,6 +603,10 @@ cause is consumed on the next outer wake; subsequent stabilization passes use
 as does an unknown source. These exported labels do not replace the existing
 in-memory wake labels used by `/v1/performance` and `doctor`; request/detail
 attribution also remains unchanged.
+
+An API write is proved by its accepted request span and the `cause=api` wake
+counter, followed by an independent reconcile pass. Its pass label may name a
+later coalesced wake; tests must not require the last-writer-wins label to retain `api`.
 
 `st.reconcile.passes_per_wake` records the number of completed passes when an
 outer wake rests or reaches its 64-pass continuation cap. It includes the
@@ -1170,6 +1175,24 @@ committed; a receipt that fails to commit is counted and logged at `error` with 
 Both record only while daemon metrics are enabled. The same distribution is available in
 process from `ReceiptWriter::stats`, and each commit logs `receipt_count` at `debug`.
 
+## Messages stream fallback telemetry
+
+A message routed to the messages shard (db break-up 4c-2b, `message_routing`) goes to the graph
+as a legacy claim when the shard does not take it: a send whose stream append fails with any
+code but `idempotency-mismatch`, or a queued outbox message the shard refused until its retries
+ran out. The sender sees no error, so each fallback the graph takes is counted, logged at
+`warn` with its subject and exact code and message, and reported since start by
+`st replication status` (`stream-fallbacks`, and `stream_fallbacks` in its JSON).
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.messages.stream.append_fallback` | Counter | `{message}` | `site=send` or `outbox`; `code` from the fixed list below, else `other` |
+
+The codes are `graph-closed`, `internal`, `invalid-message-transition`,
+`invalid-subject-reference`, `missing-message`, `missing-message-actor` and
+`shard-kind-refused`. It contributes at most `2 × 8 = 16` attribute series and counts only
+while daemon metrics are enabled; the status counts do not depend on metrics.
+
 ## Daemon startup telemetry (O11Y-R10, O11Y-R11, O11Y-R14, O11Y-R16, O11Y-R18)
 
 ```text
@@ -1346,7 +1369,7 @@ are opt-in. Observation adds no reclamation calls or changes to checkpoint clean
 Proof: the completion-scope unit test checks production totals increase. Source
 review verifies the callback's single `mallinfo2` call. The Linux GNU `otel_export`
 integration test captures all five closed states with a common collection timestamp
-and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("st3")`;
+and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("fractal")`;
 the timestamp proves a common SDK collection, not the number of native calls.
 A fresh-test-process proof initializes real daemon telemetry with traces enabled and
 metrics disabled, asserting no meter provider is created; it does not infer absence
@@ -1379,7 +1402,7 @@ treats any present `st` key as collector-owned sampling, so only sampled externa
 `st.parent.sampled=true`.
 
 The typed Rust client's optional `trace-propagation` feature owns its OTel API and tracing
-bridge dependencies, not an exporter or SDK initializer. `st3` enables the feature;
+bridge dependencies, not an exporter or SDK initializer. `fractal` enables the feature;
 `fractal-tui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from

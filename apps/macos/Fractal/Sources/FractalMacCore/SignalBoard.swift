@@ -12,69 +12,97 @@ public struct Signal: Identifiable, Sendable, Equatable {
 }
 
 /// Fixed signal order and membership, computed when objective rows change rather than in views.
+///
+/// `definitions` is the one ID-to-tile table: each served row joins the first signal whose
+/// membership names it, so no row counts on two tiles. Rows no signal names still reach the
+/// person through the Objectives tile, which lists every row. Tones and statuses are the
+/// server's; this table only groups rows.
 public struct SignalBoard: Sendable, Equatable {
   public let signals: [Signal]
   public let needsAttention: Int
 
   private enum Membership: Sendable {
+    /// Exactly this objective ID.
     case exact(String)
-    case namespaced(String)
-    case prefix(String)
+    /// The objective ID or anything under it (`agents` takes `agents/mail-delivery/host`).
+    case root(String)
+    /// Any path segment (`main-green` takes `main-green/fractal` and `example/main-green`).
+    case segment(String)
+    /// The last segment (`flakes` takes `fractal/flakes`).
+    case leaf(String)
+    /// A percentile row of a namespaced objective: `fractal/merge-latency/p95`,
+    /// `landing/merge-latency/example/p50`. Labelled parts (`…/p95{member=x}`) stay out.
+    case percentile(of: String, [String])
+    /// The daemon's own native objectives, including phone-reported and readiness rows.
     case daemon
+    /// Account allowances (`kind == budget`).
     case budgets
 
     func contains(_ row: SloEntry) -> Bool {
       if case .budgets = self { return row.kind == .budget }
       guard row.kind == .objective else { return false }
+      let id = row.id
       switch self {
-      case .exact(let id): return row.id == id
-      case .namespaced(let id): return row.id == id || row.id.hasSuffix("/" + id)
-      case .prefix(let prefix):
-        return row.id.hasPrefix(prefix) || row.id.contains("/" + prefix)
+      case .exact(let exact): return id == exact
+      case .root(let root): return id == root || id.hasPrefix(root + "/")
+      case .segment(let segment): return id.split(separator: "/").contains { $0 == segment }
+      case .leaf(let leaf): return id == leaf || id.hasSuffix("/" + leaf)
+      case .percentile(let name, let percentiles):
+        let segments = id.split(separator: "/")
+        guard let last = segments.last, percentiles.contains(String(last)) else { return false }
+        return segments.dropLast().contains { $0 == name }
       case .daemon:
-        return Self.daemonIDs.contains(row.id) || row.id.hasPrefix("transaction/")
+        return Self.daemonIDs.contains(id) || id.hasPrefix("ios-")
+          || Self.daemonRoots.contains { id.hasPrefix($0 + "/") }
       case .budgets: return false
       }
     }
 
+    /// `objectives.rs` native rows (`fixtures/objective-native-rows.json`), plus an explicit
+    /// `fractal` aggregate, which joins its children rather than hiding them.
     private static let daemonIDs: Set<String> = [
-      "person-read", "person-read/remote", "person-read-fresh", "projection-fresh", "write-ack",
+      "fractal", "person-read", "person-read/remote", "person-read-fresh", "projection-fresh", "write-ack",
       "terminal-attach", "sql-statement", "writer-hold", "cpu", "cpu/idle", "database",
+      "database-archive", "projection-divergence",
     ]
+    /// `transaction/<class>` native rows and `readiness_slo.rs`'s per-member rows.
+    private static let daemonRoots = ["transaction", "fractal-api-readiness", "fractal-api-readiness-early"]
   }
 
   private struct Definition: Sendable {
     let id: String
     let title: String
-    let membership: Membership
-    var overrideID: String? = nil
+    let membership: [Membership]
   }
 
-  /// Namespaced declared CI objectives (for example `fractal/merge-latency/p95`) and
-  /// the daemon's unnamespaced telemetry IDs come from the same served rows.
+  /// Declared objectives arrive namespaced (`fractal/ci-critical-path/p95`); native ones as the
+  /// daemon names them (`cpu/idle`, `build/admission/HOST/CLASS`, `agents/mail-delivery/HOST`).
   private static let definitions: [Definition] = [
-    Definition(id: "pr-throughput", title: "PR throughput", membership: .exact("factory/work-throughput")),
-    Definition(id: "merge-latency", title: "Merge latency p95", membership: .namespaced("merge-latency/p95")),
-    Definition(id: "ci-critical-path", title: "CI critical path p95", membership: .namespaced("ci-critical-path/p95")),
-    Definition(id: "flakes", title: "Flakes", membership: .namespaced("flakes")),
-    Definition(id: "main-green", title: "Main green", membership: .prefix("main-green")),
-    Definition(id: "fleet", title: "Fleet", membership: .prefix("fleet")),
-    Definition(id: "fractal", title: "Fractal", membership: .daemon, overrideID: "fractal"),
-    Definition(id: "agents", title: "Agents", membership: .prefix("agents")),
-    Definition(id: "spend", title: "Spend", membership: .budgets),
-    Definition(id: "disk", title: "Disk", membership: .prefix("disk")),
+    Definition(id: "pr-throughput", title: "PR throughput", membership: [.exact("factory/merged-prs")]),
+    Definition(
+      id: "merge-latency", title: "Merge latency", membership: [.percentile(of: "merge-latency", ["p50", "p95"])]),
+    Definition(
+      id: "ci-critical-path", title: "CI critical path",
+      membership: [.percentile(of: "ci-critical-path", ["p95"]), .root("build/admission")]),
+    Definition(id: "flakes", title: "Flakes", membership: [.leaf("flakes")]),
+    Definition(id: "main-green", title: "Main green", membership: [.segment("main-green")]),
+    Definition(id: "fleet", title: "Fleet", membership: [.root("fleet")]),
+    Definition(id: "fractal", title: "Fractal", membership: [.daemon]),
+    Definition(id: "agents", title: "Agents", membership: [.root("agents")]),
+    Definition(
+      id: "spend", title: "Spend", membership: [.budgets, .root("CAM-R01"), .root("CAM-R02")]),
+    Definition(id: "disk", title: "Disk", membership: [.root("disk")]),
   ]
 
   public init(rows: [SloEntry]) {
-    signals = Self.definitions.map { definition in
-      let members: [SloEntry]
-      if let overrideID = definition.overrideID,
-        let override = rows.first(where: { $0.kind == .objective && $0.id == overrideID })
-      {
-        members = [override]
-      } else {
-        members = rows.filter { definition.membership.contains($0) }
+    var claimed = Array(repeating: [SloEntry](), count: Self.definitions.count)
+    for row in rows {
+      if let index = Self.definitions.firstIndex(where: { $0.membership.contains { $0.contains(row) } }) {
+        claimed[index].append(row)
       }
+    }
+    signals = Self.definitions.enumerated().map { index, definition in
+      let members = claimed[index]
       var worst: SloEntry?
       var measuredCount = 0
       var missedCount = 0
@@ -82,8 +110,10 @@ public struct SignalBoard: Sendable, Equatable {
         measuredCount += 1
         if member.status == "missed" || member.status == "exhausted" { missedCount += 1 }
         if let previous = worst {
-          let moreSpent = definition.id == "spend" && member.tone == previous.tone
-            && (member.remainingPercent ?? .infinity) < (previous.remainingPercent ?? .infinity)
+          // Equal tones prefer the more spent allowance, so Spend keeps showing a used percentage.
+          let moreSpent = member.tone == previous.tone && member.kind == .budget
+            && (previous.kind != .budget
+              || (member.remainingPercent ?? .infinity) < (previous.remainingPercent ?? .infinity))
           if member.tone < previous.tone || moreSpent { worst = member }
         } else {
           worst = member
@@ -91,7 +121,7 @@ public struct SignalBoard: Sendable, Equatable {
       }
       let value: String
       if let worst {
-        if definition.id == "spend" {
+        if worst.kind == .budget {
           value = worst.remainingPercent.map {
             "\((100 - $0).formatted(.number.precision(.fractionLength(0))))%"
           } ?? "—"

@@ -1816,6 +1816,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fractal-client",
+ "fractal-ui-model",
  "ratatui",
  "serde",
  "serde_json",
@@ -2176,6 +2177,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-mac-custody"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fractal-migrate"
 version = "0.1.0"
 dependencies = [
@@ -2306,6 +2317,7 @@ dependencies = [
  "fractal-reconcile",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-telemetry",
  "futures-util",
  "hex",
  "libc",
@@ -2374,6 +2386,7 @@ name = "fractal-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fractal-mac-custody",
  "libc",
  "portable-pty",
  "pty-client",
@@ -5724,6 +5737,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+ "sha2-asm",
 ]
 
 [[package]]
@@ -5735,6 +5749,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

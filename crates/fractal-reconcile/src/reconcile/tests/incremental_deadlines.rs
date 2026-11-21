@@ -57,6 +57,69 @@ fn stop(reconciler: &Reconciler<FakeRuntime>, observation: &RuntimeObservation) 
 }
 
 #[test]
+fn idle_resource_admission_without_pending_work_never_arms_maintenance() {
+    let clock = Clock::at(START);
+    let (store, _, reconciler, _) = stopping();
+    assert_eq!(reconciler.resource_admission_maintenance_deadline().unwrap(), None);
+    reconciler.ensure_resource_authority().unwrap();
+    let before = store.index().unwrap();
+    for elapsed in [0, 5_000, 30_000] {
+        smallclaims::store::set_thread_clock(Some(START + elapsed));
+        assert!(!store.has_pending_resource_admission_observations().unwrap());
+        assert_eq!(reconciler.resource_admission_maintenance_deadline().unwrap(), None);
+        reconciler.maintain_resource_admission_observations().unwrap();
+        assert_eq!(reconciler.next_deadline(), None);
+        assert_eq!(store.index().unwrap(), before, "idle maintenance must not publish a new cut");
+    }
+    drop(clock);
+}
+
+#[test]
+fn idle_resource_admission_maintenance_arms_and_drains_without_new_writes() {
+    use crate::store::fleet_admission_tests_shared_seats::{admit, append, key, node};
+    use crate::store::resource_membership::{Admission, DiskFit, Fit, LaneRequest};
+    use serde_json::json;
+    let clock = Clock::at(START);
+    let key = key();
+    let store = Arc::new(node("node", Some(&key), Some(&key)));
+    admit(&store, "node", &key, "anchor", None);
+    let advertise = |supported| {
+        append(&store, "daemon.started", "daemon/node",
+            json!({"status":"running","features":{"resource_recovery_observations":supported}}));
+        store.replication_snapshot().unwrap();
+    };
+    advertise(1);
+    let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+        "node".into(), Arc::new(Notify::new())).skipping_unneeded(true);
+    reconciler.ensure_resource_authority().unwrap();
+    let request: LaneRequest = serde_json::from_value(json!({
+        "id":"idle-recovery","name":"idle-recovery","host":"node","maxMembers":1,
+        "capacity":{"cores":1,"memory":100},"coverage":"logical","class":"recovery",
+        "owner":{"run":"mission-run/idle","step":"idle","attempt":1,"invocation":null}
+    })).unwrap();
+    let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 100 }),
+        held_bytes: 100, recovery_capable: true,
+        disk: Some(DiskFit { filesystem: 1, available: 100, floor: 20 }), ..Fit::default() };
+    assert!(matches!(store.request_resource_membership(&request, fit, 1).unwrap(), Admission::Queued { .. }));
+    advertise(0);
+    store.withdraw_resource_membership(&request.id, &request.owner, 2).unwrap();
+    advertise(1);
+    assert!(store.has_pending_resource_admission_observations().unwrap());
+    assert_eq!(reconciler.resource_admission_maintenance_deadline().unwrap(), Some(START + 5_000));
+    assert!(reconciler.next_deadline().is_some_and(|due| due <= START + 5_000),
+        "the daemon scheduler must consume the dedicated maintenance deadline");
+    // No new membership, advertisement or other external write wakes this authority.
+    drop(clock);
+    let _clock = Clock::at(START + 5_000);
+    reconciler.reconcile_once().unwrap();
+    assert!(!store.has_pending_resource_admission_observations().unwrap());
+    assert_eq!(reconciler.resource_admission_maintenance_deadline().unwrap(), None);
+    let events = store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::KIND], None, 0, 100).unwrap();
+    assert_eq!(events.claims.last().unwrap().body["fields"]["state"], "retired");
+}
+
+#[test]
 fn a_new_stop_tracks_its_deadline_before_the_first_poll() {
     let _clock = Clock::at(START);
     let (_, _, reconciler, observation) = stopping();
@@ -1549,6 +1612,19 @@ fn residency_report(store: &Store, quiet: bool) {
 fn idle_residency_arms_the_exact_stable_epoch_deadline_and_rearms_after_a_blocker() {
     let _clock = Clock::at(START);
     let (store, runtime, reconciler, _) = stopping();
+    // A mature deadline now reaches the owner writer, so model the signed reader barrier.
+    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    store.bind_fleet(fleet).unwrap();
+    store.pin_fleet_anchor(key.public()).unwrap();
+    store.set_member_key(Some(key.clone())).unwrap();
+    store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"daemon/node".into(),kind:"daemon.started".into(),actor:None,
+        fields:serde_json::from_value(serde_json::json!({"status":"running","features":{"idle_residency":1}})).unwrap(),
+        evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    store.replication_snapshot().unwrap();
     let intent = parse_intent(
         "version 2\nagent \"garden\" { workspace \".\"; command \"true\"; idle-suspend \"member\" }",
         "node",

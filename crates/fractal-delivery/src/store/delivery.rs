@@ -65,6 +65,16 @@ struct KeptWorkWakes {
     names: Vec<String>,
     through: u64,
     subjects: Vec<KeptWorkWake>,
+    /// The messages shard's index these stream wakes were read through, and the wakes.
+    stream_through: u64,
+    stream: Vec<KeptStreamWake>,
+}
+
+/// A work wake that is a stream item, and its view once closed: a closed item never changes, and
+/// an open one is read again on each pass, since its lifecycle is this member's shard records.
+struct KeptStreamWake {
+    subject: String,
+    closed: Option<MessageView>,
 }
 
 /// One work wake and the view last read for it. The view is kept here, beside the subject,
@@ -384,7 +394,7 @@ impl DeliveryStore for Store {
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
         ) -> Result<(ClaimRecord, bool), FractalError> {
-        self.append_claim_fenced_outcome(input, Some(fence))
+        self.append_native_mailbox_receipt_outcome(input, fence, None)
     }
 
     fn record_mail_input_acceptance(
@@ -471,6 +481,9 @@ impl DeliveryStore for Store {
                 "native proof needs a read receipt",
             ));
         }
+        let mailbox_intake_frontier = if matches!(input.kind.as_str(), "message.staged" | "message.delivered") {
+            Some(fractal_store::suspension::mailbox_intake_frontier(self, &fence.subject)?)
+        } else { None };
         append_claim_with_commit_context(
             &self.graph,
             input,
@@ -480,6 +493,7 @@ impl DeliveryStore for Store {
             None,
             ClaimCommitContext {
                 native_receipt: native,
+                mailbox_intake_frontier,
                 ..Default::default()
             },
         )
@@ -577,9 +591,9 @@ impl DeliveryStore for Store {
                 .is_some_and(|kept| kept.names == names && kept.through <= through)
                 .then(|| kept.remove(&recipient))
                 .flatten()
-                .map(|kept| (kept.through, kept.subjects))
+                .map(|kept| (kept.through, kept.subjects, kept.stream_through, kept.stream))
         };
-        let (after, mut subjects) = kept.unwrap_or_default();
+        let (after, mut subjects, stream_after, mut stream) = kept.unwrap_or_default();
         // Sent claims are only appended, so only those after the kept cut can add a wake. The
         // rowid bounds are checked on the index entry, before the body is read.
         let mut statement = connection.prepare_cached(
@@ -651,10 +665,52 @@ impl DeliveryStore for Store {
             }
         }
         subjects.retain(|kept| !gone.contains(&kept.subject));
+        // Work wakes for this member's own seats are stream items (message_routing::send_work_wake).
+        let stream_names = names
+            .iter()
+            .cloned()
+            .chain([recipient.clone(), bare_recipient.to_owned()])
+            .collect::<Vec<_>>();
+        let (stream_through, added) =
+            fractal_store::store::messages_shard::mailbox_reads::work_wakes_after(self, &stream_names, stream_after)?;
+        let known = stream.iter().map(|kept| kept.subject.clone()).collect::<HashSet<_>>();
+        stream.extend(
+            added
+                .into_iter()
+                .filter(|(subject, _)| !known.contains(subject))
+                .map(|(subject, _)| KeptStreamWake { subject, closed: None }),
+        );
+        let mut gone = BTreeSet::new();
+        for kept in &mut stream {
+            let message = match &kept.closed {
+                Some(view) => view.clone(),
+                None => match fractal_store::store::messages_shard::message_view(self, &kept.subject)? {
+                    Some(view) => {
+                        if view.status == "closed" {
+                            kept.closed = Some(view.clone());
+                        }
+                        view
+                    }
+                    // The graph holds the subject, which its own read lists.
+                    None => {
+                        gone.insert(kept.subject.clone());
+                        continue;
+                    }
+                },
+            };
+            if message.to == recipient
+                && crate::silent::message_tag_values(message.tags.iter().map(String::as_str), "work:")
+                    .next()
+                    .is_some()
+            {
+                messages.push(message);
+            }
+        }
+        stream.retain(|kept| !gone.contains(&kept.subject));
         {
             let mut kept = wakes.0.lock().unwrap_or_else(PoisonError::into_inner);
-            if kept.get(&recipient).is_none_or(|kept| kept.through <= through) {
-                kept.insert(recipient.clone(), KeptWorkWakes { names, through, subjects });
+            if kept.get(&recipient).is_none_or(|kept| kept.through <= through && kept.stream_through <= stream_through) {
+                kept.insert(recipient.clone(), KeptWorkWakes { names, through, subjects, stream_through, stream });
             }
         }
         sort_messages_canonically(&connection, &mut messages)?;

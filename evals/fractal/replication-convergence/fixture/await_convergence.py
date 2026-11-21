@@ -7,7 +7,7 @@ import time
 
 def status(socket):
     completed = subprocess.run(
-        ["st3", "--endpoint", socket, "--json", "replication", "status"],
+        ["fractal", "--endpoint", socket, "--json", "replication", "status"],
         check=False,
         capture_output=True,
         text=True,

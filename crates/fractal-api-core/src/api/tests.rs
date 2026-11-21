@@ -1029,6 +1029,45 @@ async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_quer
     assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
 }
 
+#[tokio::test]
+async fn activity_summary_keeps_observed_ownership_and_default_status_provenance() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/declared\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "activity-summary-fixture",
+    ).unwrap();
+    state.store.append_claim(&crate::model::ClaimInput {
+        subject: "agent/eval/named".into(), kind: "workspace.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"workspace":"/observed", "host":"runtime-host"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    state.store.append_claim(&crate::model::ClaimInput {
+        subject: "agent/eval/named".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({
+            "status":"running", "host":"runtime-host",
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let app = router(state);
+    let (code, before) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{before}");
+    let (code, summary) = get_request(app.clone(), "/v1/status?subject=agent/eval/named&activity_summary=true").await;
+    assert_eq!(code, StatusCode::OK, "{summary}");
+    assert_eq!(summary["store_index"], before["store_index"]);
+    assert_eq!(summary["subjects"][0]["subject"], "agent/eval/named");
+    for field in ["status", "workspace", "host"] {
+        assert_eq!(summary["subjects"][0]["actual"][field], before["subjects"][0]["actual"][field]);
+    }
+    assert_eq!(summary["subjects"][0]["actual"]["workspace"], "/observed");
+    assert_eq!(summary["subjects"][0]["actual"]["host"], "runtime-host");
+    assert_eq!(summary["complete"], true);
+    assert_eq!(summary["unresolved"], json!([]));
+    let (code, after) = get_request(app, "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{after}");
+    assert_eq!(after, before, "opt-in summary must not alter default output");
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {
@@ -3432,7 +3471,7 @@ async fn a_local_only_harness_observation_wakes_only_the_client_feed() {
         expected_subject: None,
         idempotency_key: Some(format!("wake-usage-{tokens}")),
     };
-    let post = |input: ClaimInput| post_claim(State(state.clone()), Json(input));
+    let post = |input: ClaimInput| post_claim(State(state.clone()), None, Json(input));
     let reconciler_woke = || async {
         tokio::time::timeout(Duration::from_millis(20), state.notify.notified())
             .await
@@ -4795,6 +4834,20 @@ async fn internal_routes_refuse_seat_callers() {
     let state = state(root.path());
     let routes = internal_routes();
     assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
+    let resource_owner_routes = [
+        ("/v1/internal/resources", "GET"),
+        ("/v1/internal/resources/example", "GET"),
+        ("/v1/internal/resources/example/member-scope", "GET"),
+        ("/v1/internal/resources/by-request/example", "GET"),
+        ("/v1/internal/resources/exec", "POST"),
+        ("/v1/internal/resources/example/wait", "POST"),
+        ("/v1/internal/resources/example/cancel", "POST"),
+        ("/v1/internal/resources/by-request/example/cancel", "POST"),
+    ];
+    for (route, method) in &resource_owner_routes {
+        assert!(routes.iter().any(|registered| registered.as_str() == *route),
+            "{method} {route} must be included in the exhaustive internal-route checks");
+    }
     for route in &routes {
         for method in [
             axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT,
@@ -4810,12 +4863,7 @@ async fn internal_routes_refuse_seat_callers() {
                     .unwrap()
             };
             let bound = guard_bound_request(request(), Some("agent/own"), &state.store).await;
-            let resource_owner_route = matches!((route.as_str(), method.as_str()),
-                ("/v1/internal/resources" | "/v1/internal/resources/example", "GET")
-                | ("/v1/internal/resources/exec"
-                    | "/v1/internal/resources/example/wait"
-                    | "/v1/internal/resources/example/cancel", "POST"));
-            if resource_owner_route {
+            if resource_owner_routes.contains(&(route.as_str(), method.as_str())) {
                 assert!(bound.is_ok(), "{method} {route} reaches native resource ownership enforcement");
             } else {
                 assert_eq!(bound.unwrap_err().code, "foreign-agent-actor", "{method} {route}");
@@ -6622,6 +6670,16 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
     let mut state = state(root.path());
     state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
     state.configured_peers = vec!["cobalt".into()];
+    // A pass needs a live worker and a fresh exchange, beside the refusal under test.
+    state.store.record_replication_worker_heartbeat();
+    state
+        .store
+        .replication_sync
+        .lock()
+        .unwrap()
+        .entry("cobalt".into())
+        .or_default()
+        .observe(0, Some((0, 0)), now_ms());
     let app = router(state.clone());
     let (status, recorded) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
         "peer": "cobalt", "status": "refused", "error": "refused by that member's Fabric grants (service st3-peer-v1); replication can continue through other members"
@@ -6651,6 +6709,47 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
             .as_str()
             .unwrap()
             .contains("cobalt: refused by that member's Fabric grants")
+    );
+}
+
+/// The silent dial-out incident shape: redeemed membership, stored envelopes, no worker
+/// process. Doctor must fail loudly instead of passing on persisted history.
+#[tokio::test]
+async fn doctor_fails_replication_when_a_redeemed_member_has_no_live_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
+    state.store.bind_fleet("94cd11ba-c582-4558-9c84-c3bda922eb6d").unwrap();
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: "custom/test/stored-history".into(),
+            kind: "custom.test.recorded".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(!state.store.replication_inventory().unwrap().envelopes.is_empty());
+    state.store.replication_worker_observed_for_test(Some(now_ms().saturating_sub(120_000)), None);
+    let app = router(state);
+    let (status, doctor) = get_request(app, "/v1/doctor").await;
+    assert_eq!(status, StatusCode::OK, "{doctor}");
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "replication")
+        .unwrap();
+    assert_eq!(check["status"], "fail", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .contains("no replication worker heartbeat"),
+        "{check}"
     );
 }
 
@@ -6770,6 +6869,8 @@ fn doctor_reports_waiting_claims_without_a_replication_fault() {
         .store
         .receive_replication_exchange("alder", "fleet/waiting", &exchange)
         .unwrap();
+    // A pass needs the live-worker evidence beside the waiting claim.
+    state.store.record_replication_worker_heartbeat();
     let report = doctor_report(&state).unwrap().0;
     let check = report
         .checks
@@ -6825,6 +6926,29 @@ fn doctor_names_shared_tables_that_differ_at_equal_inventory() {
             .iter()
             .any(|check| check.name == "shared-projections")
     );
+}
+
+#[test]
+fn trim_doctor_warns_on_worker_failure_or_halt() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let report = doctor_report(&state).unwrap().0;
+    let check = report.checks.iter().find(|check| check.name == "trim").unwrap();
+    assert_eq!(check.status, "pass", "{}", check.message);
+    state.store.checkpoint_worker_phase(CheckpointPhase::LocalTrim);
+    state.store.checkpoint_worker_error("trim commit failed".into());
+    let mut status = state.store.trim_status().unwrap();
+    let check = trim_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=LocalTrim failed: trim commit failed"), "{}", check.message);
+    status.worker = None;
+    status.halted = true;
+    let check = trim_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("graph would change"), "{}", check.message);
+    status.halted = false;
+    assert_eq!(trim_doctor_check(&status).status, "pass");
 }
 
 #[test]
@@ -7017,54 +7141,6 @@ async fn replication_export_accepts_a_request_above_axums_default_body_limit() {
         .await
         .unwrap();
     assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-}
-
-/// The replication worker asks the daemon whether it needs a checkpoint's manifest, and
-/// hands it a whole manifest to adopt, which can be far above axum's default body limit.
-#[tokio::test]
-async fn the_worker_asks_for_and_hands_over_checkpoint_manifests() {
-    let root = tempfile::tempdir().unwrap();
-    let app = router(state(root.path()));
-    let post = |uri: &str, body: Vec<u8>| {
-        Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap()
-    };
-    let response = app
-        .clone()
-        .oneshot(post(
-            "/v1/internal/replication/checkpoint-need",
-            b"{}".to_vec(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let need: Value = serde_json::from_slice(&body).unwrap();
-    assert!(need["value"].is_null(), "{need}");
-
-    let manifest = crate::store::CheckpointManifest {
-        checkpoint: "checkpoint/2026-09-27".into(),
-        cut_unix_ms: crate::store::checkpoint_cut("checkpoint/2026-09-27").unwrap(),
-        ..Default::default()
-    };
-    let mut body = serde_json::to_vec(&manifest).unwrap();
-    body.resize(8 * 1024 * 1024, b' ');
-    let response = app
-        .oneshot(post("/v1/internal/replication/checkpoint-adopt", body))
-        .await
-        .unwrap();
-    // Well past the default limit, and refused only because nothing certified it here.
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let error: Value = serde_json::from_slice(&body).unwrap();
-    assert!(
-        error.to_string().contains("checkpoint-not-stable"),
-        "{error}"
-    );
 }
 
 #[tokio::test]
@@ -11385,6 +11461,84 @@ async fn client_agents_agent_roster_retains_current_during_history_publications(
     assert_agent_roster_survives_other_mode_publications(false).await;
 }
 
+#[tokio::test]
+async fn trim_completion_retains_initial_head_and_complete_roster_publications() {
+    assert!(crate::config::TrimConfig::default().local);
+    for complete in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.store = Arc::new(roster_followup_store());
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        if complete {
+            refresh_agent_roster(store, false).unwrap();
+            refresh_agent_roster(store, true).unwrap();
+        } else {
+            agent_roster_snapshot(store, |index| client_agent_roster_head(store, index)).unwrap();
+        }
+        let histories: &[bool] = if complete { &[false, true] } else { &[false] };
+        for &history in histories {
+            let query = ClientListQuery { history, ..ClientListQuery::default() };
+            let (Extension(before_cut), Json(before)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)), Query(query.clone()),
+            ).await.unwrap();
+            // Exercise the callback used when the default startup trim stops, before any
+            // background owner can publish again. Repeating it must not lose retained rows.
+            store.runtime.claims_trim_finished();
+            store.runtime.claims_trim_finished();
+            let (Extension(after_cut), Json(after)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)), Query(query),
+            ).await.expect("a graph-preserving trim must not withdraw the published roster");
+            assert_eq!(before_cut.store_index, after_cut.store_index);
+            assert_eq!(before.items, after.items);
+        }
+    }
+}
+
+#[tokio::test]
+async fn retired_identity_activation_preserves_a_successful_roster_barrier() {
+    assert!(crate::config::TrimConfig::default().local);
+    for populated in [false, true] {
+        for complete in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = state(root.path());
+            state.store = Arc::new(if populated {
+                roster_followup_store()
+            } else {
+                Store::open_memory("node").unwrap()
+            });
+            let store = &state.store;
+            // Startup enables local trimming before its paced retirement import finishes.
+            store.trim_locally(true).unwrap();
+            let _wake = store.start_agent_roster_refresher().unwrap();
+            if complete {
+                refresh_agent_roster(store, false).unwrap();
+            } else {
+                agent_roster_snapshot(store, |index| client_agent_roster_head(store, index)).unwrap();
+            }
+            let (Extension(before_cut), Json(before)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Query(ClientListQuery { min_cut: Some(0), ..ClientListQuery::default() }),
+            ).await.expect("the fixture's read-after-publication barrier succeeds");
+            let revision = store.agent_roster_revision();
+
+            // Complete the exact background startup transition after that barrier, without
+            // allowing the refresher to republish and conceal an availability regression.
+            store.import_retired_identities_paced(|_| {}).unwrap();
+            assert!(store.retired_identity_import_done().unwrap());
+            let (Extension(after_cut), Json(after)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Query(ClientListQuery::default()),
+            ).await.expect("an ordinary read after the barrier must remain ready");
+            assert_eq!(after_cut.store_index, before_cut.store_index);
+            assert_eq!(after_cut.published_at, before_cut.published_at);
+            assert_eq!(after.items, before.items);
+            assert_eq!(store.agent_roster_revision(), revision,
+                "retirement authority changes replication inventory, not roster inputs");
+        }
+    }
+}
+
 #[test]
 fn agent_roster_refresh_never_folds_more_than_a_chunk_in_one_call() {
     let root = tempfile::tempdir().unwrap();
@@ -13844,7 +13998,7 @@ async fn writer_binding_message_sender_matches_on_generic_and_message_routes() {
     let app = router(state.clone())
         .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for sender in ["agent/other", "person/example"] {
-        for path in ["/v1/claims", "/v1/messages"] {
+        for path in ["/v1/claims", "/v1/messages", "/v1/messages/"] {
             let before = state.store.index().unwrap();
             let body = if path == "/v1/claims" {
                 json!({"subject":"message/writer-binding-other", "kind":"message.sent",
@@ -13858,12 +14012,12 @@ async fn writer_binding_message_sender_matches_on_generic_and_message_routes() {
             let (status, refusal) = writer_binding_request(
                 app.clone(), path, Some("agent/own"), None, body,
             ).await;
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {sender}: {refusal}");
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {sender}: {refusal}");
             assert_eq!(refusal["code"], "foreign-agent-actor");
             assert_eq!(state.store.index().unwrap(), before);
         }
     }
-    for path in ["/v1/claims", "/v1/messages"] {
+    for path in ["/v1/claims", "/v1/messages", "/v1/messages/"] {
         let body = if path == "/v1/claims" {
             json!({"subject":"message/writer-binding-own", "kind":"message.sent",
                 "fields":{"from":"agent/own", "to":"agent/receiver", "content":"hello", "status":"sent"}})
@@ -13964,10 +14118,212 @@ async fn writer_binding_pairing_uses_authority_actor_for_claims_and_senders() {
             assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
             assert_eq!(claims[0].body["fields"]["from"], sender);
         } else {
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{sender}: {receipt}");
+            assert_eq!(status, StatusCode::FORBIDDEN, "{sender}: {receipt}");
             assert_eq!(receipt["code"], "foreign-agent-actor");
             assert_eq!(state.store.index().unwrap(), before);
         }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_routes_preserve_authenticated_callers() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "message-sender-pairing";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.messages"]);
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let mut callers = vec![
+        (app.clone(), Some("agent/own"), None, "agent/own", "cli"),
+        (app.clone(), None, Some(credential), "person/example", "paired"),
+        (app.clone().layer(Extension(HarnessAncestry::Person)), None, None, "person/example", "operator"),
+        (app.clone().layer(Extension(HarnessAncestry::Person)), None, None, "daemon/example", "daemon"),
+    ];
+    for transport in ["app-server", "claude-channel", "claude-hook", "omp-channel", "pi-channel", "exec"] {
+        callers.push((app.clone().layer(Extension(NativeDeliveryPeer {
+            agent: "agent/own".into(), transport, pid: 37, archives_inbox: false,
+        })), None, None, "agent/own", transport));
+    }
+    for (app, bound, bearer, sender, caller) in callers {
+        for (index, path) in ["/v1/messages", "/v1/messages/"].into_iter().enumerate() {
+            let (status, receipt) = writer_binding_request(
+                app.clone(), path, bound, bearer,
+                json!({"from":sender, "to":"agent/receiver", "content":"hello",
+                    "idempotency_key":format!("sender-{caller}-{index}")}),
+            ).await;
+            assert_eq!(status, StatusCode::OK, "{caller}/{path}: {receipt}");
+            assert_eq!(receipt["from"], sender, "{caller}: {receipt}");
+            if caller != "operator" && caller != "daemon" {
+                let before = state.store.index().unwrap();
+                let (status, refusal) = writer_binding_request(
+                    app.clone(), path, bound, bearer,
+                    json!({"from":"agent/other", "to":"agent/receiver", "content":"hello",
+                        "idempotency_key":format!("other-{caller}-{index}")}),
+                ).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{caller}/{path}: {refusal}");
+                assert_eq!(refusal["code"], "foreign-agent-actor");
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_accept_requires_the_connected_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let (status, sent) = writer_binding_request(
+        app.clone(), "/v1/messages", None, None,
+        json!({"from":"person/example", "to":"agent/receiver", "content":"hello",
+            "idempotency_key":"accept-connected-actor"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let subject = sent["subject"].as_str().unwrap();
+    let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+    for (route, body) in [
+        (path.as_str(), json!({"lifecycle":"read", "actor":"agent/receiver",
+            "idempotency_key":"foreign-accept"})),
+        ("/v1/claims", json!({"subject":subject, "kind":"message.read",
+            "actor":"agent/receiver", "fields":{"status":"read"},
+            "idempotency_key":"foreign-generic-accept"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), route, Some("agent/other"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    let (status, delivered) = writer_binding_request(
+        app.clone(), &path, Some("agent/receiver"), None,
+        json!({"lifecycle":"delivered", "actor":"agent/receiver",
+            "idempotency_key":"own-delivery"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{delivered}");
+    let (status, accepted) = writer_binding_request(
+        app, &path, Some("agent/receiver"), None,
+        json!({"lifecycle":"read", "actor":"agent/receiver",
+            "idempotency_key":"own-accept"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["actor"], "agent/receiver");
+}
+
+#[tokio::test]
+async fn writer_binding_message_guard_matches_only_the_path_segment() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (path, guarded) in [
+        ("/v1/messages", true), ("/v1/messages/", true),
+        ("/v1/messages/example/claims", true), ("/v1/messages-extra", false),
+    ] {
+        let request = Request::builder().method("POST").uri(path)
+            .body(Body::from(r#"{"actor":"agent/other","from":"agent/other"}"#)).unwrap();
+        let result = guard_bound_request(request, Some("agent/own"), &state.store).await;
+        if guarded {
+            let error = result.unwrap_err();
+            assert_eq!(error.status, StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(error.code, "foreign-agent-actor");
+        } else {
+            assert!(result.is_ok(), "{path}");
+        }
+    }
+}
+
+fn writer_binding_cleanup_mail(state: &AppState) {
+    let now = client_now_ms();
+    state.store.set_write_clock_at(now - 2 * mail_backlog::THRESHOLD_MS as u128).unwrap();
+    for recipient in ["own", "other"] {
+        state.store.append_claim(&ClaimInput {
+            subject: format!("message/cleanup-{recipient}"),
+            kind: "message.sent".into(),
+            actor: Some("person/example".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("person/example")),
+                ("to".into(), json!(format!("agent/{recipient}"))),
+                ("content".into(), json!("old message")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    state.store.set_write_clock_at(now).unwrap();
+}
+
+#[tokio::test]
+async fn writer_binding_message_cleanup_limits_authenticated_mailboxes() {
+    for caller in ["bound", "paired", "native"] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        writer_binding_cleanup_mail(&state);
+        let credential = "cleanup-pairing";
+        writer_binding_pairing(&state, credential, &["read.projections", "control.messages"]);
+        let app = router(state.clone())
+            .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+        let app = if caller == "native" {
+            app.layer(Extension(NativeDeliveryPeer {
+                agent: "agent/own".into(), transport: "omp-channel", pid: 37, archives_inbox: false,
+            }))
+        } else { app };
+        let bound = (caller == "bound").then_some("agent/own");
+        let bearer = (caller == "paired").then_some(credential);
+        let before = state.store.index().unwrap();
+        for dry_run in [false, true] {
+            for (to, all) in [(Some("agent/other"), false), (None, true)] {
+                let (status, refusal) = writer_binding_request(
+                    app.clone(), "/v1/messages/cleanup", bound, bearer,
+                    json!({"to":to, "all":all, "older_than_ms":mail_backlog::THRESHOLD_MS,
+                        "dry_run":dry_run}),
+                ).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{caller}/{to:?}/{dry_run}: {refusal}");
+                assert_eq!(refusal["code"], "foreign-agent-actor");
+                assert_eq!(state.store.index().unwrap(), before);
+                for recipient in ["own", "other"] {
+                    assert_eq!(state.store.message(&format!("message/cleanup-{recipient}"))
+                        .unwrap().unwrap().status, "sent", "{caller}/{recipient}");
+                }
+            }
+        }
+        let own = if caller == "paired" { "person/example" } else { "own" };
+        let (status, cleaned) = writer_binding_request(
+            app, "/v1/messages/cleanup", bound, bearer,
+            json!({"to":own, "older_than_ms":mail_backlog::THRESHOLD_MS}),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{caller}: {cleaned}");
+        assert_eq!(cleaned["count"], if caller == "paired" { 0 } else { 1 });
+        assert_eq!(state.store.message("message/cleanup-other").unwrap().unwrap().status, "sent");
+        assert_eq!(state.store.message("message/cleanup-own").unwrap().unwrap().status,
+            if caller == "paired" { "sent" } else { "closed" });
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_cleanup_retains_operator_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    writer_binding_cleanup_mail(&state);
+    let app = router(state.clone()).layer(Extension(HarnessAncestry::Person));
+    for (to, all, dry_run, count) in [
+        (None, true, true, 2),
+        (Some("agent/other"), false, false, 1),
+        (None, true, false, 1),
+    ] {
+        let (status, cleaned) = writer_binding_request(
+            app.clone(), "/v1/messages/cleanup", None, None,
+            json!({"to":to, "all":all, "dry_run":dry_run,
+                "older_than_ms":mail_backlog::THRESHOLD_MS}),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{to:?}/{dry_run}: {cleaned}");
+        assert_eq!(cleaned["count"], count);
+    }
+    for recipient in ["own", "other"] {
+        assert_eq!(state.store.message(&format!("message/cleanup-{recipient}"))
+            .unwrap().unwrap().status, "closed");
     }
 }
 
@@ -14150,9 +14506,9 @@ async fn writer_binding_json_media_types_and_missing_message_sender() {
     let state = state(root.path());
     let app = router(state.clone());
     for (media_type, sender, expected) in [
-        ("application/vnd.fractal+json; charset=utf-8", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
-        ("Application/JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
-        ("Application/Vnd.Fractal+JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("application/vnd.fractal+json; charset=utf-8", Some("person/other"), StatusCode::FORBIDDEN),
+        ("Application/JSON", Some("person/other"), StatusCode::FORBIDDEN),
+        ("Application/Vnd.Fractal+JSON", Some("person/other"), StatusCode::FORBIDDEN),
         ("application/vnd.fractal+json; charset=utf-8", None, StatusCode::OK),
     ] {
         let mut fields = json!({"to":"agent/receiver","content":"hello","status":"sent"});
@@ -16264,7 +16620,7 @@ async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
-    for path in ["/v1/checkpoint/resume", "/v1/checkpoint/excuse"] {
+    for path in ["/v1/checkpoint/resume"] {
         for actor in ["person/operator", "agent/other"] {
             let before = state.store.index().unwrap();
             let (status, refused) = checkpoint_actor_request(
@@ -16275,11 +16631,7 @@ async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
             assert_eq!(state.store.index().unwrap(), before, "{path}");
         }
         // The binding accepts the seat's own identity; store authorization still applies.
-        let code = if path.ends_with("/resume") {
-            "invalid-checkpoint-resume"
-        } else {
-            "invalid-checkpoint-excusal"
-        };
+        let code = "invalid-checkpoint-resume";
         let (status, refused) = checkpoint_actor_request(
             app.clone(), path, Some("agent/helper"), "agent/helper",
         ).await;

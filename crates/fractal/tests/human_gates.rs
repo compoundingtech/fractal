@@ -219,7 +219,7 @@ async fn act(
     .await
 }
 
-/// `POST /v1/reviews/{target}`, the route `st attention approve|reject` uses.
+/// `POST /v1/reviews/{target}`, the route `fractal attention approve|reject` uses.
 async fn review(
     app: &axum::Router,
     target: &str,
@@ -449,7 +449,7 @@ async fn a_gate_asked_again_refuses_the_old_card_and_takes_the_current_one() {
     let (socket, server) = serve(state, root.path()).await;
     let seen = card(&app, "person/avery", &step).await.expect("no card");
 
-    // The step fails and is retried before the person answers. Until st asks again, the gate
+    // The step fails and is retried before the person answers. Until fractal asks again, the gate
     // has no current request, and the review route says which attempt the old one was for.
     let asked = store.gate_request_for_owner(&step).unwrap().unwrap().id;
     store
@@ -587,7 +587,7 @@ async fn the_cli_approves_a_gate_by_the_attention_id_it_lists_and_says_why_it_re
     let app = fractal_daemon::api::router(state.clone());
     let (socket, server) = serve(state, root.path()).await;
 
-    // `st attention ls` leads each card with its attention ID; that is what a person copies.
+    // `fractal attention ls` leads each card with its attention ID; that is what a person copies.
     let listed = run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await;
     assert!(listed.status.success(), "{listed:?}");
     let listed = String::from_utf8(listed.stdout).unwrap();
@@ -1034,7 +1034,7 @@ async fn each_item_of_a_for_each_loop_takes_its_own_answer() {
     server.abort();
 }
 
-/// Every review st offers a person has a card for them, and a review without a card is not
+/// Every review fractal offers a person has a card for them, and a review without a card is not
 /// offered: while the step that started a gate's run has failed, the gate's card is gone and
 /// the review route says why, and both come back once that step is retried.
 #[tokio::test]

@@ -8,7 +8,7 @@ import XCTest
 final class SignalBoardTests: XCTestCase {
   func testSignalsKeepTheirDeclaredOrderAndMatchNamespacedObjectives() {
     let board = SignalBoard(rows: [
-      row("factory/work-throughput", current: "18 per hour"),
+      row("factory/merged-prs", current: "18 per hour"),
       row("fractal/merge-latency/p95", current: "9m over 24h"),
       row("fractal/ci-critical-path/p95", current: "11m over 24h"),
       row("fractal/flakes", current: "0"),
@@ -16,12 +16,88 @@ final class SignalBoardTests: XCTestCase {
       row("agents/running"), row("claude/weekly", kind: .budget, remaining: 70), row("disk/root"),
     ])
     XCTAssertEqual(board.signals.map(\.title), [
-      "PR throughput", "Merge latency p95", "CI critical path p95", "Flakes", "Main green",
+      "PR throughput", "Merge latency", "CI critical path", "Flakes", "Main green",
       "Fleet", "Fractal", "Agents", "Spend", "Disk",
     ])
     XCTAssertTrue(board.signals.allSatisfy { $0.members.count == 1 })
     XCTAssertEqual(signal("merge-latency", in: board).value, "9m")
     XCTAssertEqual(signal("ci-critical-path", in: board).value, "11m")
+  }
+
+  // Served IDs from slo/*.kdl and the native producers (admission_objectives.rs,
+  // mail_delivery_objectives.rs, roll_completion.rs, credit_objectives.rs, readiness_slo.rs).
+  func testEveryServedObjectiveFamilyJoinsExactlyOneTile() {
+    let expected: [(String, String)] = [
+      ("factory/merged-prs", "pr-throughput"),
+      ("fractal/merge-latency/p95", "merge-latency"),
+      ("landing/merge-latency/example/p50", "merge-latency"),
+      ("landing/merge-latency/example/p95", "merge-latency"),
+      ("fractal/ci-critical-path/p95", "ci-critical-path"),
+      ("build/admission/example-host/check", "ci-critical-path"),
+      ("fractal/flakes", "flakes"),
+      ("main-green/fractal", "main-green"),
+      ("fleet/roll-completion", "fleet"),
+      ("fractal", "fractal"),
+      ("cpu/idle", "fractal"), ("database-archive", "fractal"), ("projection-divergence", "fractal"),
+      ("ios-connect", "fractal"), ("ios-live-share", "fractal"),
+      ("fractal-api-readiness/example-member", "fractal"),
+      ("fractal-api-readiness-early/example-member", "fractal"),
+      ("agents/mail-delivery/example-host", "agents"),
+      ("CAM-R01/anthropic", "spend"), ("CAM-R02/openai", "spend"),
+      ("disk/root", "disk"),
+    ]
+    let board = SignalBoard(rows: expected.map { row($0.0) })
+    for (id, tile) in expected {
+      let owners = board.signals.filter { $0.members.contains { $0.id == id } }.map(\.id)
+      XCTAssertEqual(owners, [tile], id)
+    }
+  }
+
+  func testLabelledPartsAndRetiredThroughputStayOffTheTiles() {
+    let board = SignalBoard(rows: [
+      row("fractal/merge-latency/p95"), row("fractal/merge-latency/p95{member=example}", status: "missed"),
+      row("fractal/ci-critical-path/p95{member=example}", status: "missed"),
+      row("fractal/flakes{type=retry}", status: "missed"), row("factory/work-throughput", status: "missed"),
+    ])
+    XCTAssertEqual(signal("merge-latency", in: board).members.map(\.id), ["fractal/merge-latency/p95"])
+    XCTAssertEqual(signal("merge-latency", in: board).tone, .green)
+    XCTAssertTrue(signal("ci-critical-path", in: board).members.isEmpty)
+    XCTAssertTrue(signal("flakes", in: board).members.isEmpty)
+    XCTAssertTrue(signal("pr-throughput", in: board).members.isEmpty)
+    XCTAssertEqual(board.needsAttention, 0)
+  }
+
+  func testMergeLatencyPercentilesAndAdmissionUseTheWorstServedVerdict() {
+    let board = SignalBoard(rows: [
+      row("landing/merge-latency/example/p50"),
+      row("landing/merge-latency/example/p95", status: "at-risk", tone: "yellow"),
+      row("fractal/ci-critical-path/p95"),
+      row("build/admission/example-host/check", status: "exhausted", tone: "red"),
+    ])
+    let latency = signal("merge-latency", in: board)
+    XCTAssertEqual(latency.tone, .yellow)
+    XCTAssertEqual(latency.subtitle, "landing/merge-latency/example/p95")
+    XCTAssertEqual(latency.value, "0/2")
+    let ci = signal("ci-critical-path", in: board)
+    XCTAssertEqual(ci.tone, .red)
+    XCTAssertEqual(ci.subtitle, "build/admission/example-host/check")
+    XCTAssertEqual(ci.value, "1/2")
+  }
+
+  func testSpendRanksCreditObjectivesByToneAndKeepsBudgetPercentOnTies() {
+    let missedCredit = signal("spend", in: SignalBoard(rows: [
+      row("CAM-R01/anthropic", status: "missed", remaining: 0),
+      row("claude/weekly", kind: .budget, remaining: 70),
+    ]))
+    XCTAssertEqual(missedCredit.worstMember?.id, "CAM-R01/anthropic")
+    XCTAssertEqual(missedCredit.tone, .red)
+    XCTAssertEqual(missedCredit.value, "1/2")
+    let tied = signal("spend", in: SignalBoard(rows: [
+      row("CAM-R02/anthropic", remaining: 100),
+      row("claude/weekly", kind: .budget, remaining: 70),
+    ]))
+    XCTAssertEqual(tied.worstMember?.id, "claude/weekly")
+    XCTAssertEqual(tied.value, "30%")
   }
 
   func testWorstMeasuredToneWinsAndNoDataDoesNotCount() {
@@ -104,25 +180,30 @@ final class SignalBoardTests: XCTestCase {
     XCTAssertEqual(spend.tone, .red)
   }
 
-  func testFractalAggregatesOnlyDaemonObjectivesUntilExplicitOverrideExists() {
+  func testFractalAggregatesDaemonObjectivesAndAnExplicitAggregateNeverHidesThem() {
     let daemonIDs = [
       "person-read", "person-read/remote", "person-read-fresh", "projection-fresh", "write-ack",
       "terminal-attach", "sql-statement", "transaction/read", "transaction/write",
-      "transaction/writer_hold", "writer-hold", "cpu", "cpu/idle", "database",
+      "transaction/writer_hold", "writer-hold", "cpu", "cpu/idle", "database", "database-archive",
+      "projection-divergence", "ios-connect", "fractal-api-readiness/example-member",
     ]
     let rows = daemonIDs.map { row($0, status: "missed") } + [
-      row("ios-connect", status: "missed"), row("fractal/flakes", status: "missed"),
+      row("fractal/flakes", status: "missed"), row("agents/mail-delivery/example-host", status: "missed"),
     ]
     let aggregated = signal("fractal", in: SignalBoard(rows: rows))
     XCTAssertEqual(aggregated.members.map(\.id), daemonIDs)
-    XCTAssertEqual(aggregated.value, "14/14")
-    let overridden = signal("fractal", in: SignalBoard(rows: rows + [row("fractal", current: "99.9%")]))
-    XCTAssertEqual(overridden.members.map(\.id), ["fractal"])
-    XCTAssertEqual(overridden.value, "99.9%")
-    XCTAssertEqual(overridden.tone, .green)
-    let noData = signal("fractal", in: SignalBoard(rows: rows + [row("fractal", status: "no-data")]))
-    XCTAssertEqual(noData.value, "—", "an explicit unmeasured objective still overrides daemon rows")
-    XCTAssertEqual(noData.subtitle, "no data")
+    XCTAssertEqual(aggregated.value, "18/18")
+    let explicit = signal("fractal", in: SignalBoard(rows: [row("fractal", current: "99.9%")] + rows))
+    XCTAssertEqual(explicit.members.map(\.id), ["fractal"] + daemonIDs, "children stay in the drill-down")
+    XCTAssertEqual(explicit.tone, .red, "a green aggregate does not mask a missed child")
+    XCTAssertEqual(explicit.value, "18/19")
+    XCTAssertEqual(explicit.subtitle, "person-read")
+    let unmeasured = signal("fractal", in: SignalBoard(rows: [row("fractal", status: "no-data")] + rows))
+    XCTAssertEqual(unmeasured.members.count, 19)
+    XCTAssertEqual(unmeasured.value, "18/18", "an unmeasured aggregate does not blank measured children")
+    let alone = signal("fractal", in: SignalBoard(rows: [row("fractal", current: "99.9%")]))
+    XCTAssertEqual(alone.value, "99.9%")
+    XCTAssertEqual(alone.tone, .green)
   }
 
   // Row shapes emitted by declared_objectives_budget.rs and objectives.rs::native_budget.

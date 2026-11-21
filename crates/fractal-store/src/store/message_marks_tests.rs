@@ -577,3 +577,96 @@ fn a_pinned_open_page_costs_little_beside_the_retirements_since_its_cut() {
     let marked = json!({"global": time(None), "recipient": time(Some(RECIPIENT))});
     println!("{}", json!({"groups": groups, "unmarked": unmarked, "every_winner_marked": marked}));
 }
+
+fn freshness_membership_fixture() -> Store {
+    let store = Store::open_memory("node").unwrap();
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"birch\" { host \"node\"; command \"true\"; }\nagent \"cedar\" { host \"other\"; command \"true\"; }",
+        "node",
+    ).unwrap();
+    crate::store::card_fold_tests_shared_missions::declare(&store, &intent, "freshness-membership");
+    {
+        let connection = store.connection.write();
+        for (subject, member) in [
+            ("agent/null", None),
+            // A malformed member cannot enter the agent host expression index. Non-agent
+            // declarations still exercise the reader's exact member-decoding contract.
+            ("agent/malformed", Some("{")),
+            ("agent/incomplete", Some(r#"{"host":"node"}"#)),
+            ("agent/invalid", Some(r#"{"host":"node","kind":"future-kind"}"#)),
+        ] {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h5affa7f5bf63 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+                 SELECT ?1,'resource',revision,claim_id,'{}',?2 FROM desired WHERE subject=?3",
+                params![subject, member, RECIPIENT],
+            ).unwrap();
+        }
+        // Authorization has never imposed a subject-prefix or kind restriction.
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h589820728542 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+             SELECT 'person/avery','person',revision,claim_id,body,member
+             FROM desired WHERE subject=?1", [RECIPIENT],
+        ).unwrap();
+    }
+    store
+}
+
+#[test]
+fn freshness_membership_matches_full_desired_authorization() {
+    let store = freshness_membership_fixture();
+    let requested = [
+        RECIPIENT, "agent/node.cedar", "agent/null", "agent/malformed", "agent/incomplete",
+        "agent/invalid", "agent/missing", "person/avery", RECIPIENT,
+    ];
+    for host in ["node", "other", "unknown"] {
+        let old = store.desired_subjects().unwrap().into_iter()
+            .filter(|desired| requested.contains(&desired.subject.as_str()))
+            .filter(|desired| desired.member.as_ref().is_some_and(|member| member.host == host))
+            .map(|desired| desired.subject).collect::<BTreeSet<_>>();
+        assert_eq!(store.hosted_subjects(&requested, host).unwrap(), old);
+    }
+    assert!(store.hosted_subjects(&[], "node").unwrap().is_empty());
+}
+
+#[test]
+fn freshness_message_marks_authorize_only_current_hosted_consumers() {
+    let store = freshness_membership_fixture();
+    let message = "message/freshness-authorization";
+    store.append_claim(&sent(message, RECIPIENT, &[])).unwrap();
+    for consumer in [RECIPIENT, "agent/node.cedar", "agent/incomplete", "agent/missing", "person/avery"] {
+        message_marks::record(&store, message, "message.read", consumer).unwrap();
+    }
+    let answers = message_marks::host_marks(&store, &[message.into(), "message/absent".into()]).unwrap();
+    assert!(answers[0].0);
+    assert_eq!(
+        answers[0].1.iter().map(|mark| mark.consumer.as_str()).collect::<BTreeSet<_>>(),
+        BTreeSet::from([RECIPIENT, "person/avery"]),
+    );
+    assert_eq!(answers[1], (false, Vec::new()));
+}
+
+#[test]
+fn freshness_membership_cost_does_not_scale_with_unrequested_declarations() {
+    let store = freshness_membership_fixture();
+    let cost = || {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h69df54db0d63 owner=fractal_store::store::message_marks_tests TODO=trace-statement-and-value-representation */ Store::HOSTED_SUBJECTS_SQL).unwrap();
+        let rows = statement.query_map([serde_json::to_string(&[RECIPIENT]).unwrap()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(statement.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+        statement.get_status(rusqlite::StatementStatus::VmStep)
+    };
+    let before = cost();
+    store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h7208898d4e69 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<4096)
+         INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+         SELECT 'agent/unrequested-' || i,'agent',source.revision,source.claim_id,
+                json_object('unrelated', printf('%16384s','')),NULL
+         FROM n CROSS JOIN desired source WHERE source.subject='agent/node.birch'",
+    ).unwrap();
+    let after = cost();
+    assert!(after <= before + 16, "requested membership VM steps grew: {before} -> {after}");
+    assert_eq!(store.hosted_subjects(&[RECIPIENT], "node").unwrap(), BTreeSet::from([RECIPIENT.into()]));
+}

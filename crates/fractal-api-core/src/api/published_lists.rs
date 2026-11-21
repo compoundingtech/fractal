@@ -86,7 +86,7 @@ const FOLD_CLAIMS: u64 = 10_000;
 fn withdraw<R>(store: &Store, list: fn(&Store) -> &PublishedList<R>, name: &'static str) {
     // An ended list stopped serving already, so this warns only of an ungoverned withdrawal.
     if list(store).withdraw() {
-        eprintln!("st3: WARN the {name} list is no longer published; windows fold on read until it is");
+        eprintln!("fractal: WARN the {name} list is no longer published; windows fold on read until it is");
     }
     store.withdraw_collection_view(name);
 }
@@ -115,11 +115,11 @@ impl<R> Drop for Withdraw<R> {
         // runtime shutting down cancels it.
         if std::thread::panicking() {
             eprintln!(
-                "st3: ERROR the {} list's refresher panicked; it is not published again until the daemon restarts",
+                "fractal: ERROR the {} list's refresher panicked; it is not published again until the daemon restarts",
                 self.name
             );
         } else {
-            eprintln!("st3: the {} list's refresher stopped", self.name);
+            eprintln!("fractal: the {} list's refresher stopped", self.name);
         }
         (self.list)(&self.store).end();
         withdraw(&self.store, self.list, self.name);
@@ -436,11 +436,11 @@ fn spawn<R: Send + Sync + 'static>(
             let failed = match folded {
                 Ok(Ok(_)) => false,
                 Ok(Err(error)) => {
-                    eprintln!("st3: {name} refresh failed: {error:#}");
+                    eprintln!("fractal: {name} refresh failed: {error:#}");
                     true
                 }
                 Err(error) => {
-                    eprintln!("st3: {name} refresh stopped: {error}");
+                    eprintln!("fractal: {name} refresh stopped: {error}");
                     // The fold may have taken a forget with it: fold from nothing next.
                     list(&store).fold_from_nothing_next();
                     true
@@ -454,7 +454,7 @@ fn spawn<R: Send + Sync + 'static>(
                 if governed {
                     // Its readers refuse until a fold publishes again; its windows read once.
                     if list(&store).withdraw() {
-                        eprintln!("st3: WARN the {name} list is withdrawn; readers wait until it publishes again");
+                        eprintln!("fractal: WARN the {name} list is withdrawn; readers wait until it publishes again");
                     }
                     store.hold_collection_view(name);
                 } else {
@@ -703,9 +703,9 @@ pub fn present(card: &mut Value, gates: &[fractal_ui_model::missions::Gate], fle
                 && matches!(presentation.word, Word::Unclaimed | Word::Queued | Word::Unstaffed) => {}
         Ok(presentation) => match serde_json::to_value(presentation) {
             Ok(presentation) => card["presentation"] = presentation,
-            Err(error) => eprintln!("st3: WARN mission {} has no presentation: {error:#}", card["id"]),
+            Err(error) => eprintln!("fractal: WARN mission {} has no presentation: {error:#}", card["id"]),
         },
-        Err(error) => eprintln!("st3: WARN mission {} has no presentation: {error:#}", card["id"]),
+        Err(error) => eprintln!("fractal: WARN mission {} has no presentation: {error:#}", card["id"]),
     }
 }
 

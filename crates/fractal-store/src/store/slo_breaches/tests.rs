@@ -312,13 +312,12 @@ fn checkpoint_proof_trim_and_canonical_renumber_preserve_episode_fences() {
     let references = rows.iter().collect::<Vec<_>>();
     assert_eq!(checkpoint_rules::rule_keep(checkpoint_rules::Rule::SloEventFences, rows.len(), &references,
         false, &BTreeMap::new(), young).len(), rows.len());
-    let scratch = tempfile::tempdir().unwrap();
-    let (_, _, proof) = source.plan_checkpoint_through(cut, None, scratch.path()).unwrap();
-    assert!(proof.passed, "canonical proof/renumber: {:?}", proof.mismatches);
     let sealed = source.checkpoint_sealed_set(cut).unwrap();
     let plan = checkpoint::plan_drops(&sealed);
     assert!(!plan.claims.is_empty(), "exercise an actual redundant receipt drop");
     let before = projection_digest::oracle(&source.readers.get()).unwrap();
+    // The trim runs past the forget bound of everything it drops.
+    source.set_write_clock_at(cut + 86_400_000).unwrap();
     let mut connection = source.connection.write();
     let tx = connection.transaction().unwrap();
     checkpoint::record_checkpoint_tombstones_tx(&tx, &checkpoint::checkpoint_name(cut), &plan.envelopes, &plan.claims).unwrap();

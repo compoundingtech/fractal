@@ -1540,7 +1540,6 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     }
     if path.starts_with("/v1/internal/replication/export")
         || path.starts_with("/v1/internal/replication/receive")
-        || path.starts_with("/v1/internal/replication/checkpoint")
         || path.starts_with(CLIENT_READ_FORWARD_PATH)
     {
         // A forwarded client read is bounded by the relay's own per-hop timeouts.
@@ -1548,10 +1547,6 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     } else if path == "/v1/doctor" || path.starts_with("/v1/doctor?") {
         // Mirror the server's bulk read budget in read_deadline.rs.
         deadlines.bulk
-    } else if path.starts_with("/v1/checkpoint/plan") || path.starts_with("/v1/checkpoint/status")
-    {
-        // A dry run copies the store and replays it twice; status reads what is sealed.
-        Duration::from_secs(30 * 60)
     } else if (path.starts_with("/v1/events?") || path.starts_with("/v1/events/page?"))
         && path.contains("wait=true")
     {

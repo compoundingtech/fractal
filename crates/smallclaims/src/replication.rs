@@ -32,6 +32,69 @@ pub struct ReplicationInventory {
     /// exchange's `claim_ranges`. Older peers ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_range_query: Option<ClaimRangeQuery>,
+    /// What the sending node can take beyond envelopes, such as [`SIGNED_CLAIMS`]. Older peers
+    /// leave it out and ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
+/// A node that lists this capability takes the claims of an envelope its peer released as
+/// [`SignedEnvelope`]s (`store::signed_claims`).
+pub const SIGNED_CLAIMS: &str = "signed-claims-v1";
+
+/// What this build lists in its inventories' `capabilities`.
+pub fn replication_capabilities() -> Vec<String> {
+    vec![SIGNED_CLAIMS.to_owned()]
+}
+
+impl ReplicationInventory {
+    /// Whether the node that sent this inventory lists `capability`.
+    pub fn can(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|listed| listed == capability)
+    }
+}
+
+/// The claims of an envelope its sender released (`store::envelope_release`), each signed by its
+/// writer, in place of the payload the sender no longer holds. The envelope's identity is bound
+/// by its writer's envelope signature; the batch header gives the batch id each claim id hashes.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SignedEnvelope {
+    pub writer: String,
+    pub sequence: u64,
+    pub hash: String,
+    pub previous_hash: Option<String>,
+    pub accepted_at_unix_ms: u128,
+    /// The writer's member key and its signature over this envelope's identity.
+    pub member_key: String,
+    pub signature: String,
+    pub batch: SignedBatchHeader,
+    pub claims: Vec<SignedClaim>,
+    /// The bytes of each blob a claim names, by hash.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blobs: BTreeMap<String, crate::claim::EnvelopePayload>,
+}
+
+/// A batch's header: what its id hashes (`batch/{origin}/{sequence}/{hash}`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SignedBatchHeader {
+    pub id: String,
+    pub origin: String,
+    pub replica_sequence: u64,
+    pub previous_hash: Option<String>,
+    pub hash: String,
+    pub accepted_at_unix_ms: u128,
+}
+
+/// One claim of a [`SignedEnvelope`]: its content, its position in the batch, its writer's
+/// signature (`store::member_signatures`), and the principal's signature it carried, if any.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SignedClaim {
+    pub claim: crate::claim::ClaimRecord,
+    pub position: u64,
+    pub member_key: String,
+    pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_signature: Option<crate::principal::ClaimSignature>,
 }
 
 /// A checkpoint as an inventory advertises it.
@@ -85,6 +148,18 @@ pub struct ReplicationExchange {
     /// protocol; older peers leave it out and are compared by envelopes alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_ranges: Option<ClaimRangeSummary>,
+    /// The writer signatures of the claims this exchange carries (`store::member_signatures`),
+    /// so a claim authenticates without its envelope. Older peers neither send nor read them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claim_member_signatures: Vec<crate::store::member_signatures::ClaimMemberSignature>,
+    /// The claims of envelopes the sender released and the receiver lacks, sent only to a node
+    /// that lists [`SIGNED_CLAIMS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed_envelopes: Vec<SignedEnvelope>,
+    /// How many released envelopes the receiver lacks that this exchange could not carry,
+    /// because the receiver does not list [`SIGNED_CLAIMS`]. Local to the sender; never sent.
+    #[serde(skip)]
+    pub unservable_released: u64,
 }
 
 /// The claim-range protocol version this build speaks.
@@ -205,6 +280,11 @@ pub struct ReplicationReceipt {
     /// that walks them. Local to this node; never sent to a peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_ranges: Option<ClaimRangeComparison>,
+    /// Signed envelopes admitted, and refused (a claim or signature that does not verify).
+    #[serde(default)]
+    pub signed_envelopes: usize,
+    #[serde(default)]
+    pub refused_signed_envelopes: usize,
 }
 
 /// A node's first sync after it joins: it ends once the node holds the same envelopes as a
@@ -269,6 +349,10 @@ pub struct ReplicationReceiveRequest {
     /// Local dial evidence, never part of the signed or replicated exchange.
     #[serde(default)]
     pub carrier: ReplicationCarrier,
+    /// Sender incarnation verified by the local worker, not part of the signed exchange.
+    /// Older workers omit this; absence must not be attributed to a current member key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_member_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -308,7 +392,13 @@ pub struct ReplicaRecordView {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ReplicationStatus {
     pub configured: bool,
+    /// Waiting claim signatures refused for the per-peer or total cap (`member_signatures`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub claim_signatures_refused: u64,
     pub fleet_id: Option<String>,
+    /// Current-daemon worker heartbeat and exchange evidence, never stored envelope counts.
+    #[serde(default)]
+    pub health: ReplicationHealth,
     pub authority_digest: String,
     /// Aggregate of every shared projection table and admitted immutable claim sources.
     pub graph_digest: String,
@@ -350,6 +440,195 @@ pub struct ReplicationStatus {
     /// A member refused this node as removed or left, so it no longer syncs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed: Option<crate::fleet::RemovalNotice>,
+    /// For each peer that does not take signed claims, how many envelopes this node released
+    /// that the peer lacks and cannot get here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unservable_released: BTreeMap<String, u64>,
+    /// Signed envelopes refused since this process started: a claim, a signature or a batch
+    /// that did not verify.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub refused_signed_envelopes: u64,
+    /// Held claims a peer retired that this node keeps: a person's, or of a kind its own trim
+    /// keeps (`store::retirement_wins`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub peer_retired_kept: u64,
+    /// Claims a peer retired that this node never held and no peer it walked could supply: it
+    /// lacks their tombstones, and so the facts `claim_sources` and `operations` keep of them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub peer_retired_unheld: u64,
+    /// Messages routed to the messages shard that this process appended to the graph instead
+    /// since it started, by error code. Absent from a daemon that does not count them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_fallbacks: Option<BTreeMap<String, u64>>,
+}
+
+/// Operational evidence expires even when the stored claim history is nonempty.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplicationHealth {
+    #[default]
+    Disabled,
+    Starting,
+    Healthy,
+    NoTargets,
+    WorkerMissing,
+    WorkerStale,
+    ExchangeStale,
+}
+
+impl ReplicationHealth {
+    pub(crate) fn observe(
+        configured: bool,
+        uptime: std::time::Duration,
+        heartbeat_age: Option<std::time::Duration>,
+        target_count: usize,
+        exchange_age: Option<std::time::Duration>,
+    ) -> Self {
+        use std::time::Duration;
+        if !configured {
+            return Self::Disabled;
+        }
+        let grace = Duration::from_secs(60);
+        let Some(heartbeat_age) = heartbeat_age else {
+            return if uptime < grace { Self::Starting } else { Self::WorkerMissing };
+        };
+        if heartbeat_age > crate::windows::cpu_minutes::WORKER_FRESH {
+            return Self::WorkerStale;
+        }
+        if target_count == 0 {
+            // An anchor-only creator has nobody to exchange with; its live worker is healthy.
+            return Self::NoTargets;
+        }
+        if exchange_age.is_some_and(|age| age <= grace) {
+            Self::Healthy
+        } else if uptime < grace {
+            Self::Starting
+        } else {
+            Self::ExchangeStale
+        }
+    }
+
+    pub fn status(self) -> &'static str {
+        match self {
+            Self::Disabled | Self::Healthy | Self::NoTargets => "pass",
+            Self::Starting => "warn",
+            Self::WorkerMissing | Self::WorkerStale | Self::ExchangeStale => "fail",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Disabled => "replication is not configured",
+            Self::Starting => "replication is within its 60-second startup grace period; waiting for the first worker heartbeat or a successful exchange",
+            Self::Healthy => "replication worker is live and a current peer exchanged successfully within 60 seconds",
+            Self::NoTargets => "replication worker is live; this fleet has no other current member to exchange with",
+            Self::WorkerMissing => "fleet replication is configured but no replication worker heartbeat has reached this daemon; start the replication-worker service",
+            Self::WorkerStale => "replication worker heartbeat is stale (over 25 seconds); inspect and restart the replication-worker service",
+            Self::ExchangeStale => "replication worker is live but no successful exchange with a current peer occurred within 60 seconds; inspect fleet routes, including the bootstrap sponsor, and replication-worker logs",
+        }
+    }
+}
+
+impl std::fmt::Display for ReplicationHealth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Disabled => "disabled",
+            Self::Starting => "starting",
+            Self::Healthy => "healthy",
+            Self::NoTargets => "no-targets",
+            Self::WorkerMissing => "worker-missing",
+            Self::WorkerStale => "worker-stale",
+            Self::ExchangeStale => "exchange-stale",
+        })
+    }
+}
+
+#[cfg(test)]
+mod replication_health_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_live_sole_member_needs_no_exchange_but_still_needs_a_worker() {
+        assert_eq!(
+            ReplicationHealth::observe(true, GRACE, Some(Duration::ZERO), 0, None),
+            ReplicationHealth::NoTargets,
+        );
+        assert_eq!(
+            ReplicationHealth::observe(true, GRACE, None, 0, None),
+            ReplicationHealth::WorkerMissing,
+        );
+    }
+
+    const GRACE: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn unconfigured_replication_is_disabled_not_failing() {
+        assert_eq!(
+            ReplicationHealth::observe(false, GRACE, Some(GRACE), 1, Some(GRACE)),
+            ReplicationHealth::Disabled
+        );
+        assert_eq!(ReplicationHealth::Disabled.status(), "pass");
+    }
+
+    #[test]
+    fn configured_replication_without_any_worker_heartbeat_fails() {
+        let health = ReplicationHealth::observe(true, GRACE, None, 1, Some(Duration::ZERO));
+        assert_eq!(health, ReplicationHealth::WorkerMissing);
+        assert_eq!(health.status(), "fail");
+        assert!(health.message().contains("no replication worker heartbeat"));
+    }
+
+    #[test]
+    fn the_first_worker_heartbeat_has_a_bounded_daemon_startup_grace() {
+        for targets in [0, 1] {
+            for uptime in [Duration::ZERO, Duration::from_secs(10), GRACE - Duration::from_millis(1)] {
+                let health = ReplicationHealth::observe(true, uptime, None, targets, None);
+                assert_eq!(health, ReplicationHealth::Starting);
+                assert_eq!(health.status(), "warn");
+            }
+            for uptime in [GRACE, GRACE + Duration::from_millis(1), Duration::MAX] {
+                assert_eq!(
+                    ReplicationHealth::observe(true, uptime, None, targets, None),
+                    ReplicationHealth::WorkerMissing,
+                );
+            }
+        }
+        assert_eq!(
+            ReplicationHealth::observe(false, Duration::ZERO, None, 1, None),
+            ReplicationHealth::Disabled,
+        );
+    }
+
+    #[test]
+    fn a_stale_worker_heartbeat_fails_even_with_recent_envelope_history() {
+        let health = ReplicationHealth::observe(
+            true,
+            GRACE,
+            Some(crate::windows::cpu_minutes::WORKER_FRESH + Duration::from_secs(1)),
+            1,
+            Some(Duration::ZERO),
+        );
+        assert_eq!(health, ReplicationHealth::WorkerStale);
+        assert_eq!(health.status(), "fail");
+    }
+
+    #[test]
+    fn a_live_worker_without_a_recent_exchange_warns_only_during_the_startup_grace() {
+        let starting = ReplicationHealth::observe(true, GRACE - Duration::from_secs(1), Some(Duration::ZERO), 1, None);
+        assert_eq!(starting, ReplicationHealth::Starting);
+        assert_eq!(starting.status(), "warn");
+        let stalled = ReplicationHealth::observe(true, GRACE, Some(Duration::ZERO), 1, Some(GRACE + Duration::from_secs(1)));
+        assert_eq!(stalled, ReplicationHealth::ExchangeStale);
+        assert_eq!(stalled.status(), "fail");
+    }
+
+    #[test]
+    fn a_live_worker_with_a_recent_exchange_is_healthy() {
+        let health = ReplicationHealth::observe(true, GRACE, Some(Duration::from_secs(10)), 1, Some(Duration::from_secs(30)));
+        assert_eq!(health, ReplicationHealth::Healthy);
+        assert_eq!(health.status(), "pass");
+    }
 }
 
 /// Cumulative replication time in one daemon process since it started, split by stage, for

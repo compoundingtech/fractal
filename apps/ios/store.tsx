@@ -285,7 +285,7 @@ function useAppStore(proof?: FabricProfile) {
   }
   const observations = observationsRef.current;
   const timers = useRef<{ openToLive: number | null; connect: number | null; recover: number | null; everLive: boolean }>({ openToLive: null, connect: null, recover: null, everLive: false });
-  useEffect(() => { if (!proof) void observations.load(); }, [proof, observations]);
+  useEffect(() => { if (!proof) void observations.load().catch(error => setError(errorText(error))); }, [proof, observations]);
   useEffect(() => {
     if (proof) return;
     const gate = foreground.current;
@@ -299,7 +299,7 @@ function useAppStore(proof?: FabricProfile) {
         // recovery that was cut off are not measurements.
         for (const key of ['openToLive', 'connect', 'recover'] as const) { const token = held[key]; if (token !== null) { observations.cancel(token); held[key] = null; } }
         observations.setLive(false);
-        void observations.flush();
+        void observations.flush().catch(error => setError(errorText(error)));
       }
     };
     changed(gate.active);
@@ -368,28 +368,28 @@ function useAppStore(proof?: FabricProfile) {
   useEffect(() => {
     if (proof || !client) { observations.ready = undefined; return; }
     const state = reporting.current;
-    state.send = () => {
+    state.send = async () => {
       if (state.busy || Date.now() - state.last < 30_000) return;
       // Preparing a batch can synchronously notify ready while it closes a minute.
       state.busy = true;
       try {
-        const batch = observations.nextReport();
-        if (!batch) { state.busy = false; return; }
+        const batch = await observations.nextReport();
+        if (!batch) return;
         const report = toObservationReport(batch);
-        if (!report.samples.length) { observations.accepted(batch.report_id); state.busy = false; return; }
+        if (!report.samples.length) { await observations.accepted(batch.report_id); return; }
         state.last = Date.now();
-        void client.observationsReport(report as never).then(
-          () => observations.accepted(batch.report_id),
-          error => {
-            // A report the member refuses for its content is refused the same way every time: drop it, or nothing
-            // this phone measures is ever reported again. Anything else (no link, an older member, a busy one)
-            // sends the identical batch again at the next measurement.
-            if (error instanceof ClientError && [400, 413, 422].includes(error.status)) observations.refused(batch.report_id);
-          },
-        ).finally(() => { state.busy = false; });
+        try {
+          await client.observationsReport(report as never);
+        } catch (error) {
+          // Content refusals cannot succeed unchanged. Network failures retain the durable batch.
+          if (error instanceof ClientError && [400, 413, 422].includes(error.status)) await observations.refused(batch.report_id);
+          return;
+        }
+        await observations.accepted(batch.report_id);
       } catch (error) {
+        setError(errorText(error));
+      } finally {
         state.busy = false;
-        throw error;
       }
     };
     observations.ready = state.send;

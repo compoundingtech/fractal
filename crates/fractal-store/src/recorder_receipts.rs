@@ -24,7 +24,7 @@ pub async fn run(
 ) {
     let spool_wake = Arc::new(Notify::new());
     let _watcher = spool_watcher(&directory, spool_wake.clone())
-        .map_err(|error| eprintln!("st3: recorder spool watch unavailable; using backoff: {error:#}"))
+        .map_err(|error| eprintln!("fractal: recorder spool watch unavailable; using backoff: {error:#}"))
         .ok();
     let mut delay = Duration::from_secs(1);
     loop {
@@ -38,8 +38,8 @@ pub async fn run(
                 notify.notify_one();
                 event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
             }
-            Ok(Err(error)) => eprintln!("st3: recorder receipt ingestion failed: {error:#}"),
-            Err(error) => eprintln!("st3: recorder receipt ingestion stopped: {error}"),
+            Ok(Err(error)) => eprintln!("fractal: recorder receipt ingestion failed: {error:#}"),
+            Err(error) => eprintln!("fractal: recorder receipt ingestion stopped: {error}"),
         }
         tokio::select! {
             () = spool_wake.notified() => {}
@@ -130,7 +130,7 @@ pub fn ingest_once(store: &Store, directory: &Path) -> Result<usize> {
             let input = match input {
                 Ok(input) => input,
                 Err(error) => {
-                    eprintln!("st3: discarding invalid recorder receipt {}: {error:#}", path.display());
+                    eprintln!("fractal: discarding invalid recorder receipt {}: {error:#}", path.display());
                     return Ok(false);
                 }
             };
@@ -146,7 +146,7 @@ pub fn ingest_once(store: &Store, directory: &Path) -> Result<usize> {
             Ok(inserted) => {
                 appended += usize::from(inserted);
                 if let Err(error) = fs::remove_file(&path) {
-                    eprintln!("st3: could not remove consumed recorder receipt {}: {error}", path.display());
+                    eprintln!("fractal: could not remove consumed recorder receipt {}: {error}", path.display());
                 }
             }
             Err(error) => {
@@ -163,7 +163,7 @@ pub fn ingest_once(store: &Store, directory: &Path) -> Result<usize> {
                 };
                 fs::rename(&path, &destination).context("retain failed recorder receipt")?;
                 if attempts >= 5 {
-                    eprintln!("st3: dead-lettered recorder receipt {} after {attempts} attempts: {error:#}", destination.display());
+                    eprintln!("fractal: dead-lettered recorder receipt {} after {attempts} attempts: {error:#}", destination.display());
                 }
             }
         }

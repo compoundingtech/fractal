@@ -157,7 +157,7 @@ session or fails when no such session exists. Full subjects retain offline attac
 ```
 $ fractal terminals attach ci-w         → agent/host-a.ci-watcher
 $ fractal terminals attach interactive
-st: `interactive` matches 9 subjects; name one exactly:
+fractal: `interactive` matches 9 subjects; name one exactly:
   agent/interactive/host-a/43b16cd2-ec69-44  running · host-a · omp · idle · up 2h
   …
 ```

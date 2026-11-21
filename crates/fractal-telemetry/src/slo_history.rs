@@ -136,11 +136,11 @@ where
             Ok(Ok(())) => failing = false,
             Ok(Err(error)) if !failing => {
                 failing = true;
-                eprintln!("st3: recording the SLO history failed: {error:#}");
+                eprintln!("fractal: recording the SLO history failed: {error:#}");
             }
             Err(error) if !failing => {
                 failing = true;
-                eprintln!("st3: recording the SLO history failed: {error}");
+                eprintln!("fractal: recording the SLO history failed: {error}");
             }
             _ => {}
         }

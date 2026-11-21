@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Conversation sends and replies now describe a successful duplicate-key receipt as confirmed on retry, rather than suggesting that the message was dropped.",
+  "replay": {"status": "none", "detail": "No claim replay or delivery behavior changes."},
+  "schema": {"status": "none", "detail": "No schema or generated client changes."},
+  "rules": {"status": "none", "detail": "Idempotency keys and immutable payload comparisons are unchanged."},
+  "compatibility": {"status": "none", "detail": "Human stderr wording changes; stdout still names the message, and JSON receipts and explicit idempotency keys are unchanged."},
+  "downtime": {"status": "none", "detail": "No upgrade-time work."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Rollback restores the previous confirmation wording without changing stored messages."}
+}

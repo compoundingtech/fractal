@@ -39,6 +39,7 @@ async fn replication_receive_logs_one_summary_with_expected_fields_on_success_an
         exchange,
         round_trip_ms: None,
         carrier: Default::default(),
+        authenticated_member_key: None,
     };
     let logs = LogBuffer::default();
     let subscriber = tracing_subscriber::fmt()
@@ -161,6 +162,7 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
     let request = ReplicationReceiveRequest {
         peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
         round_trip_ms: None, carrier: Default::default(),
+        authenticated_member_key: None,
     };
     let logs = LogBuffer::default();
     let subscriber = tracing_subscriber::fmt()

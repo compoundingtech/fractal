@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """scripts/ci-local-web: the web lane runs as one shard that covers everything, in a home of its own on the account's disk, with no
-st, GitHub or SSH agent variable and none of the account's tool wrappers. The two lane scripts are stubs that record what they saw."""
+Fractal, GitHub or SSH agent variable and none of the account's tool wrappers. The two lane scripts are stubs that record what they saw."""
 import json
 import os
 from pathlib import Path

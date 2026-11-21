@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""A token-free `opencode`: the local HTTP/SSE server st's OpenCode driver talks to.
+"""A token-free `opencode`: the local HTTP/SSE server Fractal's OpenCode driver talks to.
 
-st runs `opencode --version`, then `opencode --port PORT --hostname 127.0.0.1` with
+Fractal runs `opencode --version`, then `opencode --port PORT --hostname 127.0.0.1` with
 OPENCODE_SERVER_PASSWORD set. It checks GET /doc for the API surface it depends on, follows GET
 /event (server-sent events), seeds from /session/status, /permission and /question, and delivers
 each message with POST /session/ID/prompt_async. The driver treats a message as consumed when the

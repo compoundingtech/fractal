@@ -1,5 +1,5 @@
 [Unit]
-Description=Continuous cross-host st3 message delivery soak
+Description=Continuous cross-host Fractal message delivery soak
 After=st3.service st3-replication.service
 Wants=st3.service st3-replication.service
 StartLimitIntervalSec=0

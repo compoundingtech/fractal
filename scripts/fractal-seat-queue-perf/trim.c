@@ -2,7 +2,7 @@
 //
 // Build: cc -O2 -shared -fPIC -o trim.so trim.c
 //
-// Inside st3 only, SIGRTMIN+3 writes malloc_info to $PERF_TRIM_TRIGGER.before,
+// Inside Fractal only, SIGRTMIN+3 writes malloc_info to $PERF_TRIM_TRIGGER.before,
 // calls malloc_trim(0), writes malloc_info to .after and malloc_trim's result
 // to .done. It starts no thread, because a thread moved the heap layout under
 // test. malloc_info is not async-signal-safe, so signal only a quiet daemon.
@@ -40,7 +40,7 @@ static void handle(int signal) {
 }
 
 __attribute__((constructor)) static void start(void) {
-  // setsid and nice exec st3 with this preload; only st3 installs the handler.
+  // setsid and nice exec Fractal with this preload; only its installed st3 binary installs the handler.
   if (strcmp(program_invocation_short_name, "st3") != 0) return;
   const char *value = getenv("PERF_TRIM_TRIGGER");
   if (!value || strlen(value) >= sizeof trigger) return;

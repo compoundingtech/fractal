@@ -49,7 +49,14 @@ impl Store {
         Ok(self
             .readers
             .get()
-            .prepare_cached("SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1 AND kind='agent'")?
+            .prepare_cached(
+                "SELECT coalesce(
+                    (SELECT nullif(json_extract(value,'$.arguments[0]'),'local')
+                     FROM json_each(desired.body,'$.children')
+                     WHERE json_extract(value,'$.name')='host'),
+                    json_extract(member,'$.host'))
+                 FROM desired WHERE subject=?1 AND kind='agent'",
+            )?
             .query_row(/* sqlite-large-value: allow-for-now lv-hbb373c1f9535 owner=fractal_store::store::declared_objectives TODO=trace-statement-and-value-representation */ [agent], |row| row.get::<_, Option<String>>(0))
             .optional()?
             .flatten())

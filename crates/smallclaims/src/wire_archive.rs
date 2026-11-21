@@ -16,6 +16,9 @@ use sha2::{Digest, Sha256};
 
 use crate::ReplicaEnvelopeId;
 
+mod readers;
+pub use readers::{ArchiveReaders, ArchivedRecord};
+
 const MAGIC: &[u8; 16] = b"fractal-wire\0\0\0\x01";
 const MAX_ENTRY: u64 = 128 * 1024 * 1024;
 const MAX_INDEX: u64 = 1024 * 1024;
@@ -60,7 +63,7 @@ fn digest(file: &mut File) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
-fn capture(source: &Connection, id: &ReplicaEnvelopeId) -> Result<WireEvidence> {
+pub(crate) fn capture(source: &Connection, id: &ReplicaEnvelopeId) -> Result<WireEvidence> {
     let mut evidence = WireEvidence { id: id.clone(), rows: Default::default() };
     let mut captured_bytes = 0_u64;
     for (index, (table, columns, order)) in TABLES.iter().enumerate() {

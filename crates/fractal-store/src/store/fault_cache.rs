@@ -117,7 +117,7 @@ impl Store {
                 corrections += 1;
                 crate::performance::record_correction("fault-snapshot");
                 eprintln!(
-                    "st3: fault cache correction: {} changed with no change among {} reads",
+                    "fractal: fault cache correction: {} changed with no change among {} reads",
                     failure.request,
                     reads.len()
                 );

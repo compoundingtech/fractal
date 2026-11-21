@@ -360,13 +360,12 @@ pub struct HostMark {
     pub receipt: String,
 }
 
-/// For each of `messages`: whether this member holds it, and the marks of `consumers` it
-/// recorded, a graph message's from `local_message_marks` and a stream item's from the messages
-/// shard's `stream_lifecycle`. What another member asks this host on the seat-freshness relay.
+/// For each of `messages`: whether this member holds it, and the marks of consumers whose
+/// current declarations place them on this host. Graph marks come from `local_message_marks`
+/// and stream marks from the messages shard's `stream_lifecycle`.
 pub fn host_marks(
     store: &Store,
     messages: &[String],
-    consumers: &BTreeSet<String>,
 ) -> Result<Vec<(bool, Vec<HostMark>)>> {
     let mut answers = Vec::with_capacity(messages.len());
     for message in messages {
@@ -375,7 +374,7 @@ pub fn host_marks(
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
             .query_row(/* sqlite-large-value: allow-for-now lv-h80d0240fd28e owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
         if held {
-            let marks = connection
+            let marks: Vec<HostMark> = connection
                 .prepare_cached(
                     "SELECT kind, consumer, recorded_at_unix_ms, receipt FROM local_message_marks WHERE message=?1
                      UNION ALL SELECT 'message.staged', consumer, recorded_at_unix_ms, receipt
@@ -389,19 +388,15 @@ pub fn host_marks(
                         receipt: row.get(3)?,
                     })
                 })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|mark| consumers.contains(&mark.consumer))
-                .collect();
+                .collect::<rusqlite::Result<_>>()?;
             answers.push((true, marks));
             continue;
         }
         drop(connection);
         match super::messages_shard::lifecycle_marks(store, message)? {
             Some(records) => {
-                let marks = records
+                let marks: Vec<HostMark> = records
                     .into_iter()
-                    .filter(|(_, actor, _)| consumers.contains(actor))
                     .map(|(kind, consumer, recorded_at_unix_ms)| {
                         let receipt = super::messages_shard::lifecycle_receipt(
                             &store.origin,
@@ -422,6 +417,15 @@ pub fn host_marks(
             }
             None => answers.push((false, Vec::new())),
         }
+    }
+    // Authorize only consumers encountered in the requested messages, never the whole graph.
+    let consumers = answers
+        .iter()
+        .flat_map(|(_, marks)| marks.iter().map(|mark| mark.consumer.as_str()))
+        .collect::<BTreeSet<_>>();
+    let hosted = store.hosted_subjects(&consumers.into_iter().collect::<Vec<_>>(), store.origin())?;
+    for (_, marks) in &mut answers {
+        marks.retain(|mark| hosted.contains(&mark.consumer));
     }
     Ok(answers)
 }

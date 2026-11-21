@@ -36,6 +36,7 @@ pub mod client_values;
 pub mod graph;
 pub mod maintenance;
 pub mod pairing;
+pub mod blob_restore;
 pub mod owner_indexes;
 pub mod references;
 pub mod private_notes;
@@ -47,6 +48,7 @@ pub mod sekrets_daemon;
 pub mod store;
 pub mod suspension;
 pub mod work_eta;
+pub mod wire_archive_candidates;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
 pub use model::{NormalizedIntent, FractalError};

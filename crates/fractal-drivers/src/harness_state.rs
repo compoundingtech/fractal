@@ -1123,7 +1123,7 @@ fn claim_locked(writer: &Writer, token: &str) -> anyhow::Result<u64> {
         && let Err(error) = crate::harness_context::remove(agent_dir)
     {
         tracing::warn!(
-            "st harness-state: clearing the harness-context record for {} failed: {error}",
+            "fractal harness-state: clearing the harness-context record for {} failed: {error}",
             agent_dir.display()
         );
     }
@@ -1152,7 +1152,7 @@ fn persist_floor(record_path: &Path, seq: u64) {
         crate::fsatomic::Durability::Rename,
     ) {
         tracing::warn!(
-            "st harness-state: writing the sequence floor {} failed: {error}",
+            "fractal harness-state: writing the sequence floor {} failed: {error}",
             floor_path.display()
         );
     }

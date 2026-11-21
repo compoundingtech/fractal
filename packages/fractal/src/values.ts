@@ -239,6 +239,28 @@ export const InstantSchema = Schema.declare<InstantInput>((value): value is Inst
   )
   .annotate({ identifier: 'Fractal.Instant' })
 
+/** Mission date profile: explicit known offset, Gregorian calendar, millisecond precision.
+ * Decodes to an Effect UTC instant; encoding emits canonical UTC RFC3339 text.
+ */
+export const Instant = Schema.declare<DateTime.DateTime | string>((input): input is DateTime.DateTime | string => {
+  if (typeof input !== 'string' && !DateTime.isDateTime(input)) return false
+  if (typeof input === 'string' && (
+    !/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u.test(input)
+    || input.endsWith('-00:00')
+  )) return false
+  try {
+    normalizeInstant(input)
+    return true
+  } catch {
+    return false
+  }
+}).pipe(
+  Schema.decodeTo(Schema.DateTimeUtc, {
+    decode: SchemaGetter.transform((input) => DateTime.toUtc(DateTime.makeUnsafe(input))),
+    encode: SchemaGetter.transform(normalizeInstant),
+  }),
+).annotate({ identifier: 'Fractal.MissionInstant' })
+
 /** Native local wall-clock time in 24-hour HH:MM form. */
 export const CalendarTimeSchema = Schema.String.pipe(
   Schema.refine((s): s is string => /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(s), {

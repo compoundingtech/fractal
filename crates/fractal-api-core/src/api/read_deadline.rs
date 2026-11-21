@@ -112,12 +112,7 @@ pub fn deadline(request: &Request<Body>) -> Option<Duration> {
     if let Some(wait_ms) = wait_ms {
         return Some(ORDINARY + Duration::from_millis(wait_ms));
     }
-    if export
-        || path.starts_with("/v1/internal/replication/checkpoint")
-        || path == "/v1/checkpoint/plan"
-        || path == "/v1/checkpoint/status"
-        || path == "/v1/doctor"
-    {
+    if export || path == "/v1/doctor" {
         Some(BULK)
     } else {
         Some(ORDINARY)
@@ -233,7 +228,7 @@ fn construct_timeout_response(construct: impl FnOnce() -> Response) -> Response 
 fn body_timeout_response(state: &AppState) -> Response {
     // Static route and phase only: never include the forwarded JSON or credentials.
     eprintln!(
-        "st3: read cancelled route={:?} phase=request-body callsite={} deadline_elapsed=true",
+        "fractal: read cancelled route={:?} phase=request-body callsite={} deadline_elapsed=true",
         crate::peer::CLIENT_READ_FORWARD_PATH,
         std::panic::Location::caller(),
     );
@@ -641,6 +636,7 @@ fn spawn_erased(work: ErasedWork, query: bool, roster: Option<tracing::Span>, wr
     let admission_store = store.clone().filter(|_| loan);
     let admission_budget = budget.clone();
     // Capture cancellation before executing an inline operation, including a panic.
+    let context = crate::task_cpu::capture();
     struct Cancel(Option<ReadBudget>);
     impl Drop for Cancel {
         fn drop(&mut self) {
@@ -669,20 +665,20 @@ fn spawn_erased(work: ErasedWork, query: bool, roster: Option<tracing::Span>, wr
                         if let Some(budget) = &worker_budget {
                             budget.check().map_err(WorkError::Deadline)?;
                         }
-                        let result = match (&store, permit) {
+                        let result = context.run(|| match (&store, permit) {
                             (Some(store), Some(permit)) => store
                                 .readers
                                 .request_read_with_permit(permit, work)
                                 .map_err(|error| {
                                     WorkError::Store(smallclaims::error::typed(error))
-                                })?,
+                                }),
                             (Some(store), None) if loan => {
                                 store.readers.request_read(work).map_err(|error| {
                                     WorkError::Store(smallclaims::error::typed(error))
-                                })?
+                                })
                             }
-                            _ => work(),
-                        };
+                            _ => Ok(work()),
+                        })?;
                         if let Some(budget) = &worker_budget {
                             budget.check().map_err(WorkError::Deadline)?;
                         }
@@ -848,6 +844,62 @@ pub use crate::api::read_deadline_tests_shared_client_v0_tests::{idle_long_poll_
 use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+
+    #[test]
+    fn spawned_read_loan_keeps_origin_and_excludes_snapshot_tokens() {
+        const CHILD: &str = "ST_SPAWNED_LOAN_ORIGIN_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::read_deadline::tests::spawned_read_loan_keeps_origin_and_excludes_snapshot_tokens"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        use smallclaims::sqlite::telemetry;
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(super::super::Store::open(&root.path().join("claims.sqlite"), "node").unwrap());
+        let worker_store = store.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _runtime = runtime.enter();
+        let budget = ReadBudget::new("/v1/read-probe", Duration::from_secs(10));
+        let _origin = telemetry::enter_origin(telemetry::route_origin("GET", "/v1/read-probe"));
+        with_store(Some(store), || read_budget::with(Some(budget), || runtime.block_on(
+            spawn_blocking(move || {
+                assert!(worker_store.readers.has_request_reader());
+                // A different diagnostic origin exposes duplicate snapshot charges
+                // without relying on a wall-clock threshold.
+                let _snapshot_origin = telemetry::enter_origin(
+                    telemetry::route_origin("GET", "/v1/snapshot-probe"));
+                worker_store.read_snapshot(|_| {
+                    worker_store.readers.get().query_row("SELECT 1", [], |row| row.get::<_, u64>(0))
+                        .map_err(anyhow::Error::from)
+                }).unwrap()
+            })
+        ))).unwrap();
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        let sum = exported.iter().rev().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "st.db.read_loan.duration")
+            .and_then(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Sum(sum)) => Some(sum),
+                _ => None,
+            }).expect("spawned read loan publishes duration");
+        let durations = sum.data_points().map(|point| (
+            point.attributes().find(|attribute| attribute.key.as_str() == "origin")
+                .unwrap().value.to_string(),
+            point.value(),
+        )).collect::<Vec<_>>();
+        assert!(durations.iter().any(|(origin, value)| origin == "GET /v1/read-probe" && *value > 0.0));
+        assert!(!durations.iter().any(|(origin, _)| origin == "GET /v1/snapshot-probe"),
+            "diagnostic snapshot tokens must not double-charge the physical loan");
+    }
     #[test]
     fn export_read_loan_snapshot_wait_obeys_deadline() {
         let root = tempfile::tempdir().unwrap();

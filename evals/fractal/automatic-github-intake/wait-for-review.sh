@@ -16,7 +16,7 @@ while ((SECONDS < deadline)); do
   if [[ -z "$review_run" ]]; then
     subscription_json="$(
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-      st3 --endpoint "${FRACTAL_ENDPOINT-${ST3_ENDPOINT-}}" inspect "$subscription" --json
+      fractal --endpoint "${FRACTAL_ENDPOINT-${ST3_ENDPOINT-}}" inspect "$subscription" --json
     )"
     review_run="$(
       jq -r \
@@ -27,7 +27,7 @@ while ((SECONDS < deadline)); do
 
   if [[ -n "$review_run" ]]; then
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-    run_json="$(st3 --endpoint "${FRACTAL_ENDPOINT-${ST3_ENDPOINT-}}" inspect "$review_run" --json)"
+    run_json="$(fractal --endpoint "${FRACTAL_ENDPOINT-${ST3_ENDPOINT-}}" inspect "$review_run" --json)"
     run_status="$(jq -r '.status.subjects[0].actual.status // empty' <<<"$run_json")"
     run_phase="$(jq -r '.status.subjects[0].actual.phase // empty' <<<"$run_json")"
 

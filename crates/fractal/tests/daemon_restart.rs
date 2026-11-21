@@ -35,11 +35,11 @@ impl Daemon {
         let log = std::fs::File::create(root.join("daemon.log")).unwrap();
         let _ = tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_env_filter("st3=debug")
+            .with_env_filter("fractal=debug")
             .with_writer(std::sync::Mutex::new(log))
             .try_init();
         let store = Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap();
-        // `st up` copies WAL pages on its own checkpoint thread every five seconds, so its
+        // `fractal up` copies WAL pages on its own checkpoint thread every five seconds, so its
         // writer stays under SQLite's 1000-page automatic checkpoint. This daemon has no such
         // thread: without this, a commit past 1000 pages copies the WAL on the writer and every
         // queued receipt waits for that copy and its fsync. The WAL grows for the test instead.

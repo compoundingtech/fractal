@@ -108,7 +108,7 @@ enum NudgeReason<'a> {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
-    /// Reload the inert residency policy alongside the idle-holder policy.
+    /// Reload residency policy alongside the idle-holder policy.
     /// As specified by idle residency's "Eligibility and the idle clock", enabling a policy
     /// starts a local epoch. A fresh daemon waits a full threshold after loading config.
     pub fn set_idle_residency(&self, settings: IdleResidencySettings) {
@@ -138,6 +138,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             && due > now
         {
             smallclaims::touched::note_due(due);
+        } else if residency.due_at_unix_ms.is_some() {
+            self.store.admit_idle_suspend(agent, policy.settings.after_ms,
+                policy.enabled_at_unix_ms, now)?;
         }
         Ok(())
     }

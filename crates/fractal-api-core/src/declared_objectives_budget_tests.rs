@@ -229,3 +229,84 @@ objective "example/quality" {
     let points = &tracked["objective/example/quality"].numeric.sources["custom/example/source/one"];
     assert_eq!(points.keys().copied().collect::<Vec<_>>(), [NOW - HOUR - 6 * minute]);
 }
+
+fn merge_latency_store() -> Store {
+    let source = /* sqlite-large-value: allow-for-now lv-ha5695af111aa owner=fractal_api_core::declared_objectives_budget_tests TODO=trace-statement-and-value-representation */
+        include_str!("../../../slo/dotfiles-merge-latency.kdl");
+    let store = Store::open_memory("node").unwrap();
+    let intent = crate::graph::parse_intent(source, "node").unwrap();
+    let preview = store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
+    store
+}
+
+fn merged_fact(store: &Store, name: &str, merged_at: u64, duration: u64, source: &str) {
+    let fields = json!({
+        "schema": "fractal.merge-latency/v1",
+        "repo": "example/project", "pr": 1, "head": "a".repeat(40),
+        "admission": name, "merge": "b".repeat(40),
+        "admittedAt": merged_at - duration * 1000,
+        "mergedAt": merged_at, "goAt": merged_at - duration * 1000,
+        "goSource": source,
+        "goEvidence": if source == "route-a-exact-head" { "https://github.com/example/project/pull/1#issuecomment-1" } else { name },
+        "durationSeconds": duration,
+    });
+    // Separate accepted claims for one completion must not add denominator weight.
+    for retry in 0..2 {
+        store.append_claim(&crate::model::ClaimInput {
+            subject: format!("custom/landing/dotfiles/merged/{name}"),
+            kind: "custom.landing.dotfiles-merged".into(), actor: None,
+            fields: fields.as_object().unwrap().clone().into_iter().collect(),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("merge-{name}-{retry}")),
+        }).unwrap();
+    }
+}
+
+#[test]
+fn merge_latency_native_ratios_use_exact_go_completed_cohorts_and_inclusive_bounds() {
+    let store = merge_latency_store();
+    for event in 0..20 {
+        let duration = if event < 10 { 600 } else if event < 19 { 1800 } else { 1801 };
+        merged_fact(&store, &format!("completion-{event}"), NOW - 60_000, duration, "route-a-exact-head");
+    }
+    merged_fact(&store, "proxy", NOW - 60_000, 5000, "admission-proxy");
+    merged_fact(&store, "expired", NOW - 30 * 24 * HOUR - 1, 5000, "route-a-exact-head");
+    merged_fact(&store, "future", NOW, 5000, "route-a-exact-head");
+    let evaluated = rows(&store, NOW, &[]).unwrap();
+    assert_eq!(evaluated.len(), 2);
+    for (id, bad) in [("p50", 10), ("p95", 1)] {
+        let row = evaluated.iter().find(|row| row["id"] == format!("landing/merge-latency/dotfiles/{id}")).unwrap();
+        assert_eq!(row["status"], "met", "{row}");
+        assert_eq!(row["window"], "30d");
+        assert_eq!(row["current"], format!("{bad} bad / 20 qualifying events"));
+        assert_eq!(row["remaining_percent"], 0.0);
+        assert!(row["explain"].as_str().unwrap().contains("1 excluded events"));
+    }
+    merged_fact(&store, "over-budget", NOW - 60_000, 1801, "route-a-exact-head");
+    assert!(rows(&store, NOW, &[]).unwrap().iter().all(|row| row["status"] == "exhausted"));
+}
+
+#[test]
+fn merge_latency_proxy_only_cohort_is_not_successful_go_evidence() {
+    let store = merge_latency_store();
+    merged_fact(&store, "proxy", NOW - 60_000, 1, "admission-proxy");
+    for row in rows(&store, NOW, &[]).unwrap() {
+        assert_eq!(row["status"], "no-qualifying-events");
+        assert_eq!(row["current"], "0 bad / 0 qualifying events");
+        assert!(row["remaining_percent"].is_null());
+    }
+}
+
+#[test]
+fn inclusive_allowance_boundary_preserves_unknown_and_burn_decisions() {
+    let policy = policy();
+    let boundary = BudgetEvidence { bad: 1.0, total: 20.0, eligible: true };
+    let good = BudgetEvidence { bad: 0.0, total: 1.0, eligible: true };
+    let unknown = BudgetEvidence { eligible: false, ..good };
+    assert_eq!(classify_budget(&policy, boundary, (good, good), (good, good), "no-data"), ("met", Some(0.0)));
+    assert_eq!(classify_budget(&policy, boundary, (unknown, unknown), (unknown, unknown), "no-data"), ("not-eligible", Some(0.0)));
+    assert_eq!(classify_budget(&policy, BudgetEvidence { eligible: false, ..boundary }, (good, good), (good, good), "no-data"), ("no-data", None));
+    let bad = BudgetEvidence { bad: 1.0, total: 1.0, eligible: true };
+    assert_eq!(classify_budget(&policy, boundary, (bad, bad), (good, good), "no-data"), ("burning", Some(0.0)));
+}

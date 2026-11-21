@@ -23,7 +23,7 @@ use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
-use smallclaims::sync::{ Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, MAX_MANIFEST_BYTES, WorkerConfig, };
+use smallclaims::sync::{ Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, WorkerConfig, };
 use smallclaims::sync::{dial_targets, signed_error_response_for, signed_response_for};
 use crate::client::Client;
 use crate::config::{Config, PeerConfig};
@@ -32,7 +32,6 @@ use crate::fleet::{FleetView, MemberKey};
 use crate::model::{ ApiResponse, ReplicaEnvelopeId, ReplicationExchange, ReplicationExportRequest, ReplicationExportResponse, ReplicationInventory, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse, };
 use crate::store::Store;
 use crate::relay_trace::{self, Outcome, Phase};
-use crate::store::{ CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage, CheckpointManifestRequest, };
 use crate::client::CLIENT_READ_FORWARD_PATH;
 use crate::model::*;
 use std::os::unix::fs::PermissionsExt as _;
@@ -44,7 +43,7 @@ use std::net::SocketAddr;
 use std::sync::Mutex;
 use tower::ServiceExt as _;
 use sha2::{Digest as _, Sha256};
-use smallclaims::sync::{ FleetContext, PeerState, exchange, fetch_checkpoint_manifest, peer_router, replication_http_client, };
+use smallclaims::sync::{ FleetContext, PeerState, exchange, peer_router, replication_http_client, };
 use tokio::net::TcpListener;
 use crate::store::{ClaimTombstone, EnvelopeTombstone, checkpoint_cut};
 use crate::store::{CheckpointContext, newest_due_cut};
@@ -631,7 +630,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .unwrap();
         async move {
             backend
-                .receive("fern", fleet, &exchange, None, Default::default())
+                .receive("fern", fleet, &exchange, None, Default::default(), None)
                 .await
                 .unwrap()
         }
@@ -779,7 +778,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .export_replication_exchange(fleet, &ReplicationInventory::default())
             .unwrap();
         backend
-            .receive(names[other], fleet, &exchange, None, Default::default())
+            .receive(names[other], fleet, &exchange, None, Default::default(), None)
             .await
             .unwrap();
         assert!(
@@ -798,7 +797,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .unwrap()
             .len();
         backend
-            .receive(names[other], fleet, &exchange, None, Default::default())
+            .receive(names[other], fleet, &exchange, None, Default::default(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -3554,6 +3553,7 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
             &exchange,
             Some(Duration::from_millis(10)),
             smallclaims::replication::ReplicationCarrier::Fabric,
+            None,
         )
         .await
         .unwrap();
@@ -3614,7 +3614,7 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
         before + 1
     );
     backend
-        .receive("source", fleet, &exchange, None, Default::default())
+        .receive("source", fleet, &exchange, None, Default::default(), None)
         .await
         .unwrap();
     let (success, failure) = store.replication_peer_transport("source");

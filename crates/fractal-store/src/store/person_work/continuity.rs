@@ -126,22 +126,31 @@ pub fn direct_person_binding_tx(connection: &Connection, step: &StepRunView, act
 }
 
 pub fn person_evidence_tx(connection: &Connection, source: &StepRunView) -> Result<Vec<ClaimRecord>> {
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h608979b5ef99 owner=fractal_store::store::person_work::continuity TODO=trace-statement-and-value-representation */ &canonical_sql(
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4f30e7197200 owner=fractal_store::store::person_work::continuity TODO=trace-statement-and-value-representation */ &canonical_sql(
         "WITH RECURSIVE sources(subject,attempt) AS (
            SELECT ?1,?2 UNION SELECT json_extract(c.body,'$.fields.source_step_run'),
              coalesce(json_extract(c.body,'$.fields.source_attempt'),sources.attempt)
            FROM sources JOIN claims c ON c.subject=sources.subject AND c.kind='step-run.carried'
              AND json_extract(c.body,'$.fields.attempt')=sources.attempt)
          SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
-         FROM claims WHERE (kind='work.person-asked' AND EXISTS(SELECT 1 FROM sources
-           WHERE json_extract(body,'$.fields.origin_step')=sources.subject
-             AND json_extract(body,'$.fields.origin_attempt')=sources.attempt))
-           OR (kind='work.person-done' AND EXISTS(SELECT 1 FROM sources
-             WHERE claims.subject=sources.subject AND json_extract(body,'$.fields.attempt')=sources.attempt)
-             AND NOT EXISTS(SELECT 1 FROM claims request WHERE request.subject=claims.subject AND request.kind='work.person-asked'))
-           OR (kind='gate.requested' AND json_type(body,'$.fields.reviewer')='text'
-             AND EXISTS(SELECT 1 FROM sources WHERE json_extract(body,'$.fields.owner')=sources.subject
-               AND json_extract(body,'$.fields.attempt')=sources.attempt))
+         FROM claims WHERE id IN (
+           SELECT evidence.id FROM sources CROSS JOIN claims evidence INDEXED BY claims_person_ask_origin_step_index
+           WHERE evidence.kind='work.person-asked'
+             AND json_extract(evidence.body,'$.fields.origin_step')=sources.subject
+             AND json_extract(evidence.body,'$.fields.origin_attempt')=sources.attempt
+           UNION
+           SELECT evidence.id FROM sources CROSS JOIN claims evidence
+           WHERE evidence.kind='work.person-done' AND evidence.subject=sources.subject
+             AND json_extract(evidence.body,'$.fields.attempt')=sources.attempt
+             AND NOT EXISTS(SELECT 1 FROM claims request
+               WHERE request.subject=evidence.subject AND request.kind='work.person-asked')
+           UNION
+           SELECT evidence.id FROM sources CROSS JOIN claims evidence INDEXED BY claims_human_gate_episode_index
+           WHERE evidence.kind='gate.requested'
+             AND json_extract(evidence.body,'$.fields.reviewer') IS NOT NULL
+             AND json_type(evidence.body,'$.fields.reviewer')='text'
+             AND json_extract(evidence.body,'$.fields.owner')=sources.subject
+             AND json_extract(evidence.body,'$.fields.attempt')=sources.attempt)
          ORDER BY CANONICAL_ASC(claims)"
     ))?.query_map(params![source.subject, source.attempt], claim_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)

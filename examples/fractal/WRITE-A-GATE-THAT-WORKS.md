@@ -6,7 +6,7 @@ This example verifies an invented catalog index with
 
 ## First, look for a built-in gate
 
-Most gates check something st can answer itself. Use these instead of a command:
+Most gates check something Fractal can answer itself. Use these instead of a command:
 
 ```kdl
 gate "the handoff is published" { document "doc/example/catalog/handoff" }
@@ -39,13 +39,13 @@ step "verify-index" timeout="1m" {
 
 It gives the step no time beyond its own gate and says nothing about whether the shell file
 parses. The owning step can time out while its gate is still legitimately using its full minute.
-A syntax error waits until runtime if nobody checks it before publication; `st missions check`
-runs the gate once, now, the way a run would, and `st apply` refuses a gate that check
+A syntax error waits until runtime if nobody checks it before publication; `fractal missions check`
+runs the gate once, now, the way a run would, and `fractal apply` refuses a gate that check
 finds broken.
 
 Gates use the same captured interactive login-shell environment as agents and daemon commands.
 Programs such as `bash` resolve through that PATH; absolute binary paths are optional.
-The daemon refreshes the snapshot on use every 60 seconds. `st doctor` shows the effective PATH.
+The daemon refreshes the snapshot on use every 60 seconds. `fractal doctor` shows the effective PATH.
 
 ## Supported recovery: run the complete files
 
@@ -63,10 +63,10 @@ gate_workspace="$(mktemp -d)"
 printf '%s\n' 'catalog version 1' >"$gate_workspace/catalog-index.txt"
 
 /bin/bash -n examples/fractal/verify-catalog-index.sh
-st missions check examples/fractal/gate-recovery.kdl --workspace "$gate_workspace"
-st apply examples/fractal/gate-recovery.kdl --workspace "$gate_workspace" \
+fractal missions check examples/fractal/gate-recovery.kdl --workspace "$gate_workspace"
+fractal apply examples/fractal/gate-recovery.kdl --workspace "$gate_workspace" \
   --as person/operator
-st missions start example/catalog-gate \
+fractal missions start example/catalog-gate \
   --id example/catalog-gate/first \
   --workspace "$gate_workspace" \
   --as person/operator \
@@ -78,10 +78,10 @@ captured PATH, and make the owning step timeout strictly longer than the gate's 
 
 ## Exit 0 to pass, 1 for not yet
 
-A gate's exit status is its answer. 0 passes. 1 means not yet: the step keeps waiting and st runs
+A gate's exit status is its answer. 0 passes. 1 means not yet: the step keeps waiting and Fractal runs
 the gate again five seconds later, then twice as long after each further not yet, up to every
 fifteen minutes. Any other status breaks the gate, and so does a check that cannot start, that something
-kills, that runs past its time limit, or that runs an `st` command st refused or that listed only
+kills, that runs past its time limit, or that runs a `fractal` command fractal refused or that listed only
 part of a collection. A broken gate does not fail its step: the step waits, and whoever published
 the mission gets an attention item with the gate's output, to revise the gate.
 
@@ -96,11 +96,11 @@ An eval run is the exception: there any status but 0 fails the judge's step, as 
 
 ## Three more rules that bite later
 
-**`${NAME}` belongs to st; `$NAME` belongs to the shell.** st substitutes `${ST_WORKSPACE}`,
+**`${NAME}` belongs to Fractal; `$NAME` belongs to the shell.** Fractal substitutes `${ST_WORKSPACE}`,
 `${ST_ATTEMPT}`, `${loop.round}`, and the other documented names before the command runs, and it
 rejects a publication that names an unknown one. The command itself runs through `sh -c`, so write
 shell variables and substitutions as `$area` or `$(/usr/bin/date +%s)`. `${area}` would be read as
-an st variable and refused; write `$${area}` when the shell needs the braces.
+a Fractal variable and refused; write `$${area}` when the shell needs the braces.
 
 **A gate result is kept by the gate's definition and the step attempt.** A mechanical gate's pass
 or broken result holds for its owner, attempt, name, and exact command; asking again returns it.
