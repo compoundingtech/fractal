@@ -7134,10 +7134,11 @@ where
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let context = crate::task_cpu::capture();
     tokio::task::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     }).await.map_err(ApiError::internal)
 }
 
@@ -7150,6 +7151,7 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     #[cfg(any(test, feature = "test-support"))]
     let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
@@ -7158,7 +7160,7 @@ where
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
@@ -7174,11 +7176,12 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     crate::api::read_deadline::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
@@ -7196,11 +7199,12 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     crate::api::read_deadline::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
