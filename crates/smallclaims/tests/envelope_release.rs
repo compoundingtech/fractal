@@ -162,7 +162,9 @@ fn own_claim_of_released_envelope(store: &Store) -> String {
 
 #[test]
 fn the_daemon_does_not_release_envelopes_yet() {
-    assert!(!ENVELOPE_RELEASE, "peers cannot be served a released envelope's claims before the claim-set transport");
+    const {
+        assert!(!ENVELOPE_RELEASE, "peers cannot be served a released envelope's claims before the claim-set transport");
+    }
 }
 
 #[test]
