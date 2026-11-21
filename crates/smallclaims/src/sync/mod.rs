@@ -51,9 +51,6 @@ pub(crate) fn capped(
 const PROTOCOL: &str = "st3-replication-v1";
 pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 
-/// A page of a checkpoint's manifest, for a node that adopts a checkpoint it did not take part
-/// in. Older builds neither serve nor call it.
-pub const CHECKPOINT_PATH: &str = "/v1/peer/checkpoint";
 /// Where a member asks another for its answers per claim kind; see `crate::answers`.
 pub const ANSWERS_PATH: &str = "/v1/peer/answers";
 pub const JOIN_PATH: &str = "/v1/fleet/join";
@@ -80,10 +77,6 @@ const HEADER_ALIASES: [(&str, &str); 7] = [
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 const MEMBER_SIGNATURE_DOMAIN: &str = "st3-member-v1";
 pub const MAX_EXCHANGE_BYTES: usize = 64 * 1024 * 1024;
-
-/// The largest whole manifest the worker hands the daemon to adopt. A manifest lists every
-/// tombstone so far, about 400 bytes each.
-pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024 * 1024;
 
 /// The HTTP content coding for large exchange bodies: zlib-wrapped deflate. A requester asks
 /// for it with `Accept-Encoding`, and a peer says with the same header in its answer that it

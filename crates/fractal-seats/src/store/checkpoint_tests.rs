@@ -10,7 +10,7 @@ use fractal_missions::store::checkpoint_tests_shared_seats::{AGENT, LIMITS_HOUR,
 
 
 #[test]
-fn a_usage_trim_keeps_lifetime_usage_and_the_proof_guards_it() {
+fn a_usage_trim_keeps_lifetime_usage() {
     let store = Store::open_memory("alder").unwrap();
     let old = now_ms() - 9 * DAY_MS;
     for (n, offset) in [0, 1, 2].into_iter().enumerate() {
@@ -33,10 +33,8 @@ fn a_usage_trim_keeps_lifetime_usage_and_the_proof_guards_it() {
     assert_eq!(period[0]["pricing_provenance"][0]["total_tokens"], 300);
     let lifetime = store.usage_summary_at(AGENT, None, None).unwrap().unwrap();
     assert_eq!(lifetime.total_tokens, 300);
-    let scratch = tempfile::tempdir().unwrap();
     let cut = now_ms() + 1_000;
-    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
-    assert!(proof.passed, "{proof:?}");
+    let plan = crate::store::checkpoint::plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
     assert_eq!(
         plan.claims
             .iter()
@@ -44,32 +42,6 @@ fn a_usage_trim_keeps_lifetime_usage_and_the_proof_guards_it() {
             .count(),
         2,
         "{plan:?}"
-    );
-
-    let sealed = store.checkpoint_sealed_set(cut).unwrap();
-    let newest = sealed
-        .claims
-        .iter()
-        .rev()
-        .find(|claim| claim.claim.kind == "harness.usage")
-        .unwrap();
-    let mut wrong = plan.clone();
-    wrong.claims.push(claim_tombstone(newest));
-    let copy = scratch.path().join("wrong.sqlite3");
-    store.copy_store_to(&copy).unwrap();
-    let wrong_proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
-    assert!(
-        !wrong_proof.passed,
-        "dropping a series total changes lifetime usage"
-    );
-    // The daemon's proof commits its preparation on the scratch copy; prove_on_copy keeps it in
-    // the one transaction it rolls back. Both prove the same thing, passing or failing.
-    let copy = scratch.path().join("same.sqlite3");
-    store.copy_store_to(&copy).unwrap();
-    assert_eq!(prove_on_copy(&copy, &sealed, &plan).unwrap(), proof);
-    assert_eq!(
-        store.prove_checkpoint_plan(&sealed, &wrong, scratch.path()).unwrap(),
-        wrong_proof
     );
 }
 
@@ -143,9 +115,7 @@ fn first_native_launch_receipt_binding_and_acknowledgement_survive_checkpoint_tr
             .unwrap()
     });
     let cut = now_ms() + 1_000;
-    let scratch = tempfile::tempdir().unwrap();
-    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
-    assert!(proof.passed, "{proof:?}");
+    let plan = crate::store::checkpoint::plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
     let gone = dropped(&plan);
     assert!(gone.contains(&observations[0].id), "{plan:?}");
     assert!(gone.contains(&observations[1].id), "{plan:?}");
@@ -210,11 +180,6 @@ fn status_history_survives_checkpoint_trimming_and_reports_the_gap() {
     let sealed = store.checkpoint_sealed_set(cut).unwrap();
     let plan = plan_drops(&sealed);
     assert!(!plan.claims.is_empty());
-    let scratch = tempfile::tempdir().unwrap();
-    let copy = scratch.path().join("checkpoint.sqlite3");
-    store.copy_store_to(&copy).unwrap();
-    let proof = prove_on_copy(&copy, &sealed, &plan).unwrap();
-    assert!(proof.passed, "bounded transitions and current since must survive the proof: {:?}", proof.mismatches);
     {
         let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
@@ -319,21 +284,11 @@ fn mixed_stamp_checkpoint_history(ties: bool, channels: bool, older_baseline: bo
             item["state"] == "working" && item["observed_at"] == legacy_time));
         let sealed = store.checkpoint_sealed_set(cut).unwrap();
         let plan = plan_drops(&sealed);
-        let scratch = tempfile::tempdir().unwrap();
-        let copy = scratch.path().join("checkpoint.sqlite3");
-        store.copy_store_to(&copy).unwrap();
-        let proof = prove_on_copy(&copy, &sealed, &plan).unwrap();
-        let mut connection = Connection::open(&copy).unwrap();
-        smallclaims::store::projection_digest::register(&connection).unwrap();
+        let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
         record_checkpoint_tombstones_tx(&transaction, &checkpoint_name(cut), &plan.envelopes, &plan.claims).unwrap();
         delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims).unwrap();
         let after = seat_status::history_at(&transaction, subject, cut, i64::MAX as u64).unwrap();
-        let first_difference = before["items"].as_array().unwrap().iter()
-            .zip(after["items"].as_array().unwrap()).position(|(before, after)| before != after);
-        println!("mixed-stamp proof cut={cut} legacy_source={} legacy_dropped={} first_difference={first_difference:?} before={} after={} mismatches={:?}",
-            legacy.id, dropped(&plan).contains(&legacy.id), before["items"], after["items"], proof.mismatches);
-        assert!(proof.passed, "mixed-stamp reader preservation failed: {:?}", proof.mismatches);
         assert!(!dropped(&plan).contains(&legacy.id));
         assert!(dropped(&plan).contains(&observations[1].id),
             "retaining the visible legacy transition must still drop the redundant stamped heartbeat");
@@ -399,15 +354,6 @@ fn native_auth_history_survives_checkpoint_trimming_and_runtime_reset() {
     let sealed = store.checkpoint_sealed_set(cut).unwrap();
     let plan = plan_drops(&sealed);
     assert!(!plan.claims.is_empty());
-    let scratch = tempfile::tempdir().unwrap();
-    let copy = scratch.path().join("checkpoint.sqlite3");
-    store.copy_store_to(&copy).unwrap();
-    let proof = prove_on_copy(&copy, &sealed, &plan).unwrap();
-    assert!(
-        proof.passed,
-        "bounded transitions and current since must survive the proof: {:?}",
-        proof.mismatches
-    );
     {
         let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
@@ -442,9 +388,7 @@ fn account_limits_keep_each_seats_newest_and_the_last_hour_of_each_account() {
     let before = store.account_limits().unwrap();
     assert_eq!(before.iter().find(|limit| limit.account == "claude/a").unwrap().weekly_percent, Some(95.0));
     let cut = 11 * DAY_MS;
-    let scratch = tempfile::tempdir().unwrap();
-    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
-    assert!(proof.passed, "{proof:?}");
+    let plan = crate::store::checkpoint::plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
     let gone = dropped(&plan);
     // Account a's newest reading was measured at 180 minutes, so readings before 120 go.
     for (step, claim) in one.iter().enumerate() {
@@ -516,9 +460,7 @@ fn compact_harness_questions_survive_indefinitely_while_redundant_history_expire
     };
     let (old_claims, kept) = (claims_of(&old.id), [claims_of(&pending.id), claims_of(&recent.id)].concat());
     assert_eq!(old_claims.len(), 3);
-    let scratch = tempfile::tempdir().unwrap();
-    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
-    assert!(proof.passed, "{proof:?}");
+    let plan = crate::store::checkpoint::plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
     let gone = dropped(&plan);
     assert!(gone.contains(&obsolete.revision), "redundant observation history expires");
     for id in old_claims.iter().filter(|id| **id != obsolete.revision) {

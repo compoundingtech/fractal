@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_missions::store::seat_status::*;
-pub use fractal_missions::store::seat_status::{MAX_TRANSITIONS, WINDOW_MS, enrich_harness, history_at, history_at_with_sources, history_source, observation_time, permission_blocked, state_run_since, transition_positions};
+pub use fractal_missions::store::seat_status::{MAX_TRANSITIONS, WINDOW_MS, enrich_harness, history_at, history_source, observation_time, permission_blocked, state_run_since, transition_positions};
 
 use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 

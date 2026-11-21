@@ -239,7 +239,7 @@ fn schedule_last_reached(store: &Store, schedule: &DesiredSubject) -> Result<Opt
 }
 
 /// On a fleet member's cold start, occurrence history may still be elsewhere. Require a fresh
-/// complete exchange before admitting schedules, then hold while known history is missing.
+/// exchange before admitting schedules, then hold missing history or unhealthy admission.
 fn schedule_admission_ready(
     store: &Store,
     host: &str,
@@ -249,7 +249,8 @@ fn schedule_admission_ready(
 ) -> Result<bool> {
     // Include the due callback: an armed timer cannot bypass a staged or conflicting owner.
     store.owned_desired_guard(schedule).map_err(anyhow::Error::new)?;
-    if store.replication_projection_deferred()
+    if !store.replication_admission_healthy()?
+        || store.replication_projection_deferred()
         || store.replication_catching_up()
         || store
             .first_sync()?
@@ -262,9 +263,36 @@ fn schedule_admission_ready(
         return Ok(true);
     }
     let sync = store.replication_peer_sync(&peers);
-    let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
-        && schedule_requires_complete_history(store, schedule)?;
-    Ok(schedule_progress_ready(sync.values(), since, strict))
+    let strict = schedule_requires_complete_history(store, schedule)?;
+    if strict && sync.len() != peers.len() { return Ok(false); }
+    // Membership can arrive through another peer before this peer exchanges again. Never
+    // let a replaced incarnation's samples authorize its successor, even while still fresh.
+    let membership = store.fleet_membership()?;
+    let inventory_generation = store.replication_snapshot()?.inventory_generation;
+    let mut progress = store.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+    for name in sync.keys() {
+        let Some(sample) = progress.get_mut(name) else { return Ok(false) };
+        if strict || sync[name].peer_only_envelopes == 0 || !sample.schedule_progress_since(since) {
+            continue;
+        }
+        let current_key = match membership.state(name) {
+            crate::fleet::MemberState::Current(member) => Some(member.member_key.as_str()),
+            crate::fleet::MemberState::NotMember => None,
+            _ => {
+                sample.schedule_measurements = [0; 3];
+                return Ok(false);
+            },
+        };
+        if sample.measured_member_key.as_deref() != current_key
+            || sample.window_basis.local_inventory_generation != inventory_generation
+        {
+            sample.schedule_measurements = [0; 3];
+            return Ok(false);
+        }
+    }
+    Ok(schedule_progress_ready(sync.iter().map(|(name, peer)| {
+        (peer, progress.get(name).is_some_and(|sample| sample.schedule_progress_since(since)))
+    }), since, strict))
 }
 
 fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) -> Result<Vec<String>> {
@@ -297,14 +325,18 @@ fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) 
 }
 
 fn schedule_progress_ready<'a>(
-    sync: impl IntoIterator<Item = &'a smallclaims::replication::ReplicationPeerSync>,
+    sync: impl IntoIterator<Item = (&'a smallclaims::replication::ReplicationPeerSync, bool)>,
     since: u128,
     strict: bool,
 ) -> bool {
     let mut complete = false;
-    for peer in sync {
-        if peer.peer_only_envelopes > 0 && (strict || !peer.stale) { return false; }
-        complete |= peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0;
+    for (peer, progressing) in sync {
+        // Only fresh peers can use the bounded traffic fallback. Strict history still holds
+        // a stale peer. Ownership moves and standby also require a complete exchange:
+        // shared run identity cannot undo duplicate external effects.
+        let ready = !peer.stale && (peer.peer_only_envelopes == 0 || (progressing && !strict));
+        if !ready && (strict || !peer.stale) { return false; }
+        complete |= ready && peer.measured_at_unix_ms >= since;
     }
     complete
 }
@@ -8805,8 +8837,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Adopt only a fresh physical observation of this operation's exact
         // incarnation. This includes command-only seats and one-shots that
         // already ended; readiness and restart completion remain separate.
+        // Observe the launched member, whose tags carry this operation's provenance.
         let observation = if let Some(incarnation) = incarnation.as_deref() {
-            self.runtime.observe_start(member)?.filter(|observation| {
+            self.runtime.observe_start(&prepared.launch_member)?.filter(|observation| {
                 observation.incarnation_id.as_deref() == Some(incarnation)
                     && matches!(observation.status.as_str(), "running" | "exited" | "stopped" | "vanished")
             })

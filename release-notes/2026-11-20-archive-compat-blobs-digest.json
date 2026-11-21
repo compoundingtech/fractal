@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The previous-release archive test now expects the one difference blob bytes in their own file (#6894) makes: this build's archive header no longer lists blobs, so a release that digests blobs reports a different graph root and no projection match for that table alone, while every other table restores to the same digest",
+  "replay": {"status": "none", "detail": "Test-only change."},
+  "schema": {"status": "none", "detail": "No database, claim or API change."},
+  "rules": {"status": "none", "detail": "No rule or authority change."},
+  "compatibility": {"status": "none", "detail": "Unchanged behaviour, now stated: the previous release restores this build's archive, with every table but blobs at the same digest. Its report says projections_match false because it digests blobs, which this build leaves out of the projection digest since #6894."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Nothing persisted."}
+}

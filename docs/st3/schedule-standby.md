@@ -60,6 +60,22 @@ This first implementation preserves the existing cold-admission guard. A stored
 last-success timestamp, peer inventory digest or historical first-sync result
 does not establish complete applied primary coverage after restart.
 
+For an unchanged primary-only schedule, three consecutive distinct fresh inventory
+measurements at or after the admission boundary may release a continuously nonzero
+in-flight envelope count. Every measurement must find zero invalid records and
+zero fenced envelopes locally; an incomparable inventory, quiet gap, inventory
+basis change or peer incarnation change resets this process-local streak. Restart
+also resets it. Current invalid or fenced state always holds admission.
+
+This bounded fallback trades exact missing-history coverage for liveness under
+continuous traffic: a stuck individual envelope is not proven delivered. Inventory
+counts are not acknowledgements, and writer high-water values are maxima, not
+contiguous acknowledged prefixes. No client schema or wire protocol is changed.
+Schedules with standby or any earlier host/ownership change still require complete
+fresh coverage, even after three healthy measurements. Runs use a deterministic
+schedule-and-occurrence subject across hosts, but that convergence cannot undo
+duplicate external effects, so those schedules cannot use the fallback.
+
 When the primary returns, the standby stops admitting new work. Existing work
 finishes where it started; there is no manual takeover or mid-run handback. The
 primary's cold/catch-up guard consumes available reached/run facts before

@@ -1334,16 +1334,11 @@ async fn a_populated_standalone_daemon_founds_a_fleet_with_verified_person_and_a
     let root = tempfile::tempdir().unwrap();
     let mut a = Node::new(root.path(), "studio");
     a.start().await;
-    wait_until(
-        "the initial standalone checkpoint is sealed",
-        30,
-        || async {
-            a.claims()
-                .await
-                .iter()
-                .any(|claim| claim["kind"] == "checkpoint.sealed")
-        },
-    )
+    // The first trim seals the local batches before its cut; wait for it, so the claims below
+    // are written after it.
+    wait_until("the initial trim ran", 30, || async {
+        a.logs().contains("\"action\":\"trimmed\"")
+    })
     .await;
     let agent = "agent/garden/worker";
     let mut claims = vec![
@@ -1598,7 +1593,37 @@ async fn fresh_explicit_store_fleet_create_resolves_identity_under_admission_loc
         assert_eq!(node.st_json(&["fleet", "status"])["node"], expected);
         assert!(store_dir.join("claims.sqlite3").exists());
         assert!(!node.state_dir().join("claims.sqlite3").exists());
+        // Reopened as a store from before blob files (none beside it; nothing moved yet), the
+        // existing store's admitted connection may no longer create files: the daemon still
+        // creates and attaches its blob file, and a document's bytes read back.
+        let database = store_dir.join("claims.sqlite3");
+        let blob_file = smallclaims::store::blob_file::location(&database);
+        let remove_blob_file = || {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = fs::remove_file(format!("{blob_file}{suffix}"));
+            }
+        };
+        let file = node.root.join("fixture-document.txt");
+        fs::write(&file, "explicit store bytes").unwrap();
+        node.st_ok(&["documents", "put", file.to_str().unwrap(), "--as", "doc/fixture/explicit-store"]);
         node.stop();
+        remove_blob_file();
+        node.start().await;
+        assert!(std::path::Path::new(&blob_file).exists());
+        let document = node.st_ok(&["documents", "get", "doc/fixture/explicit-store"]);
+        assert!(document.contains("explicit store bytes"), "{document}");
+        node.stop();
+        // A read-only open of a store with no blob file beside it (a reader before any writer of
+        // a build with blob files) reads and writes nothing.
+        remove_blob_file();
+        let reader = smallclaims::sqlite::open_read_connection(&database, false).unwrap();
+        let blobs: i64 = reader.query_row(
+            concat!("SELECT COUNT(*) FROM (SELECT ", smallclaims::blob_bytes!("b"), " FROM blobs AS b)"),
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(blobs >= 1);
+        assert!(!std::path::Path::new(&blob_file).exists(), "a reader created no blob file");
     }
 }
 
@@ -3691,6 +3716,137 @@ async fn previous_release_replicates_with_new_members_and_preserves_history_on_u
     }
 }
 
+/// What `node`'s store holds in valid records' bytes: their count and total length. The
+/// daemon empties them after an upgrade (`record_bytes`).
+fn valid_record_bytes(node: &Node) -> (u64, u64) {
+    rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(raw)), 0) FROM replica_records WHERE state='valid'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
+}
+
+/// Post a note under an idempotency key and return its claim id.
+async fn keyed_note(node: &Node, text: &str, key: &str) -> String {
+    let claim: Value = node
+        .client()
+        .post(
+            "/v1/claims",
+            &ClaimInput {
+                subject: format!("custom/fleet-test/{text}"),
+                kind: NOTE.into(),
+                actor: Some(PERSON.into()),
+                fields: [("text".to_owned(), Value::String(text.into()))].into_iter().collect(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .unwrap();
+    claim["id"].as_str().unwrap().to_owned()
+}
+
+/// A release member upgrades in place, and this build empties its valid records' bytes while it
+/// keeps replicating with a release peer in both directions. Rolled back over those emptied
+/// records, the release still reads every note, answers a retried request with the same claim,
+/// writes its next sequence and exchanges with an upgraded member to equal digests. Upgraded
+/// again, this build empties the bytes the release wrote meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_bytes() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "5c3e1a7b-9d2f-4b8e-a6c4-1f0e9d8c7b6a";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([9_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    let mut r = Node::new(root.path(), "r");
+    let mut n = Node::new(root.path(), "n");
+    o.binary = old.clone();
+    r.binary = old.clone();
+    o.legacy_config(fleet_id, &secret, &[("r", r.port), ("n", n.port)]);
+    r.legacy_config(fleet_id, &secret, &[("o", o.port), ("n", n.port)]);
+    n.legacy_config(fleet_id, &secret, &[("o", o.port), ("r", r.port)]);
+    for node in [&mut o, &mut r, &mut n] {
+        node.start().await;
+    }
+    let retried = keyed_note(&o, "o-keyed", "o-keyed-note").await;
+    let mut expected = BTreeSet::from(["custom/fleet-test/o-keyed".to_owned()]);
+    for (node, text) in [(&o, "o-0"), (&r, "r-0"), (&n, "n-0")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+    let (valid, bytes) = valid_record_bytes(&o);
+    assert!(valid > 0 && bytes > 0, "the release keeps each valid record's bytes");
+    assert_eq!(valid_record_bytes(&n).1, 0, "this build keeps none");
+
+    // Upgrade in place: the daemon empties the bytes and keeps every record.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the upgraded member empties its valid records' bytes", 60, || async {
+        valid_record_bytes(&o).1 == 0
+    })
+    .await;
+    assert!(valid_record_bytes(&o).0 >= valid, "no valid record went away");
+    for (node, text) in [(&o, "o-upgraded"), (&r, "r-1")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+
+    // Roll back over the emptied records.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
+    assert_eq!(keyed_note(&o, "o-keyed", "o-keyed-note").await, retried, "a retried request is answered with its claim");
+    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-1")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+    let digests = || [&o, &r, &n].map(|node| node.st_json(&["replication", "status"]));
+    wait_until("every member holds the same envelopes", 90, || async {
+        let statuses = digests();
+        statuses.iter().all(|status| status["authority_digest"] == statuses[0]["authority_digest"])
+    })
+    .await;
+    for status in digests() {
+        assert_eq!(status["invalid_records"], 0, "{status}");
+        assert_eq!(status["unsigned_envelopes"], 0, "{status}");
+    }
+    // The release stored bytes for what it admitted and wrote; upgraded again, this build
+    // empties those too.
+    assert!(valid_record_bytes(&o).1 > 0, "the rolled-back release kept the bytes it wrote");
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the re-upgraded member empties the bytes the release wrote", 60, || async {
+        valid_record_bytes(&o).1 == 0
+    })
+    .await;
+    wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
+}
+
 fn backup_baseline_graph(old: &Node, directory: &Path) {
     let original = old.state_dir().join("claims.sqlite3");
     let copy = directory.join("baseline-copy.db");
@@ -5411,19 +5567,7 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         assert!(!refused.status.success());
         assert!(String::from_utf8_lossy(&refused.stderr).contains("refused this code"));
     }
-    amber.st_json(&["replication", "checkpoint", "plan", "--cut", "2026-10-01"]);
-    amber.st_json(&[
-        "replication",
-        "checkpoint",
-        "excuse",
-        "fixture-cobalt",
-        "--as",
-        PERSON,
-        "--reason",
-        "The fixture writer may be offline.",
-    ]);
     amber.restart().await;
-    amber.st_json(&["replication", "checkpoint", "status"]);
     amber.st_json(&[
         "replication",
         "checkpoint",
@@ -6749,6 +6893,191 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
     kept(&judged, &verdicts(&o), "re-upgrade");
 }
 
+/// Verdict links without their index by claim: a previous-release member and a new one
+/// replicate signed claims both ways; the previous release upgraded in place drops the index
+/// without changing a verdict or the replicated set; rolled back, it rebuilds the index at open
+/// and reads, signs and replicates as before; upgraded again, the index goes again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "2e7a9c4f-5b1d-4e3a-8f6c-1d9b7a5e3c2f";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([11_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    const INDEXED: &str = "SELECT COUNT(*) FROM sqlite_schema WHERE name='claim_candidate_verdict_links_claim_index'";
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n = Node::new(root.path(), "n");
+    o.legacy_config(fleet_id, &secret, &[("n", n.port)]);
+    n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    o.start().await;
+    n.start().await;
+    let rows = |node: &Node, sql: &str| -> i64 {
+        rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(sql, [], |row| row.get(0))
+        .unwrap()
+    };
+    // Every signed claim's verdict. A peer's claims read held here, since the legacy fleet does not
+    // enroll node keys; what matters is that no verdict changes across upgrade and rollback.
+    let verdicts = |node: &Node| -> BTreeMap<String, String> {
+        let connection = rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare("SELECT s.claim_id, COALESCE(v.verdict, 'none') FROM claim_signatures s
+                      LEFT JOIN claim_verdicts v USING(claim_id)")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    // Settled: nothing queued for judgment, every signed claim has a verdict, and the node's own
+    // claims read verified.
+    let unsettled = |node: &Node| {
+        rows(node, &format!(
+            "SELECT (SELECT COUNT(*) FROM claim_verdict_queue)
+                  + (SELECT COUNT(*) FROM claim_signatures s LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE v.verdict IS NULL)
+                  + (SELECT COUNT(*) FROM claim_signatures s JOIN claims c ON c.id = s.claim_id
+                     LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE c.origin = '{}' AND v.verdict IS NOT 'verified')",
+            node.name,
+        ))
+    };
+    macro_rules! settle {
+        ($node:expr) => {{
+            let node: &Node = $node;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while unsettled(node) != 0 {
+                assert!(Instant::now() < deadline, "{}: verdicts did not settle: {:?}", node.name, verdicts(node));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }};
+    }
+    let kept = |before: &BTreeMap<String, String>, after: &BTreeMap<String, String>, stage: &str| {
+        for (claim, verdict) in before {
+            assert_eq!(after.get(claim), Some(verdict), "{stage}: verdict of {claim} changed");
+        }
+    };
+    // Node-signed notes: no actor, so they need no verified caller ancestry on any host.
+    let note = |node: &Node, text: &str| {
+        let client = node.client();
+        let text = text.to_owned();
+        async move {
+            let _: Value = client
+                .post("/v1/claims", &ClaimInput {
+                    subject: format!("custom/fleet-test/{text}"),
+                    kind: NOTE.into(),
+                    actor: None,
+                    fields: [("text".to_owned(), Value::String(text))].into_iter().collect(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .await
+                .unwrap();
+        }
+    };
+    let mut expected = BTreeSet::new();
+    for text in ["o-0", "o-1", "o-2"] {
+        note(&o, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for text in ["n-0", "n-1"] {
+        note(&n, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        settle!(node);
+    }
+    // The new member keeps no index by claim; the previous release keeps one.
+    assert_eq!(rows(&n, INDEXED), 0);
+    assert_eq!(rows(&o, INDEXED), 1);
+    assert!(rows(&n, "SELECT COUNT(*) FROM claim_verdict_links") > 0);
+
+    // Upgrade in place: the open drops the release's index, verdicts and the set stay.
+    let judged = verdicts(&o);
+    let before: BTreeSet<String> =
+        o.claims().await.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    assert_eq!(rows(&o, INDEXED), 0);
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "upgrade");
+    let after: BTreeSet<String> =
+        o.claims().await.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
+    assert!(before.is_subset(&after), "upgrade lost history");
+    for (node, text) in [(&o, "o-upgraded"), (&n, "n-after-upgrade")] {
+        note(node, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        settle!(node);
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // Roll back: the release rebuilds its index at open, then reads every verdict, signs and
+    // replicates as before.
+    let judged = verdicts(&o);
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    assert_eq!(rows(&o, INDEXED), 1);
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "rollback");
+    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-after-rollback")] {
+        note(node, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        settle!(node);
+    }
+
+    // Upgrade again: the index goes again.
+    let judged = verdicts(&o);
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    assert_eq!(rows(&o, INDEXED), 0);
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "re-upgrade");
+}
+
 /// A page cursor into the messages stream names its position in `stream_after` and leaves out
 /// `after`, so the previous release, whose cursor needs `after`, refuses it and the listing starts
 /// over rather than reading a stream position as a graph index. A subject the graph holds lists
@@ -7207,6 +7536,10 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
         header["data"].as_object_mut().unwrap().remove("source_build");
         // Like source_build, the writer's registry digest changes when a release adds claim kinds.
         header["data"].as_object_mut().unwrap().remove("registry_digest");
+        // This build keeps blobs out of the projection digest (blob bytes in their own file, #6894),
+        // so a release that digests them lists one more table, and the root over the tables differs.
+        header["data"]["tables"].as_object_mut().unwrap().remove("blobs");
+        header["data"].as_object_mut().unwrap().remove("graph_digest");
         // The end record's hash covers the header, so only its count can match.
         let end = &records[records.len() - 1];
         assert_eq!(end["record"], "end", "{end}");
@@ -7220,8 +7553,18 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     let restored = release_restore(&mut o, &empty_shard_archive, &root.path().join("release-restored/claims.sqlite3"));
     assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
     let report: Value = serde_json::from_slice(&restored.stdout).unwrap();
-    assert_eq!(report["graph_digest"], ours[0]["data"]["graph_digest"], "{report}");
-    assert_eq!(report["projections_match"], true, "{report}");
+    // Every table both builds digest restores to this build's digest. A release that also digests
+    // blobs reports a different root and no projection match for that table alone.
+    let shared = |tables: &Value| {
+        let mut tables = tables.as_object().unwrap().clone();
+        tables.remove("blobs");
+        tables
+    };
+    assert_eq!(shared(&report["tables"]), shared(&ours[0]["data"]["tables"]), "{report}");
+    if report["tables"].get("blobs").is_none() {
+        assert_eq!(report["graph_digest"], ours[0]["data"]["graph_digest"], "{report}");
+        assert_eq!(report["projections_match"], true, "{report}");
+    }
 
     // A stream item, read on the member: the next archive carries the shard, as version 5.
     o.start().await;
@@ -8206,8 +8549,8 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
 /// one node upgraded in place and rolled back. The release's mail reads the same after the
 /// upgrade, a stream item joins the conversation behind the graph claim it arrived after, and a
 /// wait ends on a stream reply. A cursor the release gave out resumes on this build; one this
-/// build gave out asks an older release for a full read rather than skipping, and resumes on a
-/// release that reads stream items. A CLI of either build waits on a daemon of the other.
+/// build gave out asks a release with fewer cursor fields for a full read rather than skipping.
+/// A CLI of either build waits on a daemon of the other.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback() {
@@ -8330,13 +8673,14 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
         assert_eq!(release["reply"], false, "{release}");
     }
 
-    // Roll back. An older release asks for a full read on this build's cursor; one that reads
-    // stream items resumes it, with the stream and graph mail since. The release's mail and the
-    // graph reply read as before.
+    // Roll back. Stream support alone does not imply support for a newer cursor: #6948 added
+    // the stream-receipt position as a sixth field. An older format must request a full read.
+    let cursor_fields = |cursor: &str| cursor.rsplit('/').next().unwrap().split('.').count();
+    let release_accepts_cursor = cursor_fields(&upgraded_cursor) <= cursor_fields(&release_cursor);
     o.stop();
     o.binary = old.clone();
     o.start().await;
-    if release_reads_stream {
+    if release_accepts_cursor {
         let (_, resumed) = changes(&o, Some(upgraded_cursor.clone())).await;
         assert_eq!(
             resumed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
@@ -8345,9 +8689,42 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
         );
     } else {
         let refused = person(&o).get::<Value>(&changes_path(Some(&upgraded_cursor))).await.unwrap_err().to_string();
-        assert!(refused.contains("cursor-gap"), "{refused}");
+        assert!(refused.contains("410 cursor-gap"), "{refused}");
     }
-    let (reopened, _) = changes(&o, None).await;
+    // A cursorless changes read initializes at the head; the timeline endpoint is the full read.
+    let reopened: Value = person(&o).get(&changes_path(None)).await.unwrap();
+    let session_id = reopened["session_id"].as_str().unwrap().trim_start_matches("session/");
+    let history: Value = person(&o).get(&format!(
+        "/v1/client/sessions/{}/timeline?limit=200", urlencoding::encode(session_id),
+    )).await.unwrap();
+    assert_eq!(history["page"]["has_more"], false, "{history}");
+    let reopened_messages = history["items"].as_array().unwrap();
+    let reopened = reopened["next_cursor"].as_str().unwrap().to_owned();
+    let expected_reopened = [
+        (first.as_str(), PERSON, "graph mail release-first", false),
+        (stream, "agent/fleet-sender", "through the stream", true),
+        (this_reply, "agent/fleet-sender", "through the stream", true),
+        (graph_reply.as_str(), "agent/fleet-sender", "graph mail graph-reply", false),
+        (release_reply, "agent/fleet-sender", "through the stream", true),
+        (unseen.as_str(), "agent/fleet-sender", "graph mail graph-unseen", false),
+    ].into_iter().filter(|(_, _, _, stream)| release_reads_stream || !stream);
+    let mut reopened_entries = reopened_messages.iter()
+        .filter(|item| matches!(item["type"].as_str(), Some("message" | "content")));
+    assert_eq!(
+        reopened_entries.clone().count(), expected_reopened.clone().count() * 2,
+        "the full read has exactly one header and body per supported message: {history}"
+    );
+    for (id, sender, text, _) in expected_reopened {
+        let message = reopened_entries.next().unwrap();
+        assert_eq!(message["type"], "message", "{history}");
+        assert_eq!(message["body"]["message_id"], id, "{history}");
+        assert_eq!(message["body"]["from"], sender, "{history}");
+        assert_eq!(message["body"]["to"], reader, "{history}");
+        let content = reopened_entries.next().unwrap();
+        assert_eq!(content["type"], "content", "{history}");
+        assert_eq!(content["body"]["message_id"], id, "{history}");
+        assert_eq!(content["body"]["text"], text, "{history}");
+    }
     let later = send(&o, "rolled-back", PERSON, reader).await;
     let (_, after_rollback) = changes(&o, Some(reopened)).await;
     assert_eq!(after_rollback.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [later]);
@@ -10136,7 +10513,7 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
 /// A work wake for a seat on this member is a stream item (4c-3, part b), beside the previous
 /// release, which replicates the stream as it already does. Rolled back, the member's release
 /// reconciler reads wakes from the graph alone, so it wakes the seat once more there; upgraded
-/// again, this build reads the step's wakes from both stores. Replication stays whole.
+/// again, this build reads both stores, with the graph winning for a shared subject.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_its_rollback() {
@@ -10212,11 +10589,11 @@ async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_
     let started = a.st_json(&["missions", "start", "wake/stream", "--id", "wake/first", "--as", PERSON]);
     let step = started["mission_run"]["steps"][0]["subject"].as_str().unwrap().to_owned();
     let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
-    // The step's wakes on `node`, as (subject, stream item).
+    // The step's wake history, including wakes the reconciler already closed after delivery.
     let wakes = |node: &Node| {
         let (node, step) = (node.client(), step.clone());
         async move {
-            let page: Value = node.get(&format!("/v1/messages?to={seat}")).await.unwrap();
+            let page: Value = node.get(&format!("/v1/messages?to={seat}&include_closed=true")).await.unwrap();
             page.as_array().into_iter().flatten()
                 .filter(|item| item["tags"].as_array().into_iter().flatten()
                     .any(|tag| tag.as_str().is_some_and(|tag| tag.starts_with(&format!("st3-work:{step}@")))))
@@ -10249,21 +10626,32 @@ async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_
         wakes(&a).await.iter().any(|(_, stream)| !stream)
     })
     .await;
+    // The release can reuse the first attempt's deterministic subject: it cannot see the
+    // stream attempt, and the harness incarnation can survive the daemon restart. Such a
+    // message is listed once, as the graph's, rather than once from each store.
+    let mut expected: BTreeMap<_, _> = first.iter().cloned().collect();
+    expected.extend(wakes(&a).await.into_iter().filter(|(_, stream)| !stream));
     for (subject, _) in &first {
         assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
     }
 
-    // Upgraded again, this build opens the store the release wrote and reads both kinds.
+    // Upgraded again, retain every wake, applying the shared-subject graph precedence.
     a.stop();
     a.binary = PathBuf::from(st3());
     a.start().await;
-    wait_until("the upgraded member shows the step's wakes from both stores", 90, || async {
+    wait_until("the upgraded member shows every wake with graph precedence", 90, || async {
         let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
+        let visible = wakes(&a).await;
         shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1
-            && wakes(&a).await.iter().any(|(_, stream)| *stream)
-            && wakes(&a).await.iter().any(|(_, stream)| !stream)
+            && expected.iter().all(|(subject, stream)| {
+                visible.iter().filter(|(candidate, _)| candidate == subject).count() == 1
+                    && visible.iter().any(|(candidate, stored_in_stream)| candidate == subject && stored_in_stream == stream)
+            })
     })
     .await;
+    for (subject, _) in &first {
+        assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
+    }
     for node in [&a, &o] {
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
