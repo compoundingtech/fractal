@@ -53,7 +53,7 @@ fn plain_restart_preparation_keeps_idle_incumbent_observable_until_ack_or_deadli
         let work_context = if context == "work" { "fresh-context" } else { "" };
         let driver = if context == "trust" { "claude" } else { "omp" };
         let source = |revision: &str| format!(r#"version 2
-agent "example/worker" {{ workspace {:?}; harness "{driver}" {{}}; env {{ REVISION "{revision}" }}; restart "never"; {seat_context} }}
+agent "example/worker" {{ workspace {:?}; harness "{driver}" {{ args "--restart-fixture={revision}" }}; restart "never"; {seat_context} }}
 mission "example/work" state="ready" {{
   goal "Keep work delivery available during restart preparation."
   step "work" {{ assigned-to "agent/example/worker"; {work_context} }}
