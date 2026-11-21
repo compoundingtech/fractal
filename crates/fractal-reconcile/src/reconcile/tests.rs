@@ -1,5 +1,6 @@
     #![cfg_attr(not(test), allow(unused, dead_code))]
     mod agent_review_loop_branches;
+    mod restart_preparation;
 
 mod native_effect_convergence {
     use super::*;
@@ -8648,10 +8649,10 @@ agent "import/omp/fixture" {{
             .unwrap();
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
-        assert!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        assert_eq!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap(), RequestedRestart::Handled);
         // A later pass finds the request completed: nothing to retire, retry or raise again, and
         // the member pass goes on as usual.
-        assert!(!reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        assert_eq!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap(), RequestedRestart::Continue);
         let retirements = store.claims_for(&seat, Some("runtime.reconcile-decision")).unwrap().into_iter()
             .filter(|claim| claim.body["fields"]["decision"] == "restart-retired-obsolete-request")
             .count();
