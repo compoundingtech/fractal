@@ -80,7 +80,12 @@ fn main() -> anyhow::Result<()> {
     let node = args.get(2).ok_or_else(|| anyhow::anyhow!("the copy's node name is required"))?;
     let state_dir = args.get(3).map(Path::new);
     let run = Instant::now();
-    let before_space = space(path, "before")?;
+    // S2D_PASSES picks the passes (sign, empty, delete, release, vacuum; all by default) and
+    // S2D_NO_SPACE skips the byte counts, to measure one pass again on a copy already measured.
+    let passes_env = std::env::var("S2D_PASSES").unwrap_or_else(|_| "sign,empty,delete,release,vacuum".into());
+    let passes: Vec<&str> = passes_env.split(',').collect();
+    let count_space = std::env::var_os("S2D_NO_SPACE").is_none();
+    let before_space = if count_space { space(path, "before")? } else { BTreeMap::new() };
     let started = Instant::now();
     let store = Arc::new(Store::open(path, node)?);
     println!("open_ms={}", started.elapsed().as_millis());
@@ -138,125 +143,142 @@ fn main() -> anyhow::Result<()> {
     };
     let mut holds = Vec::new();
 
-    // S2c: this member signs its own claims, settling waiting signatures first, a page at a time.
-    let (mut scanned, mut signed) = (0, 0);
-    let started = Instant::now();
-    loop {
-        let job = Instant::now();
-        store.promote_claim_member_signatures()?;
-        let page = store.sign_own_claims()?;
-        let took = job.elapsed();
-        slow("sign_own", took, format!("scanned={} signed={}", page.scanned, page.signed));
-        holds.push(took);
-        scanned += page.scanned;
-        signed += page.signed;
-        if page.done {
-            break;
+    if passes.contains(&"sign") {
+        // S2c: this member signs its own claims, settling waiting signatures first, a page at a time.
+        let (mut scanned, mut signed) = (0, 0);
+        let started = Instant::now();
+        loop {
+            let job = Instant::now();
+            store.promote_claim_member_signatures()?;
+            let page = store.sign_own_claims()?;
+            let took = job.elapsed();
+            slow("sign_own", took, format!("scanned={} signed={}", page.scanned, page.signed));
+            holds.push(took);
+            scanned += page.scanned;
+            signed += page.signed;
+            if page.done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        println!("own_claims_scanned={scanned} own_claims_signed={signed} sign_ms={}", started.elapsed().as_millis());
+        report("sign", &mut holds);
     }
-    println!("own_claims_scanned={scanned} own_claims_signed={signed} sign_ms={}", started.elapsed().as_millis());
-    report("sign", &mut holds);
 
-    // S1: valid records keep no bytes.
-    let (mut emptied, mut bytes) = (0, 0);
-    let started = Instant::now();
-    loop {
-        let job = Instant::now();
-        let page = store.release_valid_record_bytes()?;
-        let took = job.elapsed();
-        slow("empty_bytes", took, format!("work_ms={} rows={}", page.work.as_millis(), page.emptied));
-        holds.push(took);
-        emptied += page.emptied;
-        bytes += page.bytes;
-        if page.done {
-            break;
+    if passes.contains(&"empty") {
+        // S1: valid records keep no bytes.
+        let (mut emptied, mut bytes) = (0, 0);
+        let started = Instant::now();
+        loop {
+            let job = Instant::now();
+            let page = store.release_valid_record_bytes()?;
+            let took = job.elapsed();
+            slow("empty_bytes", took, format!("work_ms={} rows={}", page.work.as_millis(), page.emptied));
+            holds.push(took);
+            emptied += page.emptied;
+            bytes += page.bytes;
+            if page.done {
+                break;
+            }
         }
+        println!("emptied={emptied} emptied_bytes={bytes} empty_ms={}", started.elapsed().as_millis());
+        report("empty", &mut holds);
     }
-    println!("emptied={emptied} emptied_bytes={bytes} empty_ms={}", started.elapsed().as_millis());
-    report("empty", &mut holds);
 
-    // S2b: valid records deleted, with no rollback window.
-    let (mut scanned, mut deleted) = (0, 0);
-    let started = Instant::now();
-    loop {
-        let job = Instant::now();
-        let page = store.release_valid_records(0)?;
-        let took = job.elapsed();
-        slow("delete_records", took, format!("work_ms={} rows={}", page.work.as_millis(), page.deleted));
-        holds.push(took);
-        scanned += page.scanned;
-        deleted += page.deleted;
-        if page.done || page.waiting_until_unix_ms.is_some() {
-            break;
+    if passes.contains(&"delete") {
+        // S2b: valid records deleted, with no rollback window.
+        let (mut scanned, mut deleted) = (0, 0);
+        let started = Instant::now();
+        loop {
+            let job = Instant::now();
+            let page = store.release_valid_records(0)?;
+            let took = job.elapsed();
+            slow("delete_records", took, format!("work_ms={} rows={}", page.work.as_millis(), page.deleted));
+            holds.push(took);
+            scanned += page.scanned;
+            deleted += page.deleted;
+            if page.done || page.waiting_until_unix_ms.is_some() {
+                break;
+            }
         }
+        println!("records_scanned={scanned} records_deleted={deleted} delete_ms={}", started.elapsed().as_millis());
+        report("delete", &mut holds);
     }
-    println!("records_scanned={scanned} records_deleted={deleted} delete_ms={}", started.elapsed().as_millis());
-    report("delete", &mut holds);
 
-    // S2d: envelopes released once 14 days older than the copy's newest envelope.
-    let newest: u64 = store.readers.get().query_row(
-        "SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM replica_envelopes",
-        [],
-        |row| row.get(0),
-    )?;
-    let gate = newest.saturating_sub(smallclaims::store::envelope_release::ENVELOPE_RELEASE_AGE_MS);
-    let min_age = u64::try_from(smallclaims::store::now_ms())?.saturating_sub(gate);
-    let (envelopes, young): (u64, u64) = store.readers.get().query_row(
-        "SELECT COUNT(*), SUM(CAST(accepted_at_unix_ms AS INTEGER) > ?1) FROM replica_envelopes",
-        [gate],
-        |row| Ok((row.get(0)?, row.get::<_, Option<u64>>(1)?.unwrap_or(0))),
-    )?;
-    println!("envelopes={envelopes} younger_than_gate={young} newest_accepted_ms={newest}");
-    let (mut released, mut read, mut unsigned_bytes) = (0, 0, 0);
-    let mut kept = BTreeMap::<&str, usize>::new();
-    let started = Instant::now();
-    loop {
-        let job = Instant::now();
-        let page = store.release_envelopes(min_age)?;
-        let took = job.elapsed();
-        slow("release_envelopes", took, format!("work_ms={} read={} released={}", page.work.as_millis(), page.scanned, page.released));
-        holds.push(took);
-        if let Some(waiting) = page.waiting {
-            println!("release_waiting={waiting:?}");
+    if passes.contains(&"release") {
+        // S2d: envelopes released once 14 days older than the copy's newest envelope.
+        let newest: u64 = store.readers.get().query_row(
+            "SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM replica_envelopes",
+            [],
+            |row| row.get(0),
+        )?;
+        let gate = newest.saturating_sub(smallclaims::store::envelope_release::ENVELOPE_RELEASE_AGE_MS);
+        let min_age = u64::try_from(smallclaims::store::now_ms())?.saturating_sub(gate);
+        let (envelopes, young): (u64, u64) = store.readers.get().query_row(
+            "SELECT COUNT(*), SUM(CAST(accepted_at_unix_ms AS INTEGER) > ?1) FROM replica_envelopes",
+            [gate],
+            |row| Ok((row.get(0)?, row.get::<_, Option<u64>>(1)?.unwrap_or(0))),
+        )?;
+        println!("envelopes={envelopes} younger_than_gate={young} newest_accepted_ms={newest}");
+        if std::env::var_os("S2D_RESET_RELEASE").is_some() {
+            // Judge every envelope again, as a first pass would.
+            store.connection.batched(|tx| tx.execute("DELETE FROM meta WHERE key='envelope_release_cursor'", []))
+                .map_err(|error| anyhow::anyhow!(error))??;
         }
-        released += page.released;
-        read += page.scanned;
-        unsigned_bytes += page.unsigned_payload_bytes;
-        for (reason, count) in page.kept {
-            *kept.entry(reason).or_default() += count;
+        let (mut released, mut read, mut unsigned_bytes) = (0, 0, 0);
+        let mut kept = BTreeMap::<&str, usize>::new();
+        let started = Instant::now();
+        loop {
+            let job = Instant::now();
+            let page = store.release_envelopes(min_age)?;
+            // A page judges on a reader first; the writer is held from its submission on.
+            let took = job.elapsed().saturating_sub(page.judged);
+            slow("release_envelopes", took, format!("work_ms={} judged_ms={} read={} released={}", page.work.as_millis(), page.judged.as_millis(), page.scanned, page.released));
+            holds.push(took);
+            if let Some(waiting) = page.waiting {
+                println!("release_waiting={waiting:?}");
+            }
+            released += page.released;
+            read += page.scanned;
+            unsigned_bytes += page.unsigned_payload_bytes;
+            for (reason, count) in page.kept {
+                *kept.entry(reason).or_default() += count;
+            }
+            if page.done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        if page.done {
-            break;
+        println!(
+            "envelopes_read={read} envelopes_released={released} release_ms={} unsigned_payload_bytes={unsigned_bytes}",
+            started.elapsed().as_millis()
+        );
+        for (reason, count) in &kept {
+            println!("kept_reason={reason} kept={count}");
         }
-        std::thread::sleep(Duration::from_millis(50));
+        report("release", &mut holds);
     }
-    println!(
-        "envelopes_read={read} envelopes_released={released} release_ms={} unsigned_payload_bytes={unsigned_bytes}",
-        started.elapsed().as_millis()
-    );
-    for (reason, count) in &kept {
-        println!("kept_reason={reason} kept={count}");
-    }
-    report("release", &mut holds);
 
-    // The pages they held, back to the filesystem.
-    let mut pages = 0;
-    let started = Instant::now();
-    loop {
-        let job = Instant::now();
-        let step = store.release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE)?;
-        let took = job.elapsed();
-        slow("free_pages", took, format!("pages={step}"));
-        holds.push(took);
-        if step == 0 {
-            break;
+    if passes.contains(&"vacuum") {
+        // The pages they held, back to the filesystem.
+        let mut pages = 0;
+        let started = Instant::now();
+        loop {
+            let job = Instant::now();
+            let step = store.release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE)?;
+            let took = job.elapsed();
+            slow("free_pages", took, format!("pages={step}"));
+            holds.push(took);
+            if step == 0 {
+                break;
+            }
+            pages += step;
+            std::thread::sleep(Duration::from_millis(50));
         }
-        pages += step;
-        std::thread::sleep(Duration::from_millis(50));
+        println!("vacuum_pages={pages} vacuum_ms={}", started.elapsed().as_millis());
+        report("vacuum", &mut holds);
     }
-    println!("vacuum_pages={pages} vacuum_ms={}", started.elapsed().as_millis());
-    report("vacuum", &mut holds);
+
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     control_thread.join().map_err(|_| anyhow::anyhow!("the control writer panicked"))?;
     let mut control = std::mem::take(&mut *control.lock().unwrap());
@@ -268,7 +290,7 @@ fn main() -> anyhow::Result<()> {
     println!("digests_compared={} digests_equal={} differing={differing:?}", before.len(), differing.is_empty());
     drop(store);
     std::thread::sleep(Duration::from_secs(6));
-    let after_space = space(path, "after")?;
+    let after_space = if count_space { space(path, "after")? } else { BTreeMap::new() };
     let mut freed = before_space
         .iter()
         .map(|(table, bytes)| (table.clone(), *bytes as i64 - *after_space.get(table).unwrap_or(&0) as i64))

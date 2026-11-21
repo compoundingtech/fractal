@@ -61,9 +61,13 @@ const CURSOR: &str = "envelope_release_cursor";
 pub const PAGE: usize = 512;
 /// One page's share of a writer batch, as in `record_bytes`.
 pub const BUDGET: Duration = Duration::from_millis(10);
+/// How long a page judges envelopes on a reader before it takes the writer.
+pub const JUDGE_BUDGET: Duration = Duration::from_millis(50);
+/// The releasable envelopes one write takes at most.
+pub const RELEASES_PER_WRITE: usize = 64;
 
 /// The next envelopes past the cursor. The batch and state columns follow the payload in the row,
-/// so reading them walks each payload's overflow pages, as deleting a released row does.
+/// so reading them walks each payload's overflow pages; a page reads them on a reader.
 const PAGE_SQL: &str = "SELECT rowid, writer, sequence, envelope_hash, accepted_at_unix_ms, batch_id,
         receipt_state='validated' AND batch_id IS NOT NULL
      FROM replica_envelopes WHERE rowid>?1 ORDER BY rowid LIMIT ?2";
@@ -121,6 +125,8 @@ pub struct EnvelopeRelease {
     pub waiting: Option<&'static str>,
     /// The page's work inside its transaction, before the commit.
     pub work: Duration,
+    /// The page's work judging envelopes on a reader, before it took the writer.
+    pub judged: Duration,
     /// How many envelopes the page read and kept, by why.
     pub kept: BTreeMap<&'static str, usize>,
     /// The payload bytes of the envelopes kept only because a claim lacks its writer's signature:
@@ -153,9 +159,13 @@ impl Store {
             return waiting("this store has no fleet");
         };
         let authority = Authority { fleet_id, shard: self.bound_shard()?, membership: self.fleet_membership_sealed()? };
+        // Judging reads payload rows, hashes every claim and checks every signature, which costs
+        // what a batch's size and the disk make it: it runs on a reader. The write checks again
+        // only what can change meanwhile, then releases.
+        let judged = judge_page(&self.readers.get(), &authority, min_age_ms)?;
         let (report, released, changes) = self
             .connection
-            .batched(move |tx| release_page(tx, &authority, min_age_ms))
+            .batched(move |tx| commit_page(tx, judged))
             .map_err(anyhow::Error::msg)??;
         if !released.is_empty() {
             self.mark_payloads_released(&released, changes)?;
@@ -203,13 +213,32 @@ fn cursor(connection: &Connection) -> Result<i64> {
 
 type Released = (EnvelopeRelease, Vec<ReplicaEnvelopeId>, (i64, i64));
 
-fn release_page(tx: &Transaction<'_>, authority: &Authority, min_age_ms: u64) -> Result<Released> {
+/// An envelope a reader judged releasable: its row, identity, batch and the envelope signature
+/// it keeps.
+type Candidate = (i64, ReplicaEnvelopeId, String, (String, String));
+
+/// What a page judged on a reader, for its write.
+struct Judged {
+    /// The cursor the page read from: a write that finds it moved judges nothing of this page.
+    from: i64,
+    /// The last envelope the page judged.
+    after: i64,
+    report: EnvelopeRelease,
+    candidates: Vec<Candidate>,
+    /// Each envelope it judged and kept: its row, why, and its payload's size when only a claim's
+    /// signature is missing. The write counts those it covers; the next page judges the rest.
+    kept: Vec<(i64, &'static str, u64)>,
+}
+
+/// Judge envelopes past the cursor on a reader until the page, its budget or a write's share of
+/// releasable envelopes runs out.
+fn judge_page(connection: &Connection, authority: &Authority, min_age_ms: u64) -> Result<Judged> {
     let started = Instant::now();
-    let mut after = cursor(tx)?;
-    let changes_before = saved_inventory::changes(tx)?;
-    let newest = max_envelope_rowid(tx)?;
+    let from = cursor(connection)?;
+    let mut after = from;
+    let newest = max_envelope_rowid(connection)?;
     let oldest_accepted = now_ms().saturating_sub(u128::from(min_age_ms));
-    let page = tx
+    let page = connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb977b8b2d181 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ PAGE_SQL)?
         .query_map(params![after, PAGE], |row| {
             Ok((
@@ -222,7 +251,8 @@ fn release_page(tx: &Transaction<'_>, authority: &Authority, min_age_ms: u64) ->
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut report = EnvelopeRelease { done: page.len() < PAGE, ..Default::default() };
-    let mut released = Vec::new();
+    let mut candidates = Vec::new();
+    let mut judged_kept = Vec::new();
     for (rowid, envelope, accepted, batch, admitted) in page {
         // Rows are in arrival order, so what follows a young envelope is young too. The newest
         // row stays as well: deleting it would let the next envelope take its rowid.
@@ -230,36 +260,77 @@ fn release_page(tx: &Transaction<'_>, authority: &Authority, min_age_ms: u64) ->
             report.done = true;
             break;
         }
-        report.scanned += 1;
         after = rowid;
         let kept = match (admitted, batch) {
-            (true, Some(batch)) => match releasable(tx, authority, &envelope, &batch)? {
-                Ok(signature) if release_tx(tx, rowid, &envelope, &signature)? => None,
-                Ok(_) => Some("rowid-taken"),
+            (true, Some(batch)) => match releasable(connection, authority, &envelope, &batch)? {
+                Ok(signature) => {
+                    candidates.push((rowid, envelope, batch, signature));
+                    None
+                }
                 Err(reason) => Some(reason),
             },
             _ => Some("not-admitted"),
         };
+        if let Some(reason) = kept {
+            let unsigned_bytes = if reason == UNSIGNED_CLAIM {
+                connection
+                    .prepare_cached("SELECT length(payload) FROM replica_envelopes WHERE rowid=?1")?
+                    .query_row(/* sqlite-large-value: allow-for-now lv-h1cad97b84e06 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, u64>(0))?
+            } else {
+                0
+            };
+            judged_kept.push((rowid, reason, unsigned_bytes));
+        }
+        if started.elapsed() >= JUDGE_BUDGET || candidates.len() >= RELEASES_PER_WRITE {
+            report.done = false;
+            break;
+        }
+    }
+    report.judged = started.elapsed();
+    Ok(Judged { from, after, report, candidates, kept: judged_kept })
+}
+
+/// Release what a reader judged releasable, checking again what can change between the two:
+/// whether the envelope was retired, and its rows ([`ELIGIBLE_SQL`]): another envelope of its
+/// batch, a record's state, a repair, a checkpoint listing it, a restore's quarantine. Its claims
+/// and their signatures are as the reader saw them: a claim of it goes only with a checkpoint that
+/// lists it, and a signature is never removed. What the write's budget leaves is judged again by
+/// the next page.
+fn commit_page(tx: &Transaction<'_>, judged: Judged) -> Result<Released> {
+    let started = Instant::now();
+    let Judged { from, mut after, mut report, candidates, kept: judged_kept } = judged;
+    let changes_before = saved_inventory::changes(tx)?;
+    if cursor(tx)? != from {
+        report = EnvelopeRelease { work: started.elapsed(), judged: report.judged, ..Default::default() };
+        return Ok((report, Vec::new(), (changes_before, changes_before)));
+    }
+    let mut released = Vec::new();
+    for (rowid, envelope, batch, signature) in candidates {
+        if started.elapsed() >= BUDGET {
+            after = rowid - 1;
+            report.done = false;
+            break;
+        }
+        let kept = match still_releasable(tx, &envelope, &batch)? {
+            Some(reason) => Some(reason),
+            None if release_tx(tx, rowid, &envelope, &signature)? => None,
+            None => Some("rowid-taken"),
+        };
+        report.scanned += 1;
         match kept {
             None => {
                 released.push(envelope);
                 report.released += 1;
             }
-            Some(reason) => {
-                if reason == UNSIGNED_CLAIM {
-                    report.unsigned_payload_bytes += tx
-                        .prepare_cached("SELECT length(payload) FROM replica_envelopes WHERE rowid=?1")?
-                        .query_row(/* sqlite-large-value: allow-for-now lv-h1cad97b84e06 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, u64>(0))?;
-                }
-                *report.kept.entry(reason).or_default() += 1;
-            }
-        }
-        if started.elapsed() >= BUDGET {
-            report.done = false;
-            break;
+            Some(reason) => *report.kept.entry(reason).or_default() += 1,
         }
     }
-    if report.scanned > 0 {
+    for (_, reason, unsigned_bytes) in judged_kept.into_iter().filter(|(rowid, _, _)| *rowid <= after) {
+        report.scanned += 1;
+        report.unsigned_payload_bytes += unsigned_bytes;
+        *report.kept.entry(reason).or_default() += 1;
+    }
+    if after > from {
         tx.execute(
             /* sqlite-large-value: allow-for-now lv-h71e733dedc2b owner=smallclaims::store::envelope_release TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![CURSOR, after.to_string()],
@@ -267,6 +338,29 @@ fn release_page(tx: &Transaction<'_>, authority: &Authority, min_age_ms: u64) ->
     }
     report.work = started.elapsed();
     Ok((report, released, (changes_before, saved_inventory::changes(tx)?)))
+}
+
+/// Why the envelope's rows keep it, as far as they can change after it was judged; `None` when
+/// they still allow its release.
+fn still_releasable(tx: &Connection, envelope: &ReplicaEnvelopeId, batch: &str) -> Result<Option<&'static str>> {
+    if retired::envelope_refused(tx, &envelope.writer, envelope.sequence, &envelope.hash)? {
+        return Ok(Some("retired"));
+    }
+    eligible(tx, envelope, batch)
+}
+
+/// The first of [`ELIGIBLE_REASONS`] the envelope's rows give for keeping it.
+fn eligible(connection: &Connection, envelope: &ReplicaEnvelopeId, batch: &str) -> Result<Option<&'static str>> {
+    let eligible: [bool; 8] = connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6c3e7cfc9c6d owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ ELIGIBLE_SQL)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h37e3173cc3fd owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash, batch], |row| {
+            let mut columns = [false; 8];
+            for (index, column) in columns.iter_mut().enumerate() {
+                *column = row.get(index)?;
+            }
+            Ok(columns)
+        })?;
+    Ok(eligible.iter().position(|holds| !holds).map(|column| ELIGIBLE_REASONS[column]))
 }
 
 /// The writer's envelope signature `envelope`, of batch `batch`, keeps when it can lose its
@@ -281,20 +375,8 @@ fn releasable(
     envelope: &ReplicaEnvelopeId,
     batch: &str,
 ) -> Result<std::result::Result<(String, String), &'static str>> {
-    if retired::envelope_refused(tx, &envelope.writer, envelope.sequence, &envelope.hash)? {
-        return Ok(Err("retired"));
-    }
-    let eligible: [bool; 8] = tx
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6c3e7cfc9c6d owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ ELIGIBLE_SQL)?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h37e3173cc3fd owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash, batch], |row| {
-            let mut columns = [false; 8];
-            for (index, column) in columns.iter_mut().enumerate() {
-                *column = row.get(index)?;
-            }
-            Ok(columns)
-        })?;
-    if let Some(column) = eligible.iter().position(|holds| !holds) {
-        return Ok(Err(ELIGIBLE_REASONS[column]));
+    if let Some(reason) = still_releasable(tx, envelope, batch)? {
+        return Ok(Err(reason));
     }
     let keys = match authority.membership.window(&envelope.writer, envelope.sequence) {
         crate::fleet::Window::Keyed(keys) => keys,
@@ -481,6 +563,77 @@ pub(crate) fn assert_plan_seeks(connection: &Connection, sql: &str) {
 mod tests {
     use super::*;
     use crate::store::runtime::Plain;
+
+    /// alder, the fleet's anchor, with notes whose claims it signed, so every envelope but its
+    /// newest is releasable at age zero.
+    fn signed_alder(notes: usize) -> (Store, Authority) {
+        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        store.bind_fleet("sample-fleet").unwrap();
+        store.pin_fleet_anchor(key.public()).unwrap();
+        store.set_member_key(Some(key.clone())).unwrap();
+        store.admit_fleet_anchor("sample-fleet", key.public(), "listening").unwrap();
+        for n in 0..notes {
+            store
+                .append_claim(&crate::claim::ClaimInput {
+                    subject: format!("note/{n}"),
+                    kind: "example.note".into(),
+                    actor: None,
+                    fields: BTreeMap::from([("text".into(), serde_json::json!(format!("note {n}")))]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: Some(format!("note-{n}")),
+                })
+                .unwrap();
+        }
+        store.replication_snapshot().unwrap();
+        while !store.sign_own_claims().unwrap().done {}
+        let authority = Authority {
+            fleet_id: "sample-fleet".into(),
+            shard: store.bound_shard().unwrap(),
+            membership: store.fleet_membership_sealed().unwrap(),
+        };
+        (store, authority)
+    }
+
+    /// The write checks again what can change after a reader judged a page: an envelope a
+    /// checkpoint listed meanwhile stays, and the others go.
+    #[test]
+    fn a_change_between_judging_and_the_write_keeps_the_envelope() {
+        let (store, authority) = signed_alder(4);
+        let judged = judge_page(&store.readers.get(), &authority, 0).unwrap();
+        let candidates = judged.candidates.len();
+        assert!(candidates >= 2, "{:?}", judged.report);
+        let (_, listed, _, _) = judged.candidates[0].clone();
+        store
+            .connection
+            .write()
+            .execute(
+                "INSERT INTO checkpoint_envelopes(writer, sequence, envelope_hash, accepted_at_unix_ms, checkpoint)
+                 VALUES (?1, ?2, ?3, 0, 'checkpoint/meanwhile')",
+                params![listed.writer, listed.sequence, listed.hash],
+            )
+            .unwrap();
+        let (report, released, _) = store.connection.batched(move |tx| commit_page(tx, judged)).unwrap().unwrap();
+        // A listed envelope reads as retired here before its rows are read.
+        assert_eq!(report.kept.get("retired"), Some(&1), "{report:?}");
+        assert_eq!(released.len(), candidates - 1);
+        assert!(!released.contains(&listed));
+        assert!(!envelope_released(&store.readers.get(), &listed.writer, listed.sequence, &listed.hash).unwrap());
+    }
+
+    /// A write that finds the cursor moved since its page was judged releases nothing of it.
+    #[test]
+    fn a_page_judged_from_a_cursor_that_moved_releases_nothing() {
+        let (store, authority) = signed_alder(4);
+        let judged = judge_page(&store.readers.get(), &authority, 0).unwrap();
+        assert!(!judged.candidates.is_empty());
+        store.release_envelopes(0).unwrap();
+        let before = store.released_envelopes().unwrap();
+        let (report, released, _) = store.connection.batched(move |tx| commit_page(tx, judged)).unwrap().unwrap();
+        assert!(released.is_empty() && report.released == 0 && report.scanned == 0, "{report:?}");
+        assert_eq!(store.released_envelopes().unwrap(), before);
+    }
 
     /// Without statistics the planner assumes large tables, as on a real store.
     #[test]
