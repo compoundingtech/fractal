@@ -5,7 +5,11 @@ use smallclaims::{
     claim::ClaimInput,
     fleet::{MemberKey, envelope_signature_message_in, keys::claim_signature_message},
     replication::{ReplicationInventory, SignedEnvelope, replication_capabilities},
-    store::{Store, full_compact_replication_inventory, record_bytes::admitted_claim_sql, runtime::Plain},
+    store::{
+        Store,
+        envelope_release::{ENVELOPES_RELEASED_VERSION, PEERS_LACK_SIGNED_CLAIMS},
+        full_compact_replication_inventory, record_bytes::admitted_claim_sql, runtime::Plain,
+    },
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -231,4 +235,71 @@ fn a_forged_signed_envelope_is_refused_and_counted() {
     exchange.signed_envelopes = vec![original];
     let receipt = cedar.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
     assert_eq!((receipt.signed_envelopes, receipt.refused_signed_envelopes), (1, 0), "the genuine one is admitted");
+}
+
+fn user_version(store: &Store) -> u32 {
+    store.readers.get().query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap()
+}
+
+/// Release waits while a peer this member heard from in the last 14 days cannot take signed
+/// claims, and the replication status names it. Once that peer takes them, or has not been heard
+/// from for 14 days, release goes on; the first release fences the store at 28, as the first
+/// signed envelope a peer admits fences it.
+#[test]
+fn release_pauses_while_a_recent_peer_cannot_take_signed_claims() {
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let alder = node("alder", Some(&key), &key);
+    alder.admit_fleet_anchor(FLEET, key.public(), "listening").unwrap();
+    for n in 0..20 {
+        note(&alder, n);
+    }
+    alder.replication_snapshot().unwrap();
+    while !alder.sign_own_claims().unwrap().done {}
+    let cedar = node("cedar", None, &key);
+    let hear = |capable: bool| {
+        let mut exchange = cedar.export_replication_exchange(FLEET, &alder.replication_inventory().unwrap()).unwrap();
+        if !capable {
+            exchange.inventory.capabilities.clear();
+        }
+        alder.receive_replication_exchange("cedar", FLEET, &exchange).unwrap();
+    };
+    let release_all = || {
+        let mut released = 0;
+        loop {
+            let report = alder.release_envelopes(0).unwrap();
+            released += report.released;
+            if report.done {
+                return (released, report);
+            }
+        }
+    };
+    let before = user_version(&alder);
+    // An older cedar: nothing is released, and the status says who it waits for.
+    hear(false);
+    let (released, report) = release_all();
+    assert_eq!((released, report.waiting, report.paused_for.as_slice()), (0, Some(PEERS_LACK_SIGNED_CLAIMS), &["cedar".to_owned()][..]));
+    assert_eq!(count(&alder, "SELECT COUNT(*) FROM released_envelopes"), 0);
+    assert_eq!(user_version(&alder), before, "nothing released, so no fence");
+    assert_eq!(alder.replication_status(true, Some(FLEET), &[]).unwrap().envelope_release_paused_for, ["cedar"]);
+    // cedar upgrades: release goes on and fences the store; cedar admits the signed envelopes and
+    // is fenced too.
+    hear(true);
+    let (released, report) = release_all();
+    assert!(released > 0 && report.waiting.is_none(), "{report:?}");
+    assert_eq!(user_version(&alder), ENVELOPES_RELEASED_VERSION);
+    assert!(alder.replication_status(true, Some(FLEET), &[]).unwrap().envelope_release_paused_for.is_empty());
+    assert_eq!(sync_with(&alder, &cedar, |inventory| inventory), released);
+    assert_eq!(user_version(&cedar), ENVELOPES_RELEASED_VERSION);
+    // An older peer last heard from more than 14 days ago no longer holds release.
+    let dogwood = node("dogwood", None, &key);
+    let mut exchange = dogwood.export_replication_exchange(FLEET, &alder.replication_inventory().unwrap()).unwrap();
+    exchange.inventory.capabilities.clear();
+    alder.receive_replication_exchange("dogwood", FLEET, &exchange).unwrap();
+    assert_eq!(alder.release_envelopes(0).unwrap().paused_for, ["dogwood"]);
+    alder
+        .connection
+        .write()
+        .execute("UPDATE peer_signed_claims SET seen_at_unix_ms=seen_at_unix_ms-15*24*60*60*1000 WHERE peer='dogwood'", [])
+        .unwrap();
+    assert!(alder.release_envelopes(0).unwrap().waiting.is_none());
 }
