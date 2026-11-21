@@ -5798,6 +5798,8 @@ mod tests {
         for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
             current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
+        current.resources.get_mut("vcs.repository").unwrap().fields.remove("await_prs_not_found").unwrap();
+        current.resources.get_mut("vcs.pull-request").unwrap().fields.remove("await_pr_observation").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
