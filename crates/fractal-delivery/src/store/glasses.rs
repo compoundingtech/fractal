@@ -265,9 +265,7 @@ mod tests {
         );
         a.rebuild_claim_projections().unwrap();
         assert!(a.glasses("person/ada", i64::MAX as u64).unwrap().is_empty());
-        let scratch = tempfile::tempdir().unwrap();
-        let (plan, proof) = a.plan_checkpoint(now_ms() + 1, scratch.path()).unwrap();
-        assert!(proof.passed);
+        let plan = crate::store::checkpoint::plan_drops(&a.checkpoint_sealed_set(now_ms() + 1).unwrap());
         assert!(
             plan.claims
                 .iter()

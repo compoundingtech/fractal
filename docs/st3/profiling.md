@@ -68,6 +68,16 @@ only, excluding the separately reported prelude and repairs. `project_ms` retain
 wall time. Handler `total_ms` also includes blocking admission/dispatch waits, but does not
 include response-envelope serialization or network delivery.
 
+`envelope_claims_bytes` samples `(decoded claim count, payload byte count)` for the first 32
+envelopes prepared during admission, including retries. `envelopes_prepared`,
+`envelope_claims` and `envelope_payload_bytes` retain aggregate preparation counts;
+`envelope_sizes_omitted` counts samples beyond the cap. `finalizer_resources_ms`,
+`finalizer_custom_ms`, `finalizer_completion_ms`, `finalizer_run_eta_ms` and
+`finalizer_client_messages_ms` attribute the runtime's before-COMMIT work. These are nested
+costs within the phase's writer hold, not additional elapsed time; shared group-finalizer
+costs retain their separate shared-event attribution.
+
+
 Writer waits are measured at actual acquisition, not inferred from phase wall time. Independent
 loans measure borrower ownership through transaction finalization and postcommit observer
 cleanup, before connection return. Batched callbacks measure their queue wait and exclusive

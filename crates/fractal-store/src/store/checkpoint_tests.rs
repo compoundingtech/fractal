@@ -381,12 +381,6 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
         );
         assert_eq!(format!("{:?}", paged.envelopes), format!("{:?}", whole.envelopes));
         assert_eq!(paged.seal_rowid, whole.seal_rowid);
-        let identities = store.checkpoint_sealed_identities_paged(cut, None, envelope_page).unwrap();
-        assert_eq!(
-            identities,
-            SealedIdentities::of(&whole),
-            "identities differ at page {envelope_page}"
-        );
     }
     // The Rust sort of the pages is the SQL canonical order, on a fixture of many batches.
     let connection = store.readers.get();
@@ -430,10 +424,6 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
         format!("{:?}", store.checkpoint_sealed_set(cut).unwrap().claims),
         format!("{:?}", whole.claims)
     );
-    assert_eq!(
-        store.checkpoint_sealed_identities(cut, None).unwrap(),
-        SealedIdentities::of(&whole)
-    );
 }
 
 #[test]
@@ -467,10 +457,6 @@ fn sealed_record_windows_leave_later_envelopes_out_before_reading_bodies() {
     drop(connection);
     let through_set = store.checkpoint_sealed_set_paged(250, Some(through), 1, 1).unwrap();
     assert!(through_set.claims.iter().all(|claim| claim.claim.id != later));
-    assert_eq!(
-        SealedIdentities::of(&sealed),
-        store.checkpoint_sealed_identities_paged(150, None, 1).unwrap()
-    );
 }
 
 #[test]
@@ -620,7 +606,7 @@ fn sealed_capture_restarts_when_trim_commits_between_metadata_and_bodies() {
     let captured = captured.expect("capture must restart after a concurrent trim");
     let current = store.checkpoint_sealed_set(cut).unwrap();
     assert_eq!(format!("{:?}", captured.claims), format!("{:?}", current.claims));
-    assert_eq!(SealedIdentities::of(&captured), SealedIdentities::of(&current));
+    assert_eq!(sealed_digest(&captured), sealed_digest(&current));
     assert!(captured.claims.len() < expected.claims.len(), "capture must not return the stale bodies");
     assert_eq!(
         store.claims_for(AGENT, Some("harness.usage")).unwrap().len(),
@@ -1543,105 +1529,6 @@ fn only(exchange: &ReplicationExchange, envelopes: Vec<ReplicaEnvelope>) -> Repl
 }
 
 #[test]
-fn the_proof_passes_for_the_plan_and_fails_for_a_drop_a_reader_needs() {
-    let store = Store::open_memory("alder").unwrap();
-    write_history(&store);
-    let scratch = tempfile::tempdir().unwrap();
-    let cut = now_ms() + 1_000;
-    let reclaim_before = allocator_reclaim_stats_for_test();
-    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
-    assert_eq!(allocator_reclaim_stats_for_test().0 - reclaim_before.0, 1,
-        "nested plan/proof entrypoints reclaim once");
-    assert!(proof.passed, "{proof:?}");
-    assert_eq!(proof.graph_digest_before, proof.graph_digest);
-    assert_eq!(proof.reader_digest_before, proof.reader_digest);
-    assert!(
-        plan.claims
-            .iter()
-            .any(|claim| claim.kind == "harness.observed")
-            && plan
-                .claims
-                .iter()
-                .any(|claim| claim.kind == "daemon.diagnostic"),
-        "{plan:?}"
-    );
-    assert_eq!(proof.graph_digest, proof.graph_digest_before);
-    assert_eq!(proof.reader_digest, proof.reader_digest_before);
-
-    let before = store.claims_for(AGENT, None).unwrap().len();
-    let sealed = store.checkpoint_sealed_set(cut).unwrap();
-    let newest = sealed
-        .claims
-        .iter()
-        .rev()
-        .find(|claim| claim.claim.kind == "harness.observed")
-        .unwrap();
-    let mut wrong = plan.clone();
-    wrong.claims.push(claim_tombstone(newest));
-    let copy = scratch.path().join("wrong.sqlite3");
-    store.copy_store_to(&copy).unwrap();
-    let reclaim_before = allocator_reclaim_stats_for_test();
-    let proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
-    assert!(!proof.passed);
-    assert_eq!(allocator_reclaim_stats_for_test().0 - reclaim_before.0, 1,
-        "a reader-mismatch proof also reclaims once");
-    assert!(
-        proof
-            .mismatches
-            .iter()
-            .any(|mismatch| mismatch.starts_with(&format!("{AGENT} "))),
-        "{:?}",
-        proof.mismatches
-    );
-    // The live store is never changed by a proof.
-    assert_eq!(store.claims_for(AGENT, None).unwrap().len(), before);
-}
-
-#[test]
-fn allocator_reclamation_follows_checkpoint_plan_view_and_proof_errors_once() {
-    let store = Store::open_memory("alder").unwrap();
-    write_history(&store);
-    let scratch = tempfile::tempdir().unwrap();
-    let cut = now_ms() + 1_000;
-    let before = allocator_reclaim_stats_for_test();
-    let view = store.checkpoint_plan_view(cut, scratch.path()).unwrap();
-    assert!(view.proof.passed);
-    let after = allocator_reclaim_stats_for_test();
-    assert_eq!(after.0 - before.0, 1);
-    assert_eq!(after.1 - before.1, u64::from(cfg!(all(target_os = "linux", target_env = "gnu"))));
-
-    let sealed = store.checkpoint_sealed_set(cut).unwrap();
-    let before = allocator_reclaim_stats_for_test();
-    let staged = store.checkpoint_staged_set(cut, None, &scratch.path().join("plan")).unwrap();
-    let staged_path = staged.path.clone();
-    let captured = store.checkpoint_plan_view_from_staged(cut, staged, scratch.path()).unwrap();
-    assert!(!staged_path.exists(), "successful proof removes its dry-run staging file");
-    assert_eq!(serde_json::to_value(&captured).unwrap(), serde_json::to_value(&view).unwrap());
-    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
-        "the separately scheduled captured plan retains its outer reclamation boundary");
-    let plan = plan_drops(&sealed);
-    let blocked = scratch.path().join("not-a-directory");
-    std::fs::write(&blocked, b"occupied").unwrap();
-    let before = allocator_reclaim_stats_for_test();
-    let staged = store.checkpoint_staged_set(cut, None, &scratch.path().join("plan")).unwrap();
-    let staged_path = staged.path.clone();
-    assert!(store.checkpoint_plan_view_from_staged(cut, staged, &blocked).is_err());
-    assert!(!staged_path.exists(), "failed proof removes its dry-run staging file");
-    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1);
-    let before = allocator_reclaim_stats_for_test();
-    assert!(store.prove_checkpoint_plan(&sealed, &plan, &blocked).is_err());
-    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
-        "copy preparation failure finishes its one reclamation attempt");
-
-    let invalid = scratch.path().join("not-a-store.sqlite3");
-    std::fs::write(&invalid, b"not a SQLite store").unwrap();
-    let before = allocator_reclaim_stats_for_test();
-    assert!(prove_on_copy(&invalid, &sealed, &plan).is_err());
-    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
-        "failed direct proof also finishes once");
-}
-
-#[test]
 fn staged_plan_finishes_without_borrowing_a_held_live_writer() {
     let store = Store::open_memory("alder").unwrap();
     write_history(&store);
@@ -1653,19 +1540,18 @@ fn staged_plan_finishes_without_borrowing_a_held_live_writer() {
     std::thread::scope(|scope| {
         let (done, result) = std::sync::mpsc::channel();
         let working = &store;
-        let scratch = scratch.path();
-        let proof = scope.spawn(move || {
+        let planning = scope.spawn(move || {
             // Test builds normally compare to the full in-memory capture as well.
             // Exercise only the production staged phase while the live writer is held.
-            let view = smallclaims::store::checkpoint_staging::without_reference_plan(||
-                working.checkpoint_plan_view_from_staged(cut, staged, scratch));
-            let _ = done.send(view);
+            let plan = smallclaims::store::checkpoint_staging::without_reference_plan(||
+                working.plan_staged_checkpoint(&staged));
+            let _ = done.send(plan);
+            staged.remove().unwrap();
         });
         let completed = result.recv_timeout(std::time::Duration::from_secs(5));
         drop(writer); // Always free a wrongly borrowed writer before joining/asserting.
-        proof.join().unwrap();
-        let view = completed.expect("staged planning/proof borrowed the live writer").unwrap();
-        assert!(view.proof.passed);
+        planning.join().unwrap();
+        completed.expect("staged planning borrowed the live writer").unwrap();
     });
     assert!(!staged_path.exists());
 }
@@ -1694,121 +1580,6 @@ fn nodes_that_hold_the_same_claims_plan_the_same_drop() {
         assert_eq!(plan.drop_digest, plans[0].drop_digest);
         assert_eq!(plan.retained_digest, plans[0].retained_digest);
         assert_eq!(plan.claims, plans[0].claims);
-    }
-    // The proofs agree too, although the nodes numbered their claims differently.
-    let scratch = tempfile::tempdir().unwrap();
-    let proofs = [&source, &in_order, &reversed]
-        .map(|store| store.plan_checkpoint(cut, scratch.path()).unwrap().1);
-    for proof in &proofs {
-        assert!(proof.passed, "{proof:?}");
-        assert_eq!(proof.reader_digest_before, proof.reader_digest);
-        assert_eq!(proof.graph_digest, proofs[0].graph_digest);
-        assert_eq!(proof.reader_digest, proofs[0].reader_digest);
-    }
-}
-
-/// After a trim, the dropped envelopes are tombstones. A later checkpoint still seals their
-/// identities, and its drop digest still covers them, so a node that trimmed and one that
-/// has not yet agree on both.
-#[test]
-fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
-    let trimmed = Store::open_memory("alder").unwrap();
-    write_history(&trimmed);
-    trimmed.bind_fleet("fleet/test").unwrap();
-    let untrimmed = Store::open_memory("birch").unwrap();
-    receive(
-        &untrimmed,
-        "alder",
-        &trimmed
-            .export_replication_exchange("fleet/test", &ReplicationInventory::default())
-            .unwrap(),
-    );
-    let first = now_ms() + 1_000;
-    let plan = plan_drops(&trimmed.checkpoint_sealed_set(first).unwrap());
-    assert!(!plan.claims.is_empty());
-    {
-        let mut connection = trimmed.connection.write();
-        let transaction = connection.transaction().unwrap();
-        let checkpoint = checkpoint_name(first);
-        record_checkpoint_tombstones_tx(&transaction, &checkpoint, &plan.envelopes, &plan.claims)
-            .unwrap();
-        delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims).unwrap();
-        transaction.commit().unwrap();
-    }
-    let second = first + DAY_MS;
-    let [after_trim, without_trim] =
-        [&trimmed, &untrimmed].map(|store| store.checkpoint_sealed_set(second).unwrap());
-    assert_eq!(sealed_digest(&after_trim), sealed_digest(&without_trim));
-    // A seal reads only the identities, and they give the same digest as the whole set at
-    // every page size, though the trimmed node's identities alternate between its envelopes
-    // and its tombstones.
-    for (store, set) in [(&trimmed, &after_trim), (&untrimmed, &without_trim)] {
-        assert_eq!(
-            store.checkpoint_sealed_identities(second, None).unwrap(),
-            SealedIdentities::of(set)
-        );
-        for page in [1, 2, 3, 5] {
-            assert_eq!(
-                store.checkpoint_sealed_identities_paged(second, None, page).unwrap(),
-                SealedIdentities::of(set),
-                "identities differ at page {page}"
-            );
-        }
-    }
-    assert_eq!(after_trim.envelope_tombstones.len(), plan.envelopes.len());
-    assert!(after_trim.claims.len() < without_trim.claims.len());
-    let [after_trim, without_trim] = [after_trim, without_trim].map(|set| plan_drops(&set));
-    assert!(after_trim.claims.is_empty(), "{:?}", after_trim.claims);
-    assert_eq!(after_trim.drop_digest, plan.drop_digest);
-    assert_eq!(without_trim.drop_digest, plan.drop_digest);
-}
-
-/// While a trim records its tombstones, a dropped envelope is both a row and a tombstone. A seal
-/// counts its identity once, at every page size.
-#[test]
-fn a_seal_counts_an_envelope_once_while_its_tombstone_is_recording() {
-    let store = Store::open_memory("alder").unwrap();
-    write_history(&store);
-    let first = now_ms() + 1_000;
-    let before = store.checkpoint_sealed_identities(first, None).unwrap();
-    let plan = plan_drops(&store.checkpoint_sealed_set(first).unwrap());
-    assert!(!plan.envelopes.is_empty());
-    {
-        let mut connection = store.connection.write();
-        let transaction = connection.transaction().unwrap();
-        record_checkpoint_tombstones_tx(&transaction, &checkpoint_name(first), &plan.envelopes, &plan.claims)
-            .unwrap();
-        transaction.commit().unwrap();
-    }
-    for page in [1, 2, 3, 64] {
-        assert_eq!(store.checkpoint_sealed_identities_paged(first, None, page).unwrap(), before, "page {page}");
-    }
-}
-
-/// Each identity page seeks the identity key and reads it in order: no table scan and no sort,
-/// so a page costs its rows, wherever it starts.
-#[test]
-fn seal_identity_pages_seek_the_identity_key() {
-    let store = Store::open_memory("alder").unwrap();
-    let connection = store.readers.get();
-    for (sql, parameters) in [
-        (SEALED_IDENTITY_ENVELOPES_SQL, 6),
-        (SEALED_IDENTITY_TOMBSTONES_SQL, 5),
-    ] {
-        let mut values: Vec<rusqlite::types::Value> =
-            vec![0_i64.into(), "alder".to_owned().into(), 1_i64.into(), "hash".to_owned().into()];
-        values.extend(std::iter::repeat_n(rusqlite::types::Value::from(64_i64), parameters - 4));
-        let plan: Vec<String> = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-h60aa75e03cc5 owner=fractal_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
-            .unwrap()
-            .query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        let outer = &plan[0];
-        assert!(outer.starts_with("SEARCH") && outer.contains("INDEX"), "{plan:?}");
-        assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
-        assert!(!plan.iter().any(|line| line.starts_with("SCAN")), "{plan:?}");
     }
 }
 
@@ -1903,101 +1674,6 @@ fn ancestry_walks_through_a_dropped_claim() {
         source(&alder),
         (Some(newest.id.clone()), Some("alder".into()), false)
     );
-}
-
-/// Free bytes on the filesystem that holds `path`.
-fn free_bytes(path: &Path) -> u64 {
-    use std::os::unix::ffi::OsStrExt as _;
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `path` is NUL-terminated and `stat` is written before it is read.
-    assert_eq!(unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) }, 0);
-    let stat = unsafe { stat.assume_init() };
-    // 32 bits on macOS, 64 on Linux.
-    #[allow(clippy::unnecessary_cast)]
-    let free = stat.f_bavail as u64 * stat.f_frsize as u64;
-    free
-}
-
-/// Run `work`, sampling the free space on `path`'s filesystem every 10 ms: its result and
-/// the most space it took at once.
-fn peak_use_while<T>(path: &Path, work: impl FnOnce() -> T) -> (T, u64) {
-    let before = free_bytes(path);
-    let least = std::sync::atomic::AtomicU64::new(before);
-    let done = std::sync::atomic::AtomicBool::new(false);
-    let result = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                least.fetch_min(free_bytes(path), std::sync::atomic::Ordering::Relaxed);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        });
-        let result = work();
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
-        result
-    });
-    least.fetch_min(free_bytes(path), std::sync::atomic::Ordering::Relaxed);
-    (result, before.saturating_sub(least.into_inner()))
-}
-
-/// Plans a checkpoint over a copy of a real store and prints the dry run, with the most disk
-/// space opening the store (its schema upgrade) and the proof each took at once:
-/// `ST3_CHECKPOINT_STORE=/var/tmp/copy.sqlite3 ST3_CHECKPOINT_ORIGIN=example-linux
-/// ST3_CHECKPOINT_DAY=2026-09-27 cargo test -p fractal-daemon --lib plan_a_copy_of_a_real_store --
-/// --ignored --nocapture`. Without `ST3_CHECKPOINT_DAY` it plans the newest due checkpoint.
-/// The copy is changed; the store it came from is not read.
-#[test]
-#[ignore = "reads the store copy named by ST3_CHECKPOINT_STORE"]
-fn plan_a_copy_of_a_real_store() {
-    let path = PathBuf::from(std::env::var("ST3_CHECKPOINT_STORE").unwrap());
-    let origin = std::env::var("ST3_CHECKPOINT_ORIGIN").unwrap_or_else(|_| "example-linux".into());
-    let cut = std::env::var("ST3_CHECKPOINT_DAY")
-        .map_or_else(|_| newest_due_cut(now_ms()), |day| checkpoint_cut(&day).unwrap());
-    let directory = path.parent().unwrap();
-    let mib = |bytes: u64| bytes / (1024 * 1024);
-    eprintln!("store {} MiB", mib(fs::metadata(&path).unwrap().len()));
-    let started = std::time::Instant::now();
-    let (store, opening) = peak_use_while(directory, || Store::open(&path, origin).unwrap());
-    eprintln!("opened in {:?}, peak use {} MiB", started.elapsed(), mib(opening));
-    let scratch = path.parent().unwrap().join("proof");
-    fs::create_dir_all(&scratch).unwrap();
-    let probe = scratch.join("copy-probe.sqlite3");
-    let copying = std::time::Instant::now();
-    let method = store.copy_store_to(&probe).unwrap();
-    eprintln!("copied by {method:?} in {:?}", copying.elapsed());
-    for suffix in ["", "-journal", "-wal", "-shm"] {
-        let _ = fs::remove_file(format!("{}{suffix}", probe.display()));
-    }
-    let started = std::time::Instant::now();
-    let (plan, proving) = peak_use_while(directory, || {
-        (std::env::var("ST3_CHECKPOINT_SKIP_PROOF").is_err())
-            .then(|| store.checkpoint_plan_view(cut, &scratch).unwrap())
-    });
-    eprintln!("proof peak use {} MiB", mib(proving));
-    eprintln!("planned and proved in {:?}", started.elapsed());
-    println!("{}", serde_json::to_string_pretty(&plan).unwrap());
-    if let Ok(subject) = std::env::var("ST3_CHECKPOINT_SUBJECT") {
-        let sealed = store.checkpoint_sealed_set(cut).unwrap();
-        let plan = plan_drops(&sealed);
-        let dropped = dropped(&plan);
-        for claim in sealed
-            .claims
-            .iter()
-            .filter(|claim| claim.claim.subject == subject)
-        {
-            println!(
-                "{} {} {} valid={} protected={} envelope={}/{} dropped={}",
-                claim.claim.store_index,
-                claim.claim.kind,
-                claim.claim.id,
-                claim.valid,
-                claim.protected,
-                claim.envelope.writer,
-                claim.envelope.sequence,
-                dropped.contains(&claim.claim.id)
-            );
-        }
-    }
 }
 
 #[test]
@@ -2187,40 +1863,6 @@ fn an_observed_resource_keeps_its_newest_full_observation_its_opener_and_flat_hi
     let _ = flat;
 }
 
-#[test]
-fn checkpoint_identity_reads_of_sealed_batches_do_not_wait_for_the_writer() {
-    let store = Arc::new(Store::open_memory("checkpoint-writer-test").unwrap());
-    store
-        .append_claim(&input(
-            "agent/checkpoint-reader",
-            "harness.observed",
-            Some("agent/checkpoint-reader"),
-            json!({"state":"idle", "incarnation_id":"checkpoint-i1"}),
-            "checkpoint-reader",
-        ))
-        .unwrap();
-    store.seal_local_batches().unwrap();
-    let cut = now_ms() + 1;
-    // Holding the writer models an unrelated request without writing uncommitted state.
-    let writer = store.connection.write();
-    let (sent, received) = std::sync::mpsc::channel();
-    let reader = store.clone();
-    let task = std::thread::spawn(move || {
-        let result = reader.checkpoint_sealed_identities(cut, None);
-        sent.send(result).unwrap();
-    });
-    let result = received.recv_timeout(std::time::Duration::from_secs(2));
-    drop(writer);
-    task.join().unwrap();
-    let identities = result
-        .expect("an already sealed identity read must not take the writer")
-        .unwrap();
-    // Full capture takes a brief writer transaction to advance the persisted frontier,
-    // then releases it before reading any pages.
-    let sealed = store.checkpoint_sealed_set_through(cut, None).unwrap();
-    assert_eq!(identities.digest, sealed_digest(&sealed));
-}
-
 /// The harness and guard examples of `docs/st3/checkpoints.md`.
 #[test]
 fn the_documented_examples_drop_what_the_document_says() {
@@ -2388,8 +2030,9 @@ fn legacy_boundary_checkpoint_history(tail: usize, stamp: Option<bool>, ties: bo
     let predecessors = incarnations.iter().map(|incarnation|
         harness(incarnation, "working", witness_at, None)).collect::<Vec<_>>();
     if prompts { diagnostic("provider-auth-restored", witness_at + 1_000); }
-    let boundaries = incarnations.iter().map(|incarnation|
-        harness(incarnation, "idle", boundary_at, stamp)).collect::<Vec<_>>();
+    for incarnation in &incarnations {
+        harness(incarnation, "idle", boundary_at, stamp);
+    }
     for index in 0..tail {
         let incarnation = incarnations[index % incarnations.len()];
         let round = index / incarnations.len();
@@ -2399,45 +2042,25 @@ fn legacy_boundary_checkpoint_history(tail: usize, stamp: Option<bool>, ties: bo
     // Each cut reads the same fixed canonical sources, never the first cut's trimmed result.
     for cut in cuts {
         let connection = store.readers.get();
-        let (before, before_sources) = seat_status::history_at_with_sources(&connection, subject, cut, i64::MAX as u64).unwrap();
+        let before = seat_status::history_at(&connection, subject, cut, i64::MAX as u64).unwrap();
         drop(connection);
         if tail + incarnations.len() == seat_status::MAX_TRANSITIONS && cut == cuts[0] {
             assert_eq!(before["items"].as_array().unwrap().len(), seat_status::MAX_TRANSITIONS);
-            assert_eq!(before_sources[0].claim, boundaries[0].id);
         }
         let sealed = store.checkpoint_sealed_set(cut).unwrap();
         let plan = plan_drops(&sealed);
-        for boundary in &boundaries {
-            if before_sources.iter().any(|source| source.claim == boundary.id) {
-                assert!(!dropped(&plan).contains(&boundary.id));
-            }
-        }
         if tail + incarnations.len() == seat_status::MAX_TRANSITIONS && !prompts && cut == cuts[0] {
             for predecessor in &predecessors {
                 assert!(!dropped(&plan).contains(&predecessor.id), "boundary context must survive");
             }
         }
-        let scratch = tempfile::tempdir().unwrap();
-        let copy = scratch.path().join("checkpoint.sqlite3");
-        store.copy_store_to(&copy).unwrap();
-        let proof = prove_on_copy(&copy, &sealed, &plan).unwrap();
-        let mut connection = Connection::open(&copy).unwrap();
-        smallclaims::store::projection_digest::register(&connection).unwrap();
+        // Delete what the plan drops, read the history again, and put everything back.
+        let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
         record_checkpoint_tombstones_tx(&transaction, &checkpoint_name(cut), &plan.envelopes, &plan.claims).unwrap();
         delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims).unwrap();
-        let (after, after_sources) = seat_status::history_at_with_sources(&transaction, subject, cut, i64::MAX as u64).unwrap();
-        let before_items = before["items"].as_array().unwrap();
-        let after_items = after["items"].as_array().unwrap();
-        let first_difference = (0..before_items.len().max(after_items.len()))
-            .find(|index| before_items.get(*index) != after_items.get(*index));
-        assert!(proof.passed, "legacy-boundary cut={cut} before_len={} after_len={} first_difference={first_difference:?} before_sources={:?} after_sources={:?} mismatches={:?}",
-            before_items.len(), after_items.len(),
-            before_sources.iter().take(3).map(|source| &source.claim).collect::<Vec<_>>(),
-            after_sources.iter().take(3).map(|source| &source.claim).collect::<Vec<_>>(), proof.mismatches);
-        assert_eq!(after["items"], before["items"]);
-        assert_eq!(after_sources.iter().map(|source| (&source.claim, &source.order)).collect::<Vec<_>>(),
-            before_sources.iter().map(|source| (&source.claim, &source.order)).collect::<Vec<_>>());
+        let after = seat_status::history_at(&transaction, subject, cut, i64::MAX as u64).unwrap();
+        assert_eq!(after["items"], before["items"], "legacy-boundary cut={cut}");
         transaction.rollback().unwrap();
     }
 }
@@ -2928,28 +2551,6 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
 
 
 #[test]
-fn the_proof_compares_the_account_fold_across_seats() {
-    let store = Store::open_memory("alder").unwrap();
-    let (one, ..) = limits_history(&store);
-    let cut = 11 * DAY_MS;
-    let scratch = tempfile::tempdir().unwrap();
-    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
-    assert!(proof.passed, "{proof:?}");
-    // Dropping seat one's highest reading in the last hour changes no answer about seat one,
-    // whose newest claim stays, but changes the account's limits.
-    let sealed = store.checkpoint_sealed_set(cut).unwrap();
-    let highest = sealed.claims.iter().find(|claim| claim.claim.id == one[7].id).unwrap();
-    let mut wrong = plan.clone();
-    wrong.claims.push(claim_tombstone(highest));
-    let copy = scratch.path().join("wrong.sqlite3");
-    store.copy_store_to(&copy).unwrap();
-    let proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
-    assert!(!proof.passed);
-    assert_eq!(proof.mismatches, vec!["fleet account_limits".to_owned()], "{proof:?}");
-}
-
-
-#[test]
 fn reconcile_decisions_keep_the_newest_of_each_key() {
     let store = Store::open_memory("alder").unwrap();
     let decision = |key: Option<&str>, decision: &str, reason: &str, at: u128| {
@@ -2974,9 +2575,7 @@ fn reconcile_decisions_keep_the_newest_of_each_key() {
         json!({"severity": "warning", "code": "slow-request", "reason": "last"}), "decision-last")).unwrap();
     store.seal_local_batches().unwrap();
     let fault_before = store.member_reconcile_fault(AGENT, None).unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let (plan, proof) = store.plan_checkpoint(DAY_MS, scratch.path()).unwrap();
-    assert!(proof.passed, "{proof:?}");
+    let plan = plan_drops(&store.checkpoint_sealed_set(DAY_MS).unwrap());
     let gone = dropped(&plan);
     for wait in &waits {
         assert!(gone.contains(&wait.id), "an unkeyed decision replaced by a later one");

@@ -214,7 +214,7 @@ impl EvidenceStore for Store {
         if cut == index {
             return Ok(true);
         }
-        Ok(match self.changed_agent_resources(cut, index, &items)? {
+        Ok(match self.changed_agent_resources(cut, index, items.iter())? {
             AgentResourcesChange::Delta(delta) => delta.subjects.is_empty() && !delta.queues && !delta.membership,
             AgentResourcesChange::Invalidated { .. } => false,
         })

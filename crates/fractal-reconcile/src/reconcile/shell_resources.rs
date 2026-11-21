@@ -12,6 +12,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 tracing::warn!(execution = %execution.command.id, %error, "retaining newer-class execution until the execution host is upgraded");
                 continue;
             }
+            if !execution.cancel && self.store.shell_resource_owner_cancelled(&execution.command.lane.owner)? {
+                self.store.cancel_shell_resource(&execution.command.id)?;
+                execution.cancel = true;
+            }
+            let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+            if let Some(deadline) = execution.retirement_retry_at_unix_ms.filter(|deadline| *deadline > now) {
+                // Re-arm even on unrelated wakes or after restart: a worker's pending
+                // result is not guaranteed to produce another native event.
+                self.arm_restart(&format!("shell-retirement:{}", execution.command.id), u128::from(deadline));
+                continue;
+            }
             if let Err(error) = self.drive_shell_resource(&mut execution) {
                 let launched = execution.started_at.is_some() || self.store.resource_memberships_for_host(&self.host)?.into_iter()
                     .flat_map(|member| member.roots).any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some());
@@ -36,11 +47,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if execution.started_at.is_none() {
                     execution.queue_wait_ms = self.store.shell_resource_queue_wait_ms(&execution, now);
                 }
+                self.incremental.touch(&format!("shell-resources:{}", execution.command.lane.owner.run));
                 self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != execution.command.lane.id);
                 self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
                 execution.command.environment.clear();
+            } else if execution.cancellation_kill_generation.is_some()
+                || matches!(execution.state.as_str(), "finishing" | "finishing-refused" | "retiring" | "failing")
+            {
+                execution.retirement_retry_delay_ms = execution.retirement_retry_delay_ms.saturating_mul(2).clamp(1_000, 300_000);
+                let deadline = u64::try_from(now_ms()).unwrap_or(u64::MAX).saturating_add(execution.retirement_retry_delay_ms);
+                execution.retirement_retry_at_unix_ms = Some(deadline);
+                self.arm_restart(&format!("shell-retirement:{}", execution.command.id), u128::from(deadline));
             }
-            if self.store.update_shell_resource(&execution)? { self.signal_changed(); }
+            if self.store.update_shell_resource(&execution)? {
+                self.incremental.touch(&format!("shell-resources:{}", execution.command.lane.owner.run));
+                self.signal_changed();
+            }
         }
         Ok(())
     }
@@ -55,7 +77,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(member) = member else { return Ok(true); };
         if execution.command.parent.is_some() {
             if member.roots.iter().any(|root| root.runtime_id == execution.command.id) {
-                self.runtime.retire_resource_exec(&self.store, request, &execution.command.id)?;
+                let notify = self.notify.clone(); let event_notify = self.event_notify.clone();
+                return self.runtime.retire_shell_resource_lane(self.store.clone(), request, Some(&execution.command.id),
+                    Arc::new(move || signal_changed(&notify, &event_notify)));
             }
             return Ok(true);
         }
@@ -72,13 +96,49 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(false);
         }
-        let retired = self.runtime.retire_resource_lane(&self.store, request)?;
+        let notify = self.notify.clone(); let event_notify = self.event_notify.clone();
+        let retired = self.runtime.retire_shell_resource_lane(self.store.clone(), request, None,
+            Arc::new(move || signal_changed(&notify, &event_notify)))?;
         if retired {
             self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
             self.incremental.touch("seat-admission");
             self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != request.id);
         }
         Ok(retired)
+    }
+
+    fn capture_retirement_evidence(&self, execution: &mut Execution) -> Result<()> {
+        use crate::store::resource_profile_learner::{Coverage, EndReason};
+        if execution.result.as_ref().is_some_and(|result| result.evidence.retirement_generation.is_some()) {
+            return Ok(());
+        }
+        let member = self.store.resource_membership_record(&execution.command.lane.id, &execution.command.lane.owner)?;
+        let Some(root) = member.roots.iter().find(|root| root.runtime_id == execution.command.id) else { return Ok(()); };
+        let Some(generation) = &root.execution else { return Ok(()); };
+        let enforced = execution.command.lane.coverage == crate::store::resource_membership::Coverage::Enforced;
+        let counters = if enforced {
+            self.runtime.resource_exec_cgroup(&execution.command.id, &generation.generation_id)?
+        } else { Default::default() };
+        let declared_full = execution.command.lane.profile_estimate.as_ref().is_some_and(|estimate|
+            estimate.learning_coverage == fractal_runtime::ResourceLearningCoverage::Full);
+        let full = declared_full && enforced && member.roots.len() == 1 && member.child_runs.is_empty()
+            && counters.memory_peak_bytes.is_some() && counters.memory_events.is_some()
+            && counters.io_stat.is_some() && counters.populated.is_some();
+        let result = execution.result.get_or_insert_with(PayloadResult::default);
+        result.memory_peak_bytes = counters.memory_peak_bytes.or(result.memory_peak_bytes);
+        result.evidence = crate::store::resource_profile_learner::evidence::Evidence {
+            pre_retirement_populated: counters.populated,
+            learning_coverage: if full { Coverage::Full } else { Coverage::ClientOnly },
+            memory_events: counters.memory_events, io_stat: counters.io_stat,
+            retirement_generation: Some(generation.generation_id.clone()),
+            retirement_confirmed: false,
+            end_reason: if execution.cancel { EndReason::Cancelled }
+                else if execution.timed_out { EndReason::TimedOut }
+                else if result.exit_signal.is_some() { EndReason::Signalled }
+                else if result.exit_code.is_some() { EndReason::Natural }
+                else { EndReason::Unknown },
+        };
+        Ok(())
     }
 
     fn shell_payload_observation(&self, execution: &Execution, generation: &str, now: u64) -> Result<PayloadResult> {
@@ -90,7 +150,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .args(["status", "--porcelain", "--untracked-files=normal"]).output()
             .ok().filter(|output| output.status.success()).map(|output| output.stdout.is_empty());
         let memory_peak_bytes = if execution.command.lane.coverage == crate::store::resource_membership::Coverage::Enforced {
-            self.runtime.resource_exec_memory_peak(&execution.command.id, generation)?
+            self.runtime.resource_exec_cgroup(&execution.command.id, generation)?.memory_peak_bytes
         } else { None };
         Ok(PayloadResult {
             head_start: execution.head_start.clone(), clean_start: execution.clean_start,
@@ -98,6 +158,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             wall_duration_ms: self.store.resource_execution_elapsed(&execution.command.lane.id,
                 &execution.command.lane.owner, &execution.command.id, now)?.context("shell release clock missing")?,
             memory_peak_bytes,
+            ..PayloadResult::default()
         })
     }
 
@@ -199,6 +260,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // The native root is the observer, not the payload. Only its result file can
         // identify the payload's exit code/signal; missing publication means unknown.
         execution.exit_code = None; execution.exit_signal = None;
+        let evidence = execution.result.as_ref().map(|result| result.evidence.clone());
         if !self.read_shell_payload_result(execution)? {
             let mut result = self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
             if let Some(previous) = &execution.result {
@@ -207,6 +269,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             execution.result = Some(result);
         }
+        if let (Some(result), Some(evidence)) = (execution.result.as_mut(), evidence) {
+            result.evidence = evidence;
+        }
         Ok(())
     }
 
@@ -214,8 +279,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
         if matches!(execution.state.as_str(), "finishing" | "finishing-refused") {
             let refused = execution.state == "finishing-refused";
+            self.capture_retirement_evidence(execution)?;
+            if self.store.update_shell_resource(execution)? { self.signal_changed(); }
             if self.retire_shell_resource(execution)? {
                 self.finalize_retired_shell_result(execution)?;
+                if let Some(result) = execution.result.as_mut() { result.evidence.retirement_confirmed = true; }
                 execution.state = if refused { "refused" } else if execution.cancel { "cancelled" } else { "completed" }.into();
                 execution.ended_at = Some(now);
             }
@@ -366,17 +434,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let began = *execution.cancellation_started_at.get_or_insert(elapsed);
                 let remaining = 5_000_u64.saturating_sub(elapsed.saturating_sub(began));
                 if remaining == 0 {
+                    if execution.cancellation_kill_generation.as_deref() == Some(generation.generation_id.as_str()) {
+                        return Ok(());
+                    }
                     // Preserve observations while the cgroup still exists, even if the helper
                     // is stuck or never installed its SIGTERM handler.
                     execution.result = Some(self.shell_payload_observation(execution, &generation.generation_id, now)?);
+                    // Persist the generation-bound kill intent before the OS side effect.
+                    // Rechecks retain custody but must never repeatedly signal this generation.
+                    execution.cancellation_kill_generation = Some(generation.generation_id.clone());
                     if self.store.update_shell_resource(execution)? { self.signal_changed(); }
-                    let killing = std::time::Instant::now();
-                    self.runtime.retire_resource_exec(&self.store, &request, &execution.command.id)?;
-                    if let Some(result) = &mut execution.result {
-                        result.wall_duration_ms = result.wall_duration_ms.saturating_add(
-                            u64::try_from(killing.elapsed().as_millis()).unwrap_or(u64::MAX));
-                    }
-                    return self.drive_shell_resource(execution);
+                    // Signal only: a stuck task must not block the writer/reconcile loop.
+                    // The exit watch and subsequent sweeps confirm retirement separately.
+                    self.runtime.kill_resource_exec(&execution.command.id, &generation.generation_id)?;
+                    return Ok(());
                 }
                 self.arm_restart(&format!("shell-cancel:{}", execution.command.id), now_ms().saturating_add(u128::from(remaining)));
                 if execution.cancellation_started_at == Some(elapsed) {
@@ -408,6 +479,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
             Err(error) => return Err(error.into()),
         }
+        self.capture_retirement_evidence(execution)?;
         self.store.end_resource_execution(&grant, &execution.command.id, now)?;
         execution.state = if refusing { "finishing-refused" } else { "finishing" }.into();
         if !refusing {
@@ -419,6 +491,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // can turn a completed payload into an observation-less cancellation.
         if self.store.update_shell_resource(execution)? { self.signal_changed(); }
         if !self.retire_shell_resource(execution)? { return Ok(()); }
+        if let Some(result) = execution.result.as_mut() { result.evidence.retirement_confirmed = true; }
         execution.state = if refusing { "refused" } else if execution.cancel { "cancelled" } else { "completed" }.into();
         execution.ended_at = Some(now);
         self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);

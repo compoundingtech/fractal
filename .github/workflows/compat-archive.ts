@@ -1,4 +1,5 @@
 import { auditCaches } from './cache-audit.ts'
+import { prerequisiteLinuxRunner } from './workspace-ci.ts'
 
 type Kind = 'fleet' | 'messaging'
 type Step = { name?: string; uses?: string; [key: string]: unknown }
@@ -59,7 +60,7 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
   for (const [target, kinds] of targets) {
     jobs[`compat-archives-${target}`] = {
       name: `Prepare verified compatibility archives (${target})`,
-      'runs-on': 'ubuntu-latest', 'timeout-minutes': 15,
+      'runs-on': prerequisiteLinuxRunner, 'timeout-minutes': 15,
       permissions: { contents: 'read' },
       outputs: Object.fromEntries([...kinds].flatMap((kind, index) => [
         [`artifact-${kind}`, `\${{ steps['identity-${index}'].outputs['artifact-name'] }}`],

@@ -2189,3 +2189,33 @@ fn a_retired_citer_leaves_what_the_others_cite() {
     assert_eq!(scoped, full);
     assert!(scoped.2.iter().any(|answer| answer.contains("cited=1")), "{:?}", scoped.2);
 }
+
+/// The freshness window's forget bound: a local cut keeps a signed claim until its batch is older
+/// than the window and a day, then a later day's cut takes it.
+#[test]
+fn a_local_cut_keeps_signed_claims_inside_the_forget_bound() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    const DAY_MS: u128 = 24 * 60 * 60 * 1_000;
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    store.set_write_clock_at(written).unwrap();
+    for n in 0..20 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
+    }
+    let before = claims_of(&store, "observer.observed");
+    assert!(before > 2);
+    let at = |days: u128| {
+        let now = written + days * DAY_MS;
+        store.set_write_clock_at(now).unwrap();
+        crate::store::checkpoint_agreement::CheckpointContext { now_unix_ms: now, scratch: scratch.path().to_path_buf() }
+    };
+    // Three days on, the day's cut is past them, but they are signed and inside the bound.
+    step(&store, &at(3));
+    assert_eq!(claims_of(&store, "observer.observed"), before, "nothing signed inside the bound goes");
+    // Past the bound, a later day's cut takes them, as it would have.
+    let later = u128::from(FORGET_SIGNED_AFTER_MS) / DAY_MS + 2;
+    step(&store, &at(later));
+    assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
+}

@@ -276,6 +276,7 @@ pub fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationEx
     ReplicationExchange {
         build: None,
         claim_ranges: None,
+        claim_member_signatures: Vec::new(),
         projection_digests: Default::default(),
         peer: peer.into(),
         fleet_id: TEST_FLEET.into(),

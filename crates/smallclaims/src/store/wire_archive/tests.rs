@@ -63,7 +63,8 @@ fn empty_cold_peer_catches_up_from_original_archived_wire_in_bounded_pages() {
     let repaired = holder.replica_record_with_archive(&ids[0], 0, &mut archives).unwrap().unwrap();
     assert_eq!(repaired.view.writer, ids[0].writer);
     assert_eq!(repaired.view.position, 0);
-    assert!(!repaired.raw.is_empty());
+    // The archive holds the record as the store does: a valid record keeps no bytes.
+    assert!(repaired.raw.is_empty());
     assert!(holder.replica_record_with_archive(&ids[0], u64::MAX, &mut archives).unwrap().is_none());
     assert!(holder.replica_envelopes(ids).unwrap().is_empty(), "default readers remain inactive");
 }

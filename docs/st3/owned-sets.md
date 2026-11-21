@@ -1,7 +1,8 @@
 # Owned sets
 
 An owned set gives one publisher responsibility for a complete list of top-level seats, mission
-definitions and schedules. A successful publication retires previously live members that are
+definitions, schedules, subscriptions, objectives, GitHub sources and GitHub scopes.
+A successful publication retires previously live members that are
 absent from that list. Membership lives in the ordinary graph, on `owned-set/NAME` subjects with
 immutable `owned-set.revised` claims. There is no inventory database alongside the graph.
 
@@ -47,9 +48,22 @@ subject). Adoption captures the old heads in the set revision. A member already 
 another set is refused. Retirement keeps ownership; v1 has no release or transfer operation.
 Reintroducing a retired member through its set makes it live again.
 
-Mission runs, mission-owned seats, resources, observers and subscriptions cannot be set members.
-Publish those through their existing routes. A mission definition may contain its normal
-run-owned declarations; changing its definition preserves active runs and their pinned revisions.
+Mission runs, mission-owned seats, ordinary resources and observers cannot be set members.
+Publish those through their existing routes. Shared URI resource targets accompany publication
+but are not owned members. A mission definition may contain its normal run-owned declarations;
+changing its definition preserves active runs and their pinned revisions.
+
+Objectives, `github-source` and `github-scope` roots follow the same adoption, source ordering,
+ownership, omission confirmation and reintroduction rules as other members. Their retirement is
+**declaration-only**: a stopped desired declaration replaces the live declaration, while immutable
+claims, captured GitHub facts and historical scope evidence remain. The objective stops being
+evaluated; the source is no longer selected for acquisition and the scope is no longer a live
+roster declaration. Remaining objectives that reference retired configuration do not gain a
+replacement source or roster. Retirement does not grant, transfer, revoke or fabricate fencing of
+acquisition authority. An authority transfer still requires the separate person-controlled
+[capture fencing protocol](plugins.md). Reintroducing a source must still satisfy its existing
+generation/grant requirements. These roots can also be explicitly stopped with `stop "KIND/NAME"`;
+mission runs cannot declare or stop them.
 
 An agent's nested `exec` and `pty` tasks (`exec/NAMESPACE/AGENT/TASK`) are members carried with
 their agent: they are published, adopted and retired together with it, and the agent's `under`
@@ -148,6 +162,12 @@ Before activating owned sets, upgrade every active fleet member. Publication ref
 unless each admitted member's latest own `daemon.started` advertises `features.owned_sets=1`.
 A set with agent `exec` or `pty` task members additionally requires `features.owned_set_tasks=1`,
 because older daemons refuse replicated revisions that carry such members.
+A set with an objective, GitHub source or GitHub scope additionally requires
+`features.owned_set_native_roots=1` from every admitted member. This requirement also covers
+previously retired members, since their receipt references remain part of the set.
+A source policy whose namespace or unmanaged-allow globs name these native families additionally
+requires `features.owned_set_native_policy=1`, even if the bundle has no native members yet.
+Native membership support alone does not establish native namespace enforcement support.
 Ordinary publication and existing clients remain usable during the upgrade. An older daemon must
 not be introduced into a fleet after set activation.
 
@@ -244,9 +264,12 @@ fractal apply --set garden ... --source-policy policy.json
 `policy.json` holds `{"enforce": "off"|"audit"|"enforce", "publisher": [...], "namespaces": [...],
 "unmanaged_allow": [...]}`. Each omitted field keeps the selected value, and explicit flags override
 the file. A policy equal to `off` with empty lists is stored as absent. Namespace and allow globs
-claim top-level `agent/`, `schedule/`, `subscription/` or `mission/` subjects only: an agent's
-`exec`/`pty` tasks ride with their agent, and other `exec/` and `pty/` subjects are runtime
-(mission-run tasks, owned terminals), so such a glob is refused with `invalid-source-policy`.
+claim top-level `agent/`, `schedule/`, `subscription/`, `mission/`, `objective/`, `github-source/`
+or `github-scope/` subjects. For example, `github-source/garden` claims that exact source and
+`objective/garden/*` claims the objective namespace; matching `unmanaged_allow` globs exempt
+subjects from namespace ownership. An agent's `exec`/`pty` tasks ride with their agent, and other
+`exec/` and `pty/` subjects are runtime (mission-run tasks, owned terminals), so such a glob is
+refused with `invalid-source-policy`. Other unsupported families remain refused as well.
 
 - `off`, or no policy, is the behaviour above: a plain declaration of a member is refused with
   `set-managed-subject`, and nothing else is checked. There is no force path.

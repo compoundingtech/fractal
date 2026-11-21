@@ -18,7 +18,6 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension as _, Transaction, param
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use uuid::Uuid;
 
 use crate::claim::{
     ClaimInput, ClaimRecord, DocumentVersion, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,
@@ -70,8 +69,6 @@ mod prepared_envelope_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
-mod known_writers_tests;
-#[cfg(test)]
 mod fleet_residue_page_tests;
 #[cfg(test)]
 mod claims_in_order_tests;
@@ -88,6 +85,8 @@ pub mod prepared_seal;
 #[cfg(test)]
 mod prepared_seal_tests;
 mod binary_payloads;
+pub mod record_bytes;
+pub mod member_signatures;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -97,20 +96,19 @@ mod saved_inventory_tests;
 mod checkpoint_capture_epoch;
 mod checkpoint_space;
 pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
-#[cfg(feature = "test-support")]
-pub use checkpoint_space::checkpoint_test_fixture_headroom;
 pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
-pub mod checkpoint_accounting;
 pub mod checkpoint_staging;
 mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod wal_escalation;
+pub mod blob_file;
 pub mod document_index;
 mod document_pages;
+pub mod durability;
 pub mod claim_ranges;
 pub mod first_sync;
 pub mod principals;
@@ -130,23 +128,18 @@ pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
 pub use canonical::{CANONICAL_ORDER, CANONICAL_ORDER_DESC, canonical_sql};
 pub use checkpoint::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
-    CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView,
-    CheckpointProof, ClaimTombstone, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone,
-    SealedSet, StoreCopy, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
-    verify_checkpoint_manifest,
+    CheckpointManifestPage, CheckpointManifestRequest, ClaimTombstone, DropCount, DropPlan,
+    EnvelopeKey, EnvelopeTombstone, SealedSet, check_checkpoint_manifest, checkpoint_cut,
+    checkpoint_name, drop_digest, newest_due_cut,
 };
 pub use checkpoint_agreement::write_time;
 #[cfg(feature = "test-support")]
 pub use checkpoint_agreement::checkpoint_test_identity;
 pub use checkpoint_agreement::{
-    CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED,
-    CHECKPOINT_VERIFIED, Certificate, CheckpointAction, CheckpointClaim, CheckpointContext,
-    CheckpointExcuseRequest, CheckpointResumeRequest, CheckpointStatusView, PendingCheckpointView,
-    SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
-    first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
+    CheckpointAction, CheckpointContext, CheckpointResumeRequest, TrimStatusView, checkpoint_build,
 };
 pub use checkpoint_trim::{
-    CheckpointManifestNeed, LOCAL_TRIM_CONTEXT_KINDS, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault,
+    LOCAL_TRIM_CONTEXT_KINDS, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault,
     local_trim_capture_kinds,
 };
 
@@ -968,10 +961,6 @@ pub struct Store {
     pub trim_wal: Mutex<checkpoint_trim::TrimWal>,
     /// When the daemon's WAL recycle restarts a WAL that keeps growing; only tests change it.
     pub wal_escalation: Mutex<wal_escalation::WalEscalation>,
-    /// The last seal-identity digest, and the capture epoch it holds for; see
-    /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
-    pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
-    pub(crate) checkpoint_verify_latest: checkpoint_accounting::Latest,
     pub(crate) checkpoint_worker: Mutex<Option<checkpoint_agreement::CheckpointWorker>>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
@@ -1093,6 +1082,7 @@ impl Store {
             );
         }
         projection_digest::register(&connection)?;
+        blob_file::attach_writer(&connection, &path)?;
         crate::sqlite::observe(&mut connection);
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         // Keep the hot graph and replication index pages in SQLite's bounded
@@ -1146,7 +1136,7 @@ impl Store {
         let origin = origin.into();
         let uri = PathBuf::from(format!(
             "file:st3-{}?mode=memory&cache=shared",
-            Uuid::now_v7().simple()
+            uuid::Uuid::now_v7().simple()
         ));
         let mut connection = Connection::open_with_flags(
             &uri,
@@ -1155,6 +1145,7 @@ impl Store {
                 | OpenFlags::SQLITE_OPEN_URI,
         )?;
         projection_digest::register(&connection)?;
+        blob_file::attach_writer(&connection, &uri)?;
         crate::sqlite::observe(&mut connection);
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         Self::create_schema(&connection, &*runtime)?;
@@ -1217,6 +1208,12 @@ impl Store {
         repair_ledger::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h61123e79de50 owner=smallclaims::store TODO=trace-statement-and-value-representation */ record_bytes::VIEW_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd91f85b95b89 owner=smallclaims::store TODO=trace-statement-and-value-representation */ member_signatures::SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
@@ -1338,10 +1335,17 @@ impl Store {
         connection.install_runtime_finalizer(move |transaction| {
             finalizing_runtime.before_commit(transaction)
         })?;
+        // Temporary WAL and shared-memory fixtures opt in explicitly for deterministic tests.
+        // Ordinary disk stores resume persisted work without replication or a checkpoint.
+        let auto_schedule = !shared_memory;
+        #[cfg(any(test, feature = "test-support"))]
+        let auto_schedule = auto_schedule && readers.temporary_directory().is_none();
+        if auto_schedule {
+            Self::install_deferred_drain(&connection, runtime.clone());
+        }
         Ok(Self {
             connection,
             admitted: None,
-            checkpoint_verify_latest: Default::default(),
             checkpoint_worker: Default::default(),
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
@@ -1395,7 +1399,6 @@ impl Store {
             trim_row_cost_micros: AtomicU64::new(0),
             trim_wal: Mutex::new(checkpoint_trim::TRIM_WAL),
             wal_escalation: Mutex::new(wal_escalation::WAL_ESCALATION),
-            sealed_identity_memo: Mutex::new(None),
             runtime,
         })
     }
@@ -1551,6 +1554,9 @@ pub struct PeerSyncProgress {
     pub measured_inventory_envelopes: u64,
     /// What the open window's measurements were compared against.
     pub window_basis: InventoryBasis,
+    /// Last three distinct healthy schedule measurements, oldest first. Process-local only;
+    /// neither inventory cardinalities nor writer maxima prove an acknowledged prefix.
+    pub schedule_measurements: [u128; 3],
 }
 
 /// What a measured difference is relative to. When it changes, the number of envelopes the peer
@@ -1584,6 +1590,30 @@ impl InventoryBasis {
 }
 
 impl PeerSyncProgress {
+    /// Record a comparable exchange for the bounded schedule-admission fallback.
+    /// An unhealthy exchange, restart, incarnation/basis change, clock regression or quiet
+    /// gap breaks the streak. Re-reading one measurement can never advance it.
+    pub fn observe_schedule_progress(&mut self, healthy: bool, now: u128) {
+        let last = self.schedule_measurements[2];
+        if !healthy {
+            self.schedule_measurements = [0; 3];
+            return;
+        }
+        if last != 0 && (now < last || now.saturating_sub(last) >= PEER_QUIET_EXCHANGE_MS) {
+            self.schedule_measurements = [0; 3];
+        } else if now == last {
+            return;
+        }
+        self.schedule_measurements.rotate_left(1);
+        self.schedule_measurements[2] = now;
+    }
+
+    /// Three healthy measurements taken since the gate's boundary, not three gate reads.
+    /// This is a liveness fallback, not proof that an old individual envelope arrived.
+    pub fn schedule_progress_since(&self, since: u128) -> bool {
+        self.schedule_measurements[0] != 0 && self.schedule_measurements[0] >= since
+    }
+
     /// Record one comparison of this node's graph digest with the peer's, made while both nodes
     /// held the same envelopes.
     pub fn compare_graphs(&mut self, equal: bool, now: u128) {
@@ -2109,7 +2139,7 @@ pub struct ReplicationAdmission {
     pub valid: usize,
     pub unknown: usize,
     pub invalid: usize,
-    /// Envelopes held as `unsigned` or `fenced` by the fleet membership rules.
+    /// Envelopes waiting for fleet membership or retryable runtime admission backpressure.
     pub held: usize,
     pub changed: bool,
     /// Time spent decoding envelopes, checking their hashes and claim schemas, and looking up
@@ -2167,9 +2197,11 @@ pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool, a
     };
     let allowed_filter = if allowed_kinds { "kind IN (SELECT value FROM json_each(?7)) AND " } else { "" };
     let order = if descending { "DESC" } else { "ASC" };
+    // Keep the optional upper bound seekable, especially for descending one-row history
+    // lookups. Store indexes are SQLite signed integers; NULL includes their full domain.
     format!(
         "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
+         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND store_index<=COALESCE(?2 - 1, 9223372036854775807)
          ORDER BY store_index {order} LIMIT ?4"
     )
 }
@@ -3082,15 +3114,19 @@ impl Store {
         };
         let shard = fleet_meta(&connection, "shard_id")?;
         let mut statement = connection.prepare_cached(
-            "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
-             FROM replica_records AS records
-             JOIN replica_envelopes AS envelopes
-               USING (writer, sequence, envelope_hash)
+            // The claim's own batch names its envelopes, whether or not its valid record is
+            // stored (`record_bytes`); a claim with a record in any other state, such as one a
+            // repair replaced, is not an accepted copy.
+            /* sqlite-large-value: allow-for-now lv-h920ade08c738 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &format!("SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
+             FROM claims
+             JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
              JOIN replica_envelope_signatures AS signatures
-               USING (writer, sequence, envelope_hash)
-             WHERE records.claim_id=?1 AND records.state='valid'
+               ON signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
+                  AND signatures.envelope_hash=envelopes.envelope_hash
+             WHERE claims.id=?1 AND NOT {}
                AND envelopes.receipt_state='validated'
-               AND records.writer=?2 AND signatures.member_key=?3",
+               AND envelopes.writer=?2 AND signatures.member_key=?3",
+                record_bytes::claim_record_not_valid_sql("claims")),
         )?;
         let rows = statement.query_map(params![claim_id, self.origin, key], |row| {
             Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
@@ -3291,6 +3327,58 @@ mod sequence_page_tests {
             assert_eq!(seen, rows, "page {page}");
             assert!(reads <= 2 * rows.len() + 1, "page {page}: {reads} reads");
         }
+    }
+}
+
+#[cfg(test)]
+mod replication_admission_wake_tests {
+    use super::*;
+
+    #[test]
+    fn generation_is_visible_only_after_commit_and_survives_reopen() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("wake.sqlite");
+        let mut writer = Connection::open(&path)?;
+        writer.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )?;
+        let reader = Connection::open(&path)?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES('replication_admission_wake_generation','1')",
+            [],
+        )?;
+        assert_eq!(Store::replication_admission_wake_generation(&transaction)?, 1);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+        transaction.rollback()?;
+        assert_eq!(Store::replication_admission_wake_generation(&writer)?, 0);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES('replication_admission_wake_generation','1')",
+            [],
+        )?;
+        transaction.commit()?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "UPDATE meta SET value='2' WHERE key='replication_admission_wake_generation'",
+            [],
+        )?;
+        assert_eq!(Store::replication_admission_wake_generation(&transaction)?, 2);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+        transaction.rollback()?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+        drop(reader);
+        drop(writer);
+        let reopened = Connection::open(&path)?;
+        assert_eq!(Store::replication_admission_wake_generation(&reopened)?, 1);
+        Ok(())
     }
 }
 
@@ -6327,7 +6415,7 @@ pub fn collect_referenced_blobs(
     }
     for hash in hashes {
         if let Some(bytes) = connection
-            .query_row("SELECT bytes FROM blobs WHERE hash=?1", [&hash], |row| {
+            .query_row(concat!("SELECT ", crate::blob_bytes!("b"), " FROM blobs AS b WHERE b.hash=?1"), [&hash], |row| {
                 row.get(0)
             })
             .optional()?
@@ -6748,6 +6836,30 @@ impl Store {
         idempotency::next_expiry(&self.readers.get())
     }
 
+    /// When the replay-safe pass next has a receipt to expire, for `window_ms`.
+    pub fn next_replay_safe_expiry(&self, window_ms: i64) -> Result<Option<i64>> {
+        idempotency::next_replay_safe_expiry(&self.readers.get(), window_ms)
+    }
+
+    /// Remove one chunk of replay-safe receipts older than `window_ms`, with the clock limit of
+    /// `cleanup_idempotency`. The runtime says which must still wait for the ordinary retention.
+    pub fn cleanup_replay_safe_idempotency(&self, now_unix_ms: i64, window_ms: i64) -> Result<idempotency::Cleanup> {
+        let mut writer = self.connection.write();
+        let transaction = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(clock_limit) = idempotency::clock_limit(&transaction)? else {
+            return Ok(idempotency::Cleanup::default());
+        };
+        let cleaned = idempotency::cleanup_replay_safe_tx(
+            &transaction,
+            now_unix_ms.min(clock_limit),
+            window_ms,
+            idempotency::CLEANUP_CHUNK,
+            |connection, response| self.runtime.replay_safe_response_pinned(connection, response),
+        )?;
+        transaction.commit()?;
+        Ok(cleaned)
+    }
+
     pub fn idempotency_clock_limit(&self) -> Result<Option<i64>> {
         idempotency::clock_limit(&self.readers.get())
     }
@@ -6909,7 +7021,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",
+                concat!("SELECT ", crate::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),
                 params![name, hash],
                 |row| row.get(0),
             )
@@ -7184,16 +7296,7 @@ impl Store {
     }
 
     pub fn get_blob(&self, hash: &str) -> Result<Option<Vec<u8>>> {
-        let connection = self.readers.get();
-        connection
-            .query_row(
-                "SELECT bytes FROM blobs WHERE hash=?1
-                        UNION ALL SELECT bytes FROM local_blobs WHERE hash=?1 LIMIT 1",
-                [hash],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Into::into)
+        self.blob_bytes(hash)
     }
 
     pub fn bind_fleet(&self, fleet_id: &str) -> Result<()> {
@@ -7728,7 +7831,9 @@ impl Store {
                     Vec::new()
                 },
                 accepts: Some(replication_accepts()),
-                checkpoint: self.trimmed_checkpoint()?,
+                // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                 claim_range_query: None,
             },
             envelopes: Vec::new(),
@@ -7736,6 +7841,7 @@ impl Store {
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
             claim_ranges: Some(self.claim_range_summary()?),
+            claim_member_signatures: Vec::new(),
         })
     }
 
@@ -7859,7 +7965,9 @@ impl Store {
                     envelopes: listed,
                     buckets: buckets.to_vec(),
                     accepts: Some(replication_accepts()),
-                    checkpoint: self.trimmed_checkpoint()?,
+                    // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                     claim_range_query: None,
                 },
                 envelopes,
@@ -7867,6 +7975,7 @@ impl Store {
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
                 claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
+                claim_member_signatures: Vec::new(),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -7910,7 +8019,9 @@ impl Store {
             projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 accepts: Some(replication_accepts()),
-                checkpoint: self.trimmed_checkpoint()?,
+                // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                 ..if same {
                     ReplicationInventory {
                         digest: inventory.digest.clone(),
@@ -7923,6 +8034,9 @@ impl Store {
                     inventory.public()
                 }
             },
+            // About 200 bytes for each claim of an envelope sent: bounded by the envelope limit
+            // (`replication_page_limit`), and small beside the envelopes' own payloads.
+            claim_member_signatures: self.claim_member_signatures_for_envelopes(&missing)?,
             envelopes: match archive {
                 Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,
                 None => self.replica_envelopes(missing)?,
@@ -8304,6 +8418,7 @@ impl Store {
             None => None,
         };
         let now = now_ms();
+        let admission_healthy = self.replication_admission_healthy().map_err(internal)?;
         let mut sync = self
             .replication_sync
             .lock()
@@ -8317,6 +8432,12 @@ impl Store {
             local_inventory_generation: snapshot.inventory_generation,
             compact: !input.inventory.buckets.is_empty(),
         };
+        let same_incarnation = progress.measured_member_key.as_deref() == authenticated_member_key;
+        let same_basis = !progress.window_basis.changed_to(&basis);
+        progress.observe_schedule_progress(
+            admission_healthy && difference.is_some() && same_incarnation && same_basis,
+            now,
+        );
         progress.observe_on(received, difference, basis, now);
         if difference.is_some() {
             // This identity was authenticated before receive began. Never relabel an
@@ -8401,6 +8522,11 @@ impl Store {
             progress.compare_graphs(equal, now);
         }
         drop(sync);
+        // The writers' signatures of the claims the exchange carries, kept once they verify
+        // (`member_signatures`); a failure here costs only signatures a later exchange brings.
+        if let Err(error) = self.receive_claim_member_signatures(relay, &input.claim_member_signatures) {
+            eprintln!("st3: claim signatures from {relay} not kept: {error:#}");
+        }
         Ok(ReplicationReceipt {
             received,
             duplicate,
@@ -8472,6 +8598,10 @@ impl Store {
         if let Some(generation) = generation {
             self.admitted_fleet_generation.store(generation, Ordering::Release);
         }
+        // Admission has returned every writer loan and released its admission mutex. Queue
+        // paced deferred preparation without waiting for new arrivals to stop. This also
+        // opts memory stores into maintenance when an explicit admission requests it.
+        self.rebuild_deferred_paced()?;
         Ok(admission)
     }
 
@@ -8670,11 +8800,13 @@ impl Store {
                         (AdmissionAuthority::Source, _) => None,
                     }};
                     outcome.verify += started.elapsed();
-                    if let Some(reason) = hold {
-                        hold_replica_envelope(&pass, envelope, reason)?;
+                    if hold.is_some() || prepared.admission_deferred(&pass)? {
+                        if let Some(reason) = hold {
+                            hold_replica_envelope(&pass, envelope, reason)?;
+                        }
                         // A historical degraded receipt selected by a schema retry must remain
-                        // discoverable after that retry's marker completes. Waiting for verified
-                        // authority uses the ordinary pending lifecycle, not another schema scan.
+                        // discoverable after that retry's marker completes. Waiting for authority
+                        // or runtime catch-up uses the ordinary pending lifecycle.
                         if retry_subject_references {
                             pass.execute(
                                 /* sqlite-large-value: allow-for-now lv-hf42544a3dbab owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'
@@ -8784,15 +8916,21 @@ impl Store {
     /// replay the whole graph after every exchange. It projects at most once per interval
     /// instead, and again as soon as it has caught up. `None` means it deferred.
     pub fn project_replication_backlog_unless_catching_up(&self) -> Result<Option<bool>> {
-        let since = (now_ms() as u64).saturating_sub(
-            self.last_replication_projection_unix_ms
-                .load(Ordering::Acquire),
-        );
-        if since < replication_settle_intervals_ms().0 && self.replication_catching_up() {
+        if self.replication_projection_throttle_remaining().is_some() {
             self.defer_replication_projection();
             return Ok(None);
         }
         self.project_replication_backlog().map(Some)
+    }
+
+    /// Time until a catch-up projection may run again, without bypassing its throttle.
+    pub fn replication_projection_throttle_remaining(&self) -> Option<std::time::Duration> {
+        let since = (now_ms() as u64).saturating_sub(
+            self.last_replication_projection_unix_ms.load(Ordering::Acquire),
+        );
+        let interval = replication_settle_intervals_ms().0;
+        (since < interval && self.replication_catching_up())
+            .then(|| std::time::Duration::from_millis(interval - since))
     }
 
     /// Whether admitted replicated claims wait for a deferred projection.
@@ -8823,6 +8961,20 @@ impl Store {
             snapshot.legacy_graph_digest.clone(),
             snapshot.projection_digests.clone(),
         ))
+    }
+
+    /// Durable notification generation for runtime holds made eligible for admission again.
+    /// Read through the caller's connection so commit observers see exactly the committed
+    /// transaction; stores predating the first notification have generation zero.
+    pub fn replication_admission_wake_generation(connection: &Connection) -> Result<u64> {
+        Ok(connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='replication_admission_wake_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     pub fn projection_contention_generation(&self) -> u64 {
@@ -10088,12 +10240,11 @@ impl Store {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Trim on this member's own, without checkpoint agreement: the member's `[trim] local`
-    /// choice, off by default. It then seals, verifies and applies no new checkpoint and adopts
-    /// no peer's manifest, so a manifest never replaces its tombstones; a trim it had already
-    /// committed still finishes. Checkpoints need every participant, so the old checkpoints stop
-    /// on the other members until a person excuses this one. While it is on, the retired ledger
-    /// is the authority for what this member deleted (`retired`).
+    /// Whether this member trims: `[trim] local`, on by default in the daemon's config and off
+    /// until set on a store a test or tool opens. Every member trims on its own, with no
+    /// agreement with any other; off, it trims nothing, and a trim it had already committed
+    /// waits. While it is on, the retired ledger is the authority for what this member deleted
+    /// (`retired`).
     pub fn trim_locally(&self, on: bool) -> Result<()> {
         self.trim_local.store(on, Ordering::Relaxed);
         self.settle_retired_authority()
@@ -10103,7 +10254,7 @@ impl Store {
         self.trim_local.load(Ordering::Relaxed)
     }
 
-    /// The most claims a member that trims locally deletes in one day, `[trim] daily_claims`. A
+    /// The most claims a member deletes in one day, `[trim] daily_claims`. A
     /// cut that drops more stays `trimming` and goes on where it stopped the next day, before the
     /// next cut begins, so a large backlog drains over several days rather than in one long trim.
     pub fn trim_locally_at_most(&self, claims: u64) {
@@ -10297,6 +10448,15 @@ impl Store {
             if sole_creator { 0 } else { targets.max(1) },
             age(last_exchange),
         ))
+    }
+    /// Invalid claims and fenced writers cannot be treated as ordinary in-flight traffic.
+    pub fn replication_admission_healthy(&self) -> Result<bool> {
+        Ok(self.readers.get().query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM replica_records WHERE state='invalid')
+                AND NOT EXISTS(SELECT 1 FROM replica_envelope_holds WHERE reason='fenced')",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     /// The latest sync measurement for each configured peer that has one.
@@ -10666,6 +10826,7 @@ impl Store {
         }
         Ok(ReplicationStatus {
             configured,
+            claim_signatures_refused: self.claim_member_signatures_refused()?,
             fleet_id: fleet_id.map(str::to_owned),
             health: self.replication_health(configured)?,
             authority_digest: snapshot.authority_digest.clone(),
@@ -10721,6 +10882,7 @@ impl Store {
             timings: self.replication_timings(),
             first_sync: self.first_sync()?,
             removed: None,
+            stream_fallbacks: None,
         })
     }
 
@@ -11581,14 +11743,20 @@ fn apply_replication_repair_with_operations_tx(
     if !replacement_exists {
         return Ok((0, BTreeSet::new()));
     }
-    let (repaired_claim, previous_replacement) = transaction
+    let record = transaction
         .query_row(
             "SELECT claim_id, replacement_claim_id FROM replica_records WHERE record_ref=?1",
             [record_ref],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
         )
-        .optional()?
-        .unwrap_or_default();
+        .optional()?;
+    // A store that keeps no valid record has no row for a valid claim's record: the repair
+    // waits until its record is found again (`record_bytes::resolve_record_repairs`).
+    if record.is_none() && !record_bytes::valid_records_kept(transaction)? {
+        record_bytes::await_repaired_record_tx(transaction, record_ref)?;
+        return Ok((0, BTreeSet::new()));
+    }
+    let (repaired_claim, previous_replacement) = record.unwrap_or_default();
     let changed = transaction.execute(
         /* sqlite-large-value: allow-for-now lv-h48ffdf85be51 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired', replacement_claim_id=?2,
                 error_code=NULL, error_message=NULL, updated_at_unix_ms=?3

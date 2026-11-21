@@ -71,7 +71,12 @@ pub fn operation_is_trusted(
         let receipt: String = row.get(0)?;
         if row.get::<_, String>(1)? != expected { continue; }
         let quarantined: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM replica_records AS records JOIN replica_restore_quarantine AS quarantine USING(writer,sequence,envelope_hash) WHERE records.claim_id=?1)",
+            // The claim's batch names its envelopes, whether or not its valid record is stored
+            // (`record_bytes`).
+            "SELECT EXISTS(SELECT 1 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 JOIN replica_restore_quarantine AS quarantine ON quarantine.writer=envelopes.writer
+                     AND quarantine.sequence=envelopes.sequence AND quarantine.envelope_hash=envelopes.envelope_hash
+                 WHERE claims.id=?1)",
             [&receipt], |row| row.get(0),
         )?;
         if quarantined { continue; }
@@ -81,7 +86,12 @@ pub fn operation_is_trusted(
         )?;
         if local { return Ok(true); }
         let mut signatures = connection.prepare_cached(
-            "SELECT records.writer,records.sequence,signatures.member_key FROM replica_records AS records JOIN replica_envelope_signatures AS signatures ON signatures.writer=records.writer AND signatures.sequence=records.sequence AND signatures.envelope_hash=records.envelope_hash WHERE records.claim_id=?1 AND records.state='valid' AND records.writer=?2",
+            /* sqlite-large-value: allow-for-now lv-h03b40b8ae1cc owner=fractal_store::pairing TODO=trace-statement-and-value-representation */ &format!("SELECT envelopes.writer,envelopes.sequence,signatures.member_key FROM claims
+                 JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 JOIN replica_envelope_signatures AS signatures ON signatures.writer=envelopes.writer
+                     AND signatures.sequence=envelopes.sequence AND signatures.envelope_hash=envelopes.envelope_hash
+                 WHERE claims.id=?1 AND envelopes.writer=?2 AND NOT {}",
+                smallclaims::store::record_bytes::claim_record_not_valid_sql("claims")),
         )?;
         let mut signers = signatures.query(params![receipt, origin])?;
         while let Some(signer) = signers.next()? {
@@ -424,6 +434,27 @@ mod tests {
             target.receive_replication_exchange("issuer", "receipt-fleet", &exchange).unwrap();
             if restore { target.admit_restored_backlog() } else { target.validate_replication_backlog() }.unwrap();
             target.project_replication_backlog().unwrap();
+            assert!(target.client_operation_is_trusted(&completed).unwrap());
+            // The authorization receipt counts only as an accepted copy: a record of it in any
+            // state but valid excludes it, and a valid one need not be stored (`record_bytes`).
+            let receipt_record = |state: Option<&str>| {
+                let connection = target.connection.write();
+                let receipt = format!("custom/client/operation-{}", completed.id);
+                match state {
+                    Some(state) => connection.execute(
+                        "UPDATE replica_records SET state=?1 WHERE claim_id IN (SELECT id FROM claims WHERE subject=?2)",
+                        rusqlite::params![state, receipt],
+                    ),
+                    None => connection.execute(
+                        "DELETE FROM replica_records WHERE claim_id IN (SELECT id FROM claims WHERE subject=?1)",
+                        [receipt],
+                    ),
+                }
+                .unwrap();
+            };
+            receipt_record(Some("invalid"));
+            assert!(!target.client_operation_is_trusted(&completed).unwrap());
+            receipt_record(None);
             assert!(target.client_operation_is_trusted(&completed).unwrap());
         }
         let retained = Store::open_memory("retained").unwrap();

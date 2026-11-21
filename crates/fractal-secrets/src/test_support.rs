@@ -210,7 +210,7 @@ pub fn supervise_test() -> bool {
         let mut command = Command::new("python3");
         command
             .arg(script)
-            .args(["--owner", &std::process::id().to_string(), "--"])
+            .args(["--owner", &std::process::id().to_string(), "--pid-namespace", "--"])
             .arg(executable);
         command
     };

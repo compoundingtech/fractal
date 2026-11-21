@@ -12,8 +12,9 @@
 //! an image), a delivery probe's, a recipient without a host (a person, an undeclared or retired
 //! seat), or a host that does not advertise the inbox.
 //!
-//! Work wakes, replies that settle a parent, and senders whose evidence or predecessors cite
-//! other claims stay on the graph until 4c-3; they call the graph append, not [`send_message`].
+//! A work wake goes to the stream only for a seat on this member ([`send_work_wake`]). Replies
+//! that settle a parent, and senders whose evidence or predecessors cite other claims, stay on
+//! the graph; they call the graph append, not [`send_message`].
 
 use super::*;
 
@@ -82,16 +83,87 @@ pub fn send_message(store: &Store, input: &ClaimInput) -> Result<(ClaimRecord, b
     let routed = legacy_reason(store, input).map_err(internal)?.is_none();
     if routed && let Some(shard) = messages_shard::shard(store) {
         match shard.append_claim_outcome(input) {
-            Err(error) if error.code != "idempotency-mismatch" => {}
+            Err(error) if error.code != "idempotency-mismatch" => {
+                let sent = store.append_claim_outcome(input)?;
+                record_fallback(store, "send", &input.subject, error.code, &error.message);
+                return Ok(sent);
+            }
             sent => return sent,
         }
     }
     store.append_claim_outcome(input)
 }
 
+/// The codes a failed stream append is counted under; any other counts as `other`, so a label
+/// never takes an arbitrary value. The log line names the exact code and message.
+const FALLBACK_CODES: &[&str] = &[
+    "graph-closed",
+    "internal",
+    "invalid-message-transition",
+    "invalid-subject-reference",
+    "missing-message",
+    "missing-message-actor",
+    "shard-kind-refused",
+];
+
+/// Messages routed to the stream that this process appended to the graph instead since it
+/// started, by [`FALLBACK_CODES`] code.
+#[derive(Default)]
+struct StreamFallbacks(Mutex<BTreeMap<&'static str, u64>>);
+
+/// Count and log a routed message the graph took because the shard did not:
+/// `site` is `send` for a send whose stream append failed, `outbox` for a queued message the
+/// shard refused until its retries ran out. A fallback is never an error for the sender, so
+/// without this a broken stream path would go unseen.
+pub(crate) fn record_fallback(store: &Store, site: &'static str, subject: &str, code: &str, message: &str) {
+    let label = FALLBACK_CODES.iter().copied().find(|known| *known == code).unwrap_or("other");
+    *store.extension::<StreamFallbacks>().0.lock().unwrap_or_else(PoisonError::into_inner).entry(label).or_default() += 1;
+    fractal_telemetry::otel::record_stream_append_fallback(site, label);
+    tracing::warn!(site, subject, code, message, "a message routed to the stream went to the graph instead");
+}
+
+/// [`record_fallback`]'s counts since this process started, by code.
+pub fn fallbacks(store: &Store) -> BTreeMap<String, u64> {
+    let counts = store.extension::<StreamFallbacks>();
+    let counts = counts.0.lock().unwrap_or_else(PoisonError::into_inner);
+    counts.iter().map(|(code, count)| ((*code).to_owned(), *count)).collect()
+}
+
 /// [`send_message`], answering the claim it wrote or replayed, as [`Store::append_claim`] does.
 pub fn send(store: &Store, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
     send_message(store, input).map(|(claim, _)| claim)
+}
+
+/// Send a work wake: to the stream, as [`send`] would, only when its recipient's host is this
+/// member, whose own reconciler and step views read wakes from both stores. A wake for a seat
+/// placed on another member stays a graph claim, since that member's build may read wakes from
+/// the graph alone.
+pub fn send_work_wake(store: &Store, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
+    let to = input.fields.get("to").and_then(Value::as_str).unwrap_or_default();
+    if recipient_host(store, to).map_err(internal)?.as_deref() == Some(store.graph.origin.as_str()) {
+        let sent = send(store, input)?;
+        // The step views and the wake deadline read the mirror, so it takes the wake at once, as
+        // the outbox's drain does. Should this fail, the daemon's mirror loop catches it up.
+        if let Err(error) = super::stream_mirror::mirror(store) {
+            tracing::warn!(error = %format!("{error:#}"), "mirroring a work wake after its send failed");
+        }
+        return Ok(sent);
+    }
+    store.append_claim(input)
+}
+
+/// Queue a daemon's message from inside a graph transaction whose route it can't read before
+/// the transaction began: the outbox holds it, and the daemon's drain routes it after the commit,
+/// to the stream or, as before, the graph (`message_outbox::drain`). True when it queued, false
+/// when a message under that subject is already sent or queued, so a retried transaction sends it
+/// once.
+pub fn queue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<bool, FractalError> {
+    if super::message_sent::message_sent_tx(transaction, &input.subject)
+        .map_err(|error| FractalError::new("internal", format!("{error:#}")))?
+    {
+        return Ok(false);
+    }
+    message_outbox::enqueue_tx(transaction, input)
 }
 
 /// [`send_message`] for a sender inside a graph transaction, which cannot write to the shard: a

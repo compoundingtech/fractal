@@ -5,9 +5,19 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+const ENVELOPE_SIZE_SAMPLE_LIMIT: usize = 32;
+
 #[derive(Clone, Debug, Default)]
 pub struct Counters {
     pub envelopes_admitted: usize,
+    /// Preparation attempts, including persisted backlog and retries, not unique envelopes.
+    pub envelopes_prepared: usize,
+    pub envelope_claims: usize,
+    pub envelope_payload_bytes: usize,
+    /// First bounded sample of decoded claims and wire bytes, in preparation order.
+    pub envelope_sizes: Vec<(usize, usize)>,
+    pub envelope_sizes_omitted: usize,
+    pub finalizer_time: [Duration; 5],
     pub admit_time: Duration,
     pub project_time: Duration,
     pub projection_chunks: u64,
@@ -96,6 +106,39 @@ fn record(update: impl FnOnce(&mut Counters)) {
 
 pub fn envelopes_admitted(count: usize) {
     record(|counters| counters.envelopes_admitted += count);
+}
+
+pub fn envelope_size(claims: usize, bytes: usize) {
+    record(|counters| {
+        counters.envelopes_prepared += 1;
+        counters.envelope_claims += claims;
+        counters.envelope_payload_bytes += bytes;
+        if counters.envelope_sizes.len() < ENVELOPE_SIZE_SAMPLE_LIMIT {
+            counters.envelope_sizes.push((claims, bytes));
+        } else {
+            counters.envelope_sizes_omitted += 1;
+        }
+    });
+}
+
+#[derive(Clone, Copy)]
+pub enum Finalizer {
+    Resources,
+    Custom,
+    Completion,
+    RunEta,
+    ClientMessages,
+}
+
+/// Attribute runtime finalization without changing its error or commit boundary.
+pub fn finalizer<T>(part: Finalizer, work: impl FnOnce() -> T) -> T {
+    if capture().is_none() {
+        return work();
+    }
+    let started = std::time::Instant::now();
+    let result = work();
+    record(|counters| counters.finalizer_time[part as usize] += started.elapsed());
+    result
 }
 
 pub fn projection_chunk() {
@@ -355,6 +398,58 @@ impl Drop for Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_sizes_and_failed_finalizers_remain_request_local() {
+        let metrics = RequestMetrics::new("sizes".into());
+        {
+            let _scope = metrics.enter();
+            envelope_size(3, 1024);
+            envelope_size(7, 2048);
+            let failed: Result<(), &str> = finalizer(Finalizer::Resources, || Err("fixture"));
+            assert_eq!(failed, Err("fixture"));
+        }
+        envelope_size(99, 99);
+        let counters = metrics.snapshot();
+        assert_eq!(counters.envelope_sizes, [(3, 1024), (7, 2048)]);
+        assert!(counters.finalizer_time[Finalizer::Resources as usize] > Duration::ZERO);
+        assert_eq!(counters.finalizer_time[Finalizer::Custom as usize], Duration::ZERO);
+    }
+
+    #[test]
+    fn envelope_size_samples_are_bounded_without_losing_request_totals() {
+        let first = RequestMetrics::new("first".into());
+        let second = RequestMetrics::new("second".into());
+        let count = ENVELOPE_SIZE_SAMPLE_LIMIT * 3 + 5;
+        for claims in 1..=count {
+            // Re-entering the request models preparation across backlog batches and retries.
+            let _scope = first.enter();
+            envelope_size(claims, claims * 10);
+        }
+        {
+            let _first = first.enter();
+            let _second = second.enter();
+            envelope_size(7, 70);
+        }
+        envelope_size(99, 990);
+
+        let counters = first.snapshot();
+        let total_claims = count * (count + 1) / 2;
+        assert_eq!(counters.envelopes_prepared, count);
+        assert_eq!(counters.envelope_claims, total_claims);
+        assert_eq!(counters.envelope_payload_bytes, total_claims * 10);
+        assert_eq!(counters.envelope_sizes_omitted, count - ENVELOPE_SIZE_SAMPLE_LIMIT);
+        assert_eq!(
+            counters.envelope_sizes,
+            (1..=ENVELOPE_SIZE_SAMPLE_LIMIT).map(|claims| (claims, claims * 10)).collect::<Vec<_>>(),
+        );
+        let counters = second.snapshot();
+        assert_eq!(counters.envelopes_prepared, 1);
+        assert_eq!(counters.envelope_claims, 7);
+        assert_eq!(counters.envelope_payload_bytes, 70);
+        assert_eq!(counters.envelope_sizes, [(7, 70)]);
+        assert_eq!(counters.envelope_sizes_omitted, 0);
+    }
 
     #[test]
     fn captured_phase_crosses_threads_and_restores_after_unwind() {

@@ -302,6 +302,7 @@ local_codes = [
     "native-delivery-degraded",
     "native-delivery-recovered",
     "message-unforwarded",
+    "omp-channel-admission-fallback",
     "claude-handoff-status-unavailable",
     "claude-receipt-unavailable",
     "claude-handoff-unconfirmed",

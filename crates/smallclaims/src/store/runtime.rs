@@ -67,6 +67,12 @@ pub trait Runtime: Send + Sync {
     ) -> Result<bool> {
         Ok(false)
     }
+    /// Whether a replay-safe receipt past its short window must still wait for the ordinary
+    /// retention. A runtime returns false for a receipt that a retry simply repeats, such as a
+    /// lease renewal's, even while its work is live; by default the in-use rule decides.
+    fn replay_safe_response_pinned(&self, connection: &Connection, response: &str) -> Result<bool> {
+        self.idempotency_response_in_use(connection, response)
+    }
 
     /// Migrate an older store's tables before any table is created. The graph has checked that
     /// the schema version is one it supports.
@@ -145,6 +151,17 @@ pub trait Runtime: Send + Sync {
         _claim: &ClaimRecord,
     ) -> Option<Result<ReplicatedClaimAdmission, Error>> {
         None
+    }
+
+    /// Hold an entire replicated batch before any admission mutation while runtime work catches
+    /// up. This is backpressure, not invalid input: the envelope remains pending and later
+    /// backlog passes retry it normally. Called under the writer with current stored state.
+    fn defer_replicated_batch(
+        &self,
+        _connection: &Connection,
+        _batch: &ReplicaBatch,
+    ) -> Result<bool> {
+        Ok(false)
     }
 
     /// Append a claim this node writes, from a client's input. The runtime decides how the claim
@@ -242,9 +259,9 @@ pub trait Runtime: Send + Sync {
         Ok(())
     }
 
-    /// Rebuild derived state that a trim's deletes deferred, until `budget` is spent, and say
-    /// whether any is left. A trim calls it in paced transactions after each run, so a runtime
-    /// can refold each subject a trim touched once instead of once per deleted claim.
+    /// Rebuild deferred derived state until `budget` is spent, and say whether any is left.
+    /// The writer scheduler resumes this work in paced transactions after startup and local,
+    /// replicated, or trim writes; it never waits synchronously for the queue to become empty.
     fn rebuild_deferred(&self, _transaction: &Transaction<'_>, _budget: std::time::Duration) -> Result<bool> {
         Ok(false)
     }
@@ -262,7 +279,7 @@ pub trait Runtime: Send + Sync {
         delete()
     }
 
-    /// Whether a trim's deletes left anything for `rebuild_deferred`, read without the writer.
+    /// Whether committed writes left anything for `rebuild_deferred`, without mutating state.
     fn deferred_pending(&self, _connection: &Connection) -> Result<bool> {
         Ok(false)
     }
@@ -322,13 +339,6 @@ pub trait Runtime: Send + Sync {
         Ok(())
     }
 
-    /// Empty every projection, and every local table that refers to claims, on a copy of the
-    /// store that a checkpoint proof is about to cut down to its sealed set.
-    fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()>;
-
-    /// Project a checkpoint proof's copy from nothing.
-    fn replay_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()>;
-
     /// Every answer about `subject` that a checkpoint must leave unchanged, as of the cut.
     fn checkpoint_subject_answers(
         &self,
@@ -337,26 +347,6 @@ pub trait Runtime: Send + Sync {
         cut: u128,
     ) -> Result<Value>;
 
-    /// Answers that belong to no one subject, such as a fold across every seat, that a checkpoint
-    /// must leave unchanged. The proof computes them on its copy, which they may write to, before
-    /// and after the drop, and compares them with the subjects' answers.
-    fn checkpoint_global_answers(&self, _transaction: &Transaction<'_>) -> Result<Option<Value>> {
-        Ok(None)
-    }
-
-    /// Return the same proof answers, with optional bounded per-item source identities captured
-    /// during that read. Sources are diagnostic only and never enter the proof/digest contract.
-    fn checkpoint_subject_answers_with_sources(
-        &self,
-        connection: &Connection,
-        subject: &str,
-        cut: u128,
-    ) -> Result<(Value, super::checkpoint::CheckpointAnswerSources)> {
-        Ok((
-            self.checkpoint_subject_answers(connection, subject, cut)?,
-            Default::default(),
-        ))
-    }
 }
 
 /// The runtime of a program that only keeps and syncs claims: it accepts every claim as it is,
@@ -485,14 +475,6 @@ impl Runtime for Plain {
 
     fn plan_checkpoint_drops(&self, _sealed: &SealedSet) -> DropPlan {
         unimplemented!("the plain runtime has no checkpoint rules")
-    }
-
-    fn clear_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> Result<()> {
-        Ok(())
-    }
-
-    fn replay_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> Result<()> {
-        Ok(())
     }
 
     fn checkpoint_subject_answers(

@@ -914,6 +914,42 @@ pub fn record_mailbox_fence_check(caller: MailboxFenceCaller, elapsed: Duration)
     MAILBOX_FENCE_DURATION.record(elapsed.as_secs_f64(), &attributes);
 }
 
+static MESSAGE_OUTBOX_DELAY: std::sync::LazyLock<opentelemetry::metrics::Histogram<f64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.messages")
+            .f64_histogram("st.messages.outbox.delay")
+            .with_unit("s")
+            .with_description("Time from a message entering the outbox to its delivery, by where it went")
+            .build()
+    });
+
+/// Record how long a message waited in the outbox before the stream or the graph took it.
+pub fn record_message_outbox_delay(to: &'static str, waited: Duration) {
+    if !metrics_enabled() {
+        return;
+    }
+    MESSAGE_OUTBOX_DELAY.record(waited.as_secs_f64(), &[KeyValue::new("to", to)]);
+}
+
+static STREAM_APPEND_FALLBACKS: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.messages")
+            .u64_counter("st.messages.stream.append_fallback")
+            .with_description("Messages routed to the messages shard that went to the graph instead, by error code")
+            .with_unit("{message}")
+            .build()
+    });
+
+/// Record a message routed to the messages shard that was appended to the graph instead:
+/// `site` is `send` when the shard's append failed, `outbox` when the shard refused a queued
+/// message until its retries ran out. `code` comes from a fixed list, so it is a bounded label.
+pub fn record_stream_append_fallback(site: &'static str, code: &'static str) {
+    if !metrics_enabled() {
+        return;
+    }
+    STREAM_APPEND_FALLBACKS.add(1, &[KeyValue::new("site", site), KeyValue::new("code", code)]);
+}
+
 static GITHUB_RESPONSES: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
     std::sync::LazyLock::new(|| {
         opentelemetry::global::meter("st3.github")

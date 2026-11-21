@@ -11,13 +11,11 @@ pub(super) struct Native {
     client: Client,
     node: String,
     launchd_domain: Option<String>,
-    checkpoint_worker_enabled: bool,
 }
 
 impl Native {
-    pub fn new(endpoint: Endpoint, node: String, config: &Config) -> Self {
-        Self { client: Client::new(endpoint), node, launchd_domain: None,
-            checkpoint_worker_enabled: config.checkpoint.enabled || config.trim.local }
+    pub fn new(endpoint: Endpoint, node: String) -> Self {
+        Self { client: Client::new(endpoint), node, launchd_domain: None }
     }
 
     fn output(program: &str, arguments: &[&str]) -> Result<Output> {
@@ -113,12 +111,6 @@ fn property<'a>(text: &'a str, name: &str) -> Result<&'a str> {
     text.lines().find_map(|line| line.split_once('=').filter(|(key, _)| *key == name).map(|(_, value)| value))
         .with_context(|| format!("service manager omitted {name}"))
 }
-fn checkpoint_idle(worker_enabled: bool, status: &Value) -> Result<()> {
-    // Older daemons synthesize pending cuts even when no capture worker is spawned.
-    ensure!(!worker_enabled || status.get("pending").is_some_and(Value::is_null),
-        "checkpoint is pending or its status is unknown; do not cut over during a checkpoint");
-    Ok(())
-}
 
 
 #[cfg(any(target_os = "linux", test))]
@@ -179,9 +171,6 @@ fn inspect_services(
 impl Manager for Native {
     fn kind(&self) -> &'static str { if cfg!(target_os = "linux") { "systemd-user" } else { "launchd-user" } }
     fn domain(&self) -> Option<&str> { self.launchd_domain.as_deref() }
-    fn checkpoint_gate(&self) -> &'static str {
-        if self.checkpoint_worker_enabled { "pending-null" } else { "worker-disabled" }
-    }
     fn bind_domain(&mut self, recorded: Option<&str>, recovery: bool) -> Result<()> {
         #[cfg(target_os = "macos")]
         { self.launchd_domain = Some(super::launchd::resolve(unsafe { libc::getuid() }, recorded, recovery, |domain| {
@@ -293,10 +282,6 @@ impl Manager for Native {
     }
 
     async fn idle(&mut self) -> Result<()> {
-        if self.checkpoint_worker_enabled {
-            let checkpoint: Value = self.client.get("/v1/checkpoint/status").await.context("cannot establish checkpoint quiescence")?;
-            checkpoint_idle(self.checkpoint_worker_enabled, &checkpoint)?;
-        }
         let replication: fractal_daemon::model::ReplicationStatus = self.client.get("/v1/replication/status").await.context("cannot establish sync quiescence")?;
         ensure!(replication.pending_records == 0, "replication has pending records; wait until local admission completes");
         if let Some(first) = replication.first_sync {
@@ -328,40 +313,6 @@ impl Manager for Native {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn checkpoint_config(enabled: bool, local: bool) -> Result<Config> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("daemon.toml");
-        fs::write(&path, format!("[checkpoint]\nenabled = {enabled}\n[trim]\nlocal = {local}\n"))?;
-        load_daemon_config(Some(&path))
-    }
-
-    #[test]
-    fn checkpoint_disabled_accepts_synthesized_pending() -> Result<()> {
-        let config = checkpoint_config(false, false)?;
-        let native = Native::new(Endpoint::Unix("/unused.sock".into()), "example".into(), &config);
-        checkpoint_idle(native.checkpoint_worker_enabled, &serde_json::json!({"pending": {"cut": 42}}))?;
-        assert_eq!(native.checkpoint_gate(), "worker-disabled");
-        Ok(())
-    }
-
-    #[test]
-    fn checkpoint_enabled_refuses_pending() -> Result<()> {
-        let config = checkpoint_config(true, false)?;
-        assert!(checkpoint_idle(config.checkpoint.enabled || config.trim.local,
-            &serde_json::json!({"pending": {"cut": 42}})).is_err());
-        checkpoint_idle(true, &serde_json::json!({"pending": null}))?;
-        assert!(checkpoint_idle(true, &serde_json::json!({})).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn checkpoint_trim_local_refuses_pending() -> Result<()> {
-        let config = checkpoint_config(false, true)?;
-        assert!(checkpoint_idle(config.checkpoint.enabled || config.trim.local,
-            &serde_json::json!({"pending": {"cut": 42}})).is_err());
-        Ok(())
-    }
 
     #[test]
     fn checkpoint_unreadable_config_fails_closed() -> Result<()> {
@@ -412,8 +363,7 @@ mod tests {
             }
             Ok::<_, anyhow::Error>(())
         });
-        let config = checkpoint_config(false, false)?;
-        let mut native = Native::new(Endpoint::Unix(socket), "example".into(), &config);
+        let mut native = Native::new(Endpoint::Unix(socket), "example".into());
         native.idle().await?;
         native.idle().await?;
         assert!(native.idle().await.unwrap_err().to_string().contains("pending records"));

@@ -42,12 +42,12 @@ Use these documents for implementation details:
 - [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
   are recorded and replicated.
-- [Checkpoints and trimming](checkpoints.md) explains how every node of a fleet agrees to delete old
-  claims together: when a checkpoint is due, seal, verify and trim, which claims a rule may drop and
-  why, excusing an unreachable member, and what the first real trim taught.
-- [Checkpoint capture in bounded memory](checkpoint-capture.md) is the design for capturing,
-  planning and proving a checkpoint within a fixed memory budget, with a capture that resumes
-  after a restart (#2492).
+- [Checkpoints and trimming](checkpoints.md) explains how each member trims old claims from its own
+  copy: when a cut is due, which claims a rule may drop and why, the checks that stop a trim, and
+  how deleted claims travel to peers as retired IDs.
+- [Checkpoint capture](checkpoint-capture.md) explains how a member's daily cut captures and
+  plans within a fixed memory budget and admitted disk, with a capture that resumes after a
+  restart (#2492).
 - [Retention](retention.md) names how long Fractal keeps each claim kind: the policy file, its four
   classes, and how a rule is added and measured.
 - [Shell completion](cli-completion/spec.md) defines live entity candidates, their descriptions,

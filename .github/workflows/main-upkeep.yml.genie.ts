@@ -2,7 +2,6 @@ import { withCompatArchives } from './compat-archive.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
-import { buildFleetWorkflow } from './fleet.yml.genie.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import {
   buildEnv,
@@ -26,40 +25,6 @@ import {
   workspacePreparationSteps,
 } from './workspace-ci.ts'
 
-const proofId = (id: string) => `proof-${id}`
-const proofSelected = "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'"
-// The fleet builder includes archive producers before projection, retaining the complete queue graph.
-const fleetWorkflow = buildFleetWorkflow({ topology: 'merge-group' })
-// Queue-ref cancellation and PR-only advice cannot apply to a landed main commit.
-const proofOmissions: Record<string, string> = {
-  'namespace-capacity': 'The ephemeral queue ref no longer controls landed proof.',
-  'evidence-presign-notice': 'Pre-signing advice applies only to an open PR.',
-}
-// Preserve fleet's dependency identities inside aggregate evidence JSON, while namespacing actual jobs.
-export const proofJobs = Object.fromEntries(Object.entries(fleetWorkflow.jobs).filter(([id]) => !Object.hasOwn(proofOmissions, id)).map(([id, job]) => {
-  const dependencies: string[] = job.needs == null ? [] : typeof job.needs === 'string' ? [job.needs] : job.needs
-  const jsonFormat = `{{${dependencies.map((name, i) => `"${name}":{${i}}`).join(',')}}}`
-  const needsJson = dependencies.length
-    ? `format('${jsonFormat}', ${dependencies.map(name => `toJSON(needs.${proofId(name)})`).join(', ')})`
-    : "'{}'"
-  const expression = (text: string) => text.replaceAll('toJSON(needs)', needsJson)
-    .replace(/\bneeds(?:\.([\w-]+)|\[['"]([\w-]+)['"]\])/g, (whole, dot, bracket) => {
-      const name = dot ?? bracket
-      return Object.hasOwn(fleetWorkflow.jobs, name) ? `needs.${proofId(name)}` : whole
-    }).replaceAll('github.job', `'${id}'`)
-  const rewrite = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(rewrite)
-    if (value !== null && typeof value === 'object')
-      return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
-        [key, key === 'if' && typeof entry === 'string' ? expression(entry) : rewrite(entry)]))
-    if (typeof value !== 'string') return value
-    return value.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, text: string) => '${{' + expression(text) + '}}')
-  }
-  const projected = rewrite(job) as Record<string, unknown>
-  const condition = String(projected.if ?? 'success()').replace(/\$\{\{|\}\}/g, '')
-  return [proofId(id), { ...projected, name: `post-merge ${job.name ?? id}`,
-    needs: ['main-checks', ...dependencies.map(proofId)], if: `\${{ ${proofSelected} && (${condition}) }}` }]
-}))
 
 const missing = "steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true'"
 const whenMissing = (steps: readonly unknown[], conditionMissing = missing) => steps.map((value) => {
@@ -119,7 +84,7 @@ const upkeepWorkflow = withCompatArchives(scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
-  // Every landed tree that skipped queue work needs hosted proof; never coalesce pending main pushes.
+  // Keep cache maintenance and exact-SHA hosted-check reporting for every landed main tree.
   concurrency: {
     group: 'main-upkeep-${{ github.run_id }}',
     'cancel-in-progress': false,
@@ -132,24 +97,23 @@ const upkeepWorkflow = withCompatArchives(scopeLinuxNixSandbox(auditCaches({
     'main-checks': {
       name: 'main-checks',
       'runs-on': 'ubuntu-latest',
-      'timeout-minutes': 5,
-      permissions: { contents: 'read', actions: 'read', checks: 'read' },
-      outputs: { 'evidence-skipped': '${{ steps.queue.outputs.evidence-skipped }}' },
+      'timeout-minutes': 125,
+      permissions: { contents: 'read', actions: 'read' },
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
-        { name: 'Confirm main retains the queue checks', id: 'queue', env: { GH_TOKEN: '${{ github.token }}' }, run: 'python3 scripts/check-main-ci' },
+        { name: 'Await required hosted main push checks', env: { GH_TOKEN: '${{ github.token }}' }, run: 'python3 scripts/check-main-ci' },
       ],
     },
     'hosted-proof-failure': {
       name: 'report red main',
-      needs: Object.keys(proofJobs),
-      if: "always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))",
+      needs: ['main-checks'],
+      if: "always() && needs.main-checks.result == 'failure'",
       'runs-on': 'ubuntu-latest',
       permissions: {},
       steps: [{
         name: 'Signal revert needed',
-        run: `echo "::error::Post-merge hosted proof failed for $GITHUB_SHA: main is red; revert the merged change."
-echo "## Revert needed: hosted proof failed for $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+        run: `echo "::error::Required hosted push proof failed for $GITHUB_SHA: main is red; revert the merged change."
+echo "## Revert needed: required hosted push proof failed for $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
 exit 1`,
       }],
     },
@@ -249,6 +213,6 @@ fi`,
       before: [perfStoresCache('cost')],
     }),
   },
-}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
+}, {"main-checks": "Waits for exact-SHA hosted push checks through the API and builds nothing.", "hosted-proof-failure": "Reports failed required hosted push proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
 
-export default githubWorkflow({ ...upkeepWorkflow, jobs: { ...upkeepWorkflow.jobs, ...proofJobs } })
+export default githubWorkflow(upkeepWorkflow)

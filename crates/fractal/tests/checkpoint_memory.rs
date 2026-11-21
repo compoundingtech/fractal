@@ -114,7 +114,6 @@ fn history(store: &fractal_daemon::store::Store, claims: usize) {
 
 struct Pass {
     capture_and_plan: usize,
-    proof: usize,
     trim: usize,
     dropped: usize,
     seconds: f64,
@@ -140,16 +139,12 @@ fn pass(claims: usize) -> Pass {
             (staged, plan)
         });
         assert_eq!(plan.sealed_claims, claims);
-        let (proof, proof_peak) =
-            peak_during(|| store.prove_staged_checkpoint_plan(&staged, &plan, &scratch).unwrap());
-        assert!(proof.passed, "{:?}", proof.mismatches);
         let ((), trim) = peak_during(|| {
             let mut actions = Vec::new();
             store.trim_staged_checkpoint(&checkpoint, &staged, &plan, &mut actions).unwrap();
         });
         Pass {
             capture_and_plan,
-            proof: proof_peak,
             trim,
             dropped: plan.dropped_claims,
             seconds: started.elapsed().as_secs_f64(),
@@ -163,9 +158,8 @@ fn a_checkpoint_pass_holds_a_fixed_budget_whatever_the_history() {
     let large = pass(LARGE);
     for (claims, pass) in [(SMALL, &small), (LARGE, &large)] {
         eprintln!(
-            "checkpoint pass of {claims} claims: capture+plan {:.1} MiB, proof {:.1} MiB, trim {:.1} MiB, {} dropped, {:.1} s",
+            "checkpoint pass of {claims} claims: capture+plan {:.1} MiB, trim {:.1} MiB, {} dropped, {:.1} s",
             pass.capture_and_plan as f64 / MIB as f64,
-            pass.proof as f64 / MIB as f64,
             pass.trim as f64 / MIB as f64,
             pass.dropped,
             pass.seconds,
@@ -176,7 +170,6 @@ fn a_checkpoint_pass_holds_a_fixed_budget_whatever_the_history() {
     assert_eq!(large.dropped, LARGE / 4 * 3, "the rule drops three of every four");
     for (stage, small, large) in [
         ("capture and plan", small.capture_and_plan, large.capture_and_plan),
-        ("proof", small.proof, large.proof),
         ("trim", small.trim, large.trim),
     ] {
         assert!(small <= BUDGET, "{stage} holds {small} bytes at {SMALL} claims, above {BUDGET}");

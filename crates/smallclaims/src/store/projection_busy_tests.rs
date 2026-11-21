@@ -168,14 +168,6 @@ impl Runtime for FaultRuntime {
         unimplemented!("the plain runtime has no checkpoint rules")
     }
 
-    fn clear_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> Result<()> {
-        Ok(())
-    }
-
-    fn replay_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> Result<()> {
-        Ok(())
-    }
-
     fn checkpoint_subject_answers(
         &self,
         _connection: &Connection,

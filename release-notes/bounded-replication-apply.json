@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound out-of-order resource preparation during replication admission",
+  "replay": {"status": "changed", "detail": "Out-of-order resource claims mark preparation stale and queue a paged deferred fold instead of rebuilding the full subject history during admission. Complete observations publish atomically; canonical claim ordering and validation are unchanged."},
+  "schema": {"status": "changed", "detail": "Preparation cache version 2 adopts complete version-1 rows without rebuilding their history and persists rebuild progress and admission wakes. No client protocol or generated type changes."},
+  "rules": {"status": "changed", "detail": "After four folded-prefix resets, envelopes touching the affected subject wait retryably for a prioritized paced rebuild. They remain atomic and are not quarantined; other eligible envelopes and foreground writers continue."},
+  "compatibility": {"status": "changed", "detail": "Resource preparation uses bounded writer work units for large or out-of-order claim histories. Query-only readers use the canonical snapshot fold while preparation is stale; writer-context reads report resource-preparation-not-caught-up instead of performing an unbounded fold. Receive metrics distinguish preparation from shared writer work."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
+  "manual": {"status": "none", "detail": "No additional setup or configuration changes."},
+  "recovery": {"status": "changed", "detail": "Persisted stale marks resume at startup without a new replication receive. An older binary detects the preparation cache version change and rebuilds before serving readers; canonical claims retain their current format."}
+}

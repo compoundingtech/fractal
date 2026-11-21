@@ -261,7 +261,7 @@ fn validate_write_with(
         .to_owned();
     if content.starts_with("doc/") {
         let (name, hash) = split_document_ref(&content)?;
-        let bytes: Vec<u8> = tx.query_row("SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2", params![name,hash], |row| row.get(0)).map_err(internal)?;
+        let bytes: Vec<u8> = tx.query_row(concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"), params![name,hash], |row| row.get(0)).map_err(internal)?;
         content = String::from_utf8(bytes).map_err(internal)?;
     }
     if proof.quote.trim().is_empty() || !content.contains(&proof.quote) {

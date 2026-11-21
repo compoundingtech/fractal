@@ -514,7 +514,7 @@ again and the start is retried then. When the child ends, the program receives:
 
 | Child | Exit |
 |---|---|
-| `completed` | Success `{ run, status: 'completed', products? }`; `products` holds the value of each product the child's steps declare, by full subject (`resource/mission-run/CHILD/…`) |
+| `completed` | Success `{ run, status: 'completed', products?, executions?, result? }`; `products` holds each declared product by full subject (`resource/mission-run/CHILD/…`); `result` is the actual completed native program output when present, not a resource claim |
 | `failed` / `cancelled` | Failure `{ _tag: 'ChildFailed', run, status, reason }`; `reason` is the run's end reason, else its failed step's |
 
 A worker turn, `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission,
@@ -526,6 +526,25 @@ to retire it on exit. `Fractal.Worker.layer` does not fork the program caller's 
 mailbox or handoff into the child. A standing worker selected by the child retains its own
 mailbox, and `one-shot` alone does not request a fresh session. See
 [step context isolation](mission-graph-runtime.md#step-syntax).
+
+For a native assigned episode, `Fractal.turn({ id, agent, instructions, context,
+products?, freshContext? })` uses the existing resource transport's `agent.turn`
+operation under its durable key. `agent` is the full agent subject. Instructions and
+context are inert text, not commands or environment. Products are required run-relative
+resource specs `{ path, kind, fields }` with scalar field constraints. The native engine
+owns the persisted parent-linked finite work episode, wake/claim/report lifecycle and
+lease fences; it does not impersonate the parent as spontaneous agent work. Fresh context
+is optional, never the default. Refusal is `ResourceError`; terminal failure is
+`ChildFailed`. Success is `WorkerReport` with actual `run`, `step`, `summary`,
+`evidence: string[]`, relative-path `products`, and optional actual `executions`.
+
+`Worker.layer({ mission, input, product, report: true })` explicitly decodes the child's
+`result` as `WorkerReport`, selecting `report.products` by the requested relative paths.
+Missing or malformed reports are not accepted, even without requested products.
+With `execution: true`, this mode returns the report's episode receipts rather than the
+wrapper child program's accounting. Without report mode, the original declared-resource
+protocol and child receipt behavior remain unchanged.
+
 
 Worker turns can request `Fractal.step({ id, success, execution: true })` to return
 `{ value, executions }` instead of the decoded product alone. `value` remains domain data;
@@ -676,18 +695,32 @@ const graph = Fractal.mission({
 export default Fractal.lower(graph, {
   id: 'example/change',
   host: 'local',
-  workers: { 'example/worker': { mission: 'example/seat-turn', goalInput: 'goal' } },
+  // Optional per-agent overrides belong in workers; the standard route needs none.
 })
 ```
 
-Bindings are explicit: `workers` maps an assigned agent id to a published child mission
-and that mission's `goalInput` instruction parameter. Worker children receive every
-declared text input unchanged, plus the expanded step goal under `goalInput`. If that
-key collides with a declared graph input, compilation refuses the binding; choose an
-unused child parameter (for example `instructions` when the graph has `input.text('goal')`).
-A tree using imported agent references supplies `resolveAgent` using its existing
-reference resolver. Resolve context factories before calling `lower`. Missing worker
-bindings are compile refusals; the compiler invents no implicit seat-turn protocol.
+Assigned agents default to the published `fractal/seat-turn` child mission. Publish it
+as an ordinary `fractal/seat-turn/mission.ts` with
+`Fractal.seatTurn({ meta: import.meta, reportTo })` from `fractal/effect`; the full source
+entry is `packages/fractal/fixtures/programs/fractal/seat-turn/mission.ts`. The SDK does
+not fabricate a published revision. The helper has fixed required text inputs `agent`,
+`instructions` and `context`, calls native `Fractal.turn`, and returns `WorkerReport`.
+The default binding maps `goalInput: 'instructions'`, `contextInput: 'context'`,
+`agentInput: 'agent'`, and `report: true`. Context JSON contains `{ inputs, products,
+freshContext? }`: all original graph inputs and expanded product paths/kinds/fields
+stay inside the wrapper, avoiding collisions even for graph inputs named `agent`,
+`instructions`, `context` or `goal`. The helper decodes that wrapper and passes inputs
+as inert JSON context plus separate product specs and optional fresh-context request.
+
+`workers` optionally overrides individual assigned-agent ids with a published child
+mission and its `goalInput`, optional `contextInput`, optional `agentInput`, and optional
+`report` mode. A `goalInput`-only override keeps the original protocol: spread every
+declared text input unchanged and supply the expanded goal under that key. A collision
+refuses compilation; use a separate key or the encoded `contextInput` protocol.
+Mapped instruction, context and agent keys must be distinct. `strictWorkers: true`
+disables the standard resolver and refuses missing overrides. A tree using imported
+agent references supplies `resolveAgent` through its existing tree resolver. Resolve
+context factories before calling `lower`.
 
 The compiler validates a completed-dependency DAG and precomputes its ready sets.
 Each ready set runs through `Effect.all` with unbounded sibling concurrency; a dependent
@@ -696,12 +729,32 @@ mission budget, authority, timeout, stall threshold, resources and pinned docs r
 native mission declarations. The returned `graph` projection preserves the original ids,
 edges and gates for inspection.
 
+Mission `constraints` are ordered policy text, not executable predicates. The graph
+runtime inherits them into each step's work context (`flatten_run_steps` in
+`crates/fractal-store/src/store.rs`); the work CLI surfaces each as `Constraint:`.
+Lowering preserves every entry verbatim, including multiline text, under a
+`Constraints:` section in the native mission goal and in **every** worker's
+instruction input. Input/run references expand there just as they do in step goals;
+graph escapes such as `$${input.example}` produce literal `${input.example}`, even
+when no such input is declared. An absent or empty constraint list adds no section.
+This preserves instruction
+delivery; it does not claim mechanical enforcement of arbitrary authority, safety,
+review or admission prose. No natural-language interpretation creates new gates,
+resource limits or approvals.
+
+Mission `resources` remain owned resource declarations, not host admission limits.
+Completed `dependsOn` edges supply DAG ordering. Graph `lanes` describe ordered
+entries and optional person approval; they are not `Fractal.resources.lane` command
+admission and remain unsupported. Similar words in policy text do not make these
+contracts interchangeable.
+
 Assigned steps use native worker turns with their original graph step ids as journal
-keys. `input.text` is a required string input. Run-scoped `product.resource` values are
-decoded from the child run's **full resource subject**, including when a worker declares
-several products, and their scalar constraints are checked durably. Product field gates
-read these typed product records; their producer must be the same step or a dependency
-ancestor. Both a missing field and a mismatched value fail with `GraphGateFailed`.
+keys. `input.text` is a required string input. The standard route decodes run-scoped
+`product.resource` values from the real episode's `WorkerReport.products`, by relative
+path. Legacy overrides decode the child run's full resource subjects. Both support
+multiple products and durably check scalar constraints. Product field gates read these
+typed records; their producer must be the same step or a dependency ancestor. Both a
+missing field and a mismatched value fail with `GraphGateFailed`.
 
 `gate.human` becomes a native decision ask addressed to the declared reviewer. Only that
 reviewer's named approval lets the step finish; rejection, dismissal and cancellation
@@ -718,12 +771,19 @@ This is an explicit W1 subset, not the whole design table above. `GraphCompileRe
 names `step`, `construct` and `reason` before execution for unsupported constructs:
 `waitFor`/`usesMission`, watch/observer/subscription dispatch, `Timing`, `Review`,
 `waitUntil`, loops, non-completed dependency states, retries, compensation/finally,
-custom completion, mission gates/constraints/lanes/report flags, step-owned declarations,
+custom completion, mission gates/lanes/report flags, step-owned declarations,
 direct exec/program steps, resource inputs, external product subjects, non-resource
 products, feedback-mode human gates, exec time limits and remote exec hosts. Other gate
 kinds (including merged/document/exists) are also refused. Nothing is silently dropped.
 Existing published graph missions stay on their current runtime until explicitly
 republished from a supported lowered definition.
+
+Invalid authoring data raises `GraphCompileRefusal` with construct `authoring boundary`
+and the original schema diagnostic, including its field path. This includes handles
+that were copied or imported through a different SDK module instance, but does not
+assume every validation failure is an SDK identity problem. Keep intact authoring
+handles and resolve the graph and compiler through one SDK instance. Other typed
+refusals and unexpected defects are not reclassified as schema failures.
 
 
 ### 10. Priority

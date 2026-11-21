@@ -5,8 +5,7 @@ use crate::store::resource_membership::LaneRequest;
 impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn resolve_resource_profile(&self, request: &mut LaneRequest) -> Result<()> {
         let Some(key) = request.profile.as_deref() else {
-            anyhow::ensure!(request.profile_estimate.is_none(), "invalid-profile: estimate without a profile key");
-            return Ok(());
+            anyhow::bail!("raw-resource-declaration: Roll B requires an execution-host profile key");
         };
         fractal_runtime::validate_profile_key(key)?;
         if let Some(stored) = self.store.resource_profile_request(&request.id)? {
@@ -30,26 +29,34 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Only internal, already-persisted shell commands carry a resolved estimate here.
         // Public API and program/DSL decoders reject caller estimates before this seam.
         if request.profile_estimate.is_some() { return Ok(()); }
-        let Some(seed) = self.seat_admission.finite_policy.profiles.get(key) else {
-            anyhow::ensure!(request.capacity.is_some(), "unknown-profile: no seed for `{key}` on this execution host; an explicit declaration is required until cutover");
-            request.profile_estimate = Some(fractal_runtime::ResourceProfileEstimate {
-                seed_revision: None, learned_revision: None,
-                samples: fractal_runtime::ResourceProfileSamples::default(), memory_high_bytes: None,
-                source: None, reason: None,
-                learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly,
-            });
-            return Ok(());
-        };
+        let seed = self.seat_admission.finite_policy.profiles.get(key)
+            .with_context(|| format!("unknown-profile: no execution-host seed for `{key}`"))?;
         anyhow::ensure!(request.capacity.is_none() && request.disk.is_none() && request.io.is_none(),
-            "profile-override-conflict: known profile `{key}` does not accept caller resource overrides");
-        let estimate = seed.estimate()?;
-        let disk = seed.disk.map(|bytes| -> Result<fractal_runtime::DiskRequest> {
+            "profile-override-conflict: profile `{key}` does not accept caller resource overrides");
+        let mut estimate = seed.estimate()?;
+        let revision = estimate.seed_revision.as_deref().context("profile seed revision is missing")?;
+        let learned = self.store.resource_profile_estimate(
+            &request.host, key, revision,
+            crate::store::resource_profile_learner::SeedLimits {
+                memory_high_bytes: seed.memory_high.unwrap_or(seed.memory),
+                memory_max_bytes: seed.memory, disk_bytes: seed.disk.unwrap_or(0),
+            },
+            self.seat_admission.finite_policy.profile_readiness,
+        )?;
+        estimate.learned_revision = learned.revision;
+        estimate.samples = fractal_runtime::ResourceProfileSamples {
+            memory: learned.memory_samples, disk: learned.disk_samples,
+        };
+        if learned.memory_learned {
+            estimate.memory_high_bytes = Some(learned.memory_high_bytes);
+        }
+        let disk = seed.disk.map(|_| learned.disk_bytes).map(|bytes| -> Result<fractal_runtime::DiskRequest> {
             let path = request.disk_path.as_deref().context("profile-disk-path: a disk profile requires an execution-host disk path")?;
             anyhow::ensure!(std::path::Path::new(path).is_absolute(), "profile-disk-path: disk path must be absolute");
             let path = std::fs::canonicalize(path).context("profile disk path is unavailable on the execution host")?;
             Ok(fractal_runtime::DiskRequest { bytes, path: path.to_string_lossy().into_owned() })
         }).transpose()?;
-        request.capacity = Some(seed.capacity());
+        request.capacity = Some(fractal_runtime::Capacity { cores: seed.cores, memory: learned.memory_max_bytes });
         request.disk = disk;
         request.io = seed.io;
         request.profile_estimate = Some(estimate);
