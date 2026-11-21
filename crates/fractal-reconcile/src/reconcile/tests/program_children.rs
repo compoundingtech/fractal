@@ -113,7 +113,7 @@ mission "program-child" state="ready" {{
 mission "program-parent" state="ready" {{
   goal "Wait on child runs and asks."
   concurrent-runs max=4
-  authority { start "program-child"; start "native-turn"; }
+  authority {{ start "program-child"; start "native-turn"; }}
   input "mode" kind="text"
   input "gate" kind="text"
   step "program" {{
