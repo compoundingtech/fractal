@@ -389,7 +389,7 @@ fn wal_journal_size_limit_reclaims_a_checkpointed_high_water_file() {
     const TEST_LIMIT: u64 = 64 * 1024;
     writer.pragma_update(None, "journal_size_limit", TEST_LIMIT).unwrap();
     writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
-    writer.execute_batch("CREATE TABLE wal_limit_test(value BLOB);
+    writer.execute_batch(/* sqlite-large-value: allow-for-now lv-hf4175d1b7571 owner=smallclaims::store::projection_busy_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE wal_limit_test(value BLOB);
         INSERT INTO wal_limit_test VALUES(zeroblob(262144));").unwrap();
     let wal = path.with_extension("sqlite3-wal");
     assert!(std::fs::metadata(&wal).unwrap().len() > TEST_LIMIT);
@@ -400,7 +400,7 @@ fn wal_journal_size_limit_reclaims_a_checkpointed_high_water_file() {
     assert_eq!(frames, copied);
     // PASSIVE copies but does not truncate. The next writer resets and enforces the limit.
     assert!(std::fs::metadata(&wal).unwrap().len() > TEST_LIMIT);
-    writer.execute("INSERT INTO wal_limit_test VALUES(NULL)", []).unwrap();
+    writer.execute(/* sqlite-large-value: allow-for-now lv-hb8e54d2e4d03 owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO wal_limit_test VALUES(NULL)", []).unwrap();
     assert!(std::fs::metadata(&wal).unwrap().len() <= TEST_LIMIT);
     drop(writer);
     // The daemon's existing zero-busy-timeout TRUNCATE path can reclaim it immediately too.
