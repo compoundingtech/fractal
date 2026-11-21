@@ -1582,6 +1582,15 @@ nix flake check --no-build
 The same input supplies `otelite`, so updating its pin changes the collector used by
 release-integration and the default shell.
 
+Keep the flake input and source member on the same published producer when
+updating this toolchain. The TypeScript installation's semantic input includes
+selected upstream package sources, not just `pnpm-lock.yaml`; an unchanged
+upstream lock therefore does not prove that the previous installation hash is
+valid. After the native flake lock update, use
+`scripts/nix-typescript-client-deps-hash --system x86_64-linux --flake .` to
+measure and record both the fixed-output hash and `installationInputHash`.
+Do not copy a hash from a different producer revision.
+
 `nix.yml` also publishes the exact `packages.x86_64-linux.fractal` output on protected
 main pushes and main-only manual dispatch. This separate hosted Linux job does not
 enable the disabled persistent-store verification job or occupy merge-serving workers.
