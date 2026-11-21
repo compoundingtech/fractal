@@ -5408,6 +5408,7 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
     let input = ReplicationExchange {
         build: None,
         claim_ranges: None,
+        claim_member_signatures: Vec::new(),
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
@@ -5485,6 +5486,7 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
     let make_exchange = |envelopes: Vec<ReplicaEnvelope>| ReplicationExchange {
         build: None,
         claim_ranges: None,
+        claim_member_signatures: Vec::new(),
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
@@ -6295,6 +6297,7 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
                 &ReplicationExchange {
                     build: None,
                     claim_ranges: None,
+                    claim_member_signatures: Vec::new(),
                     projection_digests: Default::default(),
                     peer: "source".into(),
                     fleet_id: FLEET.into(),
@@ -7444,6 +7447,37 @@ fn emptying_a_valid_records_bytes_fires_no_trigger() {
         }
     }
     assert!(blind.is_empty(), "triggers that fire when only `raw` changes: {blind:?}");
+}
+
+#[test]
+fn deleting_a_valid_record_fires_only_the_position_trigger() {
+    // `record_bytes` deletes every valid record of a store once its rollback window has passed.
+    // Its claim keeps its row and its position, so a trigger that fired on that deletion would
+    // only queue rebuilds of unchanged state, for every record.
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let triggers = connection
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='replica_records'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let mut blind = Vec::new();
+    for (name, sql) in triggers {
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let head = sql.split(" BEGIN").next().unwrap_or_default();
+        if !head.contains(" DELETE ON replica_records") {
+            continue;
+        }
+        // The position trigger stores a legacy claim's position before its record goes, and
+        // the checkpoint capture guard fences a capture in progress; both are bounded.
+        let exempt = name == "claim_positions_record_delete_v1" || name.contains("checkpoint_capture");
+        if !exempt && !head.contains("OLD.state<>'valid'") {
+            blind.push(name);
+        }
+    }
+    assert!(blind.is_empty(), "triggers that fire when a valid record is deleted: {blind:?}");
 }
 
 #[test]
