@@ -8137,6 +8137,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ) {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.verdict_link_sweep", sweep_orphan_verdict_links(store.clone())));
     spawn_response_expiry_with(store.clone(), config.trim.replay_safe_receipt_window_ms()?.min(i64::MAX as u64) as i64);
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
@@ -22293,6 +22294,50 @@ const SIGNATURE_BOOTSTRAP_RETRY: Duration =
 /// A verdict drain at least this large is logged; smaller ones are ordinary sealing work.
 const SIGNATURE_BACKLOG_REPORTED: usize = 1_000;
 
+/// Verdict links whose claim is gone: a deleted claim leaves its links (they have no index by
+/// claim), and a requeue that meets one drops it. A pass a day walks the rest in key order from
+/// its cursor, each loan followed by an equally long quiet interval.
+async fn sweep_orphan_verdict_links(store: Arc<Store>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<u64>> {
+            let now = || now_ms().min(u128::from(u64::MAX)) as u64;
+            if let Some(wait) = worker.verdict_link_sweep_wait(now())? {
+                return Ok(Some(wait));
+            }
+            let started = std::time::Instant::now();
+            let (mut examined, mut deleted, mut longest) = (0, 0, Duration::ZERO);
+            loop {
+                let page_started = std::time::Instant::now();
+                let page = fractal_daemon::task_cpu::profiled_blocking("maintenance.verdict_link_sweep", || worker.sweep_orphan_verdict_links(now()))?;
+                examined += page.examined;
+                deleted += page.deleted;
+                longest = longest.max(page.held);
+                if page.finished {
+                    break;
+                }
+                std::thread::sleep(page_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+            }
+            if deleted != 0 {
+                stderr_message("fractal", format_args!("orphan verdict links swept: {deleted} of {examined} in {:.0}s, longest writer hold {} ms", started.elapsed().as_secs_f64(), longest.as_millis()));
+            }
+            Ok(None)
+        }).await;
+        match result {
+            Ok(Ok(Some(wait))) => tokio::time::sleep(Duration::from_millis(wait.min(60 * 60 * 1_000))).await,
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) if smallclaims::store::principals::transient_storage_error(&error) => {
+                stderr_message("fractal", format_args!("orphan verdict-link sweep retrying in {}s after a transient storage error: {error:#}", SIGNATURE_BOOTSTRAP_RETRY.as_secs()));
+                tokio::time::sleep(SIGNATURE_BOOTSTRAP_RETRY).await;
+            }
+            result => {
+                stderr_message("fractal", format_args!("orphan verdict-link sweep stopped: {result:?}"));
+                return;
+            }
+        }
+    }
+}
+
 async fn migrate_signature_candidates(store: Arc<Store>) {
     let mut reported_fault = None;
     loop {
@@ -23235,6 +23280,7 @@ async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
         let pass_started = Instant::now();
         let (mut rows, mut bytes, mut unreleased, mut released) = (0, 0, 0, 0);
         let mut longest = Duration::ZERO;
+        let mut caught_up = false;
         loop {
             let step_store = store.clone();
             let step = match store.connection.write_workers().spawn_blocking(move || {
@@ -23261,6 +23307,7 @@ async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
                 unreleased = 0;
             }
             if !step.more {
+                caught_up = !step.waiting;
                 break;
             }
             tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
@@ -23272,7 +23319,59 @@ async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
                 pass_started.elapsed().as_secs(),
             ));
         }
+        if caught_up {
+            compact_blob_rows(&store).await;
+        }
         tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
+/// Pack the `blobs` rows the move emptied, a bounded writer hold a step, giving free pages back
+/// as it goes (`Store::compact_blob_rows_step`). One pass per store, over the rows the move had
+/// emptied when the pass began; after it, each call finds nothing to do. Rows emptied later are
+/// few (new blobs, an hour at a time) and stay where they are.
+async fn compact_blob_rows(store: &Arc<Store>) {
+    const HOLD_BUDGET: Duration = Duration::from_millis(40);
+    // Rows a step considers; the hold budget usually ends it first.
+    const BATCH: usize = 2_000;
+    // Rows relocated between giving free pages back.
+    const RELEASE_EVERY_ROWS: usize = 20_000;
+    let started = Instant::now();
+    let (mut relocated, mut unreleased, mut released) = (0, 0, 0);
+    let mut longest = Duration::ZERO;
+    loop {
+        let step_store = store.clone();
+        let step = match store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::blocking("blobs.compact", || step_store.compact_blob_rows_step(BATCH, HOLD_BUDGET))
+        }).await {
+            Ok(Ok(step)) => step,
+            Ok(Err(error)) => {
+                stderr_message("fractal", format_args!("packing blob rows failed: {error:#}"));
+                break;
+            }
+            Err(error) => {
+                stderr_message("fractal", format_args!("packing blob rows stopped: {error}"));
+                break;
+            }
+        };
+        relocated += step.relocated;
+        unreleased += step.relocated;
+        longest = longest.max(step.hold);
+        if unreleased >= RELEASE_EVERY_ROWS || (!step.more && unreleased > 0) {
+            released += release_free_pages_paced(store).await;
+            unreleased = 0;
+        }
+        if !step.more {
+            break;
+        }
+        tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
+    }
+    if relocated > 0 {
+        stderr_message("fractal", format_args!(
+            "blob rows packed: {relocated} rows, gave {released} free pages back, longest writer hold {} ms, pass {} s",
+            longest.as_millis(),
+            started.elapsed().as_secs(),
+        ));
     }
 }
 

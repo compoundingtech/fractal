@@ -131,7 +131,7 @@ fn a_writer_signs_its_claims_and_a_peer_keeps_only_signatures_that_verify() {
     sync(&alder, &cedar);
     while cedar.promote_claim_member_signatures().unwrap() > 0 {}
     assert_eq!(
-        cedar.claim_member_signatures_for(&[genuine.claim_id.clone()]).unwrap(),
+        cedar.claim_member_signatures_for(std::slice::from_ref(&genuine.claim_id)).unwrap(),
         vec![genuine],
         "only alder's own signature is kept for alder's claim"
     );
@@ -210,10 +210,10 @@ fn only_a_key_membership_admits_counts_and_waiting_signatures_never_hide_later_o
     for _ in 0..4 {
         birch.promote_claim_member_signatures().unwrap();
     }
-    assert_eq!(birch.claim_member_signatures_for(&[genuine.claim_id.clone()]).unwrap(), vec![genuine]);
+    assert_eq!(birch.claim_member_signatures_for(std::slice::from_ref(&genuine.claim_id)).unwrap(), vec![genuine]);
     assert_eq!(waiting(&birch), 600, "the invented ones still wait for claims that never come");
     for signature in &invented {
-        assert!(birch.claim_member_signatures_for(&[signature.claim_id.clone()]).unwrap().is_empty());
+        assert!(birch.claim_member_signatures_for(std::slice::from_ref(&signature.claim_id)).unwrap().is_empty());
     }
 }
 

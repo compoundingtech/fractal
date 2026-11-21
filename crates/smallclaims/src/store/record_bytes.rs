@@ -140,28 +140,6 @@ pub fn replaced_update_trigger(connection: &Connection, table: &str, name: &str)
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::runtime::Plain;
-
-    #[test]
-    fn a_page_seeks_the_rowid_range_and_sorts_nothing() {
-        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
-        let connection = store.connection.write();
-        // Statistics that favour the state index, as a large store's do.
-        connection.execute_batch("ANALYZE").unwrap();
-        let plan = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {PAGE_SQL}"))
-            .unwrap()
-            .query_map(params![0, PAGE], |row| row.get::<_, String>(3))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(plan, ["SEARCH replica_records USING INTEGER PRIMARY KEY (rowid>?)"]);
-    }
-}
-
 /// Whether the claim `alias` has a record in a state other than valid: a record a repair
 /// replaced, or one marked invalid with its envelope. Such a claim is not an accepted copy.
 pub fn claim_record_not_valid_sql(alias: &str) -> String {
@@ -247,33 +225,6 @@ pub(crate) fn assert_plan_seeks(connection: &Connection, sql: &str) {
         .filter(|step| (step.starts_with("SCAN ") && !produced(step)) || step.contains("AUTOMATIC"))
         .collect();
     assert!(scans.is_empty(), "{scans:?} in {plan:#?} for {sql}");
-}
-
-#[cfg(test)]
-mod view_plan_tests {
-    use super::*;
-    use crate::store::runtime::Plain;
-
-    /// Without statistics the planner assumes large tables, as on a real store.
-    #[test]
-    fn envelope_record_counts_and_late_checks_seek_and_scan_nothing() {
-        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
-        let connection = store.connection.write();
-        for sql in [
-            format!(
-                "SELECT {} FROM replica_envelopes envelopes WHERE rowid>?1 AND rowid<=?2",
-                envelope_record_count_sql("envelopes")
-            ),
-            format!(
-                "SELECT {} FROM replica_envelopes envelopes WHERE writer=?1",
-                envelope_has_late_record_sql("envelopes", "?2")
-            ),
-            "SELECT COUNT(*) FROM replica_record_rows WHERE claim_id=?1".into(),
-            crate::store::checkpoint::sealed_envelope_records_sql(),
-        ] {
-            assert_plan_seeks(&connection, &sql);
-        }
-    }
 }
 
 /// Every record a reader of `replica_records` used to see: the stored rows (a record that is not
@@ -592,4 +543,53 @@ fn resolve_page(tx: &Transaction<'_>) -> Result<RecordRepairResolution> {
         params![LOOKUP_CURSOR, if report.done { "0".to_owned() } else { after.to_string() }],
     )?;
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    #[test]
+    fn a_page_seeks_the_rowid_range_and_sorts_nothing() {
+        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+        let connection = store.connection.write();
+        // Statistics that favour the state index, as a large store's do.
+        connection.execute_batch("ANALYZE").unwrap();
+        let plan = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {PAGE_SQL}"))
+            .unwrap()
+            .query_map(params![0, PAGE], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(plan, ["SEARCH replica_records USING INTEGER PRIMARY KEY (rowid>?)"]);
+    }
+}
+
+#[cfg(test)]
+mod view_plan_tests {
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    /// Without statistics the planner assumes large tables, as on a real store.
+    #[test]
+    fn envelope_record_counts_and_late_checks_seek_and_scan_nothing() {
+        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+        let connection = store.connection.write();
+        for sql in [
+            format!(
+                "SELECT {} FROM replica_envelopes envelopes WHERE rowid>?1 AND rowid<=?2",
+                envelope_record_count_sql("envelopes")
+            ),
+            format!(
+                "SELECT {} FROM replica_envelopes envelopes WHERE writer=?1",
+                envelope_has_late_record_sql("envelopes", "?2")
+            ),
+            "SELECT COUNT(*) FROM replica_record_rows WHERE claim_id=?1".into(),
+            crate::store::checkpoint::sealed_envelope_records_sql(),
+        ] {
+            assert_plan_seeks(&connection, &sql);
+        }
+    }
 }

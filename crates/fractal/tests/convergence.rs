@@ -759,12 +759,9 @@ impl World {
 
     fn check_actions(&mut self, index: usize, actions: &[CheckpointAction]) {
         for action in actions {
-            match action {
-                CheckpointAction::TrimGraphChanged { .. } => {
-                    let message = format!("{}: {action:?}", self.nodes[index].name);
-                    self.fail(message);
-                }
-                _ => {}
+            if let CheckpointAction::TrimGraphChanged { .. } = action {
+                let message = format!("{}: {action:?}", self.nodes[index].name);
+                self.fail(message);
             }
         }
     }
