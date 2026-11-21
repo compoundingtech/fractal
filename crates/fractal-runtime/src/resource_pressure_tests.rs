@@ -74,6 +74,41 @@ fn a_sampling_gap_or_backwards_clock_resets_continuous_evidence() {
 }
 
 #[test]
+fn independent_samples_release_while_reconcile_passes_are_17_to_27_seconds_apart() {
+    let policy = Policy::default();
+    let period = u64::try_from(policy.sample_interval().as_millis()).unwrap();
+    let mut brake = Brake::new(policy).unwrap();
+    // Missing data closes admission. Only the independent healthy samples recover it.
+    assert_eq!(brake.observe(&[], 0).reason, Some(Reason::UnknownObservation));
+    let reconcile_times = [17000, 44000, 61000, 88000, 105000, 132000];
+    let mut sampled = 0;
+    for now in reconcile_times {
+        while sampled + period <= now {
+            sampled += period;
+            brake.observe(&readings(sampled, 0, 0), sampled);
+        }
+        // Admission may also consult the shared observer between periodic samples.
+        let decision = brake.observe(&readings(sampled, 0, 0), now);
+        assert_eq!(decision.blocked, now < 122500, "reconcile at {now}ms");
+        if decision.blocked {
+            assert_eq!(decision.reason, Some(Reason::Recovering));
+        }
+    }
+}
+
+#[test]
+fn healthy_recovery_is_distinct_from_the_original_pressure_signal() {
+    let mut brake = Brake::new(Policy::default()).unwrap();
+    for now in (0..=60000).step_by(2500) {
+        brake.observe(&readings(now, 1000, 0), now);
+    }
+    assert_eq!(brake.observe(&readings(62500, 0, 0), 62500).reason,
+        Some(Reason::Recovering));
+    assert_eq!(brake.observe(&readings(65000, 1000, 0), 65000).reason,
+        Some(Reason::Pressure(Signal::MemoryFull)));
+}
+
+#[test]
 fn configured_signal_window_threshold_and_timings_are_used() {
     let policy = Policy {
         rules: vec![Rule { signal: Signal::IoFull, window: Window::Avg10,

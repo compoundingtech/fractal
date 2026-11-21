@@ -10,7 +10,7 @@ fn reconciler() -> Reconciler<FakeRuntime> {
     )
 }
 #[tokio::test]
-async fn idle_host_without_finite_custody_does_not_poll_pressure() {
+async fn admission_refresh_does_not_schedule_pressure_polling() {
     let reconciler = reconciler();
     reconciler.refresh_seat_admission_at(u64::try_from(now_ms() / 1000).unwrap());
     assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
@@ -19,43 +19,106 @@ async fn idle_host_without_finite_custody_does_not_poll_pressure() {
 
 
 #[tokio::test]
-async fn logical_admission_keeps_pressure_refresh_platform_explicit_without_native_lanes() {
-    let reconciler = reconciler();
+async fn daemon_sampler_observes_without_a_pass_or_native_lanes() {
+    let reconciler = Arc::new(reconciler());
     assert!(reconciler.seat_admission.lanes.is_none());
     assert!(reconciler.seat_admission.config.is_none());
-    use crate::store::resource_membership::{Admission, Fit, LaneRequest};
-    let request: LaneRequest = serde_json::from_value(serde_json::json!({
-        "id":"pressure-owner", "name":"checks", "host":"node", "maxMembers":1,
-        "capacity":{"cores":1,"memory":1024}, "coverage":"logical",
-        "owner":{"run":"run","step":"step","attempt":1}, "class":"check",
-    })).unwrap();
-    reconciler.store.start_resource_authority("node", "pressure-authority").unwrap();
-    let fit = Fit { room: request.capacity, ..Fit::default() };
-    let Admission::Admitted(grant) = reconciler.store.request_resource_membership(&request, fit.clone(), 1).unwrap()
-        else { panic!("finite fixture must admit"); };
-    let mut queued = request.clone();
-    queued.id = "pressure-queued".into();
-    assert!(matches!(reconciler.store.request_resource_membership(&queued, fit, 2).unwrap(), Admission::Queued { .. }));
-    let now = u64::try_from(now_ms() / 1000).unwrap();
-    reconciler.refresh_seat_admission_at(now);
-    let deadlines = reconciler.step_deadlines.lock().unwrap();
+    assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
+    let events = reconciler.event_notify.subscribe();
+    let sampler = reconciler.sample_resource_pressure();
+    tokio::pin!(sampler);
     if cfg!(target_os = "linux") {
+        tokio::select! {
+            () = &mut sampler => panic!("sampler must remain scoped to the daemon run"),
+            () = reconciler.notify.notified() => {},
+            () = tokio::time::sleep(Duration::from_secs(10)) => panic!("sampler did not observe independently"),
+        }
         assert!(reconciler.seat_admission.pressure.lock().unwrap().is_some());
-        assert!(deadlines.get("resource-pressure").is_some_and(|deadline|
-            *deadline >= u128::from(now + 5) * 1000));
+        assert!(!reconciler.step_deadlines.lock().unwrap().contains_key("resource-pressure"));
+        assert!(!events.has_changed().unwrap(), "sampling must not publish a graph mutation");
     } else {
+        tokio::select! {
+            () = &mut sampler => panic!("unsupported platforms keep the sampler dormant"),
+            () = std::future::ready(()) => {},
+        }
         assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
-        assert!(!deadlines.contains_key("resource-pressure"));
     }
-    drop(deadlines);
-    reconciler.store.cancel_resource_membership(&grant, &request.owner, 3).unwrap();
-    let runtime = fractal_runtime::ExecRuntime::new(PathBuf::new(), PathBuf::new());
-    assert!(reconciler.store.retire_resource_membership(&grant, &request.owner, &runtime, 3).unwrap());
-    assert!(reconciler.store.has_live_finite_resource_memberships("node").unwrap(),
-        "queued custody alone keeps pressure recovery observable");
-    reconciler.store.withdraw_resource_membership(&queued.id, &queued.owner, 4).unwrap();
-    assert!(!reconciler.store.has_live_finite_resource_memberships("node").unwrap(),
-        "terminal custody no longer needs pressure observations");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sampler_recovers_while_incremental_observe_holds_its_lock_past_freshness() {
+    use crate::incremental::{ChangeFeed, ChangeSource};
+    use fractal_runtime::resource_pressure::{Policy, Reason, Rule, Signal, Window};
+    use std::time::Instant;
+
+    struct StalledFeed {
+        entered: tokio::sync::mpsc::UnboundedSender<Instant>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl ChangeSource for StalledFeed {
+        fn changes_since(&self, _: u64, _: i64) -> Result<ChangeFeed> {
+            self.entered.send(Instant::now()).unwrap();
+            self.release.recv_timeout(Duration::from_secs(30)).unwrap();
+            Ok(ChangeFeed::default())
+        }
+    }
+
+    let mut reconciler = reconciler();
+    // Read real kernel PSI, with thresholds near 100% so ordinary host activity is healthy.
+    // An intentional observation gap below closes the real Brake before recovery begins.
+    reconciler.seat_admission.finite_policy.psi_brake = Policy {
+        rules: vec![Rule { signal: Signal::MemoryFull, window: Window::Avg10,
+            threshold_millipercent: 100000, resume_millipercent: 99999 }],
+        sustained_ms: 1, resume_ms: 2000, freshness_ms: 1000,
+    };
+    assert!(!reconciler.seat_admission.pressure_decision().unwrap().blocked);
+    let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
+    reconciler.seat_admission.pressure_samples.set(samples).unwrap();
+    let reconciler = Arc::new(reconciler);
+    let incremental = reconciler.incremental.clone();
+    let (entered, mut entering) = tokio::sync::mpsc::unbounded_channel();
+    let (release, stalled) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        incremental.observe(&StalledFeed { entered, release: stalled }).unwrap();
+    });
+    let held_since = entering.recv().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    let sampler = reconciler.sample_resource_pressure();
+    tokio::pin!(sampler);
+    let mut previous = None;
+    let mut count = 0;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let (at, decision) = tokio::select! {
+                () = &mut sampler => panic!("sampler ended while the feed was stalled"),
+                sample = sampled.recv() => sample.unwrap(),
+            };
+            if let Some(previous) = previous {
+                assert!(at.duration_since(previous) <= Duration::from_millis(1000),
+                    "incremental observation stalled the independent sampling cadence");
+            }
+            previous = Some(at);
+            count += 1;
+            if count == 1 {
+                assert_eq!(decision.reason, Some(Reason::UnknownObservation));
+            } else if decision.blocked {
+                assert_eq!(decision.reason, Some(Reason::Recovering));
+            } else {
+                break;
+            }
+        }
+    }).await.expect("the real Brake did not recover while changes_since held the incremental lock");
+    assert!(count >= 10, "recovery requires continued periodic healthy observations");
+    assert!(held_since.elapsed() > Duration::from_millis(1000));
+    assert!(reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
+
+    release.send(()).unwrap();
+    observer.join().unwrap();
+    // Only the next pass drains the signal and takes incremental's lock.
+    reconciler.refresh_seat_admission_at(0);
+    assert!(!reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
 }
 
 #[test]
