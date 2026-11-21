@@ -590,3 +590,50 @@ fn a_verdict_that_differs_between_members_is_named_and_one_still_to_judge_is_not
     let plain = alder.answers_summary(cut).unwrap();
     assert!(differing_kinds(&folding, &plain, false).is_empty(), "a member that runs only the verdict reader runs no fold reader");
 }
+
+#[test]
+fn a_verdict_judged_again_after_the_summary_moves_rather_than_differs() {
+    let alder = Arc::new(node("alder"));
+    let birch = node("birch");
+    let claim = state(&alder, "item/a", "one");
+    let other = state(&alder, "item/b", "two");
+    push(&alder, &birch);
+    let cut = cut();
+    let kind = verdicts_kind();
+    let every: BTreeSet<usize> = (0..BUCKETS).collect();
+    let cache = Arc::new(AnswersCache::default());
+    let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
+    let ask = AnswersRequest { cut_unix_ms: cut, kind: Some(kind.clone()), buckets: every.clone() };
+    let invalid = |store: &Store, claim: &str| {
+        store
+            .connection
+            .write()
+            .execute(
+                "INSERT OR REPLACE INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+                [claim],
+            )
+            .unwrap();
+    };
+    // alder keeps a summary in which item/b is invalid and item/a has no key (unsigned).
+    invalid(&alder, &other);
+    invalid(&birch, &other);
+    let kept = settled(&cache, &alder, &summary).summary.unwrap();
+    assert_eq!(kept.kinds[&kind].keys, 1);
+
+    // Then both judge item/a invalid. Nothing of its subject arrives, so only its verdict moved:
+    // the kept summary moves its key, and birch, computing now, lists it, which is no difference.
+    invalid(&alder, &claim);
+    invalid(&birch, &claim);
+    let served = settled(&cache, &alder, &summary).summary.unwrap();
+    assert_eq!(served.kinds[&kind].keys, 1, "the re-judged key moves and item/b still counts");
+    let ours = settled(&cache, &alder, &ask).buckets.unwrap();
+    assert!(ours.keys.iter().any(|key| key.subject == "item/a" && key.moving), "{:?}", ours.keys);
+    let theirs = birch.answer_buckets(&kind, cut, &every).unwrap();
+    assert_eq!(theirs.keys.iter().filter(|key| !key.moving).count(), 2);
+    assert!(differing_keys(&ours.keys, &theirs.keys).is_empty());
+
+    // Verdicts rebuilt from nothing say nothing the kept ones do: every key moves.
+    alder.connection.write().execute("DELETE FROM claim_verdicts", []).unwrap();
+    let rebuilt = settled(&cache, &alder, &summary).summary.unwrap();
+    assert_eq!(rebuilt.kinds[&kind].keys, 0);
+}

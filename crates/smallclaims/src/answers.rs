@@ -589,7 +589,9 @@ impl Store {
         summary.trimmed_cut_unix_ms = u128::try_from(trimmed)?;
         summary.trim_unfinished = unfinished > trimmed || before != (trimmed, unfinished);
         let mut readers = Vec::new();
-        if comparable {
+        // A legacy cache or a signature migration that started during the pass served some of
+        // those verdicts from tables that were changing: then none counts.
+        if comparable && crate::store::principals::verdicts_comparable(&connection)? {
             let (kind, answers, buckets) = reader_answers(VERDICTS, cut_unix_ms, verdicts);
             summary.kinds.insert(kind, answers);
             readers.push(buckets);
@@ -701,6 +703,8 @@ struct CacheState {
     summary: Option<AnswersSummary>,
     /// The newest claim the summary has seen admitted; see [`still_current`].
     summary_mark: i64,
+    /// The newest verdict written when the summary's verdicts were read; see [`verdicts_moved`].
+    verdict_mark: i64,
     kinds: Vec<(Instant, KindBuckets)>,
     /// Every fold reader's keys at the summary's cut, kept apart so narrowing a claim kind never
     /// evicts them.
@@ -709,8 +713,8 @@ struct CacheState {
 }
 
 enum Computed {
-    Summary(AnswersSummary, Vec<KindBuckets>, i64),
-    Kept(AnswersSummary, Vec<KindBuckets>, i64),
+    Summary(AnswersSummary, Vec<KindBuckets>, i64, i64),
+    Kept(AnswersSummary, Vec<KindBuckets>, i64, i64),
     Kind(KindBuckets),
 }
 
@@ -723,6 +727,10 @@ struct Kept {
     summary: AnswersSummary,
     readers: Vec<KindBuckets>,
     mark: i64,
+    /// The newest verdict written when it started. A summary kept by a build without it is not
+    /// served, since a new build computes again.
+    #[serde(default)]
+    verdict_mark: i64,
 }
 
 /// The store index of the newest claim admitted.
@@ -744,6 +752,35 @@ fn still_current(connection: &Connection, mark: i64, cut_unix_ms: u128) -> Resul
         |row| row.get(0),
     )?;
     Ok((!late).then_some(newest))
+}
+
+/// The newest verdict written. A verdict is written as a new row each time a claim is judged.
+fn newest_verdict(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row("SELECT COALESCE(MAX(rowid), 0) FROM claim_verdicts", [], |row| row.get(0))?)
+}
+
+/// The verdict keys of claims older than the cut whose verdict was written after `mark`, with the
+/// newest verdict written; `None` when verdicts were rebuilt since (the newest is below `mark`).
+/// A verdict is not pinned by the cut as a claim is: a claim can be judged again (a signature
+/// arriving apart from it, a requeue) with no claim of its subject arriving, so the verdicts a
+/// summary kept for hours no longer say what this member serves. Those keys move instead, as a
+/// key with a claim after the cut does. The verdicts after `mark` are a short range of rowids.
+fn verdicts_moved(connection: &Connection, mark: i64, cut_unix_ms: u128) -> Result<Option<(BTreeSet<(String, String)>, i64)>> {
+    let newest = newest_verdict(connection)?;
+    if newest < mark {
+        return Ok(None);
+    }
+    let mut statement = connection.prepare_cached(
+        "SELECT c.subject, c.kind, c.origin FROM claim_verdicts v JOIN claims c ON c.id=v.claim_id
+         WHERE v.rowid>?1 AND v.rowid<=?2 AND CAST(c.accepted_at_unix_ms AS INTEGER)<?3",
+    )?;
+    let mut rows = statement.query(rusqlite::params![mark, newest, i64::try_from(cut_unix_ms)?])?;
+    let mut moved = BTreeSet::new();
+    while let Some(row) = rows.next()? {
+        let (kind, origin): (String, String) = (row.get(1)?, row.get(2)?);
+        moved.insert((row.get(0)?, serde_json::to_string(&[kind, origin])?));
+    }
+    Ok(Some((moved, newest)))
 }
 
 /// The subjects of `subjects` with a claim accepted at or after the cut by now. A fold reader's
@@ -781,7 +818,7 @@ fn kept(store: &Store, cut_unix_ms: u128) -> Option<Kept> {
 }
 
 /// Keep `summary` beside `store`, replacing the summary it kept at an earlier cut.
-fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets], mark: i64) -> Result<()> {
+fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets], mark: i64, verdict_mark: i64) -> Result<()> {
     use std::io::Write as _;
     let Some(path) = kept_path(store) else { return Ok(()) };
     let kept = Kept {
@@ -789,6 +826,7 @@ fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets], mark: 
         summary: summary.clone(),
         readers: readers.to_vec(),
         mark,
+        verdict_mark,
     };
     let mut written = path.clone().into_os_string();
     written.push(".new");
@@ -805,6 +843,41 @@ fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets], mark: 
 }
 
 impl CacheState {
+    /// Mark the verdict keys `moved` names moving, adding a key for a verdict that listed none
+    /// (`verified` then), or every key when `moved` is `None`, and count the reader again.
+    fn remark_verdicts(&mut self, moved: Option<&BTreeSet<(String, String)>>) {
+        let Some(summary) = self.summary.as_mut() else { return };
+        let kind = verdicts_kind();
+        let Some(every) = self.readers.iter_mut().find(|every| every.kind == kind) else { return };
+        let mut keys = std::mem::take(&mut every.keys);
+        let mut changed = false;
+        let mut stop = |key: &mut AnswerKey| {
+            changed |= !key.moving;
+            key.moving = true;
+            key.claim.clear();
+        };
+        match moved {
+            None => keys.iter_mut().for_each(&mut stop),
+            Some(moved) => {
+                let listed: BTreeSet<(String, String)> =
+                    keys.iter().map(|key| (key.subject.clone(), key.origin.clone())).collect();
+                keys.iter_mut().filter(|key| moved.contains(&(key.subject.clone(), key.origin.clone()))).for_each(&mut stop);
+                for (subject, origin) in moved.difference(&listed) {
+                    // A key that listed nothing changes no digest by moving.
+                    keys.push(AnswerKey { subject: subject.clone(), origin: origin.clone(), claim: String::new(), moving: true });
+                }
+                keys.sort();
+            }
+        }
+        if !changed {
+            every.keys = keys;
+            return;
+        }
+        let (kind, answers, buckets) = reader_answers(VERDICTS, every.cut_unix_ms, keys);
+        summary.kinds.insert(kind, answers);
+        *every = buckets;
+    }
+
     /// The subjects the kept fold readers still count.
     fn counted_subjects(&self) -> BTreeSet<String> {
         self.readers
@@ -862,10 +935,12 @@ impl AnswersCache {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
             let mark = state.summary_mark;
+            let verdict_mark = state.verdict_mark;
             let counted = state.counted_subjects();
             drop(state);
             let store: &Store = (**store).borrow();
             let current = still_current(&store.readers.get(), mark, request.cut_unix_ms);
+            let verdicts = verdicts_moved(&store.readers.get(), verdict_mark, request.cut_unix_ms);
             let moved = moved_since(&store.readers.get(), &counted, request.cut_unix_ms);
             let slots = self.movement.lock().unwrap_or_else(PoisonError::into_inner).clone()
                 .map(|movement| movement(&store.readers.get(), &counted, request.cut_unix_ms))
@@ -875,6 +950,18 @@ impl AnswersCache {
                 match moved.and_then(|moved| Ok((moved, slots?))) {
                     Ok((moved, slots)) => state.remark_moving(&moved, &slots),
                     Err(error) => eprintln!("fractal: answers at {}: moving keys could not be read: {error:#}", request.cut_unix_ms),
+                }
+                match verdicts {
+                    Ok(Some((moved, newest))) => {
+                        state.remark_verdicts(Some(&moved));
+                        state.verdict_mark = state.verdict_mark.max(newest);
+                    }
+                    Ok(None) => state.remark_verdicts(None),
+                    // Verdicts that cannot be read again say nothing current: none counts.
+                    Err(error) => {
+                        eprintln!("fractal: answers at {}: moved verdicts could not be read: {error:#}", request.cut_unix_ms);
+                        state.remark_verdicts(None);
+                    }
                 }
             }
             match current {
@@ -952,7 +1039,7 @@ impl AnswersCache {
                 None => {
                     if let Some(kept) = kept(store, cut) {
                         match still_current(&store.readers.get(), kept.mark, cut)? {
-                            Some(newest) => return Ok(Computed::Kept(kept.summary, kept.readers, newest)),
+                            Some(newest) => return Ok(Computed::Kept(kept.summary, kept.readers, newest, kept.verdict_mark)),
                             None => eprintln!(
                                 "fractal: answers at {cut}: a claim older than the cut arrived since they were kept; \
                                  computing them again"
@@ -960,6 +1047,7 @@ impl AnswersCache {
                         }
                     }
                     let mark = newest_claim(&store.readers.get())?;
+                    let verdict_mark = newest_verdict(&store.readers.get())?;
                     let (mut summary, mut every) = store.answers_summary_and_readers(cut)?;
                     if let Some(readers) = &readers {
                         for (name, keys) in readers(&store.readers.get(), cut)? {
@@ -968,21 +1056,21 @@ impl AnswersCache {
                             every.push(buckets);
                         }
                     }
-                    Ok(Computed::Summary(summary, every, mark))
+                    Ok(Computed::Summary(summary, every, mark, verdict_mark))
                 }
                 Some(kind) => store
                     .answer_buckets(kind, cut, &(0..BUCKETS).collect())
                     .map(Computed::Kind),
             });
-            if let Ok(Computed::Summary(summary, readers, mark)) = &computed
-                && let Err(error) = keep(store, summary, readers, *mark)
+            if let Ok(Computed::Summary(summary, readers, mark, verdict_mark)) = &computed
+                && let Err(error) = keep(store, summary, readers, *mark, *verdict_mark)
             {
                 eprintln!("fractal: answers at {cut} could not be kept: {error:#}");
             }
             let mut state = cache.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.computing.remove(&(cut, kind.clone()));
             match computed {
-                Ok(Computed::Summary(summary, readers, mark)) => {
+                Ok(Computed::Summary(summary, readers, mark, verdict_mark)) => {
                     eprintln!(
                         "fractal: answers at {cut} computed in {}s: {} kinds, {} of them fold readers",
                         started.elapsed().as_secs(),
@@ -991,12 +1079,14 @@ impl AnswersCache {
                     );
                     state.summary = Some(summary);
                     state.summary_mark = mark;
+                    state.verdict_mark = verdict_mark;
                     state.readers = readers;
                 }
-                Ok(Computed::Kept(summary, readers, mark)) => {
+                Ok(Computed::Kept(summary, readers, mark, verdict_mark)) => {
                     eprintln!("fractal: answers at {cut} kept from an earlier run: {} kinds", summary.kinds.len());
                     state.summary = Some(summary);
                     state.summary_mark = mark;
+                    state.verdict_mark = verdict_mark;
                     state.readers = readers;
                 }
                 Ok(Computed::Kind(every)) => {
