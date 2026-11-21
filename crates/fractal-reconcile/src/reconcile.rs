@@ -3747,6 +3747,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
         );
         let mut member_errors = BTreeMap::new();
+        // Keep every prepared worktree fenced through rendering, runtime initialization and
+        // publication later in this pass, including reuse of an existing checkout.
+        let mut activation_leases = BTreeMap::new();
         for subject in &active {
             if subject.kind == "stop" {
                 continue;
@@ -3786,6 +3789,29 @@ impl<R: RuntimeControl> Reconciler<R> {
             let checkout = (subject.kind == "agent")
                 .then(|| Checkout::from_desired(&subject.desired))
                 .flatten();
+            let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
+                .or_else(|| crate::repositories::workspace_repository(workspace));
+            let lease_owner = match fractal_runtime::store_worktree_lease::canonical_owner(
+                &crate::checkout::workspace_worktree(workspace).unwrap_or_else(|| workspace.to_path_buf()),
+            ) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    member_errors.insert(subject.subject.clone(), error);
+                    continue;
+                }
+            };
+            if let Some(repository) = repository
+                && !activation_leases.contains_key(&lease_owner)
+            {
+                let lease = self.worktree_activation_lease(&lease_owner, &repository);
+                match lease {
+                    Ok(lease) => { activation_leases.insert(lease_owner.clone(), lease); }
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        continue;
+                    }
+                }
+            }
             if workspace.is_dir() {
                 if let Some(checkout) = &checkout
                     && let Err(error) = checkout.validate_workspace(workspace)
@@ -3799,7 +3825,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             let result = if let Some(checkout) = checkout {
-                self.create_checkout(&subject.subject, &checkout, workspace)
+                self.create_checkout(
+                    &subject.subject, &checkout, workspace,
+                    &activation_leases[&lease_owner],
+                )
                     .and_then(|failure| match failure {
                         Some(reason) => Err(anyhow::anyhow!(reason)),
                         None => Ok(()),
@@ -3818,7 +3847,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.observe_agent_workspace(&subject.subject, member)?;
             }
         }
-        let renderable = active
+        let mut renderable = active
             .iter()
             .copied()
             .filter(|subject| {
@@ -3849,6 +3878,38 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .incremental
                         .needs(&format!("member:{}", subject.subject), now_ms())
             });
+        if render_needed {
+            renderable.retain(|subject| {
+                let member = subject.member.as_ref().expect("renderable member");
+                let workspace = Path::new(&member.workspace);
+                let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
+                    &crate::checkout::workspace_worktree(workspace).unwrap_or_else(|| workspace.to_path_buf()),
+                ) {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        return false;
+                    }
+                };
+                if activation_leases.contains_key(&owner) {
+                    return true;
+                }
+                let Some(repository) = crate::repositories::workspace_repository(workspace) else {
+                    return true;
+                };
+                let lease = self.worktree_activation_lease(&owner, &repository);
+                match lease {
+                    Ok(lease) => {
+                        activation_leases.insert(owner, lease);
+                        true
+                    }
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        false
+                    }
+                }
+            });
+        }
         // A render panic faults this host's members; stops never render, so they still run.
         let mut render_span = crate::reconcile_telemetry::phase("pass/render");
         render_span.items(renderable.len());
@@ -7721,6 +7782,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         checkout: &Checkout,
         workspace: &Path,
+        lease: &fractal_runtime::store_worktree_lease::StoreWorktreeLease,
     ) -> Result<Option<String>> {
         let declaration = self.store.newest_claim_index(subject, "intent.desired")?;
         {
@@ -7749,7 +7811,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(Some(failure.clone()));
         }
-        match checkout.create(workspace) {
+        match checkout.create_leased(workspace, lease) {
             Ok(warnings) => {
                 self.checkout_retries
                     .lock()
@@ -8520,6 +8582,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             )?;
             self.signal_changed();
         }
+        let _activation_lease = self.member_activation_lease(member)?;
         let workspace = Path::new(&member.workspace);
         if workspace.exists() {
             anyhow::ensure!(
