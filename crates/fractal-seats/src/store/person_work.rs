@@ -2522,13 +2522,34 @@ mission "writer-load" state="ready" {
                     "claim_incarnation":"worker-one","claim_expires_at_unix_ms":(now_ms()+600_000) as u64}}), &[], None)?;
             project_mission_run_update(tx, &claim).unwrap();
             // These are valid retained claims on unrelated subjects, not the run being updated.
+            // Seed the history through the canonical record/event writers, then drain the
+            // append projectors once. Running admission and every append projector for each
+            // historical receipt measures fixture construction, not receive/write contention.
+            // Keep one batch per claim, just as the live writer does.
             for n in 0..20_000 {
-                append_claim_tx(tx, "birch", "daemon/birch", "daemon.diagnostic", None,
-                    &json!({"fields":{"severity":"warning","code":"retained","reason":format!("history {n}")}}), &[], None)?;
+                let body = json!({"fields":{"severity":"warning","code":"retained","reason":format!("history {n}")}});
+                if n == 19_999 {
+                    append_claim_tx(tx, "birch", "daemon/birch", "daemon.diagnostic", None,
+                        &body, &[], None)?;
+                } else {
+                    let claim = smallclaims::store::append_claim_record_tx(
+                        tx, "birch", "daemon/birch", "daemon.diagnostic", None, &body, &[], None)?;
+                    fractal_store::store::insert_event(
+                        tx, claim.store_index, &claim.kind, &claim.subject, &claim.body)?;
+                }
             }
             Ok(())
         }).unwrap().unwrap();
         target.project_replication_backlog().unwrap();
+        assert_eq!(
+            target.readers.get().query_row(
+                "SELECT COUNT(*),COUNT(DISTINCT batch_id) FROM claims
+                 WHERE subject='daemon/birch' AND kind='daemon.diagnostic'
+                   AND json_extract(body,'$.fields.code')='retained'",
+                [], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+            ).unwrap(),
+            (20_000, 20_000),
+        );
         input.step = None;
         input.new_run = Some("release-question".into());
         let ask = source.ask_person(&input).unwrap();
