@@ -149,6 +149,7 @@ pub mod stop_deferral;
 pub mod stopping_seat;
 pub mod card_fold;
 mod card_actual;
+mod activity_summary;
 #[cfg(test)]
 pub mod card_fold_tests;
 #[cfg(test)]
