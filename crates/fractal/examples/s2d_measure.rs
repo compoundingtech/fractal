@@ -6,8 +6,13 @@
 //! bytes per table, file size, each job's writer hold, the digests before and after, and why
 //! envelopes stay. Only counts, timings and digests are printed, never stored content.
 //!
+//! With STATE_DIR, the copy is prepared with that member's fleet file and key as the daemon
+//! prepares its store, and the member's own claims are signed first (S2c) as its daemon would.
+//! The key is read, never printed. A control writer commits one row every 50 ms throughout; its
+//! holds are reported beside the passes'.
+//!
 //! ```sh
-//! cargo run --release -p fractal --example s2d_measure -- COPY.sqlite3 [FLEET]
+//! cargo run --release -p fractal --example s2d_measure -- COPY.sqlite3 NODE [STATE_DIR]
 //! ```
 use fractal_daemon::store::Store;
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::{Duration, Instant}};
@@ -71,17 +76,23 @@ fn report(label: &str, holds: &mut Vec<Duration>) {
 fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
     let path = Path::new(&args[1]);
-    let fleet = args.get(2).cloned();
+    // The member the copy belongs to: its own claims are the ones it signs and serves.
+    let node = args.get(2).ok_or_else(|| anyhow::anyhow!("the copy's node name is required"))?;
+    let state_dir = args.get(3).map(Path::new);
     let run = Instant::now();
     let before_space = space(path, "before")?;
-    let origin: String = rusqlite::Connection::open(path)?.query_row(
-        "SELECT origin FROM batches ORDER BY rowid DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    )?;
     let started = Instant::now();
-    let store = Arc::new(Store::open(path, &origin)?);
+    let store = Arc::new(Store::open(path, node)?);
     println!("open_ms={}", started.elapsed().as_millis());
+    let fleet = match state_dir {
+        Some(state_dir) => {
+            let file = smallclaims::fleet::file::FleetFile::load(state_dir)?
+                .ok_or_else(|| anyhow::anyhow!("no fleet file in the state directory"))?;
+            smallclaims::fleet::prepare(&store, state_dir, &file)?;
+            Some(file.fleet_id)
+        }
+        None => None,
+    };
     // The daemon's WAL checkpointer, every five seconds, as `recycle_idle_wal` runs it.
     {
         let store = Arc::downgrade(&store);
@@ -103,6 +114,22 @@ fn main() -> anyhow::Result<()> {
         });
     }
     let before = digests(&store, fleet.as_deref())?;
+    // The control: one short write every 50 ms, as a busy member's own appends would queue.
+    let control = Arc::new(std::sync::Mutex::new(Vec::<Duration>::new()));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let control_thread = {
+        let (store, control, stop) = (store.clone(), control.clone(), stop.clone());
+        store.connection.batched(|tx| tx.execute_batch("CREATE TABLE IF NOT EXISTS measure_control(at INTEGER)"))
+            .map_err(|error| anyhow::anyhow!(error))??;
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let job = Instant::now();
+                let _ = store.connection.batched(|tx| tx.execute("INSERT INTO measure_control VALUES (1)", []));
+                control.lock().unwrap().push(job.elapsed());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
     let clock = Instant::now();
     let slow = |job: &str, took: Duration, detail: String| {
         if took.as_millis() >= 100 {
@@ -110,6 +137,26 @@ fn main() -> anyhow::Result<()> {
         }
     };
     let mut holds = Vec::new();
+
+    // S2c: this member signs its own claims, settling waiting signatures first, a page at a time.
+    let (mut scanned, mut signed) = (0, 0);
+    let started = Instant::now();
+    loop {
+        let job = Instant::now();
+        store.promote_claim_member_signatures()?;
+        let page = store.sign_own_claims()?;
+        let took = job.elapsed();
+        slow("sign_own", took, format!("scanned={} signed={}", page.scanned, page.signed));
+        holds.push(took);
+        scanned += page.scanned;
+        signed += page.signed;
+        if page.done {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    println!("own_claims_scanned={scanned} own_claims_signed={signed} sign_ms={}", started.elapsed().as_millis());
+    report("sign", &mut holds);
 
     // S1: valid records keep no bytes.
     let (mut emptied, mut bytes) = (0, 0);
@@ -182,6 +229,7 @@ fn main() -> anyhow::Result<()> {
         if page.done {
             break;
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
     println!(
         "envelopes_read={read} envelopes_released={released} release_ms={} unsigned_payload_bytes={unsigned_bytes}",
@@ -205,9 +253,15 @@ fn main() -> anyhow::Result<()> {
             break;
         }
         pages += step;
+        std::thread::sleep(Duration::from_millis(50));
     }
     println!("vacuum_pages={pages} vacuum_ms={}", started.elapsed().as_millis());
     report("vacuum", &mut holds);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    control_thread.join().map_err(|_| anyhow::anyhow!("the control writer panicked"))?;
+    let mut control = std::mem::take(&mut *control.lock().unwrap());
+    println!("control_over_100ms={}", control.iter().filter(|took| took.as_millis() >= 100).count());
+    report("control", &mut control);
 
     let after = digests(&store, fleet.as_deref())?;
     let differing = before.iter().filter(|(name, digest)| after.get(*name) != Some(digest)).map(|(name, _)| name.as_str()).collect::<Vec<_>>();
