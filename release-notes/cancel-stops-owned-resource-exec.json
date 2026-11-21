@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stop owned resource executions when mission steps are cancelled or fail",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "changed", "detail": "Internal shell execution JSON adds optional generation-bound kill intent and retirement retry deadline/backoff fields with backward-readable defaults. No client-v0 schema or code generation changes."},
+  "rules": {"status": "changed", "detail": "The execution host matches native run, step and attempt ownership during shell reconciliation. Failed, cancelled and superseded attempts request generation-fenced process-group SIGTERM, followed by one persisted SIGKILL intent per generation after the five-second grace period. Unfinished retirement persists and re-arms a retry deadline with exponential backoff from one second to five minutes, without repeatedly signalling a stuck generation. Exit observation and custody retirement remain separate. Finally steps remain eligible until their own attempt ends."},
+  "compatibility": {"status": "changed", "detail": "Mission cleanup includes owned shell executions and waits for exit, retirement and receipt publication until the cleanup deadline. At expiry it records an explicit execution custody unconfirmed outcome and terminalizes the run without terminalizing the execution or releasing membership custody. Later shell sweeps continue retirement. Step-declared drivers retain the existing exact-stop, terminate-request and kill-deadline path."},
+  "downtime": {"status": "none", "detail": "No migration; behavior changes when the reconciler is restarted."},
+  "manual": {"status": "none", "detail": "No new commands or settings."},
+  "recovery": {"status": "changed", "detail": "Active shell reconciliation cancels executions whose owning attempt has ended. Cancellation offsets, generation-bound kill intent and retirement retry deadlines survive restart; terminal receipts remain immutable. Older internal records default to no kill intent or retry deadline."}
+}
