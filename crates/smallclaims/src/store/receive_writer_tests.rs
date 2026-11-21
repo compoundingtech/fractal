@@ -176,7 +176,7 @@ fn out_of_order_receipt_publication_keeps_the_latest_checkpoint_and_observation(
             older.receipt_checkpoint_at_unix_ms.unwrap(),
             older.last_received_at_unix_ms.unwrap(),
         );
-        target.record_peer_failure("birch", "unreachable", "probe failed").unwrap();
+        target.record_peer_failure("birch", "down", "probe failed").unwrap();
         set_thread_clock(Some(start + 1_000 + PEER_QUIET_EXCHANGE_MS));
         assert_eq!(target.replication_peer_up("birch").unwrap(), (true, Some(newer_at)));
         let sync = target.replication_sync.lock().unwrap();
@@ -203,7 +203,7 @@ fn out_of_order_receipt_publication_keeps_the_latest_checkpoint_and_observation(
         assert_eq!(progress.receipt_checkpoint_at_unix_ms, Some(checkpoint_at));
         assert_eq!(progress.last_received_at_unix_ms, Some(checkpoint_at));
     }
-    target.record_peer_failure("birch", "unreachable", "probe failed").unwrap();
+    target.record_peer_failure("birch", "down", "probe failed").unwrap();
     set_thread_clock(Some(start + 50_000));
     assert_eq!(target.replication_peer_up("birch").unwrap(), (true, Some(checkpoint_at)));
 }
