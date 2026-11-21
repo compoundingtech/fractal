@@ -1148,3 +1148,22 @@ The first uses source/report strings as variable index keys; the second combines
 a numeric minute with a variable subject key. Both index existing canonical
 claims without adding authoritative tables. Any later reference conversion must
 preserve exact retry, conflict exclusion, minute range and replication semantics.
+
+### Trim recording preserves ready publications (#6977)
+
+The `smallclaims::store::checkpoint_trim` maintainer retains
+`flow-h39d714b2bc13` for `trim_checkpoint_from`. Recording a cut now calls
+`replica_inventory_changed` rather than withdrawing claim projections: recording
+changes the replication ledger, while deletion and its graph-equivalence checks
+remain delegated to `finish_trim`. This changes the function's comment-free token
+fingerprint, so the flow record is refreshed from
+`python3 scripts/propose-sqlite-large-values`; the flow ID, owner, adjacent marker,
+disposition and `stage-generation-and-keyed-reclamation` obligation are unchanged.
+
+The producer still writes the exact checkpoint ID, drop digest, serialized
+tombstone counts and paged envelope/claim tombstones inline, preserving restart
+and certification semantics. Paging does not prove a physical value-size or
+reclamation-cost bound. The existing generation-staging and certified keyed
+reclamation work therefore remains necessary; this review neither removes the
+exception nor grants a wider exemption. No statement, column catalog or other
+flow record changes are accepted by this refresh.
