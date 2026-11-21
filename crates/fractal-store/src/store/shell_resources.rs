@@ -256,7 +256,7 @@ pub fn submission_digest(command: &Command) -> Result<String> {
 pub enum RequestScope<'a> {
     Local { person: Option<&'a str>, host: &'a str },
     Run { run: &'a str, step: &'a str, attempt: u32 },
-    Agent { owner: &'a resource_membership::Owner },
+    Agent { owner: &'a resource_membership::Owner, #[serde(skip)] live_owners: &'a [resource_membership::Owner] },
 }
 
 impl RequestScope<'_> {
@@ -268,7 +268,7 @@ impl RequestScope<'_> {
                 None => owner.run.strip_prefix("local:") == Some(*host),
             },
             Self::Run { run, step, attempt } => owner.run == *run && owner.step == *step && owner.attempt == *attempt,
-            Self::Agent { owner: expected } => owner == *expected,
+            Self::Agent { live_owners, .. } => live_owners.contains(owner),
         };
         if !owns || execution.command.request_id.as_deref().and_then(|id| uuid::Uuid::parse_str(id).ok()) != Some(request_id) {
             return Err(FractalError::new("resource-request-conflict",
@@ -310,6 +310,26 @@ pub fn request_execution_id(scope: &RequestScope<'_>, request_id: uuid::Uuid) ->
     bytes[6] = (bytes[6] & 0x0f) | 0x80;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Ok(uuid::Uuid::from_bytes(bytes).to_string())
+}
+
+fn shell_request_execution(connection: &Connection, scope: &RequestScope<'_>, request_id: uuid::Uuid) -> Result<Option<Execution>> {
+    let lookup = |candidate: &RequestScope<'_>| -> Result<Option<Execution>> {
+        let id = request_execution_id(candidate, request_id)?;
+        let body: Option<String> = connection.query_row(
+            "SELECT body FROM shell_resources_v1 WHERE id=?1", [&id], |row| row.get(0)).optional()?;
+        let execution: Option<Execution> = body.map(|body| serde_json::from_str(&body).map_err(anyhow::Error::from)).transpose()?;
+        if let Some(execution) = &execution { scope.validate_execution(execution, request_id)?; }
+        Ok(execution)
+    };
+    if let RequestScope::Agent { live_owners, .. } = scope {
+        for owner in *live_owners {
+            if let Some(execution) = lookup(&RequestScope::Agent { owner, live_owners })? {
+                return Ok(Some(execution));
+            }
+        }
+        return Ok(None);
+    }
+    lookup(scope)
 }
 
 
@@ -384,28 +404,20 @@ impl Store {
     }
 
     pub fn shell_resource_by_request(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid) -> Result<Option<Execution>> {
-        let id = request_execution_id(scope, request_id)?;
-        let body: Option<String> = self.readers.get().query_row(
-            "SELECT body FROM shell_resources_v1 WHERE id=?1", [&id], |row| row.get(0)).optional()?;
-        let execution: Option<Execution> = body.map(|body| serde_json::from_str(&body).map_err(anyhow::Error::from)).transpose()?;
-        if let Some(execution) = &execution { scope.validate_execution(execution, request_id)?; }
-        Ok(execution)
+        shell_request_execution(&self.readers.get(), scope, request_id)
     }
 
     pub fn cancel_shell_resource_by_request(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid, now: u64) -> Result<Option<Execution>> {
-        let id = request_execution_id(scope, request_id)?;
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         expire_request_cancellations(&transaction, now)?;
-        let body: Option<String> = transaction.query_row(
-            "SELECT body FROM shell_resources_v1 WHERE id=?1", [&id], |row| row.get(0)).optional()?;
-        let mut execution: Option<Execution> = body.map(|body| serde_json::from_str(&body).map_err(anyhow::Error::from)).transpose()?;
+        let mut execution = shell_request_execution(&transaction, scope, request_id)?;
         if let Some(execution) = &mut execution {
-            scope.validate_execution(execution, request_id)?;
-            cancel_command(&transaction, &id)?;
+            cancel_command(&transaction, &execution.command.id)?;
             execution.cancel = true;
         } else {
             // Keep cancellation atomic with request lookup; UUID keys do not prove total storage cost.
+            let id = request_execution_id(scope, request_id)?;
             transaction.execute(/* sqlite-large-value: allow-for-now lv-hc433437e984c owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resource_request_cancellations_v1(id,cancelled_at)
                 VALUES(?1,?2) ON CONFLICT(id) DO NOTHING", rusqlite::params![id, now])?;
         }
@@ -504,6 +516,32 @@ impl Store {
         };
         self.shell_resource_owner_live(&owner)?;
         Ok(owner)
+    }
+
+    /// All live native owners of the current incarnation, newest first.
+    pub fn shell_resource_agent_owners(&self, agent: &str) -> Result<Vec<resource_membership::Owner>> {
+        let harness = self.current_harness(agent)?.context("calling agent has no current harness")?;
+        anyhow::ensure!(!matches!(harness.state.as_str(), "ended" | "indeterminate"), "calling agent harness is not live");
+        let receipts = self.agent_invocation_receipts(agent)?;
+        let mut owners = Vec::new();
+        for receipt in receipts.iter().rev().filter(|receipt|
+            receipt.incarnation.as_deref() == Some(harness.incarnation_id.as_str())) {
+            let owner = match (&receipt.owner_run, &receipt.owner_step, receipt.owner_attempt) {
+                (Some(run), Some(step), Some(attempt)) => resource_membership::Owner {
+                    run: run.clone(), step: step.clone(), attempt, invocation: Some(receipt.invocation_id.clone()),
+                },
+                (None, None, None) => resource_membership::Owner {
+                    run: receipt.invocation_id.clone(), step: receipt.invocation_id.clone(), attempt: 1,
+                    invocation: Some(receipt.invocation_id.clone()),
+                },
+                _ => continue,
+            };
+            if !owners.contains(&owner) && self.shell_resource_owner_live(&owner).is_ok() {
+                owners.push(owner);
+            }
+        }
+        anyhow::ensure!(!owners.is_empty(), "calling agent has no live native invocation for its current incarnation");
+        Ok(owners)
     }
 
     /// Match native run, step and attempt ownership, not process environment labels.
@@ -908,11 +946,36 @@ mod tests {
             RequestScope::Run { run: "run", step: "step", attempt: 1 },
             RequestScope::Run { run: "run", step: "step", attempt: 2 },
             RequestScope::Run { run: "run", step: "other", attempt: 1 },
-            RequestScope::Agent { owner: &owner },
-            RequestScope::Agent { owner: &next_owner },
+            RequestScope::Agent { owner: &owner, live_owners: std::slice::from_ref(&owner) },
+            RequestScope::Agent { owner: &next_owner, live_owners: std::slice::from_ref(&next_owner) },
         ];
         let mut ids = std::collections::BTreeSet::from([id]);
         for scope in scopes { assert!(ids.insert(request_execution_id(&scope, key).unwrap())); }
+    }
+
+    #[test]
+    fn agent_request_lookup_and_cancel_span_live_invocation_owners() {
+        let store = Store::open_memory("host-a").unwrap();
+        let earlier = command("earlier").lane.owner;
+        let newer = command("newer").lane.owner;
+        let owners = [newer.clone(), earlier.clone()];
+        for (index, owner) in owners.iter().enumerate() {
+            let key = uuid::Uuid::now_v7();
+            let scope = RequestScope::Agent { owner, live_owners: std::slice::from_ref(owner) };
+            let mut submitted = command("transport");
+            submitted.id = request_execution_id(&scope, key).unwrap();
+            submitted.request_id = Some(key.to_string());
+            submitted.lane.owner = owner.clone();
+            let execution = store.submit_shell_resource(submitted, 1).unwrap();
+            let other = &owners[1 - index];
+            let rebound = RequestScope::Agent { owner:other, live_owners:&owners };
+            assert_eq!(store.shell_resource_by_request(&rebound, key).unwrap().unwrap(), execution);
+            assert_eq!(request_execution_id(&scope, key).unwrap(), execution.command.id,
+                "additional live owners must not change the persisted request hash");
+            assert!(store.cancel_shell_resource_by_request(&rebound, key, 2).unwrap().unwrap().cancel);
+            let isolated = RequestScope::Agent { owner:other, live_owners:std::slice::from_ref(other) };
+            assert!(store.shell_resource_by_request(&isolated, key).unwrap().is_none());
+        }
     }
 
     #[test]
