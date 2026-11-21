@@ -1593,7 +1593,37 @@ async fn fresh_explicit_store_fleet_create_resolves_identity_under_admission_loc
         assert_eq!(node.st_json(&["fleet", "status"])["node"], expected);
         assert!(store_dir.join("claims.sqlite3").exists());
         assert!(!node.state_dir().join("claims.sqlite3").exists());
+        // Reopened as a store from before blob files (none beside it; nothing moved yet), the
+        // existing store's admitted connection may no longer create files: the daemon still
+        // creates and attaches its blob file, and a document's bytes read back.
+        let database = store_dir.join("claims.sqlite3");
+        let blob_file = smallclaims::store::blob_file::location(&database);
+        let remove_blob_file = || {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = fs::remove_file(format!("{blob_file}{suffix}"));
+            }
+        };
+        let file = node.root.join("fixture-document.txt");
+        fs::write(&file, "explicit store bytes").unwrap();
+        node.st_ok(&["documents", "put", file.to_str().unwrap(), "--as", "doc/fixture/explicit-store"]);
         node.stop();
+        remove_blob_file();
+        node.start().await;
+        assert!(std::path::Path::new(&blob_file).exists());
+        let document = node.st_ok(&["documents", "get", "doc/fixture/explicit-store"]);
+        assert!(document.contains("explicit store bytes"), "{document}");
+        node.stop();
+        // A read-only open of a store with no blob file beside it (a reader before any writer of
+        // a build with blob files) reads and writes nothing.
+        remove_blob_file();
+        let reader = smallclaims::sqlite::open_read_connection(&database, false).unwrap();
+        let blobs: i64 = reader.query_row(
+            concat!("SELECT COUNT(*) FROM (SELECT ", smallclaims::blob_bytes!("b"), " FROM blobs AS b)"),
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(blobs >= 1);
+        assert!(!std::path::Path::new(&blob_file).exists(), "a reader created no blob file");
     }
 }
 
