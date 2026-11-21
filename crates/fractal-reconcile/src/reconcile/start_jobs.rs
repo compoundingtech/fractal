@@ -17,10 +17,20 @@ struct StartResult {
     finished_at: std::time::Instant,
 }
 
+type ActivationLease = Arc<fractal_runtime::store_worktree_lease::StoreWorktreeLease>;
+
+#[derive(Default)]
+struct ActivationLeases {
+    owners: BTreeMap<PathBuf, std::sync::Weak<fractal_runtime::store_worktree_lease::StoreWorktreeLease>>,
+    // Durable operations keep admission through queueing, worker exit, result adoption and cleanup.
+    starts: HashMap<String, ActivationLease>,
+}
+
 pub struct StartJobs {
     owner: String,
     pub live: Arc<(Mutex<HashSet<String>>, Condvar)>,
     application: Mutex<()>,
+    activation_leases: Mutex<ActivationLeases>,
     results: tokio::sync::mpsc::UnboundedSender<StartResult>,
     completions: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<StartResult>>,
     #[cfg(test)]
@@ -33,6 +43,7 @@ impl Default for StartJobs {
             owner: uuid::Uuid::now_v7().to_string(),
             live: Arc::default(),
             application: Mutex::new(()),
+            activation_leases: Mutex::default(),
             results,
             completions: tokio::sync::Mutex::new(completions),
             #[cfg(test)]
@@ -91,7 +102,42 @@ pub enum StartCompletion {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    pub(super) fn worktree_activation_lease(
+        &self,
+        owner: &Path,
+        repository: &Path,
+    ) -> Result<ActivationLease> {
+        let mut leases = self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner);
+        leases.owners.retain(|_, lease| lease.strong_count() != 0);
+        if let Some(lease) = leases.owners.get(owner).and_then(std::sync::Weak::upgrade) {
+            return Ok(lease);
+        }
+        let lease = Arc::new(crate::checkout::activation_lease(owner, repository)?);
+        leases.owners.insert(owner.to_path_buf(), Arc::downgrade(&lease));
+        Ok(lease)
+    }
+
+    pub(super) fn member_activation_lease(&self, member: &MemberSpec) -> Result<Option<ActivationLease>> {
+        let workspace = Path::new(&member.workspace);
+        let Some(repository) = crate::repositories::workspace_repository(workspace) else {
+            return Ok(None);
+        };
+        let owner = crate::checkout::workspace_worktree(workspace)
+            .context("Git workspace has no worktree owner")?;
+        self.worktree_activation_lease(&owner, &repository).map(Some)
+    }
+
+    fn retain_start_activation_lease(&self, id: &str, member: &MemberSpec) -> Result<Option<ActivationLease>> {
+        let lease = self.member_activation_lease(member)?;
+        if let Some(lease) = &lease {
+            self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
+                .starts.insert(id.to_owned(), lease.clone());
+        }
+        Ok(lease)
+    }
+
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
+        let activation_lease = self.member_activation_lease(&prepared.member)?;
         if let Some(run) = &prepared.subject.owner_run
             && self.store.run_projection_pending(run)?
         {
@@ -166,6 +212,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             RuntimeStartAdmission::Admitted | RuntimeStartAdmission::CapacityBusy => {}
         }
+        if let Some(lease) = activation_lease {
+            self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
+                .starts.insert(id.clone(), lease);
+        }
         drop(recovery_lock);
         if let Some(pending) = &failed_start {
             self.record_once(
@@ -218,6 +268,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if operation.dispatched || operation.finished || operation.revoked_by.is_some() {
             return Ok(());
         }
+        let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
+        // Recovered queued operations reacquire admission before any launch work.
+        let activation_lease = self.retain_start_activation_lease(&operation.id, &prepared.member)?;
         let Some(launch_permit) = self.admit_incarnation_launch()? else {
             return Ok(());
         };
@@ -235,7 +288,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
-        let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
         let store = self.store.clone();
         let runtime = self.runtime.clone();
         let notify = self.notify.clone();
@@ -253,6 +305,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let spawned = std::thread::Builder::new().name("st3-runtime-start".into()).spawn(move || crate::task_cpu::blocking("runtime.start", || {
             let _lock = lock;
             let _launch_permit = launch_permit;
+            let _activation_lease = activation_lease;
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
                 anyhow::ensure!(store.runtime_start_intent_current(&id)?,
@@ -493,7 +546,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Read operations only after serialization: a snapshot from before a
         // completion consumer ran must never be applied a second time.
         let _application = self.start_jobs.application.lock().unwrap_or_else(PoisonError::into_inner);
-        for operation in self.store.pending_runtime_starts()? {
+        let pending = self.store.pending_runtime_starts()?;
+        // Workers retain their own Arc even when their durable queue entry is superseded.
+        self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
+            .starts.retain(|id, _| pending.iter().any(|operation| operation.id == *id));
+        for operation in pending {
             let subject = operation.subject.clone();
             self.isolate_start_completion(&subject, || {
                 self.reconcile_start_operation(operation, snapshot)
@@ -523,6 +580,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         snapshot: &PassPtySnapshot,
     ) -> Result<()> {
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
+        let _activation_lease = self.retain_start_activation_lease(&operation.id, &prepared.member)?;
         if let Some(run) = &prepared.subject.owner_run
             && self.store.run_projection_pending(run)?
         {
@@ -751,6 +809,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.cleanup_revoked_start(&operation, &prepared, snapshot)?;
         } else {
             self.start_queued_job(&operation)?;
+        }
+        if self.store.runtime_start_for(&operation.subject)?.is_none_or(|pending| pending.id != operation.id) {
+            self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
+                .starts.remove(&operation.id);
         }
         Ok(())
     }

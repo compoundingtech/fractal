@@ -3796,7 +3796,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(repository) = repository
                 && !activation_leases.contains_key(&lease_owner)
             {
-                let lease = crate::checkout::activation_lease(&lease_owner, &repository);
+                let lease = self.worktree_activation_lease(&lease_owner, &repository);
                 match lease {
                     Ok(lease) => { activation_leases.insert(lease_owner, lease); }
                     Err(error) => {
@@ -3883,7 +3883,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let Some(repository) = crate::repositories::workspace_repository(workspace) else {
                     return true;
                 };
-                let lease = crate::checkout::activation_lease(&owner, &repository);
+                let lease = self.worktree_activation_lease(&owner, &repository);
                 match lease {
                     Ok(lease) => {
                         activation_leases.insert(owner, lease);
@@ -8547,6 +8547,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             )?;
             self.signal_changed();
         }
+        let _activation_lease = self.member_activation_lease(member)?;
         let workspace = Path::new(&member.workspace);
         if workspace.exists() {
             anyhow::ensure!(
