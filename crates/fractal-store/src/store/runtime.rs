@@ -715,9 +715,8 @@ impl Runtime for FractalRuntime {
     fn claims_trimmed(&self) {
         // A trim's run goes on: every list refolds, keeping its generation, so a fold under way
         // still publishes and readers keep their rows.
-        // Forgetting them here, after every chunk, restarted the roster's fold of seconds
-        // before it could publish, all through the run. The trim forgets the views once when
-        // the run stops, which also drops what the caches hold of the claims it deleted.
+        // Keep published rows throughout the run and at completion: each chunk proves that
+        // the graph is unchanged. Completion separately releases history-dependent reductions.
         self.presented_agents.refold();
         self.published_missions.refold();
         self.published_work.refold();
@@ -735,26 +734,17 @@ impl Runtime for FractalRuntime {
         }
     }
 
+    fn claims_trim_finished(&self) {
+        self.retain_agent_roster();
+        self.forget_reductions();
+        self.claims_trimmed();
+        self.summary_list.refold();
+    }
+
     fn projection_advanced(&self, caught_up: bool) {
         // Readers keep the roster they had while it refolds from nothing: keep it before the
         // caches it lives in are cleared.
-        {
-            let resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
-            let refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut previous = self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner);
-            for history in [false, true] {
-                if let Some(entry) = resources.iter()
-                    .filter(|entry| entry.history == history && entry.covered.is_none())
-                    .max_by_key(|entry| (entry.index, entry.local))
-                {
-                    previous.resources.retain(|kept| kept.history != history);
-                    previous.resources.push(entry.clone());
-                }
-            }
-            if let Some(entry) = refs.iter().filter(|entry| !entry.history).max_by_key(|entry| entry.index) {
-                previous.page_refs = Some(entry.clone());
-            }
-        }
+        self.retain_agent_roster();
         // Reductions keyed by graph cut alone would answer from the prefix projected before:
         // the cut did not move. They go, as on a forget.
         self.forget_reductions();
@@ -856,6 +846,34 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
 
 
 impl FractalRuntime {
+    /// Keep presentation rows, not claim-dependent reductions, across graph-preserving work.
+    fn retain_agent_roster(&self) {
+        let resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut previous = self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner);
+        for history in [false, true] {
+            if let Some(entry) = resources.iter()
+                .filter(|entry| entry.history == history && entry.covered.is_none())
+                .max_by_key(|entry| (entry.index, entry.local))
+            {
+                previous.resources.retain(|kept| kept.history != history);
+                previous.resources.push(entry.clone());
+            }
+        }
+        if let Some(entry) = refs.iter().filter(|entry| !entry.history).max_by_key(|entry| entry.index) {
+            // Startup can have published only a bounded head, before a complete roster exists.
+            // Retain its cards with its page order too; neither alone answers that first page.
+            if let Some(head) = resources.iter()
+                .filter(|cards| !cards.history && cards.index == entry.index && cards.covered.is_some())
+                .max_by_key(|cards| cards.local)
+            {
+                previous.resources.retain(|kept| kept.history || kept.covered.is_none());
+                previous.resources.push(head.clone());
+            }
+            previous.page_refs = Some(entry.clone());
+        }
+    }
+
     /// Drop every reduction kept by graph cut: statuses, views, conversation owners, agent
     /// cards and the roster built from them, usage folds and agent page order.
     fn forget_reductions(&self) {
