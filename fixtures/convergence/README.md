@@ -581,3 +581,15 @@ ever held it, wait for retired IDs to travel with an exchange (TODO: T-wins dele
 set-sync S2d); until then such a claim is allowed and that node's `claim_sources`,
 `operations` and graph digest are not compared. The sabotage check is a trim that forgets a
 claim it retired.
+
+## Native turn claim registration
+
+`claims-v41.json` adds the durable `program.turn.report` receipt and optional
+`native_turn`, `native_turn_key`, and `parent_attempt` creation fields. Versions 1 through
+40 remain frozen. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`;
+do not hand-edit the snapshot. The simulation and audit reports select v41. The native
+report is a system-only once-per-run fact; neither its retention nor its schema grants work
+authority. Local-trim convergence, retained claim equality, oracle reader comparisons,
+person-authored claim preservation, and invalid/pending-record checks remain unchanged.
+
