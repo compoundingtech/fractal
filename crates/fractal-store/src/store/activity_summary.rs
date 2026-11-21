@@ -5,6 +5,15 @@ use super::*;
 const FIELDS: [&str; 3] = ["status", "workspace", "host"];
 pub(super) const CANDIDATES: usize = 64;
 
+// Unlike canonical::position_sql, this must never infer legacy position by counting a batch.
+// Both stored-position arms are point/index seeks; absence is an ordering uncertainty.
+const STORED_KEY_SQL: &str = "SELECT length(claims.accepted_at_unix_ms),claims.accepted_at_unix_ms,
+    batches.origin,batches.replica_sequence,claims.batch_id,
+    COALESCE((SELECT position FROM claim_positions WHERE claim_id=claims.id LIMIT 1),
+        (SELECT position FROM replica_records INDEXED BY replica_records_claim
+         WHERE claim_id=claims.id ORDER BY position LIMIT 1))
+    FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1 LIMIT 1";
+
 fn candidate_sql() -> String {
     format!("SELECT id,kind,accepted_at_unix_ms,store_index FROM claims INDEXED BY claims_actual_accepted_index
         WHERE subject=?1 AND {ACTUAL_STATE_CLAIM}
@@ -55,7 +64,7 @@ fn bounded_actual(connection: &Connection, subject: &str, cut: u64) -> Result<(O
         .query_map(params![subject, CANDIDATES + 1], |row| Ok((row.get::<_,String>(0)?,
             row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,u64>(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let truncated = rows.len() > CANDIDATES;
+    let mut truncated = rows.len() > CANDIDATES;
     if truncated {
         let boundary = rows.pop().expect("lookahead row").2;
         // The omitted row can precede every retained row of its accepted-time group in
@@ -63,20 +72,36 @@ fn bounded_actual(connection: &Connection, subject: &str, cut: u64) -> Result<(O
         rows.retain(|row| row.2 != boundary);
     }
     let mut candidates = Vec::with_capacity(rows.len());
+    let mut keys = connection.prepare_cached(STORED_KEY_SQL)?;
     for (id, kind, _, index) in rows {
         if index > cut || kind.as_bytes().get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"harness.")) { continue; }
         let repaired: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
             [&id], |row| row.get(0))?;
-        if !repaired { candidates.push((card_actual::key(connection, &id)?, id, kind)); }
+        if !repaired {
+            let (prefix, position) = keys.query_row([&id], |row| Ok((
+                (row.get::<_,usize>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?,
+                 row.get::<_,Option<i64>>(3)?, row.get::<_,String>(4)?),
+                row.get::<_,Option<i64>>(5)?,
+            )))?;
+            candidates.push(((prefix, position, id), kind));
+        }
     }
     candidates.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+    if let Some(index) = candidates.iter().position(|candidate| candidate.0.1.is_none()) {
+        // The latest group without a stored position is an ordering barrier. Only groups
+        // strictly newer than it are safe: sorting its known positions first would guess.
+        let before = candidates[..index].partition_point(|candidate|
+            candidate.0.0 > candidates[index].0.0);
+        candidates.truncate(before);
+        truncated = true;
+    }
     let mut actual = serde_json::Map::new();
     let mut resolved = [false; FIELDS.len()];
     let mut seen = false;
     let registry = fractal_schema::registry();
     let mut body_query = connection.prepare_cached("SELECT body FROM claims WHERE id=?1")?;
-    for (_, id, kind) in candidates {
+    for ((_, _, id), kind) in candidates {
         let body: String = body_query.query_row([id], |row| row.get(0))?;
         #[cfg(any(test, feature = "test-support"))]
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
@@ -133,5 +158,52 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert!(plan.iter().any(|line| line.contains("claims_actual_accepted_index")), "{plan:?}");
         assert!(!plan.iter().any(|line| line.contains("SCAN ") || line.contains("TEMP B-TREE")), "{plan:?}");
+        let positions = connection.prepare(&format!("EXPLAIN QUERY PLAN {STORED_KEY_SQL}")).unwrap()
+            .query_map(["candidate-id"], |row| row.get::<_,String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(!positions.iter().any(|line| line.contains("SCAN ") || line.contains("TEMP B-TREE")), "{positions:?}");
+    }
+
+    #[test]
+    fn activity_summary_never_counts_the_prefix_of_a_large_legacy_batch() {
+        fn legacy(rows: usize) -> Store {
+            let store = Store::open_memory("node").unwrap();
+            {
+                let connection = store.connection.write();
+                connection.execute(
+                    "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                     VALUES ('legacy','legacy-origin',1,'fixture','1')", [],
+                ).unwrap();
+                connection.execute(
+                    "WITH RECURSIVE ordinal(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ordinal WHERE n<?1)
+                     INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+                     SELECT printf('legacy-%d',n),'legacy','agent/example/legacy','runtime.observed',
+                        'legacy-origin','{\"fields\":{\"status\":\"running\",\"host\":\"observed\"}}','[]',
+                        CAST(1000+n AS TEXT) FROM ordinal", [rows],
+                ).unwrap();
+                assert_eq!(connection.query_row(
+                    "SELECT COUNT(*) FROM claim_positions JOIN claims ON claims.id=claim_positions.claim_id
+                     WHERE claims.batch_id='legacy'", [], |row| row.get::<_,usize>(0),
+                ).unwrap(), 0);
+                assert_eq!(connection.query_row(
+                    "SELECT COUNT(*) FROM replica_records WHERE claim_id LIKE 'legacy-%'",
+                    [], |row| row.get::<_,usize>(0),
+                ).unwrap(), 0);
+            }
+            store
+        }
+        let (few, many) = (legacy(128), legacy(12_000));
+        let read = |store: &Store| {
+            let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            let result = store.status_activity_summary_at("agent/example/legacy", None).unwrap();
+            (scope.finish(), result)
+        };
+        let (few_work, _) = read(&few);
+        let (many_work, result) = read(&many);
+        assert!(many_work.vm_steps <= few_work.vm_steps + 2_000,
+            "canonical positions scanned legacy history: 128={few_work:?}, 12000={many_work:?}");
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["unresolved"], json!(["status", "workspace", "host"]));
+        assert_eq!(result["subjects"][0]["actual"], json!({"status":null,"workspace":null,"host":null}));
     }
 }

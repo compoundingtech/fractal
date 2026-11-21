@@ -187,6 +187,13 @@ fn activity_summary_warm_cache_preserves_observed_ownership_at_the_same_cut() {
 fn activity_summary_short_histories_match_full_fold_with_sparse_fields_and_clears() {
     for seed in 1..32 {
         let store = random_history(seed);
+        // Preserve the fixture's legacy order as explicit positions. Cold summaries may not
+        // infer positions from batch prefixes; that case has its own bounded/unresolved test.
+        store.connection.write().execute(
+            "INSERT OR IGNORE INTO claim_positions(claim_id,position)
+             SELECT id,ROW_NUMBER() OVER (PARTITION BY batch_id ORDER BY store_index)-1 FROM claims",
+            [],
+        ).unwrap();
         let summary = store.status_activity_summary_at(SEAT, None).unwrap();
         assert_eq!(summary["complete"], true, "seed {seed}");
         let full = store.status_at(Some(SEAT), None, Some(summary["store_index"].as_u64().unwrap())).unwrap();
@@ -195,6 +202,20 @@ fn activity_summary_short_histories_match_full_fold_with_sparse_fields_and_clear
                 full.subjects[0].actual.as_ref().and_then(|actual| actual.get(field)), "seed {seed}: {field}");
         }
     }
+}
+
+#[test]
+fn activity_summary_keeps_only_fields_strictly_newer_than_a_missing_legacy_position() {
+    let store = Store::open_memory("node").unwrap();
+    notice_raw_observation(&store, SEAT, "workspace.observed", "legacy-workspace", "node", 1000,
+        json!({"workspace":"/old-observed", "host":"old-host"}));
+    observe(&store, json!({"status":"running", "host":"new-host"}));
+    let result = store.status_activity_summary_at(SEAT, None).unwrap();
+    assert_eq!(result["complete"], false);
+    assert_eq!(result["unresolved"], json!(["workspace"]));
+    assert_eq!(result["subjects"][0]["actual"], json!({"status":"running","host":"new-host","workspace":null}));
+    let full = store.status_at(Some(SEAT), None, Some(result["store_index"].as_u64().unwrap())).unwrap();
+    assert_eq!(full.subjects[0].actual.as_ref().unwrap()["workspace"], "/old-observed");
 }
 
 #[test]
