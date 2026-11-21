@@ -120,6 +120,7 @@ export const seatTurn = (options: Meta & {
   ...options,
   id: options.id ?? 'fractal/seat-turn',
   goal: 'Complete one assigned agent turn and return its verified report.',
+  authority: { start: ['native-turn'] },
   input: Schema.Struct({ agent: Schema.String, instructions: Schema.String, context: Schema.String }),
   output: WorkerReport,
 }, ({ agent, instructions, context }) => Effect.gen(function* () {

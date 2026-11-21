@@ -538,6 +538,13 @@ is optional, never the default. Refusal is `ResourceError`; terminal failure is
 `ChildFailed`. Success is `WorkerReport` with actual `run`, `step`, `summary`,
 `evidence: string[]`, relative-path `products`, and optional actual `executions`.
 
+The parent revision must grant `authority { start "native-turn" }`, intersected with its
+starter's authority like any other child start. Native admission establishes the parent-linked
+run row before checking that start, in the same transaction; a refusal leaves no run or ready
+work. The verified `program.turn.report` is a daemon receipt of the literal worker submission,
+not a second parent effect requiring a broad write grant. Inherited resource context must be
+attached before the episode becomes runnable, never retrofitted onto an existing run.
+
 `Worker.layer({ mission, input, product, report: true })` explicitly decodes the child's
 `result` as `WorkerReport`, selecting `report.products` by the requested relative paths.
 Missing or malformed reports are not accepted, even without requested products.

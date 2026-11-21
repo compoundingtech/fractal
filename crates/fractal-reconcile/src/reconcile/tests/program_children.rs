@@ -113,7 +113,7 @@ mission "program-child" state="ready" {{
 mission "program-parent" state="ready" {{
   goal "Wait on child runs and asks."
   concurrent-runs max=4
-  authority {{ start "program-child"; }}
+  authority {{ start "program-child"; start "native-turn"; }}
   input "mode" kind="text"
   input "gate" kind="text"
   step "program" {{
@@ -676,6 +676,23 @@ fn native_turn_adopts_one_parent_owned_literal_leaf_and_preserves_worker_text() 
 }
 
 #[test]
+fn native_turn_authority_refusal_rolls_back_parent_link_and_ready_work() {
+    use crate::AdhocWorkStore as _;
+    let fixture = fixture();
+    let started = fixture.start_mission("program-unauthorized", "native-unauthorized", "turn");
+    fixture.store.set_step_state(&started.step, "working", None).unwrap();
+    let parent = fixture.store.mission_run(&started.run).unwrap().unwrap();
+    let key = "native-unauthorized";
+    let error = fixture.store.create_native_turn(&parent, &started.step, 1, key, &native_turn_request()).unwrap_err();
+    assert_eq!(error.code, "run-authority-denied");
+    assert!(error.message.contains("start `native-turn`"));
+    let subject = crate::store::adhoc_work::native_turn_subject(key);
+    assert!(fixture.store.mission_run(&subject).unwrap().is_none());
+    assert!(fixture.store.claims_for(&subject, None).unwrap().is_empty());
+    assert!(fixture.children(&started.step).is_empty());
+}
+
+#[test]
 fn native_turn_requires_actual_literal_report_and_verified_products_before_success() {
     use crate::AdhocWorkStore as _;
     let fixture = fixture();
@@ -772,29 +789,32 @@ fn native_turn_resource_replays_after_host_loss_and_returns_actual_report() {
     assert!(child_exit["value"].get("products").is_none(), "program results must not fabricate resource products");
 }
 
-fn native_scope(fixture: &Fixture, parent: &Started) -> crate::store::resource_membership::Membership {
+fn native_scope(fixture: &Fixture, name: &str, mode: &str) -> (Started, crate::store::resource_membership::Membership) {
     use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
     fixture.reconciler.ensure_resource_authority().unwrap();
+    let owner = fixture.start(&format!("{name}-scope-owner"), "ask");
+    let child = fixture.store.mission_run_subject_for_idempotency_key(&format!("program-parent-{name}"));
     let lane = LaneRequest {
-        id: format!("native-scope:{}", parent.run), name: "native-workers".into(), host: "node".into(),
+        id: format!("native-scope:{}", owner.run), name: "native-workers".into(), host: "node".into(),
         max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 * 1024 }),
         coverage: Coverage::Logical, admission_timeout_ms: None, class: fractal_runtime::RequestClass::Agent,
         disk: None, io: None,
         profile: None, profile_estimate: None, disk_path: None,
-        owner: Owner { run: parent.run.clone(), step: parent.step.clone(), attempt: 1, invocation: None },
+        owner: Owner { run: owner.run.clone(), step: owner.step.clone(), attempt: 1, invocation: None },
     };
     let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 4, memory: 1024 * 1024 * 1024 }), ..Fit::default() };
     let Admission::Admitted(grant) = fixture.store.request_resource_membership(&lane, fit, 1).unwrap()
         else { panic!("native fixture scope must admit"); };
-    fixture.store.attach_resource_child(&grant, &lane.owner, &parent.run).unwrap();
-    fixture.store.resource_membership_record(&lane.id, &lane.owner).unwrap()
+    // Context must precede runnable creation; the scope belongs to an outer run.
+    fixture.store.attach_resource_child(&grant, &lane.owner, &child).unwrap();
+    let scope = fixture.store.resource_membership_record(&lane.id, &lane.owner).unwrap();
+    (fixture.start(name, mode), scope)
 }
 
 #[test]
 fn native_turn_inherits_same_host_membership_without_reparenting_the_standing_seat() {
     let fixture = fixture();
-    let parent = fixture.start("native-scoped", "turn");
-    let scope = native_scope(&fixture, &parent);
+    let (parent, scope) = native_scope(&fixture, "native-scoped", "turn");
     let episode = crate::store::adhoc_work::native_turn_subject(&format!("program:{}:1:turn", parent.step));
     fixture.until("native same-host episode attaches", || fixture.store.mission_run(&episode).unwrap().is_some());
     let inherited = fixture.store.resource_context_for_run(&episode).unwrap().unwrap();
@@ -815,8 +835,7 @@ fn native_turn_inherits_same_host_membership_without_reparenting_the_standing_se
 #[test]
 fn native_turn_refuses_cross_host_inherited_authority_without_claiming_custody() {
     let fixture = fixture();
-    let parent = fixture.start("native-cross-host", "turn-remote");
-    let scope = native_scope(&fixture, &parent);
+    let (parent, scope) = native_scope(&fixture, "native-cross-host", "turn-remote");
     fixture.until("native cross-host refusal returns", || fixture.result(&parent.step, RESULT_KEY, 1).is_some());
     let (status, error) = fixture.result(&parent.step, RESULT_KEY, 1).unwrap();
     assert_eq!(status, "failed");
