@@ -649,9 +649,25 @@ mission "garden/proposed" state="ready" revisions="human-only" revision-reviewer
 
 /// More missions, each with a run and its steps ready, than one snapshot refolds.
 fn burst(store: &Store, burst: usize) {
+    // A catch-up round observes the completed burst, not its individual publications. Publish
+    // its independent definitions together so setup does not repeat publication admission and
+    // commit work for every row. Keep every mission, run and ready step in the burst.
+    let definitions = (0..FOLD_CHUNK + 1)
+        .map(|number| {
+            format!(
+                r#"mission "garden/burst-{burst}-{number}" state="ready" {{
+  goal "Grow the garden."
+  concurrent-runs max=4
+  step "plant" {{ assigned-to "agent/garden/ash" }}
+  step "water" {{ assigned-to "agent/garden/birch" }}
+}}
+"#
+            )
+        })
+        .collect::<String>();
+    publish(store, &format!("version 2\n{definitions}"), &format!("publish-burst-{burst}"));
     for number in 0..FOLD_CHUNK + 1 {
         let name = format!("garden/burst-{burst}-{number}");
-        mission(store, &name);
         let run = start(store, &name, &format!("burst-{burst}-{number}"));
         for path in ["plant", "water"] {
             store.set_step_state(&step(&run, path).0, "ready", None).unwrap();
