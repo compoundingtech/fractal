@@ -290,11 +290,11 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     }).count(), 0);
 }
 
-/// A local cut that deletes in many chunks leaves the roster's generation alone until its run
-/// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
-/// roster's fold before it could publish, all through a run.
+/// A local cut preserves the roster's publication generation through recording, deletion and
+/// completion, including a capped run resumed the next day. Reductions still release deleted
+/// history, answers stay equivalent, and the final mark still expires old claim cursors.
 #[test]
-fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
+fn a_local_cut_preserves_publications_however_many_chunks_it_deletes() {
     let scratch = tempfile::tempdir().unwrap();
     let store = local_member("alder");
     store.set_trim_pause(std::time::Duration::ZERO);
@@ -316,12 +316,8 @@ fn a_local_cut_forgets_the_views_once_however_many_chunks_it_deletes() {
         let chunks = all.difference(&observer_ids(&store)).count() - deleted;
         let forgets = store.fractal.presented_agents.generation() - generation;
         assert!(chunks > 4, "day {day}: the run deletes in many chunks ({chunks})");
-        // Once when a cut's tombstones are recorded and once when its run stops: the second
-        // day finishes the first cut, then records the next one and stops at the cap.
-        assert!(forgets <= 3, "day {day}: {forgets} forgets for {chunks} chunks");
-        // A stopped run still forgets what the views hold of the claims it deleted, and the
-        // final mark still expires every cursor taken before it.
-        assert!(forgets >= 1, "day {day}: the run's stop forgets the views");
+        assert_eq!(forgets, 0, "day {day}: graph-preserving trim must retain publication generations");
+        // Publication identity survives, but the final trim mark still expires claim cursors.
         assert_eq!(claims_sequence(&store) > sequence, outcome == "trimmed", "day {day}: cursors expire at the final mark");
         assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}: the readers answer the same");
     }
@@ -343,6 +339,7 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
     }
     let fractal = Arc::clone(&store.fractal);
     fractal.presented_agents.start();
+    let initial_generation = fractal.presented_agents.generation();
     let published = Arc::new(Mutex::new(Vec::new()));
     let hook_published = Arc::clone(&published);
     let mut building = None;
@@ -359,7 +356,7 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
                     vec![row], vec![format!("agent/example-{chunk}")],
                 ),
             });
-            hook_published.lock().unwrap().push(done.is_some());
+            hook_published.lock().unwrap().push((done.is_some(), fractal.presented_agents.generation()));
         }
         building = fractal.presented_agents.begin_materialization();
     }));
@@ -367,7 +364,17 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
     store.trim_chunk_hook.lock().unwrap().take();
     let published = published.lock().unwrap();
     assert!(published.len() > 4, "the cut deletes in many chunks ({})", published.len());
-    assert!(published.iter().all(|done| *done), "the agents source reset while materializing its publication: {published:?}");
+    assert!(published.iter().all(|(done, _)| *done), "the agents source reset while materializing its publication: {published:?}");
+    // Recording changes the replication ledger but has not deleted any claims or replaced
+    // projections: it must preserve the same generation the deletion chunks keep serving.
+    let generation = published.first().unwrap().1;
+    assert_eq!(generation, initial_generation, "recording tombstones must not withdraw presentation rows");
+    assert!(published.iter().all(|(_, observed)| *observed == generation),
+        "deletion chunks must preserve their publication generation: {published:?}");
+    assert_eq!(store.fractal.presented_agents.generation(), generation,
+        "finishing a graph-preserving trim must not replace the publication generation");
+    assert!(matches!(store.fractal.presented_agents.current(), super::published_list::ListRead::Served(..)),
+        "the last publication must remain served after the default local trim stops");
 }
 
 /// A local cut's run lets the views refold once the interval is due, keeping the roster's
