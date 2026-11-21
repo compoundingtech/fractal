@@ -1604,6 +1604,11 @@ impl RestartWake {
     }
 }
 
+struct ObserverInterest {
+    fields: Vec<String>,
+    await_prs: Vec<crate::resource::AwaitPrTarget>,
+}
+
 pub struct Reconciler<R = NativeRuntime> {
     pub store: Arc<Store>,
     runtime: Arc<R>,
@@ -1678,7 +1683,7 @@ pub struct Reconciler<R = NativeRuntime> {
     observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
     /// Fields and native PR targets captured by each observer/revision's latest arm. New
     /// interest observes immediately rather than keeping a deadline for an older input set.
-    observer_fields: Arc<Mutex<HashMap<String, (Vec<String>, Vec<crate::resource::AwaitPrTarget>)>>>,
+    observer_fields: Arc<Mutex<HashMap<String, ObserverInterest>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// By observer: held from a look reading its cursor until the look publishes the cursor it
     /// kept, so an arm that retired another waits for that look rather than polling from the
@@ -19436,10 +19441,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         // adds were never read, as when a watch's subscription reaches the standing observer
         // after its first poll (#4470), so poll now instead of waiting out that cadence.
         let previous_fields = self.observer_fields.lock().unwrap_or_else(PoisonError::into_inner)
-            .insert(deadline_key.clone(), (spec.fields.clone(), await_prs.clone()));
-        if previous_fields.as_ref().is_some_and(|(fields, targets)| {
-            spec.fields.iter().any(|field| !fields.contains(field))
-                || await_prs.iter().any(|target| targets.iter().find(|previous| previous.pr == target.pr)
+            .insert(deadline_key.clone(), ObserverInterest {
+                fields: spec.fields.clone(),
+                await_prs: await_prs.clone(),
+            });
+        if previous_fields.as_ref().is_some_and(|previous| {
+            spec.fields.iter().any(|field| !previous.fields.contains(field))
+                || await_prs.iter().any(|target| previous.await_prs.iter().find(|previous| previous.pr == target.pr)
                     .is_none_or(|previous| target.registrations.iter().any(|token| !previous.registrations.contains(token))))
         }) || previous_fields.is_none() && !await_prs.is_empty() {
             next_check = next_check.min(now_ms());

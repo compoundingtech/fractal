@@ -138,7 +138,6 @@ pub trait ProgramPrWatchesStore {
 
 impl ProgramPrWatchesStore for Store {
     fn program_pr_watches(&self) -> Result<Vec<Value>> {
-        use crate::MissionsStore as _;
         smallclaims::touched::note_read(|| "kind:program.step".into());
         let candidates = {
             let connection = self.readers.get();
