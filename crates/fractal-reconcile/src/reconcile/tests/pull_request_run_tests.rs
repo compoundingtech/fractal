@@ -327,11 +327,21 @@ fn supersession_revokes_a_claimed_worker_and_runs_final_cleanup() {
             .work_action(&step.subject, "complete", &work("late-complete"))
             .is_err()
     );
-    let notices = store.messages(None, true).unwrap();
+    // This focused evaluation bypasses the reconcile pass's post-commit outbox drain.
+    crate::store::message_outbox::drain(&store).unwrap();
+    let cancellation_message = store
+        .messages(None, true)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.title.as_deref() == Some("Mission work cancelled"))
+        .expect("the superseded worker receives a cancellation message");
+    assert_eq!(cancellation_message.from, "daemon/runtime");
+    assert_eq!(cancellation_message.to, "agent/node.worker");
+    assert!(cancellation_message.content.contains(&step.subject));
     assert!(
-        notices
-            .iter()
-            .any(|message| message.title.as_deref() == Some("Mission work cancelled"))
+        cancellation_message
+            .tags
+            .contains(&format!("mission-run:mission-run/{}", run.id))
     );
     for _ in 0..5 {
         r.evaluate_mission_runs().unwrap();
