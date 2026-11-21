@@ -401,6 +401,9 @@ pub const FUTURE_SIGNATURE_MS: u64 = 60 * 60 * 1_000;
 /// rule applies it to the same claims.
 pub const FRESHNESS_FROM_UNIX_MS: u64 = 1_796_083_200_000; // 2026-12-01T00:00:00Z
 
+/// The verdict reason for a claim whose batch is out of its writer's order.
+pub const BATCH_DISORDER: &str = "its batch is timed before a batch it follows";
+
 /// The batch a judged claim arrived in, as the writer timed it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchTime {
@@ -440,7 +443,7 @@ pub fn judge(claim: &Judged<'_>, signature: Option<&ClaimSignature>, facts: &dyn
     }
     if let Some(batch) = facts.batch().filter(|batch| batch.time_unix_ms >= FRESHNESS_FROM_UNIX_MS) {
         if !batch.ordered {
-            return Verdict::Invalid("its batch is timed before a batch it follows".into());
+            return Verdict::Invalid(BATCH_DISORDER.into());
         }
         if batch.time_unix_ms.saturating_sub(signature.signed_at_unix_ms) > FRESHNESS_WINDOW_MS {
             return Verdict::Invalid("the signature is older than the freshness window".into());

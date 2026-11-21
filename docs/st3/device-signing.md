@@ -314,7 +314,9 @@ signed claim's content again in a later batch, and members keep that original on
 have not trimmed it. The window makes such a copy of a claim old enough to be forgotten invalid
 from its own fields, so members agree without holding the original. Forgets keep signed claims at
 least 8 days. The order check reads the writer's previous batch and the batches of its claims'
-predecessors only where the member still holds them. The remaining gap is accepted, since it needs
+predecessors only where the member still holds them. A claim judged before such a batch arrives is
+judged again when it does, and an out-of-order verdict once found is recorded and kept, so neither
+arrival order nor a later trim changes it. The remaining gap is accepted, since it needs
 a member with a writer key: a writer can still time a copy within the window before a batch some
 members no longer hold (forgotten, or from before the checkpoint a member joined from), or when it
 has no earlier batch and no predecessors.

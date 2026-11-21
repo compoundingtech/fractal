@@ -3,11 +3,11 @@
   "summary": "Claims in batches timed from 2026-12-01T00:00Z on are judged under two new rules. A signature counts only within 7 days after it was made, by the time of the batch that carries it. The batch must keep its writer's order. A claim's ID covers its batch but its signature does not, so a writer could carry a validly signed claim's content again in a later batch: that copy is now invalid from its own fields once the original is old enough to be forgotten, on every member, whether or not it still holds the original. Until now the verdict of such a copy depended on whether a member had trimmed the original.",
   "replay": {
     "status": "none",
-    "detail": "No replay and no scan. Batches before 2026-12-01T00:00Z are not checked. For later ones, judging a claim reads its batch's time and checks three index seeks: claims of the batch timed before it, the writer's previous batch, and batches its claims name as predecessors."
+    "detail": "No replay and no scan. Batches before 2026-12-01T00:00Z are not checked. For later ones, judging a claim reads its batch's time and checks three index seeks: claims of the batch timed before it, the writer's previous batch, and batches its claims name as predecessors. Neither arrival order nor forgetting changes the answer, for batches the member has held. Arrival: a batch the check reads but the member does not hold yet is recorded as a verdict dependency (batch:WRITER|SEQUENCE, arrival:CLAIM), and its arrival requeues the claim. Forgetting: a disorder once found is recorded in claim_batch_disorder and kept, since more batches can only add constraints, so a later trim or a full recheck cannot turn it back."
   },
   "schema": {
-    "status": "none",
-    "detail": "No table, index, column, kind, digest or storage version change. Constants in code: FRESHNESS_WINDOW_MS 7 days, FUTURE_SIGNATURE_MS 1 hour, FRESHNESS_FROM_UNIX_MS 2026-12-01T00:00:00Z."
+    "status": "changed",
+    "detail": "One host-local table, claim_batch_disorder(claim_id), records each claim judged out of its writer's order. Two triggers, claim_verdict_batch_arrived on batches and claim_verdict_claim_arrived on claims, requeue claims waiting on a batch's or a predecessor's arrival. No column, index, kind, digest or storage version change. Constants in code: FRESHNESS_WINDOW_MS 7 days, FUTURE_SIGNATURE_MS 1 hour, FRESHNESS_FROM_UNIX_MS 2026-12-01T00:00:00Z."
   },
   "rules": {
     "status": "changed",

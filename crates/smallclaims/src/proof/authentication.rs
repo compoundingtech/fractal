@@ -10,6 +10,35 @@ use super::{ProofError, chain_error, malformed};
 pub(super) struct Authentication<'a> {
     pub(super) records: &'a BTreeMap<String, Record>,
     pub(super) membership: &'a Membership,
+    /// The records by writer and sequence and by batch, built once for the batch-order check.
+    pub(super) order: std::cell::OnceCell<BatchIndex<'a>>,
+}
+
+/// Each writer's batch times by sequence, and each batch's latest predecessor time.
+#[derive(Default)]
+pub(super) struct BatchIndex<'a> {
+    times: std::collections::HashMap<(&'a str, u64), u128>,
+    latest_predecessor: std::collections::HashMap<&'a str, u128>,
+}
+
+impl<'a> Authentication<'a> {
+    pub(super) fn new(records: &'a BTreeMap<String, Record>, membership: &'a Membership) -> Self {
+        Self { records, membership, order: std::cell::OnceCell::new() }
+    }
+
+    fn order(&self) -> &BatchIndex<'a> {
+        self.order.get_or_init(|| {
+            let mut index = BatchIndex::default();
+            for record in self.records.values() {
+                index.times.insert((record.claim.origin.as_str(), record.sequence), record.claim.accepted_at_unix_ms);
+                for predecessor in record.claim.predecessors.iter().filter_map(|id| self.records.get(id)) {
+                    let latest = index.latest_predecessor.entry(record.claim.batch_id.as_str()).or_default();
+                    *latest = (*latest).max(predecessor.claim.accepted_at_unix_ms);
+                }
+            }
+            index
+        })
+    }
 }
 
 impl Authentication<'_> {
@@ -85,15 +114,13 @@ impl Facts for ProofFacts<'_, '_> {
         if time < principal::FRESHNESS_FROM_UNIX_MS {
             return Some(principal::BatchTime { time_unix_ms: time, ordered: true });
         }
-        let later = |record: &Record| u64::try_from(record.claim.accepted_at_unix_ms).is_ok_and(|other| other > time);
-        let records = self.authentication.records;
-        let disordered = records.values().any(|record| {
-            // The writer's previous batch.
-            (record.claim.origin == claim.origin && record.sequence + 1 == self.record.sequence && later(record))
-                // Any batch a claim of this batch names as a predecessor.
-                || (record.claim.batch_id == claim.batch_id
-                    && record.claim.predecessors.iter().any(|predecessor| records.get(predecessor).is_some_and(|p| later(p))))
-        });
+        let later = |other: u128| u64::try_from(other).is_ok_and(|other| other > time);
+        let order = self.authentication.order();
+        // The writer's previous batch, and any batch a claim of this batch names as a predecessor.
+        let disordered = self.record.sequence.checked_sub(1)
+            .and_then(|previous| order.times.get(&(claim.origin.as_str(), previous)))
+            .is_some_and(|&previous| later(previous))
+            || order.latest_predecessor.get(claim.batch_id.as_str()).is_some_and(|&latest| later(latest));
         Some(principal::BatchTime { time_unix_ms: time, ordered: !disordered })
     }
 
@@ -280,12 +307,12 @@ impl VerifiedHistory {
     /// carried by another writer cannot establish that window. Nonces count only when signed
     /// genuinely for their claim.
     pub fn verify_claim(&self, id: &str) -> Result<(), ProofError> {
-        Authentication { records: &self.records, membership: &self.membership }.require(id)
+        Authentication::new(&self.records, &self.membership).require(id)
     }
 
     /// Resolve a historical agent spelling through authenticated same-storage naming edges.
     pub fn verify_actor_alias(&self, requested: &str, storage: &str) -> Result<bool, ProofError> {
-        authenticated_actor_alias(&Authentication { records: &self.records, membership: &self.membership }, requested, storage)
+        authenticated_actor_alias(&Authentication::new(&self.records, &self.membership), requested, storage)
     }
 
     /// Validate the portable runtime schema and request/effect binding of all naming claims.
