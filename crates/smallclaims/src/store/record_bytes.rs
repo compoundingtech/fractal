@@ -218,6 +218,7 @@ pub(crate) fn assert_plan_seeks(connection: &Connection, sql: &str) {
         step == "SCAN CONSTANT ROW"
             || step == "SCAN records"
             || step == "SCAN replica_record_rows"
+            || step == "SCAN envelope_rows"
             || step.starts_with("SCAN (subquery-")
     };
     let scans: Vec<&String> = plan

@@ -471,10 +471,10 @@ pub fn sealed_envelope_records_sql() -> String {
          JOIN batches ON batches.id=claims.batch_id
          WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?5
            AND records.state<>'repaired'
-           AND EXISTS(SELECT 1 FROM envelope_rows envelopes
-                      WHERE envelopes.writer=?1 AND envelopes.sequence=?2 AND envelopes.envelope_hash=?5
-                        AND envelopes.row_id <= ?4
-                        AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3)"
+           AND EXISTS(SELECT 1 FROM envelope_rows
+                      WHERE envelope_rows.writer=?1 AND envelope_rows.sequence=?2
+                        AND envelope_rows.envelope_hash=?5 AND envelope_rows.row_id <= ?4
+                        AND CAST(envelope_rows.accepted_at_unix_ms AS INTEGER) < ?3)"
     )
 }
 
