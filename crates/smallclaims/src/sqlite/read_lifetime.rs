@@ -45,10 +45,16 @@ impl LiveReadToken {
 
 impl Drop for LiveReadToken {
     fn drop(&mut self) {
-        LIVE_READS
+        let read = LIVE_READS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.0);
+        if let Some(read) = read.filter(|read| read.pool.is_some()) {
+            super::telemetry::METRICS.read_loan_duration.add(
+                read.started.elapsed().as_secs_f64(),
+                &[read.origin.attribute("origin")],
+            );
+        }
     }
 }
 
