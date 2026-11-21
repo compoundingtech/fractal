@@ -2,10 +2,64 @@
 //! Phase wall times contain nested costs; they must not be added to writer or shared time.
 
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 const ENVELOPE_SIZE_SAMPLE_LIMIT: usize = 32;
+
+#[derive(Clone, Copy, Debug)]
+pub enum ExchangeClass { Empty, Nonempty }
+
+impl ExchangeClass {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::Empty => "empty", Self::Nonempty => "nonempty" }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Outcome { Ok, Deferred, Contended, Error }
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok", Self::Deferred => "deferred",
+            Self::Contended => "contended", Self::Error => "error",
+        }
+    }
+}
+
+struct Instruments {
+    receives: opentelemetry::metrics::Counter<u64>,
+    commits: opentelemetry::metrics::Counter<u64>,
+}
+
+impl Instruments {
+    fn new(meter: &opentelemetry::metrics::Meter) -> Self {
+        Self {
+            receives: meter.u64_counter("st.replication.receives").with_unit("{receive}").build(),
+            commits: meter.u64_counter("st.replication.receive.commits").with_unit("{commit}").build(),
+        }
+    }
+
+    fn record_summary(&self, class: ExchangeClass, outcome: Outcome, counters: &Counters) {
+        let attributes = [
+            opentelemetry::KeyValue::new("exchange_class", class.as_str()),
+            opentelemetry::KeyValue::new("outcome", outcome.as_str()),
+        ];
+        self.receives.add(1, &attributes);
+        self.commits.add(counters.commits, &attributes);
+    }
+}
+
+static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
+    Instruments::new(&opentelemetry::global::meter("smallclaims.replication.receive"))
+});
+
+/// Emit once from the same final snapshot as the structured receive summary. No peer,
+/// correlation ID, error code or projection stage becomes a metric label.
+pub fn record_summary(class: ExchangeClass, outcome: Outcome, counters: &Counters) {
+    METRICS.record_summary(class, outcome, counters);
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Counters {
@@ -397,6 +451,60 @@ impl Drop for Timer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn receive_counter_totals_match_final_request_snapshots() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        let instruments = Instruments::new(&provider.meter("receive-test"));
+        let mut expected = std::collections::BTreeMap::new();
+        for class in [ExchangeClass::Empty, ExchangeClass::Nonempty] {
+            for outcome in [Outcome::Ok, Outcome::Deferred, Outcome::Contended, Outcome::Error] {
+                let mut commits = 0;
+                for count in [0, 2, 3] {
+                    let request = RequestMetrics::default();
+                    {
+                        let _request = request.enter();
+                        for _ in 0..count { commit(); }
+                    }
+                    let summary = request.snapshot();
+                    commits += summary.commits;
+                    instruments.record_summary(class, outcome, &summary);
+                }
+                expected.insert((class.as_str().to_owned(), outcome.as_str().to_owned()), commits);
+            }
+        }
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for metric in finished.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+        {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                panic!("receive metrics must be integer counters");
+            };
+            let mut series = 0;
+            for point in sum.data_points() {
+                let attributes: Vec<_> = point.attributes().collect();
+                assert_eq!(attributes.len(), 2);
+                let label = |name| attributes.iter().find(|attribute| attribute.key.as_str() == name)
+                    .unwrap().value.to_string();
+                let key = (label("exchange_class"), label("outcome"));
+                let value = if metric.name() == "st.replication.receives" { 3 } else { expected[&key] };
+                assert_eq!(point.value(), value);
+                series += 1;
+            }
+            assert_eq!(series, 8);
+            seen.insert(metric.name().to_owned());
+        }
+        assert_eq!(seen, std::collections::BTreeSet::from([
+            "st.replication.receives".to_owned(), "st.replication.receive.commits".to_owned(),
+        ]));
+    }
+
     use super::*;
 
     #[test]
