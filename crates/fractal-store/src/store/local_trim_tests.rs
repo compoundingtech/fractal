@@ -359,7 +359,7 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
                     vec![row], vec![format!("agent/example-{chunk}")],
                 ),
             });
-            hook_published.lock().unwrap().push(done.is_some());
+            hook_published.lock().unwrap().push((done.is_some(), fractal.presented_agents.generation()));
         }
         building = fractal.presented_agents.begin_materialization();
     }));
@@ -367,7 +367,16 @@ fn the_roster_publishes_between_the_chunks_of_a_local_cut() {
     store.trim_chunk_hook.lock().unwrap().take();
     let published = published.lock().unwrap();
     assert!(published.len() > 4, "the cut deletes in many chunks ({})", published.len());
-    assert!(published.iter().all(|done| *done), "the agents source reset while materializing its publication: {published:?}");
+    assert!(published.iter().all(|(done, _)| *done), "the agents source reset while materializing its publication: {published:?}");
+    // Recording the tombstones before deletion legitimately invalidates old publications.
+    // Compare with the generation observed inside deletion, not before recording began.
+    let generation = published.first().unwrap().1;
+    assert!(published.iter().all(|(_, observed)| *observed == generation),
+        "deletion chunks must preserve their publication generation: {published:?}");
+    assert_eq!(store.fractal.presented_agents.generation(), generation,
+        "finishing a graph-preserving trim must not replace the publication generation");
+    assert!(matches!(store.fractal.presented_agents.current(), super::published_list::ListRead::Served(..)),
+        "the last publication must remain served after the default local trim stops");
 }
 
 /// A local cut's run lets the views refold once the interval is due, keeping the roster's
