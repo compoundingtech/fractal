@@ -83,7 +83,9 @@ impl Store {
         }
         // Citations live in claim bodies; the cache answers who cites a thread without reading them.
         self.catch_up_local_trim_citations()?;
-        let cutoff = now_ms.saturating_sub(RETAIN_AFTER_CLOSE_MS);
+        // A week after the close, and never inside the freshness window's forget bound: the close
+        // is a thread's newest claim, and a claim is accepted no earlier than its batch.
+        let cutoff = now_ms.saturating_sub(RETAIN_AFTER_CLOSE_MS.max(smallclaims::principal::FORGET_SIGNED_AFTER_MS));
         let (after, mut deferred) = self.retirement_progress()?;
         // Deferred threads first, the oldest first; one still deferred goes to the back.
         let mut judged: Vec<(Option<i64>, String, Judgement)> = Vec::new();

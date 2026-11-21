@@ -39,10 +39,15 @@ fn store_with_drops(origin: &str) -> (Store, DropPlan) {
     (store, plan)
 }
 
+/// Trim as a member does once what it drops is past the freshness window's forget bound.
 fn trim(store: &Store, plan: &DropPlan) {
+    store
+        .set_write_clock_at(now_ms() + u128::from(smallclaims::principal::FORGET_SIGNED_AFTER_MS) + 86_400_000)
+        .unwrap();
     store
         .apply_checkpoint_drop(CHECKPOINT, &plan.envelopes, &plan.claims)
         .unwrap();
+    store.set_write_clock_offset(0).unwrap();
 }
 
 /// Send `to` what `from` holds and `to` lacks, as one exchange does. With `buckets`, `to`

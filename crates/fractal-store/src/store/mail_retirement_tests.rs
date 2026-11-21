@@ -333,3 +333,24 @@ fn warming_reads_each_table_by_an_index() {
         assert!(lines.iter().all(|line| !line.starts_with("SCAN")), "{table}: {lines:?}");
     }
 }
+
+/// The freshness window's forget bound: a signed thread stays until its close is older than the
+/// window and a day, not only a week.
+#[test]
+fn a_signed_thread_stays_until_the_forget_bound() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let written = FRESHNESS_FROM_UNIX_MS + 60_000;
+    store.set_write_clock_at(u128::from(written)).unwrap();
+    let ids = thread(&store, "message/signed", SENDER, RECIPIENT, true);
+    let at = |later: u64| {
+        store.set_write_clock_at(u128::from(written + later)).unwrap();
+        retire_all(&store, written + later).0
+    };
+    assert_eq!(at(RETAIN_AFTER_CLOSE_MS + DAY_MS / 2), 0, "a week and a half day: inside the bound");
+    assert!(ids.iter().all(|id| claims(&store).contains(id)));
+    assert_eq!(at(FORGET_SIGNED_AFTER_MS + DAY_MS / 2), 1, "past the bound it retires");
+    assert!(ids.iter().all(|id| retired(&store).contains(id)));
+}
