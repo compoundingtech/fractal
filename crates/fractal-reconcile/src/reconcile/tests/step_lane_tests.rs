@@ -80,11 +80,20 @@ mission "orchid" state="ready" {
 #[test]
 fn a_step_whose_raised_lane_does_not_fit_waits_blocked_until_it_does() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
         .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     apply_source(&store, r#"version 2
 agent "held" { workspace "/tmp"; command "true"; capacity cores=8 memory="40G" }"#, "held");
     observe(&store, "agent/node.held", "running");
+    // This seat must physically hold its lane throughout the reconciliation passes,
+    // not merely have an old running claim while the runtime reports it missing.
+    let held = store.desired_subject_with_writer("agent/node.held").unwrap().unwrap().0.member.unwrap();
+    assert!(held.terminal);
+    runtime.ptys.lock().unwrap().push(RuntimeObservation {
+        runtime_id: held.runtime_id.clone(), terminal: true, status: "running".into(),
+        exit_code: None, incarnation_id: Some("agent/node.held-1".into()),
+    });
     let run = run(&store, r#"version 2
 mission "orchid" state="ready" {
   goal "Build."
@@ -108,6 +117,9 @@ mission "orchid" state="ready" {
     // Room frees when the other seat stops for good (a seat that only exits is started again and
     // holds its room while it starts): the step is delivered.
     apply_source(&store, "version 2\nstop \"agent/node.held\"", "stop-held");
+    runtime.ptys.lock().unwrap().iter_mut()
+        .find(|observation| observation.runtime_id == held.runtime_id).unwrap()
+        .status = "exited".into();
     observe(&store, "agent/node.held", "exited");
     for _ in 0..2 {
         reconciler.reconcile_once().unwrap();
