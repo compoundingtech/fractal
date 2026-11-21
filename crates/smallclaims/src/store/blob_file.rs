@@ -40,6 +40,12 @@ pub const FENCED_FROM: &str = "blob_file_fenced_from";
 /// in the blob file, so it commits with the copies it counts.
 pub const COPIED: &str = "copied_through";
 
+/// `meta`: the rowid at or below which compaction relocates emptied rows, fixed when it starts:
+/// the move's cursor then, so every row it covers has already let go of its bytes.
+pub const COMPACT_THROUGH: &str = "blob_compact_through";
+/// `meta`: the last rowid compaction has dealt with.
+pub const COMPACT_CURSOR: &str = "blob_compact_cursor";
+
 /// Rows one step considers.
 const PAGE: i64 = 64;
 
@@ -47,13 +53,15 @@ const BLOB_FILE_TABLE: &str = /* sqlite-large-value: allow-for-now lv-hca561fb42
     hash TEXT PRIMARY KEY, bytes BLOB NOT NULL, size INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blob_file.meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)";
 
-/// The bytes of the `blobs` row aliased `$alias`: its own, or the blob file's once they moved.
+/// The bytes of the `blobs` row aliased `$alias`: its own, or the blob file's once they moved. A
+/// moved row whose copy is missing reads as NULL, also when a reader stands the store's own file
+/// in for a missing blob file (`attach_reader`), whose row for it is the emptied one.
 #[macro_export]
 macro_rules! blob_bytes {
     ($alias:literal) => {
         concat!(
             "CASE WHEN ", $alias, ".size>0 AND length(", $alias, ".bytes)=0 THEN (SELECT moved.bytes FROM blob_file.blobs AS moved WHERE moved.hash=",
-            $alias, ".hash) ELSE ", $alias, ".bytes END"
+            $alias, ".hash AND length(moved.bytes)=moved.size) ELSE ", $alias, ".bytes END"
         )
     };
 }
@@ -79,6 +87,12 @@ pub fn location(database: &Path) -> String {
 
 /// Attach the blob file to the store's writer, creating it with incremental auto-vacuum.
 pub fn attach_writer(connection: &Connection, database: &Path) -> Result<()> {
+    // An admitted store's connection may not create files (`AdmittedStore::open_connection`
+    // drops SQLITE_OPEN_CREATE once its database exists), and an attach inherits that.
+    let blob_file = location(database);
+    if blob_file != ":memory:" && !blob_file.starts_with("file:") && !Path::new(&blob_file).exists() {
+        create(&blob_file)?;
+    }
     connection.execute(/* sqlite-large-value: allow-for-now lv-h2e95b3b64cc3 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS blob_file", [location(database)])?;
     // Only an empty file takes a vacuum mode, so set it before the first table.
     let fresh: bool =
@@ -93,20 +107,37 @@ pub fn attach_writer(connection: &Connection, database: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Attach the blob file to a reader. A store whose writer has not yet run this build has no blob
-/// file, and none of its bytes moved: an empty stand-in answers the same.
+/// Attach the blob file to a reader, which never writes. A store whose writer has not yet run
+/// this build has no blob file, and none of its rows' bytes moved: the reader then attaches the
+/// store's own file under the blob file's name, whose `blobs` and `meta` tables have the blob
+/// file's columns, so every statement naming the blob file compiles, a moved-bytes lookup runs for
+/// no row, and a cursor reads as unset. An in-memory stand-in can't do that: on a read-only
+/// connection it is read-only too, and could not take the tables. A private in-memory store has no
+/// file to share, so its reader keeps an in-memory stand-in.
 pub fn attach_reader(connection: &Connection, database: &Path) -> Result<()> {
     let location = location(database);
-    let present = location == ":memory:" || location.starts_with("file:") || Path::new(&location).exists();
-    if present {
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h86d6852c28d8 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS blob_file", [&location])?;
-        if location != ":memory:" {
-            return Ok(());
-        }
-    } else {
+    if location == ":memory:" {
         connection.execute(/* sqlite-large-value: allow-for-now lv-hb2d3b2648e1d owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ':memory:' AS blob_file", [])?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hedea69cc751c owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ BLOB_FILE_TABLE)?;
+        return Ok(());
     }
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hedea69cc751c owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ BLOB_FILE_TABLE)?;
+    let attached = if location.starts_with("file:") || Path::new(&location).exists() {
+        location
+    } else {
+        database.to_string_lossy().into_owned()
+    };
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h5219554f400a owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS blob_file", [&attached])?;
+    Ok(())
+}
+
+/// Create the empty blob file at `location` with the writer's settings. Two at once are harmless:
+/// the vacuum mode only takes on an empty file, and the table is created if it doesn't exist.
+fn create(location: &str) -> Result<()> {
+    let connection = Connection::open(location)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA auto_vacuum = INCREMENTAL")?;
+    connection.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h12063254abf6 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ &BLOB_FILE_TABLE.replace("blob_file.", "main."))?;
     Ok(())
 }
 
@@ -131,6 +162,17 @@ pub fn copy_beside(database: &Path, shared_memory: bool, copy: &Path) -> Result<
     attach_reader(&connection, database)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h1145b31da060 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "VACUUM blob_file INTO ?1", [&target])?;
     Ok(())
+}
+
+/// What one compaction step did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BlobCompaction {
+    /// Rows given a rowid past every other.
+    pub relocated: usize,
+    /// The step's writer hold.
+    pub hold: Duration,
+    /// Whether rows up to the frontier remain.
+    pub more: bool,
 }
 
 /// What one step of moving or restoring did.
@@ -278,6 +320,104 @@ impl Store {
         Ok(done)
     }
 
+    /// Pack the `blobs` rows whose bytes moved, one bounded writer hold a step. SQLite doesn't
+    /// merge pages when a row shrinks, so once the move has emptied them the rows sit sparse on
+    /// their old pages. Each step gives the next of them, in rowid order up to [`COMPACT_THROUGH`],
+    /// a rowid past every other, which packs them densely at the table's end and leaves their old
+    /// pages to the freelist, for the caller's paced incremental vacuum to give back. Updating
+    /// only the rowid keeps the hash, so `documents.hash` and every lookup by hash are untouched.
+    /// It waits while the move is between a copy and its emptying, and refuses a table with a
+    /// trigger, which a rowid update would fire. A blob of zero bytes, which has no bytes to move,
+    /// is packed the same way. The rows to relocate are read before the writer is taken, and each
+    /// relocation re-checks that its row has no bytes. Call again while `more`.
+    pub fn compact_blob_rows_step(&self, batch: usize, budget: Duration) -> Result<BlobCompaction> {
+        let reader = self.readers.get();
+        let triggers: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM main.sqlite_schema WHERE type='trigger' AND tbl_name='blobs'",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(triggers == 0, "blobs has {triggers} trigger(s), which relocating its rows would fire");
+        let (emptied, copied, through, cursor): (i64, i64, Option<i64>, i64) = reader.query_row(
+            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?1), 0),
+                    COALESCE((SELECT CAST(value AS INTEGER) FROM blob_file.meta WHERE key=?2), 0),
+                    (SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?3),
+                    COALESCE((SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?4), 0)",
+            params![CURSOR, COPIED, COMPACT_THROUGH, COMPACT_CURSOR],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let mut done = BlobCompaction::default();
+        // Nothing has let go of its bytes yet, or the move holds copies it has yet to empty.
+        if emptied == 0 || copied > emptied {
+            return Ok(done);
+        }
+        let through = through.unwrap_or(emptied);
+        if cursor >= through {
+            return Ok(done);
+        }
+        let page: Vec<i64> = reader
+            .prepare_cached(
+                "SELECT rowid FROM blobs WHERE rowid>?1 AND rowid<=?2 AND length(bytes)=0 ORDER BY rowid LIMIT ?3",
+            )?
+            .query_map(params![cursor, through, i64::try_from(batch).unwrap_or(i64::MAX)], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(reader);
+        let connection = self.connection.write_background();
+        let started = Instant::now();
+        super::durability::committing_without_fsync(&connection, || {
+            let transaction = connection.unchecked_transaction()?;
+            // The move has dealt with every row there is: the relocated rows, empty, need none
+            // of its passes, so its cursors move past them rather than page through them again.
+            // Read under the writer, as the move's own steps write them.
+            let caught_up: bool = transaction.query_row(
+                "SELECT COALESCE((SELECT MAX(rowid) FROM blobs), 0)<=moved AND copied>=moved
+                 FROM (SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM main.meta WHERE key=?1), 0) AS moved,
+                              COALESCE((SELECT CAST(value AS INTEGER) FROM blob_file.meta WHERE key=?2), 0) AS copied)",
+                params![CURSOR, COPIED],
+                |row| row.get(0),
+            )?;
+            let mut last = if page.len() < batch { through } else { *page.last().unwrap_or(&through) };
+            {
+                let mut relocating = transaction.prepare_cached(
+                    /* sqlite-large-value: allow-for-now lv-hd0083a887d5d owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "UPDATE blobs SET rowid=(SELECT MAX(rowid)+1 FROM blobs) WHERE rowid=?1 AND length(bytes)=0",
+                )?;
+                for (n, &rowid) in page.iter().enumerate() {
+                    if n > 0 && started.elapsed() >= budget {
+                        last = page[n - 1];
+                        break;
+                    }
+                    done.relocated += relocating.execute(/* sqlite-large-value: allow-for-now lv-h6fc82c88c317 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])?;
+                }
+            }
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h591299972bff owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO main.meta(key, value) VALUES (?1, ?2)",
+                params![COMPACT_THROUGH, through.to_string()],
+            )?;
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h33d0c971f40a owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
+                params![COMPACT_CURSOR, last.to_string()],
+            )?;
+            if caught_up {
+                let end: i64 = transaction.query_row("SELECT COALESCE(MAX(rowid), 0) FROM blobs", [], |row| row.get(0))?;
+                // Two files, each committing on its own: either cursor alone past the relocated
+                // rows is safe, since both passes skip a row without bytes.
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-hf64a77d17140 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
+                    params![CURSOR, end.to_string()],
+                )?;
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h092b1cde716b owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO blob_file.meta(key, value) VALUES (?1, ?2)",
+                    params![COPIED, end.to_string()],
+                )?;
+            }
+            done.more = last < through;
+            transaction.commit()?;
+            Ok(())
+        })?;
+        done.hold = started.elapsed();
+        Ok(done)
+    }
+
     /// Whether everything committed to the blob file is on disk: a PASSIVE checkpoint, from a
     /// connection of its own so the writer is not held, copied every frame of its WAL into the
     /// file and synced it. A private in-memory store's blob file has no disk to wait on.
@@ -356,7 +496,7 @@ pub fn restore_page(connection: &Connection, now_ms: u64) -> Result<BlobBytes> {
         )?;
         for &(rowid, size) in &page {
             anyhow::ensure!(
-                restoring.execute(/* sqlite-large-value: allow-for-now lv-h6fc82c88c317 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])? == 1,
+                restoring.execute(/* sqlite-large-value: allow-for-now lv-h954b3095a645 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])? == 1,
                 "blob row {rowid} has no bytes here or in the blob file; the store can't be restored"
             );
             done.rows += 1;
@@ -367,4 +507,69 @@ pub fn restore_page(connection: &Connection, now_ms: u64) -> Result<BlobBytes> {
     transaction.commit()?;
     done.hold = started.elapsed();
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Store, runtime::Plain};
+    use std::sync::Arc;
+
+    /// A store none of whose rows moved, with no blob file beside it: as one whose writer hasn't
+    /// run this build, or that a reader opens first.
+    fn without_blob_file(directory: &Path) -> std::path::PathBuf {
+        let path = directory.join("claims.sqlite3");
+        drop(Store::open(&path, "writer", Arc::new(Plain)).unwrap());
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", location(&path)));
+        }
+        path
+    }
+
+    #[test]
+    fn a_read_only_open_before_any_blob_file_compiles_every_blob_statement_and_writes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = without_blob_file(directory.path());
+        let reader = crate::sqlite::open_read_connection(&path, false).unwrap();
+        // Every statement naming the blob file compiles and runs.
+        let rows: i64 = reader
+            .query_row(concat!("SELECT COUNT(*) FROM (SELECT ", blob_bytes!("b"), " FROM blobs AS b)"), [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        let copied: i64 = reader
+            .query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM blob_file.meta WHERE key=?1), 0)", [COPIED], |row| row.get(0))
+            .unwrap();
+        assert_eq!(copied, 0);
+        assert!(!Path::new(&location(&path)).exists(), "a reader created no blob file");
+    }
+
+    #[test]
+    fn a_moved_row_whose_blob_file_is_gone_reads_as_null_not_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = without_blob_file(directory.path());
+        let reader = crate::sqlite::open_read_connection(&path, false).unwrap();
+        // The stand-in's row for a moved blob is the emptied one: size set, bytes empty.
+        let bytes: Option<Vec<u8>> = reader
+            .query_row(
+                concat!("SELECT ", blob_bytes!("b"), " FROM (SELECT 'gone' AS hash, x'' AS bytes, 3 AS size) AS b"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bytes, None);
+    }
+
+    #[test]
+    fn a_writer_creates_the_blob_file_its_connection_may_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = without_blob_file(directory.path());
+        // As an admitted store's connection, once its database exists: no SQLITE_OPEN_CREATE.
+        let connection = rusqlite::Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+        attach_writer(&connection, &path).unwrap();
+        let mode: i64 = connection.query_row("PRAGMA blob_file.auto_vacuum", [], |row| row.get(0)).unwrap();
+        assert_eq!(mode, 2, "incremental, set before the first table");
+        let journal: String = connection.query_row("PRAGMA blob_file.journal_mode", [], |row| row.get(0)).unwrap();
+        assert_eq!(journal, "wal");
+        connection.execute("INSERT INTO blob_file.blobs(hash, bytes, size) VALUES ('fixture', x'01', 1)", []).unwrap();
+    }
 }

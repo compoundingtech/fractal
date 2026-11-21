@@ -147,7 +147,8 @@ impl ClaimSource {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h34b0045efaf9 owner=smallclaims::ivm::claim_source TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS ivm_install_claim_record_insert")?;
         let triggers: [(&str, &str, String, String); 7] = [
             ("record_insert", "AFTER INSERT ON replica_records", "NEW.claim_id IS NOT NULL".into(), changed_sources.to_string()),
-            ("record_delete", "AFTER DELETE ON replica_records", "OLD.claim_id IS NOT NULL".into(), relevant.to_string()),
+            // A valid record's deletion changes no claim or position (`record_bytes`).
+            ("record_delete", "AFTER DELETE ON replica_records", format!("OLD.claim_id IS NOT NULL AND {}", crate::store::record_bytes::RECORD_DELETE_MATTERS), relevant.to_string()),
             ("record_update", "AFTER UPDATE OF position,claim_id ON replica_records", "OLD.position<>NEW.position OR OLD.claim_id IS NOT NEW.claim_id".into(), format!("{relevant} UNION {insert_relevant}")),
             // Even deletion of an unrelated kind can change the legacy COUNT ranks.
             ("claim_delete", "AFTER DELETE ON claims", "1".into(), all.to_string()),
@@ -156,6 +157,10 @@ impl ClaimSource {
             ("source_epoch", "AFTER UPDATE OF epoch ON ivm_source", "OLD.epoch<>NEW.epoch".into(), all.to_string()),
         ];
         for (name, event, condition, sources) in triggers {
+            if name == "record_delete" {
+                // The bounded definition above replaces one that fired on every record deletion.
+                connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h82f7de3ee5cb owner=smallclaims::ivm::claim_source TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS ivm_install_claim_record_delete")?;
+            }
             connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h0d17d2d43780 owner=smallclaims::ivm::claim_source TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS ivm_install_claim_{name} {event} WHEN {condition} BEGIN
                 UPDATE ivm_install_sources SET available=0 WHERE name IN ({sources});
                 UPDATE ivm_install_jobs SET phase='stopped',error='retained claim source changed outside bounded capture' WHERE source IN ({sources}) AND phase IN ('scan','catchup');

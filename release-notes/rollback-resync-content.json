@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Strengthen the conversation rollback resync test to verify exact message count, order, sender and body, addressing the independent review finding on #6951.",
+  "replay": {"status": "none", "detail": "Test assertions only; no runtime changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Keep the existing 410 cursor-gap and supported-cursor resume checks. The full resync must contain exactly one ordered header and content row per supported sent message, with matching IDs, senders, recipients and text, rather than only the set of message IDs."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}

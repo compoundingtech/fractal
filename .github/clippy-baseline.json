@@ -69,8 +69,6 @@
       "clippy::field_reassign_with_default": 4
     },
     "smallclaims": {
-      "clippy::empty_line_after_doc_comments": 1,
-      "clippy::filter_next": 1,
       "clippy::needless_range_loop": 1
     }
   },
