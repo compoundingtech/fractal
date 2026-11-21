@@ -216,11 +216,35 @@ def collect(repo, since, source):
     }
 
 
+def repairs_invalid_statuses(repo, base, source, path):
+    """Allow enum repairs only; valid statuses and all other metadata stay immutable."""
+    try:
+        before = json.loads(source_text(repo, base, path))
+        after = json.loads(source_text(repo, source, path))
+    except json.JSONDecodeError:
+        return False
+    try:
+        validate(before, path)
+    except ImpactError:
+        pass
+    else:
+        return False
+    validate(after, path)
+    if not isinstance(before, dict):
+        return False
+    for field in FIELDS:
+        impact = before.get(field)
+        if isinstance(impact, dict) and 'status' in impact and impact['status'] not in ('none', 'changed', 'unknown'):
+            impact['status'] = after[field]['status']
+    return before == after
+
+
 def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
     """Check the effective merge tree, independently of the unreleased main backlog.
 
     Each new first-parent PR merge in a queue group needs a fresh fragment. Existing
-    fragments are immutable; a later correction or backfill gets its own file.
+    fragments are immutable except invalid status enum repairs; other corrections
+    or backfills get their own file.
     No event identity means strict local validation without a rollout exemption.
     """
     base, source = resolve(repo, base), resolve(repo, source)
@@ -230,6 +254,8 @@ def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
     for change in changes:
         status, path = change.split('\t', 1)
         if path.endswith('.json') and status != 'A':
+            if status == 'M' and repairs_invalid_statuses(repo, base, source, path):
+                continue
             raise ImpactError(f'{path}: existing fragments are immutable; add a new fragment for corrections')
     commits = git(repo, 'rev-list', '--first-parent', '--reverse', f'{base}..{source}').splitlines()
     if not commits:

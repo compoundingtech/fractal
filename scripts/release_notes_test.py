@@ -273,6 +273,35 @@ class ReleaseNotes(unittest.TestCase):
             with self.assertRaisesRegex(ImpactError, 'existing fragments are immutable'):
                 check_pull_request(self.repo, base, source)
 
+    def test_pr_repairs_only_invalid_statuses_without_rewriting_metadata(self):
+        invalid = fragment('Existing activity summary')
+        invalid['compatibility']['status'] = 'additive'
+        self.add_fragment('published', invalid)
+        base = self.commit('Invalid status on main')
+        repaired = copy.deepcopy(invalid)
+        repaired['compatibility']['status'] = 'changed'
+        for operation in ('repair', 'rewrite detail', 'rewrite summary', 'valid status edit', 'still invalid'):
+            with self.subTest(operation=operation):
+                self.git('switch', '--detach', '--quiet', base)
+                candidate = copy.deepcopy(repaired)
+                if operation == 'rewrite detail':
+                    candidate['compatibility']['detail'] = 'Changed historical detail'
+                elif operation == 'rewrite summary':
+                    candidate['summary'] = 'Changed historical summary'
+                elif operation == 'valid status edit':
+                    candidate['replay']['status'] = 'changed'
+                elif operation == 'still invalid':
+                    candidate['compatibility']['status'] = 'additive'
+                self.add_fragment('published', candidate)
+                self.add_fragment('fresh')
+                source = self.commit(operation)
+                if operation == 'repair':
+                    report = check_pull_request(self.repo, base, source)
+                    self.assertEqual(set(report['coverage']), {source})
+                else:
+                    with self.assertRaises(ImpactError):
+                        check_pull_request(self.repo, base, source)
+
     def test_pr_rejects_invalid_metadata_and_undeclared_version_change(self):
         self.write('release-notes/bad.json', '{')
         source = self.commit('Invalid fragment')

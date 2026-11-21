@@ -34,6 +34,10 @@ to each PR in a queue group, not just its head ref. Supplied metadata must be va
 include matching schema/rules transitions. New PRs missing metadata cannot merge. The check uses the effective merge tree and
 immutable event base; it does not require unrelated unreleased main changes to be backfilled.
 Existing fragments are immutable: corrections, later measurements and backfills use a new file.
+The sole repair exception replaces invalid `status` enum values with valid values when the
+base fragment fails validation and the repaired fragment passes. All other metadata,
+including already-valid statuses and details, must remain unchanged. Add a fresh fragment
+for the repair PR as usual.
 
 Reviewers check the metadata against the whole change. Labels can draw attention to an impact,
 but do not replace the committed details.
