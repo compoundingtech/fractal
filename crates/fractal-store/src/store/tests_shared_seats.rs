@@ -300,10 +300,13 @@ pub fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationEx
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: Vec::new(),
         },
         envelopes,
         signature_requests: Vec::new(),
         signatures: Vec::new(),
+        signed_envelopes: Vec::new(),
+        unservable_released: Default::default(),
     }
 }
 

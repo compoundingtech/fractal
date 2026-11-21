@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Preserves the helper completion barrier and exact quiet-pass counts."
+    "detail": "Preserves the helper completion barrier and exact quiet-pass counts. Restart fixtures assert the verified running incarnation at launch completion, followed by a separate readiness clear: exactly cutover, replacement running, and ready clear observations, with no artificial starting or per-pass claims."
   },
   "downtime": {
     "status": "none",
