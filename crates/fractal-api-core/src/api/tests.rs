@@ -16,6 +16,17 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[test]
+fn worker_authorization_warning_is_process_wide_and_rate_limited() {
+    let now = std::time::Instant::now();
+    let mut last = None;
+    assert!(worker_warning_due(&mut last, now));
+    assert!(!worker_warning_due(&mut last, now));
+    assert!(!worker_warning_due(&mut last, now + std::time::Duration::from_secs(59)));
+    assert!(worker_warning_due(&mut last, now + std::time::Duration::from_secs(60)));
+    assert!(!worker_warning_due(&mut last, now + std::time::Duration::from_secs(61)));
+}
+
 #[tokio::test]
 async fn health_reports_read_only_systemd_failure_and_recovery() {
     // No manager access: both production routers share the health handler, and
@@ -597,7 +608,7 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
         };
         let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
         let authority: Option<WorkerAuthority> = worker.then(|| {
-            Arc::new(|| Ok(std::process::id())) as WorkerAuthority
+            WorkerAuthority::new("test-replication.service", || Ok(std::process::id()))
         });
         let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
             reserved, app, Some(state.store), authority, lookup,
@@ -719,7 +730,7 @@ async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person()
     let root = tempfile::tempdir().unwrap();
     let store = state(root.path()).store;
     for verified in [false, true] {
-        let authority: WorkerAuthority = Arc::new(move || Ok(if verified { pid } else { 0 }));
+        let authority = WorkerAuthority::new("test-replication.service", move || Ok(if verified { pid } else { 0 }));
         let app = Router::new().fallback(|| async { "accepted" })
             .layer(from_fn_with_state((store.clone(), Some(authority)), guard_bound_actor));
         for (method, path, header) in [
