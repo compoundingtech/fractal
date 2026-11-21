@@ -345,3 +345,90 @@ fn an_envelope_with_a_claim_without_its_writer_signature_stays() {
         "every released claim has its writer signature"
     );
 }
+
+/// The record view as the previous release defines it: stored records and valid claims of held
+/// envelopes, with no branch for released ones.
+const PREVIOUS_RECORD_ROWS_VIEW: &str = "
+CREATE VIEW replica_record_rows(writer, sequence, envelope_hash, position, state, claim_id) AS
+    SELECT writer, sequence, envelope_hash, position, state, claim_id FROM replica_records
+    UNION ALL
+    SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash, positions.position,
+           'valid', claims.id
+    FROM claims
+    JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+    JOIN claim_positions AS positions ON positions.claim_id=claims.id
+    WHERE NOT EXISTS (
+        SELECT 1 FROM replica_records AS stored
+        WHERE stored.writer=envelopes.writer AND stored.sequence=envelopes.sequence
+          AND stored.envelope_hash=envelopes.envelope_hash AND stored.position=positions.position);
+";
+
+fn record_rows(connection: &rusqlite::Connection, view: &str) -> Vec<(String, u64, String, u64, String, Option<String>)> {
+    connection
+        .prepare(&format!(
+            "SELECT writer, sequence, envelope_hash, position, state, claim_id FROM {view}
+             ORDER BY writer, sequence, envelope_hash, position"
+        ))
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn schema_sql(store: &Store, name: &str) -> Option<String> {
+    store
+        .readers
+        .get()
+        .query_row("SELECT sql FROM sqlite_master WHERE name=?1", [name], |row| row.get(0))
+        .ok()
+}
+
+/// A store the previous release wrote upgrades in place: its open adds the released-envelope
+/// table and view and replaces the record view, and every reader, digest and generation reads
+/// as before. A release on the upgraded store then works as on a new one.
+#[test]
+fn a_store_from_the_previous_release_upgrades_in_place_and_reads_the_same() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("claims.sqlite3");
+    let (alder, key) = alder_at(Store::open(&path, "alder", Arc::new(Plain)).unwrap(), 20);
+    let before = seen(&alder);
+    // As the previous release left it: no released-envelope table or view, and its record view.
+    {
+        let connection = alder.connection.write();
+        connection
+            .execute_batch(&format!(
+                "DROP VIEW replica_record_rows; DROP VIEW envelope_rows; DROP TABLE released_envelopes;
+                 DELETE FROM meta WHERE key='envelope_release_cursor'; {PREVIOUS_RECORD_ROWS_VIEW}"
+            ))
+            .unwrap();
+        assert_eq!(record_rows(&connection, "replica_record_rows"), before.records, "the previous release's view reads the same rows");
+    }
+    drop(alder);
+
+    let alder = bind(Store::open(&path, "alder", Arc::new(Plain)).unwrap(), Some(&key), &key);
+    assert!(schema_sql(&alder, "replica_record_rows").unwrap().contains("released_envelopes"), "the record view is replaced");
+    assert!(schema_sql(&alder, "envelope_rows").is_some());
+    assert_eq!(count(&alder, "SELECT COUNT(*) FROM released_envelopes"), 0);
+    assert_eq!(seen(&alder), before, "upgrading changes nothing a reader or a peer sees");
+    assert_snapshot_matches_store(&alder);
+
+    assert!(release_all(&alder) > 0);
+    let after = seen(&alder);
+    assert_eq!((after.records, after.admitted, after.authority_digest), (before.records, before.admitted, before.authority_digest));
+    assert_snapshot_matches_store(&alder);
+}
+
+/// Rolling back while the pass is off: the previous release creates its record view only when it
+/// is missing, so it keeps this build's, which reads exactly the rows its own would.
+#[test]
+fn the_previous_release_reads_the_same_rows_through_this_builds_record_view() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("claims.sqlite3");
+    let (alder, _) = alder_at(Store::open(&path, "alder", Arc::new(Plain)).unwrap(), 20);
+    let connection = alder.connection.write();
+    connection.execute_batch(&PREVIOUS_RECORD_ROWS_VIEW.replace("CREATE VIEW replica_record_rows", "CREATE TEMP VIEW previous_rows")).unwrap();
+    let current = record_rows(&connection, "replica_record_rows");
+    assert!(!current.is_empty());
+    assert_eq!(current, record_rows(&connection, "temp.previous_rows"));
+}
