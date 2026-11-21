@@ -8,7 +8,12 @@ const verdicts = Object.entries(typecheckTargets).flatMap(([packagePath, project
 // `buck2 build //:typecheck` checks every admitted TypeScript project.
 export default buckRootFile({
   text: rootBuck,
-  extra: `filegroup(
+  extra: `load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
+
+# Prelude Rust tests require this sanitizer-label provider even for local execution.
+noop_test_toolchain(name = "test", visibility = ["PUBLIC"])
+
+filegroup(
     name = "typecheck",
     srcs = {
 ${verdicts.join('\n')}
