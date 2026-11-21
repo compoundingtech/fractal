@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "No wire or API change: retired IDs already travel in the claim-range walk's retired namespace, and a retired claim is asked for as a missing one is. With the switch on, a member answers a request for a claim it retired with the envelope that still carries it; with it off, as before, it serves none. An older peer sends and keeps retired IDs as before."
+    "detail": "No wire or API change: retired IDs already travel in the claim-range walk's retired namespace, and a retired claim is asked for as a missing one is. With the switch on, a member answers a request for a claim it retired with the envelope that still carries it; with it off, as before, it serves none. An older peer sends and keeps retired IDs as before. Switching on: the release that turns RETIREMENT_WINS on deletes on a peer's word only while every peer this member exchanged with in the last 14 days advertises signed-claims-v1, judged from its own exchanges; while any such peer lacks it, the deletion pauses and the replication status says why."
   },
   "downtime": {
     "status": "none",
