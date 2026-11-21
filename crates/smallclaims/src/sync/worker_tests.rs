@@ -17,6 +17,148 @@ use crate::store::runtime::Plain;
 use crate::store::{Runtime as _, Store};
 use crate::sync::Local;
 
+#[test]
+fn idle_rounds_grow_to_the_ceiling_and_movement_resets_them() {
+    let mut idle = IdleBackoff::default();
+    let ceiling = crate::sync::replication_idle_max_from(None);
+    for seconds in [30, 60, 120, 240, 480, 600, 600] {
+        assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(seconds)));
+    }
+    assert_eq!(idle.round(true, ceiling), None);
+    assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(30)));
+    idle.rounds = u32::MAX;
+    assert_eq!(idle.round(false, ceiling), Some(ceiling));
+}
+
+#[test]
+fn idle_wakes_and_new_inbound_exchanges_reset_only_the_idle_backoff() {
+    let mut idle = IdleBackoff::default();
+    let ceiling = Duration::from_secs(600);
+    let inbound = Some(tokio::time::Instant::now());
+    idle.observe_inbound(inbound);
+    assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(30)));
+    idle.observe_inbound(inbound);
+    assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(60)));
+    idle.observe_inbound(Some(inbound.unwrap() + Duration::from_secs(1)));
+    assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(30)));
+    let _ = idle.round(false, ceiling);
+    idle.reset();
+    assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(30)));
+    // Failure jitter and its hour-long ceiling are independent of quiet-round state.
+    assert_eq!(PeerBackoff::delay(0, 0), Duration::from_millis(800));
+    assert_eq!(PeerBackoff::delay(1, 400), Duration::from_millis(2400));
+    assert_eq!(PeerBackoff::delay(u32::MAX, 0), Duration::from_secs(2880));
+    assert_eq!(PeerBackoff::delay(u32::MAX, 400), Duration::from_secs(4320));
+}
+
+#[test]
+fn idle_ceiling_knob_can_raise_the_default_without_changing_the_timer_cap() {
+    let default = crate::sync::replication_idle_max_from(None);
+    assert_eq!(default, Duration::from_secs(600));
+    let raised = crate::sync::replication_idle_max_from(Some("1800000"));
+    let mut idle = IdleBackoff::default();
+    for _ in 0..10 {
+        let _ = idle.round(false, raised);
+    }
+    assert_eq!(idle.round(false, raised), Some(Duration::from_secs(1800)));
+    assert_eq!(crate::sync::replication_idle_max_from(Some("0")), Duration::from_secs(30));
+    assert_eq!(crate::sync::replication_idle_max_from(Some("invalid")), default);
+    assert_eq!(crate::sync::replication_idle_max_from(Some("9999999")), Duration::from_secs(3600));
+    assert_eq!(crate::sync::capped(raised, Some(Duration::from_millis(300))), Duration::from_millis(300));
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_dialer_backs_off_and_wake_inbound_and_movement_restart_the_sequence() {
+    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+    let auth = FleetAuth::test(fleet_id, &[6; 32]);
+    let root = tempfile::tempdir().unwrap();
+    let local = Arc::new(plain_open(&root.path().join("source.sqlite3"), "source").unwrap());
+    let remote = Arc::new(plain_memory("target").unwrap());
+    for store in [&local, &remote] {
+        store.bind_fleet(fleet_id).unwrap();
+    }
+    let state = PeerState::new(
+        Local(remote.clone()),
+        "target".into(),
+        auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["source".into()])),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(
+        listener,
+        Router::new().route(EXCHANGE_PATH, post(receive_exchange)).with_state(state),
+    ).into_future());
+    let (_routes, routes) = watch::channel(vec![Route::Http(format!("http://{address}"))]);
+    let (notify, _) = watch::channel(0);
+    let fleet = FleetContext::legacy(BTreeSet::from(["target".into()]));
+    let dialer = tokio::spawn(dial_peer(
+        Local(local.clone()), "source".into(), "target".into(), routes,
+        auth, fleet.clone(), notify.subscribe(),
+    ));
+    // Keep the paused clock from racing real socket and blocking-store work.
+    let awake = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    async fn idle_at(store: &Store, seconds: u128) {
+        let started = std::time::Instant::now();
+        loop {
+            let ready = store.replication_sync.lock().unwrap().get("target")
+                .and_then(|progress| progress.worker.as_ref())
+                .is_some_and(|worker| {
+                    worker.phase == "idle"
+                        && worker.next_retry_at_unix_ms.is_some_and(|at| {
+                            at.saturating_sub(crate::store::now_ms()).abs_diff(seconds * 1000) < 1000
+                        })
+                });
+            if ready {
+                // Let answers-check and the idle select install their timers.
+                for _ in 0..1000 {
+                    tokio::task::yield_now().await;
+                }
+                return;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "idle interval {seconds}s not observed");
+            tokio::task::yield_now().await;
+        }
+    }
+    idle_at(&local, 30).await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    idle_at(&local, 60).await;
+    tokio::time::advance(Duration::from_secs(60)).await;
+    idle_at(&local, 120).await;
+    notify.send_modify(|generation| *generation += 1);
+    tokio::time::advance(REPLICATION_WAKE_COALESCE).await;
+    idle_at(&local, 30).await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    idle_at(&local, 60).await;
+    fleet.inbound.write().unwrap().insert("target".into(), tokio::time::Instant::now());
+    fleet.inbound_changed.send_modify(|generation| *generation += 1);
+    // Inbound activity still owns the existing 30-second anti-entropy quiet window.
+    tokio::time::advance(Duration::from_secs(31)).await;
+    idle_at(&local, 30).await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    idle_at(&local, 60).await;
+    // A remote write has no local wake: the next timed round pulls it and resets idle.
+    remote.append_claim(&ClaimInput {
+        subject: "host/target".into(),
+        kind: "transport.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    tokio::time::advance(Duration::from_secs(60)).await;
+    idle_at(&local, 30).await;
+    assert!(local.latest_claim("host/target", Some("transport.observed")).unwrap().is_some());
+    dialer.abort();
+    server.abort();
+    awake.abort();
+}
+
 #[tokio::test]
 async fn leave_snapshot_is_read_only_and_reports_expiry_confirmation_and_persistence_failure() {
     let fixture = leave_fixture();

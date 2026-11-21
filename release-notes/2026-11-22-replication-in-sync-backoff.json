@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Back off quiet replication rounds independently for each store and peer, from 30 seconds to a configurable idle ceiling, while keeping wake-driven propagation immediate.",
+  "replay": {"status": "none", "detail": "Replication replay is unchanged."},
+  "schema": {"status": "none", "detail": "No durable schema, client API or wire protocol changes."},
+  "rules": {"status": "changed", "detail": "Consecutive in_sync rounds double the idle interval to 10 minutes by default. Movement, local wakes, inbound exchanges and route or connectivity changes reset it. Failure backoff and authenticated overload polling are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Quiet anti-entropy detection can take up to the idle ceiling when no wake or inbound exchange arrives. Existing peer and outcome round metrics retain their labels."},
+  "downtime": {"status": "none", "detail": "No coordinated restart or migration is required."},
+  "manual": {"status": "changed", "detail": "ST3_REPLICATION_IDLE_MAX_MS configures the ceiling between 30000 and 3600000 milliseconds; default 600000. ST3_WORKER_INTERVAL_MS still only shortens timers. Worker status includes the next idle retry deadline."},
+  "recovery": {"status": "none", "detail": "No persisted state changes; ordinary binary rollback applies."}
+}
