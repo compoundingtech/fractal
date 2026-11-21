@@ -902,7 +902,7 @@ pub(crate) fn settled_verdict(connection: &Connection, claim_id: &str) -> Result
             "SELECT EXISTS(SELECT 1 FROM claim_verdict_fresh WHERE claim_id=?1)
                  OR EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id=?1)",
         )?
-        .query_row([claim_id], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h66bf27ca9800 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, bool>(0))?;
     if waiting || judging::unavailable(connection, claim_id)?.is_some() {
         return Ok(None);
     }
