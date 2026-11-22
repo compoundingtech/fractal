@@ -448,6 +448,8 @@ user-manager hierarchy: `app-capped-heavy.slice` means
 `app.slice/app-capped.slice/app-capped-heavy.slice`. Absolute paths identify exact cgroups
 relative to the cgroup v2 mount. `excludedCgroups` supplies additional excluded subtrees
 (defaults `app-lanes.slice` and `gate.slice`) using the same path rules.
+Names resolve independently for every discovered user manager. A protected root inside a
+job-parent or excluded subtree is excluded too; matching uses path components, not string prefixes.
 
 PSI aggregates descendants and retains averages after a job exits. A protected ancestor
 containing a configured job path is therefore never sampled, even when that job subtree is

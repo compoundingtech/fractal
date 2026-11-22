@@ -289,7 +289,7 @@ fn empty_job_parent_with_high_aggregate_emits_zero_without_failing_closed() {
     fixture.cgroup("app.slice", "24.5", "90");
     assert!(!fixture.observe(0).blocked);
     assert!(fixture.reader.readings.iter().all(|reading|
-        reading.millipercent == 0 && reading.cgroup.is_none()));
+        reading.millipercent == 0 && reading.cgroup.as_deref() != Some("/app.slice")));
     // An existing but empty job parent with high pressure emits nothing either.
     fixture.cgroup("app.slice/app-capped.slice", "24.5", "90");
     assert!(!fixture.observe(2500).blocked);
@@ -627,6 +627,58 @@ fn system_service_discovers_interactive_app_slices_from_mount() {
     assert_eq!(fixture.reader.readings[0].cgroup.as_deref(),
         Some("/user.slice/user-1000.slice/user@1000.service/app.slice/editor.service"));
     assert_eq!(fixture.reader.readings[1].millipercent, 40000);
+}
+
+#[test]
+fn job_parent_names_resolve_independently_for_every_discovered_user_manager() {
+    let mut fixture = PressureFixture::new();
+    for uid in [1000, 2000] {
+        let app = format!("user.slice/user-{uid}.slice/user@{uid}.service/app.slice");
+        fixture.cgroup(&app, "24.5", "90");
+        fixture.cgroup(&format!("{app}/app-capped.slice"), "24.5", "90");
+        fixture.cgroup(&format!("{app}/app-capped.slice/app-capped-heavy.slice"), "24.5", "90");
+        fixture.cgroup(&format!("{app}/editor.service"), "0", "0");
+    }
+    for now in (0..=60000).step_by(5000) {
+        assert!(!fixture.observe(now).blocked);
+        assert!(fixture.reader.readings.iter().all(|reading| reading.millipercent == 0));
+    }
+    let editor = "user.slice/user-2000.slice/user@2000.service/app.slice/editor.service";
+    fixture.cgroup(editor, "3.14", "0");
+    for now in (65000..125000).step_by(5000) {
+        assert!(!fixture.observe(now).blocked);
+    }
+    assert_eq!(fixture.observe(125000).reason, Some(Reason::Pressure {
+        signal: Signal::MemoryFull, value: 3140, threshold: 1000,
+        cgroup: Some(format!("/{editor}").into()),
+    }));
+}
+
+#[test]
+fn protected_descendants_of_job_parents_and_exclusions_are_never_sampled() {
+    for job_parent in [true, false] {
+        let mut fixture = PressureFixture::new();
+        fixture.policy.protected_cgroups = vec![
+            "/custom/jobs/workload".into(), "/custom/jobs-other".into(),
+        ];
+        fixture.policy.job_parent_cgroups = if job_parent { vec!["/custom/jobs".into()] } else { Vec::new() };
+        fixture.policy.excluded_cgroups = if job_parent { Vec::new() } else { vec!["/custom/jobs".into()] };
+        fixture.cgroup("custom/jobs/workload", "99", "99");
+        fixture.cgroup("custom/jobs-other", "0", "0");
+        for now in (0..=60000).step_by(5000) {
+            assert!(!fixture.observe(now).blocked);
+            assert!(fixture.reader.readings.iter().all(|reading| reading.millipercent == 0));
+        }
+        // Path-component matching must not hide a sibling sharing a string prefix.
+        fixture.cgroup("custom/jobs-other", "3.14", "0");
+        for now in (65000..125000).step_by(5000) {
+            assert!(!fixture.observe(now).blocked);
+        }
+        assert_eq!(fixture.observe(125000).reason, Some(Reason::Pressure {
+            signal: Signal::MemoryFull, value: 3140, threshold: 1000,
+            cgroup: Some("/custom/jobs-other".into()),
+        }));
+    }
 }
 
 #[test]

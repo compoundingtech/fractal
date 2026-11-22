@@ -434,25 +434,33 @@ fn configured_path(entry: &Path, manager: Option<&Path>, root: &Path) -> Option<
     Some(path)
 }
 
-/// The user-manager cgroup root anchors canonical slice resolution: a
-/// protected root inside `user@<uid>.service` names that service, otherwise a
-/// protected `app.slice` names its parent; a top-level app.slice means the
-/// mount root.
-fn user_manager_root(protected: &[PathBuf]) -> Option<PathBuf> {
+/// Resolve each discovered manager independently; multiple logged-in users may
+/// have identically named job slices in different cgroup subtrees.
+fn user_manager_roots(protected: &[PathBuf]) -> Vec<PathBuf> {
+    let mut managers = Vec::new();
     for path in protected {
         let mut prefix = PathBuf::new();
+        let mut found = false;
         for part in path.components() {
             prefix.push(part.as_os_str());
             let Some(name) = part.as_os_str().to_str() else { continue; };
             if name.strip_prefix("user@").and_then(|name| name.strip_suffix(".service"))
                 .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit()))
             {
-                return Some(prefix);
+                managers.push(prefix);
+                found = true;
+                break;
             }
         }
+        if !found && path.file_name().is_some_and(|name| name == "app.slice")
+            && let Some(parent) = path.parent()
+        {
+            managers.push(parent.to_path_buf());
+        }
     }
-    protected.iter().find(|path| path.file_name().is_some_and(|name| name == "app.slice"))
-        .and_then(|path| path.parent().map(Path::to_path_buf))
+    managers.sort();
+    managers.dedup();
+    managers
 }
 
 /// A discovered optional slice is skipped when absent and rediscovered each
@@ -631,21 +639,17 @@ impl Reader {
     /// endpoints are skipped whole; descent continues only along configured
     /// paths; every other child is sampled directly.
     fn sample_frontier(&mut self, policy: &Policy, root: &Path, children: &[PathBuf],
-        protected: &[PathBuf], job_parents: &[PathBuf], excluded: &[PathBuf], bounds: &mut Enumeration,
+        protected: &[PathBuf], excluded: &[PathBuf], bounds: &mut Enumeration,
     ) -> Result<()> {
         for child in children {
-            if job_parents.iter().any(|job| job == child) { continue; }
-            if excluded.iter().any(|job| job == child) { continue; }
+            if excluded.iter().any(|job| child.starts_with(job)) { continue; }
             if protected.iter().any(|path| path == child) {
                 // An independently protected child is observed by its own plan.
                 continue;
             }
-            if job_parents.iter().any(|job| job.starts_with(child) && job != child)
-                || excluded.iter().any(|job| job.starts_with(child) && job != child)
-            {
+            if excluded.iter().any(|job| job.starts_with(child)) {
                 let descendants = Self::children(child, bounds)?;
-                self.sample_frontier(policy, root, &descendants,
-                    protected, job_parents, excluded, bounds)?;
+                self.sample_frontier(policy, root, &descendants, protected, excluded, bounds)?;
                 continue;
             }
             self.sample_cgroup(policy, root, child, true)?;
@@ -673,11 +677,19 @@ impl Reader {
         // configured names: a missing endpoint still splits its protected
         // ancestors, so a removed job can never resurface through a
         // contaminated ancestor aggregate.
-        let manager = user_manager_root(&protected);
-        let job_parents: Vec<PathBuf> = policy.job_parent_cgroups.iter()
-            .filter_map(|entry| configured_path(entry, manager.as_deref(), cgroup_root)).collect();
-        let mut excluded: Vec<PathBuf> = policy.excluded_cgroups.iter()
-            .filter_map(|entry| configured_path(entry, manager.as_deref(), cgroup_root)).collect();
+        let managers = user_manager_roots(&protected);
+        let mut excluded = Vec::new();
+        for entry in policy.job_parent_cgroups.iter().chain(&policy.excluded_cgroups) {
+            if entry.is_absolute() {
+                excluded.push(rooted(cgroup_root, entry));
+            } else {
+                for manager in &managers {
+                    if let Some(path) = configured_path(entry, Some(manager), cgroup_root) {
+                        excluded.push(path);
+                    }
+                }
+            }
+        }
         excluded.sort();
         excluded.dedup();
         let mut bounds = Enumeration::default();
@@ -685,19 +697,15 @@ impl Reader {
         for path in protected {
             // A configured job parent or excluded subtree is never observed,
             // even when it is itself protected.
-            if job_parents.iter().any(|job| job == &path)
-                || excluded.iter().any(|job| job == &path) { continue; }
+            if excluded.iter().any(|job| path.starts_with(job)) { continue; }
             groups.push(path);
         }
         for path in &groups {
-            if job_parents.iter().any(|job| job.starts_with(path) && job != path)
-                || excluded.iter().any(|job| job.starts_with(path) && job != path)
-            {
+            if excluded.iter().any(|job| job.starts_with(path)) {
                 // Split along the configured paths: observe the remaining
                 // immediate children, never this contaminated ancestor.
                 let children = Self::children(path, &mut bounds)?;
-                self.sample_frontier(policy, cgroup_root, &children, &groups,
-                    &job_parents, &excluded, &mut bounds)?;
+                self.sample_frontier(policy, cgroup_root, &children, &groups, &excluded, &mut bounds)?;
             } else {
                 // No configured path lives inside; observe it directly.
                 self.sample_cgroup(policy, cgroup_root, path, false)?;
