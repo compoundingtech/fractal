@@ -193,8 +193,11 @@ impl Pool {
         let mut state = lock(&self.0);
         let id = state.next;
         state.next += 1;
-        lock(&state.users).insert(id, (paths.clone(), callback));
-        if let Some(predicate) = predicate { lock(&state.users).inputs.insert(id, predicate); }
+        {
+            let mut users = lock(&state.users);
+            users.insert(id, (paths.clone(), callback));
+            if let Some(predicate) = predicate { users.inputs.insert(id, predicate); }
+        }
         if let Err(error) = state.update(&paths, true, stamp) {
             state.remove(id);
             return Err(error);
