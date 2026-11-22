@@ -465,7 +465,7 @@ impl WatchesStore for Store {
     ) -> Result<bool, FractalError> {
         // Use first-send admission itself: terminal identity resolution and lifecycle
         // conflicts must agree with the wake's eventual send.
-        match fractal_store::store::retirements::admit_recipient(&self.readers.get(), Some(agent)) {
+        match crate::store::retirements::admit_recipient(&self.readers.get(), Some(agent)) {
             Err(error) if error.code == "recipient-retired" => return Ok(true),
             Err(error) => return Err(error),
             Ok(()) => {}
