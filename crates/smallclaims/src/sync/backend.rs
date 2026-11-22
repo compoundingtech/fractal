@@ -35,27 +35,6 @@ pub trait Backend: Clone + Send + Sync + 'static {
         signature_requests: &[ReplicaEnvelopeId],
     ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send;
 
-    /// The recent-inbound guard still requests the complete, unchanged summary.
-    /// A process boundary may mark this local request for count/wall accounting.
-    fn guard_summary(
-        &self,
-        fleet_id: &str,
-    ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send {
-        async move {
-            self.export(fleet_id, &ReplicationInventory::default(), true, &[]).await
-        }
-    }
-
-    /// Read the recent-inbound guard's scalar without requiring a process boundary to carry
-    /// every bucket. Backends without that local optimization keep the full summary path and
-    /// its errors, exactly once. The result is fresh at its read cut, not a promise about later
-    /// writes; callers must retain their existing change notifications and anti-entropy.
-    fn authority_digest(
-        &self,
-        fleet_id: &str,
-    ) -> impl Future<Output = Result<String>> + Send {
-        async move { Ok(self.guard_summary(fleet_id).await?.exchange.authority_digest) }
-    }
 
     /// Store a peer's exchange, then admit and project what it carried. The options retain
     /// local dial evidence, authenticated sender incarnation and the optional answer deadline.
@@ -78,6 +57,13 @@ pub trait Backend: Clone + Send + Sync + 'static {
     fn redeem(&self, request: &JoinRequest) -> impl Future<Output = Result<Value>> + Send;
 
     fn fleet_view(&self) -> impl Future<Output = Result<FleetView>> + Send;
+
+    /// Return the current store-local cursor, or wait for it to differ from `after`.
+    /// Registration precedes the revision check; cancellation never consumes a change.
+    fn wait_revision(
+        &self,
+        request: super::revision::RevisionRequest,
+    ) -> impl Future<Output = Result<super::revision::StoreRevision>> + Send;
 
     fn record_failure(
         &self,
@@ -173,6 +159,16 @@ impl<S> Backend for Local<S>
 where
     S: Borrow<Store> + Send + Sync + 'static,
 {
+    async fn wait_revision(
+        &self,
+        request: super::revision::RevisionRequest,
+    ) -> Result<super::revision::StoreRevision> {
+        let kind = request.kind;
+        self.store().wait_replication_revision(request).await?;
+        let backend = self.clone();
+        tokio::task::spawn_blocking(move || backend.store().replication_revision_snapshot(kind)).await?
+    }
+
     async fn export(
         &self,
         fleet_id: &str,
@@ -187,7 +183,11 @@ where
         tokio::task::spawn_blocking(move || crate::task_cpu::blocking("replication.export", || {
             let store = backend.store();
             let exchange = if summary_only {
-                store.export_replication_summary(&fleet_id)?
+                if inventory.can(crate::replication::ROOT_SUMMARY) {
+                    store.export_replication_root_summary(&fleet_id)?
+                } else {
+                    store.export_replication_summary(&fleet_id)?
+                }
             } else {
                 store.export_replication_exchange_answering(
                     &fleet_id,
@@ -266,6 +266,7 @@ where
     }
 
     async fn fleet_view(&self) -> Result<FleetView> {
+        crate::performance::record_request("replication/membership-read", None, std::time::Duration::ZERO);
         self.store().fleet_view()
     }
 

@@ -35,6 +35,12 @@ use crate::sqlite::{
     STATEMENT_CACHE_CAPACITY, WriterConnection,
 };
 
+fn note_full_summary_construction(_store: &Store) {
+    crate::performance::record_request("replication/full-summary", None, std::time::Duration::ZERO);
+    #[cfg(test)]
+    _store.full_summary_constructions.fetch_add(1, Ordering::Relaxed);
+}
+
 mod admitted;
 #[cfg(any(test, feature = "test-support"))]
 mod temporary;
@@ -924,6 +930,9 @@ pub struct Store {
     /// For a shard, the default store whose fleet identity and membership it uses: a shard
     /// holds no fleet claims of its own. See `bind_fleet_authority`.
     fleet_authority: std::sync::OnceLock<Arc<dyn FleetAuthority>>,
+    pub(crate) sync_revisions: std::sync::OnceLock<Arc<crate::sync::revision::StoreRevisions>>,
+    #[cfg(test)]
+    pub(crate) full_summary_constructions: AtomicU64,
     /// For a shard, its authority's fleet generation when its last admission began. Membership
     /// that changes later can decide envelopes the shard held. See `fleet_moved_since_admission`.
     admitted_fleet_generation: AtomicI64,
@@ -1468,6 +1477,9 @@ impl Store {
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
             fleet_authority: std::sync::OnceLock::new(),
+            sync_revisions: Default::default(),
+            #[cfg(test)]
+            full_summary_constructions: AtomicU64::new(0),
             admitted_fleet_generation: AtomicI64::new(i64::MIN),
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
@@ -7975,6 +7987,16 @@ impl Store {
         self.replication_summary(fleet_id, true)
     }
 
+    /// A signed peer probe, including signature requests and claim roots, but no bucket list.
+    /// The root-summary marker distinguishes omitted proofs from an empty inventory.
+    pub fn export_replication_root_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        let mut summary = self.replication_summary(fleet_id, false)?;
+        summary.signature_requests = self.replication_signature_requests()?;
+        summary.inventory.capabilities.push(crate::replication::ROOT_SUMMARY.to_owned());
+        crate::performance::record_request("replication/root-summary", None, std::time::Duration::ZERO);
+        Ok(summary)
+    }
+
     /// A local scalar guard reads only `authority_digest`. Keep the full summary's fresh
     /// snapshot, metadata and errors, but avoid cloning/serializing its unused bucket list.
     /// This reduced inventory must not be used to construct a signed peer exchange.
@@ -7989,6 +8011,9 @@ impl Store {
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
         let digests = self.exported_digests(&snapshot)?;
+        if include_buckets {
+            note_full_summary_construction(self);
+        }
         let _timing = time_stage(&self.replication_timers.export);
         // A guard summary stays on this node, so it asks no peer and takes no backfill request.
         let signature_requests = if include_buckets {
@@ -8125,12 +8150,25 @@ impl Store {
         buckets: &[ReplicationInventoryBucket],
         mut archive: Option<&mut crate::wire_archive::ArchiveReaders>,
     ) -> Result<ReplicationExchange> {
+        let _timing = time_stage(&self.replication_timers.export);
+        let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
+        if remote.can(crate::replication::ROOT_FIRST)
+            && remote.can(crate::replication::ROOT_SUMMARY)
+            && remote.claim_range_query.is_none()
+        {
+            // A different root requests proofs, not a bucketless full-inventory answer.
+            // On equality the response remains scalar, including claim roots and signatures.
+            return if same {
+                self.export_replication_root_summary(fleet_id)
+            } else {
+                self.export_replication_summary(fleet_id)
+            };
+        }
         let digests = {
             let _span = crate::profile::span("replication.digests");
             self.exported_digests(snapshot)?
         };
-        let _timing = time_stage(&self.replication_timers.export);
-        let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
+        note_full_summary_construction(self);
         if !same && !remote.buckets.is_empty() {
             // The peer sent range digests, so only differing ranges need identities. Each
             // answer lists from the next differing range, so every one is listed in turn.
