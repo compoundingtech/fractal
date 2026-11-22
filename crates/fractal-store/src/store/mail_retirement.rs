@@ -277,12 +277,15 @@ fn warm(connection: &Connection, judged: &[(Option<i64>, String, Judgement)]) {
         for table in BY_CLAIM {
             let _ = read(&format!("SELECT * FROM {table} WHERE claim_id=?1"), id);
         }
-        // The claims that share a nonce with this one, whose judging the delete marks dirty.
+        // The claims that share a nonce with this one, whose judging the delete marks dirty: its
+        // key and nonce pairs as `forget_claim_tx` reads them (from storage version 29 a nonce use
+        // is only its link, and a store there has no use rows).
         let _ = read(
-            "SELECT judging.* FROM claim_signature_nonce_uses AS n
+            "SELECT judging.* FROM (SELECT key,nonce FROM claim_signature_nonce_uses WHERE claim_id=?1
+                 UNION SELECT key,nonce FROM claim_signature_candidates WHERE claim_id=?1
+                 UNION SELECT key,nonce FROM claim_signatures WHERE claim_id=?1) AS n
              CROSS JOIN claim_verdict_dependency_links AS l ON l.link='nonce:'||n.key||'|'||n.nonce
-             JOIN claim_signature_judging AS judging ON judging.claim_id=l.claim_id
-             WHERE n.claim_id=?1",
+             JOIN claim_signature_judging AS judging ON judging.claim_id=l.claim_id",
             id,
         );
     }

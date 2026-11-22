@@ -137,6 +137,25 @@ mod tests {
     }
 
     #[test]
+    fn forgetting_a_claim_with_no_use_row_queues_its_nonce_dependents_through_its_signature() {
+        // Storage version 29 keeps a nonce use only as the claim's nonce link: the forgotten
+        // claim's key and nonce come from its facade.
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        tx.execute_batch(
+            "INSERT INTO claim_signatures(claim_id,signer,key,nonce,signature) VALUES('forgotten','host/studio','key','nonce','{}');
+             INSERT INTO claim_verdict_links VALUES('nonce:key|nonce','forgotten'),('nonce:key|nonce','dependent');
+             INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,complete,dirty)
+                 VALUES('dependent',1,'','','',1,0);"
+        ).unwrap();
+        assert_eq!(tx.query_row("SELECT COUNT(*) FROM claim_signature_nonce_uses", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
+        forget_claim_tx(&tx, "forgotten").unwrap();
+        assert!(tx.query_row("SELECT dirty FROM claim_signature_judging WHERE claim_id='dependent'", [], |row| row.get::<_, bool>(0)).unwrap());
+        assert!(tx.query_row("SELECT EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id='dependent')", [], |row| row.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
     fn forgetting_compact_edges_invalidates_nonce_dependents_and_removes_only_orphan_keys() {
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
         let mut connection = store.connection.write();

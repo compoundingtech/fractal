@@ -873,7 +873,13 @@ impl Facts for StoreFacts<'_> {
         let others = self
             .connection
             .prepare_cached(
-                "SELECT claim_id FROM claim_signature_nonce_uses WHERE key=?1 AND nonce=?2 AND claim_id<>?3",
+                // A nonce use is a use row (storage version 28 and earlier) or a held claim's
+                // nonce link (version 29); see `nonce_used_in_model`.
+                "SELECT claim_id FROM claim_signature_nonce_uses WHERE key=?1 AND nonce=?2 AND claim_id<>?3
+                 UNION
+                 SELECT l.claim_id FROM claim_verdict_dependency_links l
+                 WHERE l.link='nonce:'||?1||'|'||?2 AND l.claim_id<>?3
+                   AND EXISTS(SELECT 1 FROM claims c WHERE c.id=l.claim_id)",
             )
             .and_then(|mut statement| {
                 statement
@@ -1074,8 +1080,10 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
     // Absence of a formerly live nonce use can make a retained candidate valid again.
     // Queue its dependents before deleting the relation, in the deletion transaction.
     // The indexed join includes non-winning cryptographic uses, not just the facade.
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h953da2f52162 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN (SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_dependency_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1)")?.execute(/* sqlite-large-value: allow-for-now lv-h4207bd94c16e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he72e0837252e owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_dependency_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h871e734931b2 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    // Its key and nonce pairs are its use rows (version 28 and earlier) or, with none, those of
+    // its candidates and facade: a superset of its uses, which only queues more.
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb70911bd69ca owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN (SELECT l.claim_id FROM (SELECT key,nonce FROM claim_signature_nonce_uses WHERE claim_id=?1 UNION SELECT key,nonce FROM claim_signature_candidates WHERE claim_id=?1 UNION SELECT key,nonce FROM claim_signatures WHERE claim_id=?1) n CROSS JOIN claim_verdict_dependency_links l ON l.link='nonce:'||n.key||'|'||n.nonce)")?.execute(/* sqlite-large-value: allow-for-now lv-h4207bd94c16e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4742d896be31 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT l.claim_id FROM (SELECT key,nonce FROM claim_signature_nonce_uses WHERE claim_id=?1 UNION SELECT key,nonce FROM claim_signature_candidates WHERE claim_id=?1 UNION SELECT key,nonce FROM claim_signatures WHERE claim_id=?1) n CROSS JOIN claim_verdict_dependency_links l ON l.link='nonce:'||n.key||'|'||n.nonce")?.execute(/* sqlite-large-value: allow-for-now lv-h871e734931b2 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
     queue_affected_by_tx(connection, claim_id)?;
     if legacy::active(connection)? {
         legacy::queue_affected_by_tx(connection, claim_id)?;
@@ -2403,6 +2411,14 @@ impl Store {
 fn nonce_used(connection: &Connection, key: &str, nonce: &str) -> Result<bool> {
     nonce_used_in_model(connection, key, nonce, legacy::active(connection)?)
 }
+/// Whether a claim the store holds used `key` and `nonce`.
+///
+/// Through storage version 28, a candidate whose signature matches its claim writes a
+/// `claim_signature_nonce_uses` row. Judging that reaches the replay check writes the claim's
+/// `nonce:KEY|NONCE` verdict link; on a real member the two sets were equal, pair for pair. From
+/// version 29 the link is the only copy, written where the row was, and the table is gone.
+/// Readers count either, of a claim the store still holds: a forgotten claim keeps its links
+/// until the sweep, as it lost its row. The replay rules are unchanged.
 fn nonce_used_in_model(
     connection: &Connection,
     key: &str,
@@ -2415,7 +2431,10 @@ fn nonce_used_in_model(
         if let Some(reason) = migration::unavailable(connection)? {
             anyhow::bail!("{reason}");
         }
-        "SELECT EXISTS(SELECT 1 FROM claim_signature_nonce_uses WHERE key=?1 AND nonce=?2)"
+        // A use row or a held claim's nonce link; see `nonce_used_in_model`.
+        "SELECT EXISTS(SELECT 1 FROM claim_signature_nonce_uses WHERE key=?1 AND nonce=?2)
+             OR EXISTS(SELECT 1 FROM claim_verdict_dependency_links l WHERE l.link='nonce:'||?1||'|'||?2
+                       AND EXISTS(SELECT 1 FROM claims c WHERE c.id=l.claim_id))"
     };
     Ok(connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf9d562de9ebc owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ sql)?

@@ -3334,3 +3334,47 @@ fn pending_judgment_diagnostics_aggregate_thousands_of_rows_into_one_bounded_sam
     assert!(!pending[0].detail.contains("pending/00020"));
     assert!(pending[0].detail.len() < 1024);
 }
+
+/// Storage version 29 keeps a nonce use only as the claim's `nonce:` verdict link. A store whose
+/// use rows are gone judges a replay as one with them does, and the seal-time check still sees
+/// the nonce; a link of a claim the store no longer holds is no use.
+#[test]
+fn a_store_that_keeps_nonce_uses_only_as_links_judges_a_replay_the_same() {
+    let anchor = key();
+    let store = node("alder", Some(&anchor), Some(&anchor));
+    admit(&store, "alder", &anchor, "anchor");
+    store.set_write_clock_at(110).unwrap();
+    let earlier = note(&store, None, "same signed content");
+    let content = content_digest(&earlier.subject, &earlier.kind, earlier.actor.as_deref(), &earlier.body);
+    let signature = ClaimSignature::sign(&anchor, &content, "host/alder", None, vec![], 110);
+    attach(&store, &earlier, &signature);
+    store.set_write_clock_at(120).unwrap();
+    let later = note(&store, None, "same signed content");
+    attach(&store, &later, &signature);
+    drain_verdicts(&store);
+    assert_eq!(verdict(&store, &earlier), Verdict::Verified);
+    assert!(matches!(verdict(&store, &later), Verdict::Invalid(reason) if reason.contains("earlier claim")));
+    let before = verdicts(&store);
+    let link = format!("nonce:{}|{}", signature.key, signature.nonce);
+    {
+        let connection = store.connection.write();
+        let links: u64 = connection
+            .query_row("SELECT COUNT(*) FROM claim_verdict_links WHERE link=?1", [&link], |row| row.get(0))
+            .unwrap();
+        assert_eq!(links, 2, "each use is also its claim's nonce link");
+        connection.execute("DELETE FROM claim_signature_nonce_uses", []).unwrap();
+        connection
+            .execute("INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT claim_id FROM claim_verdicts", [])
+            .unwrap();
+    }
+    drain_verdicts(&store);
+    assert_eq!(verdicts(&store), before, "judged again from the links alone, every verdict is the same");
+    assert!(matches!(verdict(&store, &later), Verdict::Invalid(reason) if reason.contains("earlier claim")));
+    assert!(store.signature_nonce_used(&signature.key, &signature.nonce).unwrap());
+    store
+        .connection
+        .write()
+        .execute("INSERT INTO claim_verdict_links VALUES ('nonce:other|nonce', 'forgotten')", [])
+        .unwrap();
+    assert!(!store.signature_nonce_used("other", "nonce").unwrap(), "a forgotten claim's link is no use");
+}
