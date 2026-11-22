@@ -273,7 +273,7 @@ impl Admission {
         match self.failed {
             None => format!("{} admission passed", driver.as_str()),
             Some(reason) => format!(
-                "{} {} admission failed at {}; native delivery is unavailable. Repair the producer/adapter contract and remove {} to repeat the isolated checks. A person may explicitly allow this installed build with `st admission override {} --binary <installed-executable> --reason <reason>`, then restart the affected seat",
+                "{} {} admission failed at {}; native delivery is unavailable. Repair the producer/adapter contract and remove {} to repeat the isolated checks. A person may explicitly allow this installed build with `fractal admission override {} --binary <installed-executable> --reason <reason>`, then restart the affected seat",
                 driver.as_str(),
                 self.version.as_deref().unwrap_or("unknown version"),
                 reason.as_str(),
@@ -817,7 +817,7 @@ fn start_measurement(
             Err(error) => (Err(error.into()), false),
         };
         if let Err(error) = &result {
-            eprintln!("st3: measuring an executable's identity: {error:#}");
+            eprintln!("fractal: measuring an executable's identity: {error:#}");
         }
         let mut ready = IDENTITY_READY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         ready.retain(|entry| entry.dependencies != dependencies);

@@ -52,7 +52,7 @@ impl Receipt {
             "No claim request was sent."
         };
         format!(
-            "`{}` reported that `st work claim {}` could not connect to daemon Unix socket `{}`: {cause}. {advice}",
+            "`{}` reported that `fractal work claim {}` could not connect to daemon Unix socket `{}`: {cause}. {advice}",
             self.actor, self.step_run, self.socket
         )
     }
@@ -146,7 +146,7 @@ mod tests {
         );
         for body in [
             json!({"status":"success","content":line}),
-            json!({"status":"error","content":"Operation not permitted on the st socket"}),
+            json!({"status":"error","content":"Operation not permitted on the Fractal socket"}),
             json!({"status":"error","content":format!("quoted: {line}")}),
             json!({"status":"error","arguments":line}),
             json!({"status":"error","content":format!("{PREFIX}{{\"actor\":\"agent/node.worker\"}}")}),

@@ -11,6 +11,7 @@
 
 pub mod answers;
 pub mod claim;
+pub mod claim_archive;
 pub mod error;
 pub mod fleet;
 pub mod hash;

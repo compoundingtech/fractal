@@ -244,7 +244,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .collect::<Vec<_>>();
         if counted.is_empty()
             || schedule_progress_ready(
-                counted.iter().filter_map(|peer| sync.get(peer)),
+                counted.iter().filter_map(|peer| sync.get(peer)).map(|peer| (peer, false)),
                 self.started_at_unix_ms,
                 false,
             )

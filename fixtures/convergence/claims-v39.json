@@ -1433,6 +1433,96 @@
     "projection": null,
     "wakes_reconciler": true
   },
+  "custom.client.observation-minute": {
+    "kind": "custom.client.observation-minute",
+    "subjects": [
+      "custom"
+    ],
+    "fields": {
+      "buckets": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "carrier": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "fabric",
+          "tailscale",
+          "lan"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "count": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "max_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "over": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "pairing_grant": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "path": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "report_digest": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "report_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "source": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "start_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "target": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": false
+  },
   "daemon.diagnostic": {
     "kind": "daemon.diagnostic",
     "subjects": [
@@ -9902,48 +9992,6 @@
         "immutable": false,
         "reference": false
       },
-      "idle_after_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "idle_declaration": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "idle_eligible_since_unix_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "idle_enabled_at_unix_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "idle_frontier": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "idle_wake_attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "idle_wake_lineage": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "ignore_fit": {
         "value_type": "boolean",
         "required": false,
@@ -9987,12 +10035,6 @@
         "reference": false
       },
       "source_host": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "suspend_operation_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -13469,55 +13511,6 @@
     "write_policy": "authorized-participant",
     "cardinality": "append",
     "projection": "work",
-    "wakes_reconciler": true
-  },
-  "work.rebound": {
-    "kind": "work.rebound",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "claimant": {
-        "value_type": "subject-reference",
-        "required": false,
-        "immutable": false,
-        "reference": true
-      },
-      "from_incarnation": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "harness": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "session_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "to_incarnation": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": "step-runs",
     "wakes_reconciler": true
   },
   "work.released": {

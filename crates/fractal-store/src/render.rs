@@ -176,7 +176,7 @@ pub fn prepare_render(
             }
             "git-exclude" => {
                 anyhow::ensure!(!arguments.is_empty(), "git-exclude needs at least one path");
-                // st no longer writes `.st3/`, and it removes that line where it finds it, so an
+                // Fractal no longer writes `.st3/`, and it removes that line where it finds it, so an
                 // older declaration that still names it adds nothing.
                 let arguments = arguments
                     .iter()

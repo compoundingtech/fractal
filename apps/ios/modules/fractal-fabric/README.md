@@ -22,7 +22,7 @@ Manual builds realize the toolchain normally, including building on a cache miss
 
 The package is exposed only on Darwin. Its source is the Git checkout (including linked worktrees), so ignored build outputs, `rust/target`, and `node_modules` are not imported into the Nix store when resolving the toolchain.
 
-Build Debug for an arm64 simulator of your own (`ARCHS=arm64 ONLY_ACTIVE_ARCH=YES`); the proof framework has no x86_64 simulator slice. The script targets iOS 16.4, including its C/assembly dependencies, and writes the XCFramework under `ios/build` inside the pod root. On a shared build host, wait until `pgrep -x xcodebuild` finds no process before starting Xcode. Generated static libraries and the device/simulator XCFramework are ignored; do not commit them. To restore the default build, reinstall pods without `FRACTAL_FABRIC` (`FRACTAL_FABRIC_PROOF`, or either legacy `ST3_` counterpart).
+Build Debug for an arm64 simulator of your own (`ARCHS=arm64 ONLY_ACTIVE_ARCH=YES`); the proof framework has no x86_64 simulator slice. The script targets iOS 16.4, including its C/assembly dependencies, and writes the XCFramework under `ios/build` inside the pod root. Packaging reads only this module's static libraries and headers, so it does not wait for unrelated `xcodebuild` processes. Callers own build admission; release delivery holds its heavy slot throughout the worker. Do not run two builders against the same module output directory. Generated static libraries and the device/simulator XCFramework are ignored; do not commit them. To restore the default build, reinstall pods without `FRACTAL_FABRIC` (`FRACTAL_FABRIC_PROOF`, or either legacy `ST3_` counterpart).
 
 ## Isolated proof
 
@@ -32,10 +32,10 @@ Use the installed `fractal` and a pinned **fabric 0.2.41+84c3208** binary, even 
 node apps/ios/modules/fractal-fabric/proof-member.mjs /path/to/fractal /path/to/fabric
 ```
 
-It starts a test member and fabric daemon under a fresh `/tmp/st-fabric-proof-*` directory, exposes only `client.sock` as `demo-client/0`, and prints a descriptor path. Open its `identity-link.txt` in the Debug app to read the public phone NodeID. You can also set `EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK` when starting a local Metro server for a headless simulator launch. Then grant only that service, inbound-only, and create a test pairing challenge:
+It starts a test member and fabric daemon under a fresh `/tmp/fractal-fabric-proof-*` directory, exposes only `client.sock` as `demo-client/0`, and prints a descriptor path. Open its `identity-link.txt` in the Debug app to read the public phone NodeID. You can also set `EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK` when starting a local Metro server for a headless simulator launch. Then grant only that service, inbound-only, and create a test pairing challenge:
 
 ```sh
-node apps/ios/modules/fractal-fabric/proof-member.mjs grant /tmp/st-fabric-proof-example/member.json PHONE_NODE_ID
+node apps/ios/modules/fractal-fabric/proof-member.mjs grant /tmp/fractal-fabric-proof-example/member.json PHONE_NODE_ID
 ```
 
 The grant is `fabric add PHONE_NODE_ID demo-phone --inbound-only --allow demo-client/0`: the member serves the phone when it connects and never dials, probes or announces to it, and `fabric status` shows it as `inbound-only`. Start the helper with `FABRIC_PROOF_APP=separate` to write links for the separate offline Debug app.

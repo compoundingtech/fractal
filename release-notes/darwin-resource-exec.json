@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Admit macOS shell resource executions into per-job Darwin custody slots",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "none", "detail": "Retains the existing shell execution and Darwin custody v2 wire schemas."},
+  "rules": {"status": "changed", "detail": "Darwin shell lanes heavy, gate and eval bind respectively to one, three and one UID custody slots. Scheduling priority remains a separate class. Program lanes remain logical and PTY seats remain detached."},
+  "compatibility": {"status": "changed", "detail": "The helper supports five compiled-in slot identities. Upgrade helper, runtime and per-slot provisioning together; no detached fallback is allowed. Nested Darwin shell roots are refused."},
+  "downtime": {"status": "none", "detail": "No automatic service restart or slot activation."},
+  "manual": {"status": "changed", "detail": "Provision all slot users, shared roots, inheritable caller ACLs and pinned sudo rules. Payload sources must be accessible to the admitted UID without widening home-directory ACLs. Run root acceptance before activation."},
+  "recovery": {"status": "changed", "detail": "Job workspaces are removed only after custody retirement. Cleanup failures are reported as workspace leftovers; uncertain UID retirement retains custody."}
+}

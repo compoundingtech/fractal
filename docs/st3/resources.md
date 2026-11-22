@@ -21,13 +21,12 @@ serialized admission decision, the admitted generation, process placement, and r
 owns enforcement. Graph observations describe those facts; a replicated grant-shaped claim cannot
 launch a process. No standing lane worker or replicated graph semaphore grants resource capacity.
 
-A named lane policy binds an execution host, `maxMembers`, an explicit CPU/memory profile, and
-required coverage. A request without a profile is refused with typed code `missing-profile`;
-there is no implicit finite-execution footprint. The host refuses a conflicting policy for an
-existing name. Every request has a class: `landing`, `check` or `agent` (the default). Classes
-are served in that order. Within a class, FIFO is preferred, but a fitting later ticket may
-backfill a head that does not fit until that head has waited 15 minutes. A lower class never
-bypasses a higher-class head. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
+A named lane policy binds an execution host, `maxMembers`, a workload profile key and required
+coverage. Roll B refuses raw declarations and unknown keys. The host refuses a conflicting
+policy for an existing name. Classes are served in order: `recovery`, `landing`, `check`, `agent`
+(the default). Within a class, FIFO is preferred, but a fitting later ticket may backfill a head
+that does not fit until that head has waited 15 minutes. A lower class never bypasses a
+higher-class head. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
 generation. Independent roots consume room once in the accountant shared with seats and their
 raises/bursts, including CI and shell work. A child run without an OS process reserves no memory.
 
@@ -41,12 +40,204 @@ revision, reason, affected operations and receipt persist independently of the i
 Resolving an ask, terminating a run, or restarting a daemon does not clear a hold. Resolution checks
 its owner and expected revision and wakes dependent admissions.
 
+## Workload profile keys
+
+The execution host's `finite_resources.profiles` map owns reusable workload seeds, for example:
+
+```json
+{"profiles":{"check.unit":{"cores":4,"memory":8589934592,"disk":16106127360,"io":"heavy"}}}
+```
+
+The same key is exposed as CLI `--profile`, Effect `profile`, and KDL `profile`. It is distinct
+from the physical lane name and priority class. A known key supplies CPU, charged/enforced memory
+maximum, optional disk bytes and optional IO class; callers cannot override those values. The
+host resolves before fit, freezes the estimate in the durable request, and reuses that snapshot
+on replay and nested execution rather than looking up a newer seed. Lane identity retains the
+key, not mutable seed revisions. Clients cannot supply `profile_estimate`.
+
+Disk location is separate: CLI `--disk-path` defaults to the caller's working directory for a
+keyed root; Effect `diskPath` and KDL `disk-path` must be explicit when the seed reserves disk.
+There are no fleet-host defaults or client lookups; missing or unknown keys are refused.
+Seed estimates expose their seed revision, declared source/reason, zero memory/disk samples and
+no learned revision. Optional seed `memoryHigh` is copied as `memory_high_bytes`; without it no
+MemoryHigh is synthesized. Charged/enforced memory maximum remains the seed's `memory`. Learned
+adjustments are not activated here.
+Linux keeps the named parent lane's aggregate envelope separate from each execution generation's
+child slice. CPU/memory limits (and any explicit MemoryHigh) apply per generation; aggregate
+bounds never shrink below live launch, admitted or retiring snapshots. Both levels enable IO
+accounting, and enforced launch verifies the actual parent/child controls before payload release.
+
+### Learning, pressure and recovery
+
+`learningCoverage` defaults to `client-only`; no keys currently have certified full coverage.
+Only explicit `full` coverage, confirmed retirement and untruncated measurements can train the
+learner. Untruncated means the entire cgroup was already `populated=0` before teardown, not
+merely empty after forced cleanup. OOM/limit events, cancellation, timeout, missing measurements
+and unknown retirement are excluded; natural test failures are not excluded just for failing.
+Receipts retain the evidence and learning decision. Estimates use per-key p95 with a 6/5 memory
+maximum; host `profileReadiness` attestations (`nixPerBuildCgroups`, `ioAccounting`,
+`diskMeasurement`) must all be true before learning can lower declared seeds.
+
+On Linux, `psiBrake` samples every quarter of `freshnessMs` (2.5 seconds by default).
+Memory PSI comes from the user manager's aggregate `app.slice/app-lanes.slice`, which contains
+enforced finite executions and laned seats. A second memory signal protects against host
+reclaim outside those lanes: root memory `full` PSI qualifies while the last observed increase
+in the sum of `/proc/vmstat` `allocstall_*` counters is no older than that rule's PSI window
+(10, 60 or 300 seconds) **plus `sustainedMs`**, inclusive. An event counts entry into
+reclaim, not time spent stalled. This bounded retention lets pressure crossing its threshold
+within the PSI window complete the sustained interval on a later sample, even when
+`sustainedMs` exceeds the window. It needs no separate pressure-episode state.
+The first sample and a counter reset clear corroboration and give lane-only readings,
+healthy unless lane pressure or the independent floor says otherwise. After a reset,
+root corroboration waits for the next observed counter increment; an unchanged counter
+does not restore it. Missing, malformed, duplicate or truncated allocator-counter
+observations remain unknown.
+
+`memory.high` reclaim uses `try_to_free_mem_cgroup_pages`. In Linux v6.18,
+[`do_try_to_free_pages` accounts ALLOCSTALL only when `!cgroup_reclaim(sc)`](https://github.com/torvalds/linux/blob/v6.18/mm/vmscan.c#L6393-L6394),
+distinguishing global reclaim from this memcg path. This accounting site was checked against
+the v6.18 tag, not the v6.18.51 point source. Do not use `pgscan_direct`: it includes memcg
+reclaim. Do not use `pgscan_kswapd`: background page-cache and ZFS ARC churn can wake kswapd
+without allocator distress, so any scan delta would reintroduce false positives.
+
+By default, lane memory `full avg60 >= 1%`, qualifying root memory `full avg60 >= 1%`,
+or host `MemAvailable < memoryAvailableFloorBytes` sustained for 60 seconds pauses new
+admissions without killing holders. The independent floor applies even to IO-only policies;
+it defaults to **2147483648 bytes (2 GiB)**, an absolute value, not a percentage. **0 disables
+the floor**. A positive floor at or above `MemTotal` is rejected when constructing the reader;
+the same per-sample check remains as a fail-closed backstop. IO PSI remains host-wide:
+`some avg60 >= 25%` independently trips after the
+same sustained interval.
+
+Resume requires lane memory below 0.5%, qualifying root memory below 0.5% (or allocator-event
+evidence older than its PSI window plus `sustainedMs`), `MemAvailable >= memoryAvailableFloorBytes` when enabled, and root IO
+below 10%, continuously for 120 seconds. Configured memory windows also apply to root `full`.
+The runtime creates the lane slice hierarchy only when enforced work launches; an absent
+lane slice means zero lane pressure. With `LogicalOnly` coverage, memory protection comes
+from the independent floor and qualified root pressure, not from unrelated capped seats.
+If the daemon has a well-formed cgroup v2 placement but no recognizable user manager (for
+example a system service or container), the lane signal is **not applicable**, not unknown:
+qualified root PSI and the independent memory floor still protect admission. A missing
+unified placement, cgroup v1-only placement, or malformed placement remains unknown and
+holds admission. The reader logs the observed placement once per observer lifetime.
+Reconciliation also publishes a queryable `daemon.diagnostic` warning with code
+`lane-psi-not-applicable` and the placement in its reason, deduplicated while unchanged.
+This does not relax required file reads or parsing in a recognized user-manager hierarchy.
+Missing, unreadable or malformed PSI in an existing lane cgroup, unavailable containing
+hierarchy, missing/malformed required meminfo, root PSI, vmstat or IO, and stale observations
+hold admission. Existing policies remain valid; thresholds and timers remain configurable.
+Darwin admission is unchanged.
+
+`recovery` requires an operator-declared `recoveryCapable` profile and a measured filesystem
+observation. At most one recovery execution holds the host recovery slot. It bypasses only
+the disk floor/reservation check; CPU, memory, PSI, holds, membership and IO limits still apply.
+Execution state and both durable/file receipts preserve `admissionDecision`, including the
+`disk-floor` exemption, admission timestamp (`atMs`) and measured free bytes
+(`freeBytesAtAdmission`). These observations remain frozen across replay and retirement.
+Class contention weights are 1000 for recovery and landing, 100 for check and 10 for agent;
+priority does not create extra capacity.
+
+
+## Lane names, priorities and Darwin allocation
+
+Resource lane names and scheduling classes are separate axes. On Linux, `resources exec
+--lane NAME` selects a named resource policy; `--class landing|check|agent` selects its
+admission priority, not a physical slot pool. Linux lane names are not restricted to the
+Darwin allocation below. Requests still declare their CPU/memory profile, disk peak and IO
+needs; naming a lane does not supply a footprint.
+
+Do not mechanically copy legacy gate-slot flags. Its `--class heavy|gate|eval` selects
+physical workload capacity, unlike the resource API's scheduling class. Its `--lane build`
+selects normal heavy capacity, while `--lane check` (also spelled `--class heavy
+--expect-short`) selects separate short-heavy capacity with a 300-second admission bound.
+Neither means native `--class check`, and short-heavy work is not the gate pool. For example,
+`scripts/web-check` uses that legacy short-heavy lane, not a gate-class allocation.
+A Linux cutover must preserve the intended named policy, profile and time budgets explicitly;
+the legacy short FIFO and slots are not implied by a native lane's spelling.
+
+Darwin shell execution uses these canonical lane names and a fixed custody slot inventory:
+
+| Native lane | Maximum members | Custody slot | Dedicated user | UID | Job root |
+| --- | --- | --- | --- | --- | --- |
+| `heavy` | 1 | `heavy1` | `_fractal-heavy1` | 471 | `/Users/Shared/fractal-jobs/heavy1` |
+| `gate` | 3 | `gate1` | `_fractal-gate1` | 472 | `/Users/Shared/fractal-jobs/gate1` |
+| `gate` | 3 | `gate2` | `_fractal-gate2` | 473 | `/Users/Shared/fractal-jobs/gate2` |
+| `gate` | 3 | `gate3` | `_fractal-gate3` | 474 | `/Users/Shared/fractal-jobs/gate3` |
+| `eval` | 1 | `eval1` | `_fractal-eval1` | 475 | `/Users/Shared/fractal-jobs/eval1` |
+
+UID 476 is spare, not additional admitted capacity. Gate's three rows describe one
+capacity-three lane, not three policies each allowing three members. Shell callers choose
+the lane and priority, never a UID or slot number. The host derives the canonical member
+limit and eligible slots from the same inventory, validates that policy, and atomically
+allocates one free slot when admitting a membership. A queued request owns no slot.
+Each admitted independent root consumes its declared shared host footprint once; multiple
+gate members still compete for memory, disk and IO room. A slot remains occupied through
+preparation, execution, cancellation and uncertain retirement until positive UID-custody
+retirement proof permits reuse. Payload exit alone does not free it, and nesting must inherit
+the existing membership rather than acquire a second slot.
+
+After admission the host creates a per-execution workspace at `<slot-root>/<job-id>/`,
+exports it as `FRACTAL_JOB_WORKSPACE`, and uses it as the default working directory.
+An explicit shell `--cwd` must remain within the admitted slot root; otherwise launch refuses
+with `darwin-custody-cwd`. Workspace cleanup follows confirmed retirement; a cleanup or ACL
+failure reports the leftover rather than claiming it was removed.
+
+Source access is an operator-provisioned, read-only ACL on a configured repository/worktree
+store for every slot user. The caller's home receives only a non-inheriting `search` ACE:
+this permits traversal to the store without listing or reading the home. The store grants
+`list,search,readattr,readextattr,readsecurity` (including file `read`) with
+`file_inherit,directory_inherit`, covering both existing descendants and new children.
+All worktrees in that store are readable by every slot; this is an accepted source visibility
+trade-off, not per-repository isolation. The provisioner reconciles its own ACEs without
+duplicating them or removing unrelated ACLs, and revokes grants when a slot is retired.
+Admission itself does not edit home or source ACLs. Symlinks outside the configured store
+need separately provisioned read access; the provisioner must not follow them recursively.
+
+Payload writes belong in `FRACTAL_JOB_WORKSPACE`, not the source store. Recommended settings:
+
+```sh
+export GIT_OPTIONAL_LOCKS=0
+export CARGO_TARGET_DIR="$FRACTAL_JOB_WORKSPACE/target"
+export XDG_CACHE_HOME="$FRACTAL_JOB_WORKSPACE/cache"
+export TMPDIR="$FRACTAL_JOB_WORKSPACE/tmp"
+mkdir -p "$CARGO_TARGET_DIR" "$XDG_CACHE_HOME" "$TMPDIR"
+```
+
+Read-only Git inspection can otherwise try to refresh the index. Mutating Git operations
+(checkout, commit, fetch, submodule initialization) require a job-local writable checkout;
+`GIT_OPTIONAL_LOCKS=0` does not make them read-only. Git may also reject the different source
+owner: if needed, pass `-c safe.directory=<exact-approved-worktree>` for that invocation,
+never trust every directory globally. Cargo may write `Cargo.lock` in the source tree:
+use `--locked` for an existing lockfile or a job-local checkout. Tools that insist on
+in-tree output (`target/`, `node_modules/.cache`, generated files, test snapshots, or package
+installation) need explicit workspace output/cache flags or a job-local source copy.
+`XDG_CACHE_HOME` alone does not redirect every tool. The login-less slot identity has no
+writable user home; do not rely on the caller's home caches or credentials. These allow ACEs
+grant no write permissions; operators must also ensure no pre-existing mode/group/ACL
+grant independently gives a slot write access to the store.
+
+Provisioned roots are owned by the slot user with group `staff` and mode `2770`;
+the slot user's primary group is `nobody`. Cross-UID access uses inherited ACLs, not
+group membership. The root's inheritable caller ACE needs `list`, `add_file`, `search`,
+`add_subdirectory`, `delete_child`, `readattr`, `writeattr`, `readextattr`, `writeextattr`,
+and `readsecurity`, with `file_inherit,directory_inherit`: the caller creates job directories,
+reads results written by the payload and removes the retired job tree. Fractal adds the
+same inheritable rights for the admitted slot user on the caller-created job directory,
+without changing the caller's home or source-tree ACLs.
+
+The resource scheduling class remains `landing`, `check` or `agent` for every Darwin lane;
+it does not change the eligible slot set. `build` and `check` are not Darwin shell lane
+aliases. The slot-backed shell path does not change program/DSL lane execution: those
+Darwin lanes retain logical coverage and their existing named policies. UID custody proves
+process retirement, not Linux-equivalent CPU/memory limits; neither path promises enforced
+coverage on Darwin.
+
 ## Shell callers
 
 ```sh
-fractal resources exec --lane verification --class check \
-  --cores 4 --memory 24G --disk 15G --disk-path /workspace \
-  --io heavy --admission-timeout 4h --timeout 2h -- run-verification
+fractal resources exec --lane verification --profile check.unit --class check \
+  --max-members 1 --disk-path /workspace --receipt-file outcome.json \
+  --admission-timeout 4h --timeout 2h -- run-verification
 ```
 
 The CLI uses the local daemon's internal resource path and the same finite membership machinery
@@ -56,12 +247,93 @@ byte counts, exact unsigned e/E notation (`2e9` equals `2000000000`), or binary 
 floating-point rounding is used. Admission and payload timeouts are separate budgets.
 Waiting, admitted and refused diagnostics go to stderr with `blockedBy`; payload stdout is not
 mixed with admission diagnostics, and the payload's exit status is preserved.
+`--lane` remains required except with `--inherit-parent`; `--max-members` is a positive integer
+and defaults to one. Raw `--cores` and `--memory` are optional only as a pair. Existing no-key callers can continue using
+that pair together with `--disk BYTES --disk-path PATH` and `--io heavy`.
+
+`--receipt-file PATH` is root-only: inherited execution, `--inherit-parent` and `--require-parent`
+are refused before launch with `nested-receipt-unsupported`. It atomically replaces PATH only
+after a terminal root outcome and confirmed retirement (or confirmed nonlaunch). Its body uses
+the exact canonical A.3 receipt fields, including head/clean observations, coverage, class,
+owner, profile and memory fields, plus `schema_version: 1` and nullable `receipt_subject`.
+It includes root `exec_id`, host/state, nullable exit code/signal, `launched`, queue/wall timing,
+actual root `argv` and `argv_sha256`. The digest is lowercase SHA-256 of UTF-8 arguments joined
+by NUL without a trailing NUL; NUL-containing arguments are refused. Nested proof joins the
+eventual outer root receipt instead of fabricating a terminal root outcome from a child's exit.
+`FRACTAL_RESOURCE_EXEC_ID` joins the outer root receipt; `FRACTAL_RESOURCE_MEMBER_EXEC_ID`
+identifies the current execution generation. Neither value is authorization.
+Receipts contain actual root argv, so never put credentials in argv. Environment values are sent
+only in the live launch request and are neither receipt fields nor persisted command data.
+After restart, a command whose live environment is unavailable fails closed rather than replaying
+lost secrets.
+Use optional `--request-id UUID` to recover a transport-uncertain submission with an owner-scoped
+identity. UUID syntax is validated before submission. The first accepted intent owns that ID:
+identical semantic retries return the existing execution without relaunching or replacing its
+live environment; changed intent is refused. Environment values never enter the persisted
+submission-intent digest. Request IDs also work for inherited child executions.
+An identical inherited retry adopts its existing execution even after parent retirement;
+live parent custody is required only when accepting a new child, never for replay adoption.
+
+`show --request-id UUID` returns `{"execution":null}` when absent.
+`cancel --request-id UUID --wait` returns `{requestId,cancelled:true,tombstone,execution}` after
+confirmed retirement or a durable cancellation tombstone. Tombstones fence late submissions
+for seven days; never reuse expired identities. Use `--json` for machine-readable responses.
+
+`exec`, `show`, `cancel` and `member-scope` accept `--as ACTOR` after the subcommand. Agent
+selectors use the authenticated Unix agent transport; local operator selectors such as
+`person/operator` use `unix_as`, not an agent identity.
+
+
+`fractal resources cancel EXECUTION_ID` uses the same authenticated execution-owner boundary and
+waits for confirmed retirement or nonlaunch, then prints the terminal execution (`--json` for
+machine-readable output). It does not infer process ownership from cgroup names or environment
+labels. `show EXECUTION_ID` exposes the terminal receipt subject.
+
+### Offline membership decision
+
+`fractal --json resources in-member --owner-uid UID` reads only the local kernel membership
+through the runtime's shared lane grammar. It performs no config discovery, API request,
+daemon connection or authorization. Its fixed JSON is
+`{"inside":false,"laneSlice":null,"binding":null}` outside a recognized member, or
+`{"inside":true,"laneSlice":"CANONICAL_PARENT_SLICE","binding":"BINDING_HASH"}` inside a matching
+member hierarchy (including descendants). The original raw lane name is not recoverable from
+the slice identity. `--owner-uid` selects the expected user hierarchy, not an identity grant.
+
+Both normal inside and outside decisions exit zero. An unreadable kernel membership or
+unsupported OS is a genuine nonzero error; wrappers must fail closed, not reinterpret it as
+outside and start another root. This is only a local nesting decision and never proves live
+host custody, authorizes a privileged helper, or replaces the authenticated exact member-scope
+check below. No custody layout or configurable cgroup root is exposed.
+
+### Exact member verification for privileged helpers
+
+`fractal --json resources member-scope --exec-id EXECUTION_ID` reports the runtime-owned DTO:
+`{execId, rootExecId, requestId, lane, class, profile, generation, state: "running", cgroupPath}`. The authenticated API
+`GET /v1/internal/resources/{id}/member-scope` checks the exact shell owner, host membership,
+released root, live grant, enforced coverage and execution generation, then verifies the running
+runtime binding and exact kernel cgroup path. Parent slices, sibling generations, ended roots,
+retiring memberships and logical-only execution are not proof of a live enforced member.
+This cgroup proof endpoint is Linux-only; Darwin UID custody does not make `member-scope`
+available, even when shell execution is admitted.
+
+A root helper must independently read its own unified `/proc/self/cgroup` entry and require
+**exact equality** with the reported `cgroupPath` for `FRACTAL_RESOURCE_MEMBER_EXEC_ID`; prefix matching
+or a parent/sibling match is insufficient. The environment ID is only a lookup key, never
+authority. Reject absent, stale, retired or mismatched execution evidence before any mutation.
+
+Launch the resource payload as the user, with only `sudo /exact/pinned/helper` inside it. Each
+privileged helper needs a security review and narrowly pinned sudoers permission for no arguments
+or a closed argument enum. Do not grant root shells, `systemd-run`, arbitrary manager commands,
+or another escape from the admitted user member. This inspection API grants no sudo permission.
 
 Linux defaults to enforced coverage: a transient scope beneath `app-lanes.slice` with memory and
-CPU limits. macOS refuses `resources exec` before launch with `unsupported-platform` because it
-has no whole-tree retirement proof; `ls`, `show`, `hold` and `release` remain available.
-A nested resource exec validates and inherits its parent's membership through an environment
-marker instead of reserving a second footprint; custody lasts until every execution root retires.
+CPU limits. macOS shell execution uses the canonical `heavy`, `gate` and `eval` lanes above with
+logical coverage and dedicated-UID custody. Unsupported lanes or unavailable custody refuse
+before payload launch; there is no detached-process fallback.
+On Linux a nested resource exec validates and inherits its parent's membership through an
+environment marker instead of reserving a second footprint; custody lasts until every execution
+root retires. Darwin shell custody refuses nested roots with `darwin-custody-nested`: a second
+helper cannot bind an occupied UID slot. Invoke child commands directly inside the admitted job.
 Disk accounting uses declared reservations, not measured disk peaks; memory peaks come from cgroup
 `memory.peak` on enforced hosts and are absent on logical-only hosts.
 
@@ -79,6 +351,35 @@ fractal resources release worker HOLD_ID --expected-revision 1 --resolution 'mai
 Ownership comes from the authenticated run/attempt or native agent invocation, not mutable
 environment labels. An ad-hoc local operator has an explicit local/person owner. Nested
 membership inheritance requires that same authenticated owner; inventory never exports grants.
+Use `--require-parent` for nested-only checks: without an inherited membership marker the CLI
+refuses instead of creating a root; the daemon still authenticates the marker's grant, owner and
+active parent state. `--inherit-parent` implies that requirement and uses the parent's frozen
+lane, profile and resource snapshot, allowing `--lane` to be omitted. Contradictory explicit
+lane, profile or class values are refused. `FRACTAL_RESOURCE_EXEC_ID` alone never satisfies the
+parent requirement. Nested checks inherit existing admission, so omit `--admission-timeout`
+rather than using a zero budget.
+
+
+Shell payload environment values exist only in the submitting daemon's memory, keyed by execution
+ID, until launch (or terminal refusal/cancellation). Neither names nor values are retained in the
+execution record, inspection responses, or receipts; `command.environment` is always empty there.
+A daemon restart loses pending launch environments, including explicitly empty ones. An execution
+that has not launched refuses with `environment-unavailable` when it reaches launch; resubmit it
+with its live environment. Existing native generations keep their execution facts and custody and
+are observed/retired without relaunching or substituting the daemon's environment.
+The runtime's durable launch-operation identity is passed separately as typed control-plane
+metadata. Payload keys such as `ST3_START_OPERATION` are never parsed into generation receipts,
+start-rejection evidence, producer custody, or runtime operation tracing.
+
+On first upgraded store open, historical shell command environments are cleared in place while
+execution history, outcomes, receipts, and membership custody remain readable. The writer enables
+SQLite secure deletion, truncates the WAL, rewrites the database with `VACUUM`, and truncates the
+WAL again before recording completion. Busy checkpoints or rewrite errors fail store open; stop
+competing readers/writers and retry the open. This scrubs the active database and WAL, not external
+backups, snapshots, or payload-produced output. Do not downgrade to a writer that persists shell
+environments. Secrets deliberately printed by payloads or supplied as argv remain the caller's
+responsibility.
+
 
 ## Program API
 
@@ -90,10 +391,9 @@ const verify = Effect.scoped(Effect.gen(function* () {
   const lane = yield* Fractal.resources.lane('verification', {
     host: 'worker',
     maxMembers: 1,
-    capacity: { cores: 4, memory: 8 * 1024 ** 3 },
+    profile: 'check.unit',
     class: 'check',
-    disk: { bytes: 15 * 1024 ** 3, path: '/workspace' },
-    io: 'heavy',
+    diskPath: '/workspace',
     coverage: 'enforced',
     admissionTimeout: '30m',
   })
@@ -104,8 +404,8 @@ const verify = Effect.scoped(Effect.gen(function* () {
 }))
 ```
 
-`maxMembers` defaults to one and `coverage` to `logical`. An explicit capacity profile is required
-for admission; memory is bytes in the program API. `admissionTimeout` is an optional duration. The acquired handle exposes
+`maxMembers` defaults to one and `coverage` to `logical`. A known `profile` resolves on the host;
+raw `capacity` remains supported during caller cutover, with memory in bytes. `admissionTimeout` is an optional duration. The acquired handle exposes
 `lane.exec(id, argv, options)` and `lane.run(id, mission, input)`. The latter starts a linked child
 run whose actual exec roots consume the same native membership and fencing context. Arbitrary
 Effect code inside the scope does not move its processes into the lane or fence external writes.
@@ -128,9 +428,7 @@ status and linked-child failure.
 ```kdl
 step "verify" timeout="20m" {
   agentless
-  lane "verification" host="worker" max-members=1 class="check" disk="15G" disk-path="/workspace" io="heavy" coverage="enforced" admission-timeout="30m" {
-    capacity cores=4 memory="8G"
-  }
+  lane "verification" host="worker" profile="check.unit" max-members=1 class="check" disk-path="/workspace" coverage="enforced" admission-timeout="30m"
   exec "verify" {
     host "worker"
     command "run-verification"
@@ -139,8 +437,9 @@ step "verify" timeout="20m" {
 ```
 
 The step must contain exactly one exec declaration, and its actual host must match the lane host.
-The name, explicit host, and nested `capacity` profile are required for admission. Other defaults
-and options match the program API: `max-members` maps to `maxMembers`, `admission-timeout` to
+The name and explicit host are required. A known `profile` replaces the raw nested `capacity`
+block; unknown keys require complete raw values. Other defaults and options match the program
+API: `disk-path` maps to `diskPath`, `max-members` to `maxMembers`, `admission-timeout` to
 `admissionTimeout`, and lane-child `capacity` to the independent root's footprint. Numeric bounds for a shared containment slice
 accommodate its configured members; independent root reservations still add in host fit.
 
@@ -162,6 +461,9 @@ reservations or IO-heavy requests. Each current member advertises its version on
 `daemon.started`. Planning and direct publication report `mission-resource-lane-unavailable` while
 any reader is older. The shell CLI requires version 2 from its local daemon before submission.
 Plain revisions and already published history are unaffected.
+Keyed declarations and keyed program support additionally require `resource_profile_keys>=1`;
+the CLI checks that capability for keyed calls, receipt files and nondefault member limits.
+
 
 ## Admission, clocks and cancellation
 
@@ -308,11 +610,13 @@ absence still requires an inactive unit with no cgroup and a snapshot newer than
 join. PTY launcher acknowledgement and observed pre-migration process membership complete that
 join boundary before the old scope can disappear.
 
-Darwin offers host-local logical exclusivity and scoped cancellation, not Linux-equivalent
-whole-tree CPU/memory enforcement. Required `enforced` coverage returns `UnsupportedCoverage`.
-Logical-only execution does not imply an enforced resource cap. Detached process groups cannot
-prove quiescence of escaped descendants; uncertain retirement retains custody instead of promising
-safe successor execution. Arbitrary shell SSH is not a remote target mutation fence.
+Darwin offers host-local admission and cancellation, not Linux-equivalent whole-tree CPU/memory
+enforcement. Required `enforced` coverage returns `UnsupportedCoverage`; logical coverage does
+not imply an enforced resource cap. Slot-backed shell execution uses dedicated-UID custody
+to prove retirement, including descendants that escape the original process group.
+Program/DSL logical execution retains its existing process-group boundary, which cannot prove
+quiescence of escaped descendants. In either path uncertain retirement retains custody instead
+of promising safe successor execution. Arbitrary shell SSH is not a remote target mutation fence.
 
 ## FACTORY integration boundary
 

@@ -12,6 +12,23 @@ const intent = { meta, id: 'checks', goal: 'Check source.', reportTo, input: Sch
 // This is a protocol test, not a replacement host accountant. Native parity tests own fit,
 // queue clocks, process containment, cancellation races and confirmed physical retirement.
 describe('scoped native resource lanes', () => {
+  it.effect('passes keyed profiles and disk paths without synthesizing client estimates', () => Effect.gen(function* () {
+    const operations: ResourceRequest[] = []
+    const program = Fractal.mission(intent, () => Effect.scoped(Fractal.resources.lane('checks', {
+      host: 'executor', profile: 'check.unit', diskPath: '/workspace', maxMembers: 3, class: 'check',
+    })))
+    const host = fakeHost({ resource: async (request) => {
+      operations.push(request)
+      return { _tag: 'Success', value: request.operation === 'resource.lane.acquire' ? membership : null }
+    } })
+    expect((yield* start(program, host))._tag).toBe('Success')
+    expect(operations[0]?.payload).toEqual({
+      name: 'checks', host: 'executor', profile: 'check.unit', diskPath: '/workspace',
+      maxMembers: 3, class: 'check', coverage: 'logical',
+    })
+    expect(operations.map((request) => request.operation)).toEqual(['resource.lane.acquire', 'resource.lane.release'])
+  }))
+
   it.effect('preserves impossible admission failures as typed resource errors', () => Effect.gen(function* () {
     for (const code of ['impossible', 'impossible-capacity']) {
       const program = Fractal.mission(intent, () => Effect.scoped(Fractal.resources.lane('checks', { host: 'executor' })))
@@ -38,6 +55,11 @@ describe('scoped native resource lanes', () => {
         case 'resource.lane.exec': return { _tag: 'Success', value: { code: 0, signal: null, stdout: '', stderr: '' } }
         case 'resource.lane.run': return { _tag: 'Success', value: { run: 'mission-run/child', status: 'completed' } }
         case 'resource.lane.release': return { _tag: 'Success', value: null }
+        // This lane fixture does not host native agent turns.
+        case 'agent.turn': return {
+          _tag: 'Failure',
+          error: { _tag: 'ResourceError', code: 'operation-refused', message: 'Unexpected native agent turn in lane fixture.' },
+        }
       }
     } })
     const exit = yield* start(program, host)

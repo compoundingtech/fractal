@@ -85,7 +85,7 @@ record_completed_step() {
 start_fresh() {
   local label=$1 output run step
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  output="$(st3 missions start eval/work-wake-reliability/fresh \
+  output="$(fractal missions start eval/work-wake-reliability/fresh \
     --id "fresh-$label-${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
     --workspace "$PWD" \
     --as "$REQUESTER" \
@@ -118,7 +118,7 @@ start_fresh two
 
 fractal apply "$revisable_v1" --as "$REQUESTER" >/dev/null
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-revisable_output="$(st3 missions start eval/work-wake-reliability/revisable \
+revisable_output="$(fractal missions start eval/work-wake-reliability/revisable \
   --id "revisable-${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
   --workspace "$PWD" \
   --as "$REQUESTER" \

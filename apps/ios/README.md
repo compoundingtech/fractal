@@ -51,6 +51,10 @@ The fifteen-second collections opening deadline includes the WebSocket handshake
 
 Observation reporting holds one send slot during both batch preparation and transport. Closing a measured minute can synchronously notify the reporter; that notification cannot prepare a second batch while the first is being formed. A null or empty batch releases the slot without delaying the next measurement.
 
+Minute reports retain the existing observation endpoint and wire shape. Preparing a report first restores the existing canonical-bin journal and durably saves the exact batch and its UUID; only then may transport upload it. Failed reads never replace unread saved data, failed writes leave the batch pending, and failed acknowledgement writes retain it for an identical retry after restart or member changes. Open minutes are saved too. Minutes without observations are absent, not healthy zeroes. Foreground time remains in the live-share denominator while the feed is disconnected on the selected carrier.
+
+`observations.test.mjs` uses a controlled clock and a temporary disk journal to assert that actual persisted producer output equals `fixtures/observation-minute.json`, including all seven objectives and 40 seconds of disconnected foreground time. The native ingestion/evaluation test consumes that same fixture; no simulator, running gateway, or live phone is required.
+
 ## Layout
 
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
@@ -278,6 +282,28 @@ background QoS or low-priority I/O: `taskpolicy -c utility` is a clamp, not an
 elevation from background. Missing admission tooling refuses the build; it
 never silently bypasses host limits.
 An advisory lock makes scheduled and manual invocations single-flight.
+The private checkout fetches an exact commit from the configured local source
+repository, not a network object transfer. For `origin/<branch>`, it snapshots
+the source's `refs/remotes/origin/<branch>` after checking the configured origin
+URL. A bounded `git ls-remote` request to that approved origin must prove the
+snapshot equals the published branch tip; a pinned commit may instead be a
+locally provable ancestor of a published branch tip. Unavailable publication
+proof or an unresolvable source snapshot skips all delivery, including cached
+installation. Whoever updates the
+source remote-tracking ref owns freshness; delivery does not download objects
+from the network. Each `source_snapshot` records SHA, ref and commit time.
+Trusted ancestry still refuses backward or divergent snapshots.
+Under the delivery lock, shared temporary packs older than one hour are
+considered for removal only when `lsof` proves no live open users; unavailable
+`lsof`, warnings, errors or changed files preserve them. Fresh shared files
+are never removed. Each transfer writes into its own isolated object directory,
+with the existing object database as an alternate. Downloaded objects stay in
+complete packs, promoted by hard link before their indexes advertise them.
+`FETCH_HEAD` changes atomically only after promotion succeeds; failure leaves
+the prior value intact, kills and reaps the transfer group, then removes only
+its owned directory. Parent SIGTERM is blocked until the spawned process
+group is registered with the cancellation handler; the child restores the
+original signal mask before exec so it remains directly terminable.
 One root `pnpm install --frozen-lockfile` installs the workspace. Delivery follows
 the app's recursive `workspace:` and `file:` runtime dependencies (currently
 `clients/typescript/fractal-views` and `clients/typescript/fractal-client`). Changes under
@@ -306,6 +332,10 @@ default, `test` only when explicitly selected) and the daily Fabric
 settings pinned before invoking Xcode. Before publishing the signed snapshot,
 it requires defined Rust bridge symbols in the app executable: the real module
 and disabled stub share the same Swift class name, so that name alone is not proof.
+The worker logs UTC ISO timestamped phase starts for dependency installation,
+Expo configuration, Fabric packaging, prebuild/CocoaPods, JavaScript export,
+Xcode compilation and artifact verification. Cached phases still emit their
+start marker and report reuse.
 Metro inlines `EXPO_PUBLIC_*` values into each transformed module, so the build runs
 with a delivery-scoped `TMPDIR` under `build-cache/tmp` and resets that
 transform cache whenever the inlined values change; a successful build also

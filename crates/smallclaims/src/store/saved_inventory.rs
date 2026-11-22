@@ -51,6 +51,15 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
         ("retired_envelopes", "INSERT", ""),
         ("retired_envelopes", "DELETE", ""),
         ("retired_envelopes", "UPDATE", ""),
+        // An identity received as released (`signed_claims`) joins the inventory; one this member
+        // releases itself was listed already, and its deletion from `replica_envelopes` counts.
+        (
+            "released_envelopes",
+            "INSERT",
+            "WHEN NOT EXISTS(SELECT 1 FROM replica_envelopes AS held
+                 WHERE held.writer=NEW.writer AND held.sequence=NEW.sequence AND held.envelope_hash=NEW.envelope_hash)",
+        ),
+        ("released_envelopes", "DELETE", ""),
     ] {
         connection.execute_batch(&format!(
             /* sqlite-large-value: allow-for-now lv-h4b84af8077fd owner=smallclaims::store::saved_inventory TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {table}_saved_inventory_{event} AFTER {event} ON {table}
@@ -191,19 +200,19 @@ impl Store {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
-                eprintln!("st3: the saved replication inventory {} cannot be opened, so the first snapshot reads the store: {error}", source.display());
+                eprintln!("fractal: the saved replication inventory {} cannot be opened, so the first snapshot reads the store: {error}", source.display());
                 return Ok(None);
             }
         };
         if let Err(error) = std::fs::remove_file(&source) {
             // Read it only when it cannot outlive this process's changes.
-            eprintln!("st3: the saved replication inventory {} cannot be removed, so the first snapshot reads the store: {error}", source.display());
+            eprintln!("fractal: the saved replication inventory {} cannot be removed, so the first snapshot reads the store: {error}", source.display());
             return Ok(None);
         }
         let (header, inventory, buckets) = match read(file) {
             Ok(read) => read,
             Err(error) => {
-                eprintln!("st3: the saved replication inventory {} is unreadable, so the first snapshot reads the store: {error:#}", source.display());
+                eprintln!("fractal: the saved replication inventory {} is unreadable, so the first snapshot reads the store: {error:#}", source.display());
                 return Ok(None);
             }
         };

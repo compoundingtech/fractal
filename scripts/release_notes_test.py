@@ -273,6 +273,85 @@ class ReleaseNotes(unittest.TestCase):
             with self.assertRaisesRegex(ImpactError, 'existing fragments are immutable'):
                 check_pull_request(self.repo, base, source)
 
+    def test_pr_accepts_inherited_invalid_fragment_repair(self):
+        invalid = fragment()
+        invalid['compatibility']['status'] = 'additive'
+        for content in (json.dumps(invalid), '{'):
+            with self.subTest(content=content):
+                self.git('switch', '--detach', '--quiet', self.base)
+                self.write('release-notes/inherited.json', content)
+                base = self.commit('Inherited invalid note')
+                self.add_fragment('inherited')
+                self.add_fragment('repair')
+                source = self.commit('Repair invalid note with fresh classification')
+                report = check_pull_request(self.repo, base, source)
+                self.assertEqual(report['coverage'][source],
+                                 ['release-notes/inherited.json', 'release-notes/repair.json'])
+                self.assertEqual(len(collect(self.repo, base, source)['fragments']), 2)
+
+    def test_queue_cannot_modify_fragment_repaired_by_earlier_member(self):
+        invalid = fragment()
+        invalid['compatibility']['status'] = 'additive'
+        self.add_fragment('inherited', invalid)
+        base = self.commit('Inherited invalid note')
+        self.git('checkout', '-qb', 'repair')
+        self.add_fragment('inherited')
+        self.add_fragment('repair')
+        self.commit('Repair invalid note')
+        self.git('checkout', '-q', '-')
+        self.git('merge', '--no-ff', '-qm', 'Merge pull request #1662 from example/repair', 'repair')
+        repaired = self.git('rev-parse', 'HEAD')
+        queue_ref = 'refs/heads/gh-readonly-queue/main/pr-1662-' + base
+        self.assertEqual(list(check_pull_request(self.repo, base, repaired, queue_ref=queue_ref)['coverage']),
+                         [repaired])
+        self.git('checkout', '-qb', 'mutate')
+        self.add_fragment('inherited', fragment('Edit the now-valid note'))
+        self.add_fragment('mutate')
+        self.commit('Mutate valid note with another fresh classification')
+        self.git('checkout', '-q', '-')
+        self.git('merge', '--no-ff', '-qm', 'Merge pull request #1663 from example/mutate', 'mutate')
+        with self.assertRaisesRegex(ImpactError, 'existing fragments are immutable'):
+            check_pull_request(self.repo, base, 'HEAD', queue_ref=queue_ref)
+
+    def test_pr_invalid_fragment_repair_still_requires_fresh_fragment(self):
+        invalid = fragment()
+        invalid['compatibility']['status'] = 'additive'
+        self.add_fragment('inherited', invalid)
+        base = self.commit('Inherited invalid note')
+        self.add_fragment('inherited')
+        source = self.commit('Repair without fresh classification')
+        with self.assertRaisesRegex(ImpactError, 'add a uniquely named'):
+            check_pull_request(self.repo, base, source)
+
+    def test_pr_rejects_still_invalid_fragment_repair(self):
+        invalid = fragment()
+        invalid['compatibility']['status'] = 'additive'
+        self.add_fragment('inherited', invalid)
+        base = self.commit('Inherited invalid note')
+        invalid['summary'] = 'Changed but still invalid'
+        self.add_fragment('inherited', invalid)
+        self.add_fragment('repair')
+        source = self.commit('Incomplete repair')
+        for pr_number in (None, 1661):
+            with self.subTest(pr_number=pr_number):
+                with self.assertRaisesRegex(ImpactError, 'status must be none, changed or unknown'):
+                    check_pull_request(self.repo, base, source, pr_number=pr_number)
+
+    def test_pr_cannot_delete_or_rename_inherited_invalid_fragment(self):
+        self.write('release-notes/inherited.json', '{')
+        base = self.commit('Inherited invalid note')
+        for operation in ('delete', 'rename'):
+            with self.subTest(operation=operation):
+                self.git('switch', '--detach', '--quiet', base)
+                if operation == 'delete':
+                    self.git('rm', 'release-notes/inherited.json')
+                else:
+                    self.git('mv', 'release-notes/inherited.json', 'release-notes/renamed.json')
+                self.add_fragment('repair')
+                source = self.commit(operation)
+                with self.assertRaisesRegex(ImpactError, 'existing fragments are immutable'):
+                    check_pull_request(self.repo, base, source)
+
     def test_pr_rejects_invalid_metadata_and_undeclared_version_change(self):
         self.write('release-notes/bad.json', '{')
         source = self.commit('Invalid fragment')

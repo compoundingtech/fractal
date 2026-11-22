@@ -64,18 +64,13 @@ use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
 pub use smallclaims::store::{
-    CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
-    CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction,
-    CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest,
-    CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView, CheckpointProof,
-    CheckpointResumeRequest, CheckpointStatusView, ClaimTombstone, CreatedFleetInvite, DropCount,
+    CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointAction, CheckpointContext, CheckpointManifest,
+    CheckpointManifestCursor, CheckpointManifestPage, CheckpointManifestRequest,
+    CheckpointResumeRequest, TrimStatusView, ClaimTombstone, CreatedFleetInvite, DropCount,
     DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue, FleetInviteView,
-    FleetRedemption, FleetRemoval, PendingCheckpointView, ReplicationAdmission, SealTerms,
-    SealedSet, TRIM_CHUNK_ENVELOPES, TrimFault, VerifiedTerms, certificates, checkpoint_build,
-    checkpoint_cut, checkpoint_name, checkpoint_participants, chosen_certificate,
-    configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
-    newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
+    FleetRedemption, FleetRemoval, ReplicationAdmission, SealedSet, TRIM_CHUNK_ENVELOPES,
+    TrimFault, checkpoint_build, checkpoint_cut, checkpoint_name, configure_projection_writer,
+    drop_digest, newest_due_cut, valid_fleet_node_name, check_checkpoint_manifest,
 };
 pub use fractal_store::store::runtime_starts::RuntimeStartOperation;
 pub use fractal_store::store::attention_snapshot::{
@@ -103,7 +98,7 @@ pub use fractal_store::store::{PinnedDefinitions, RANGE_SUBJECTS, RECENTLY_ENDED
 pub use fractal_store::store::{StepTiming, Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_BUCKETS, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND};
 pub use fractal_store::store::{accounts, active_step_blockers_tx, adhoc_work, agent_view, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx, append_claim_with_commit_context, append_claim_with_fences, append_claim_with_subject_fences, append_latest_observation_publication, append_receipt_claim_tx};
 pub use fractal_store::store::{apply_effective_step_state, apply_effective_step_state_with_owner, arm_waiting_mission_deadline_tx, arrangements, attention, attention_list, attention_snapshot, backup, backup_format, cancel_descendant_mission_runs_tx, cancel_mission_run_tx, card_fold};
-pub use fractal_store::store::{carried_claimants_tx, carried_revision_step_paths, carried_step_lease, carried_step_projection, check_mailbox_fence, check_observer_completion, checkpoint, checkpoint_rules, checkpoint_status, claim_append_error, claim_by_id_tx, claim_log_order};
+pub use fractal_store::store::{carried_claimants_tx, carried_revision_step_paths, carried_step_lease, carried_step_projection, check_mailbox_fence, check_observer_completion, checkpoint, checkpoint_rules, claim_append_error, claim_by_id_tx, claim_log_order};
 pub use fractal_store::store::{classify_replicated_claim_with_registry, client_summary, compatible_step_paths, current_desired_row, current_desired_row_tx, current_harness_at, database_size, declarations, delegation, descendant_mission_run_ids_tx, desired_from_row, desired_lineage_from_tx};
 pub use fractal_store::store::{desired_revision, desired_row_at, dropped_claimant, enforce_mission_run_capacity, enrich_step_definition_cached, enrich_step_nudge_at, enrich_step_queue, enrich_step_queue_at, enrich_step_queue_cached, enrich_step_summaries_at, evidence, first_readiness_fault_tx};
 pub use fractal_store::store::{flatten_mission_step_specs, flatten_steps, fold_step_clock, fold_step_clock_open, fold_step_timing, fresh_context_ready_tx, generation_id_from_subject, git_change_tables, github_workflow_failures, glass_heads, harness_fold_at, harness_questions};

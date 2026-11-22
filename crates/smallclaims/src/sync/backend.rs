@@ -1,10 +1,9 @@
-//! What the sync worker asks of the store it keeps in step: export and receive exchanges, serve
-//! and adopt checkpoints, publish endpoints, redeem invites, and read membership.
+//! What the sync worker asks of the store it keeps in step: export and receive exchanges,
+//! publish endpoints, redeem invites, and read membership.
 
 use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -14,13 +13,10 @@ use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
 use crate::fleet::handshake::JoinRequest;
 use crate::replication::{
-    ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
+    ReceiveOptions, ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
     ReplicationReceiveResponse,
 };
-use crate::store::{
-    CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest, FleetRedemption, Store,
-};
+use crate::store::{FleetRedemption, Store};
 
 /// The store the worker syncs, as the worker reaches it. Every call may cross a process
 /// boundary, so each takes and returns plain values.
@@ -61,30 +57,15 @@ pub trait Backend: Clone + Send + Sync + 'static {
         async move { Ok(self.guard_summary(fleet_id).await?.exchange.authority_digest) }
     }
 
-    /// Store a peer's exchange, then admit and project what it carried. `round_trip` is how
-    /// long this worker's request that returned it took, when the exchange is a response.
+    /// Store a peer's exchange, then admit and project what it carried. The options retain
+    /// local dial evidence, authenticated sender incarnation and the optional answer deadline.
     fn receive(
         &self,
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: crate::replication::ReplicationCarrier,
+        options: ReceiveOptions<'_>,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
-
-    fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> impl Future<Output = Result<CheckpointManifestPage>> + Send;
-
-    fn checkpoint_need(
-        &self,
-    ) -> impl Future<Output = Result<Option<CheckpointManifestNeed>>> + Send;
-
-    fn adopt_checkpoint(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> impl Future<Output = Result<Vec<CheckpointAction>>> + Send;
 
     fn publish_endpoints(
         &self,
@@ -227,27 +208,34 @@ where
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: crate::replication::ReplicationCarrier,
+        options: ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
+        let ReceiveOptions { round_trip, carrier, authenticated_member_key, deadline_unix_ms } = options;
         let backend = self.clone();
         let peer = peer.to_owned();
         let fleet_id = fleet_id.to_owned();
         let exchange = exchange.clone();
+        let authenticated_member_key = authenticated_member_key.map(str::to_owned);
         self.store().connection.spawn_blocking(move || crate::task_cpu::blocking("replication.receive", || {
             let store = backend.store();
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             if let Some(round_trip) = round_trip {
                 store.record_replication_round_trip(round_trip);
             }
             let receipt = store
-                .receive_replication_exchange_via(
+                .receive_replication_exchange_before(
                     &peer,
                     &fleet_id,
                     &exchange,
                     round_trip.is_some(),
-                    carrier,
+                    ReceiveOptions {
+                        round_trip,
+                        carrier,
+                        authenticated_member_key: authenticated_member_key.as_deref(),
+                        deadline_unix_ms,
+                    },
                 )
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::from)?;
             store.record_transport_observation(&peer, "up", None, None)?;
             let admission = store.validate_replication_backlog()?;
             let repairs = store.apply_replication_repairs()?;
@@ -259,26 +247,6 @@ where
             })
         }))
         .await?
-    }
-
-    async fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> Result<CheckpointManifestPage> {
-        self.store().checkpoint_manifest_page(request)
-    }
-
-    async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
-        self.store().checkpoint_manifest_need()
-    }
-
-    async fn adopt_checkpoint(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>> {
-        self.store()
-            .adopt_checkpoint(manifest)
-            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
     }
 
     async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {

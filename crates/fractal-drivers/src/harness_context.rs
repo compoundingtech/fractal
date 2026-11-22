@@ -782,7 +782,7 @@ fn read_at(path: &Path, now_ms: u64) -> Option<Observed> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
             tracing::warn!(
-                "st harness-context: reading {} failed: {error}",
+                "fractal harness-context: reading {} failed: {error}",
                 path.display()
             );
             return None;
@@ -795,14 +795,14 @@ fn read_at(path: &Path, now_ms: u64) -> Option<Observed> {
 pub fn read_raw_at(raw: &[u8], now_ms: u64) -> Option<Observed> {
     let Ok(record) = serde_json::from_slice::<Record>(raw) else {
         tracing::warn!(
-            "st harness-context: {} is not a readable record",
+            "fractal harness-context: {} is not a readable record",
             "committed context event"
         );
         return None;
     };
     if !crate::contracts::schema_matches(&record.schema, SCHEMA) {
         tracing::warn!(
-            "st harness-context: {} carries schema `{}`, not `{SCHEMA}`",
+            "fractal harness-context: {} carries schema `{}`, not `{SCHEMA}`",
             "committed context event",
             record.schema
         );
@@ -810,7 +810,7 @@ pub fn read_raw_at(raw: &[u8], now_ms: u64) -> Option<Observed> {
     }
     if record.harness == Harness::Unrecognized {
         tracing::warn!(
-            "st harness-context: {} was written by a harness this version cannot interpret",
+            "fractal harness-context: {} was written by a harness this version cannot interpret",
             "committed context event"
         );
         return None;
@@ -820,7 +820,7 @@ pub fn read_raw_at(raw: &[u8], now_ms: u64) -> Option<Observed> {
         || record.rate_limits.observed_at_ms.is_some_and(|at| at > future_bound)
     {
         tracing::warn!(
-            "st harness-context: {} is stamped beyond the future-skew bound",
+            "fractal harness-context: {} is stamped beyond the future-skew bound",
             "committed context event"
         );
         return None;
@@ -1430,7 +1430,7 @@ mod tests {
                 .unwrap()
         );
         let observed = read(&harness_context_path(&agent_dir)).unwrap();
-        assert_eq!(observed.compactions, 2, "st counted the two edges");
+        assert_eq!(observed.compactions, 2, "Fractal counted the two edges");
         assert_eq!(
             observed.used_percent,
             Some(96.7),

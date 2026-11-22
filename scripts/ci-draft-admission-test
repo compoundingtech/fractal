@@ -191,6 +191,10 @@ assert 'pull_request_target:' not in workflow and 'pull_request:' not in workflo
 assert "github.event.workflow_run.event == 'pull_request'" in workflow
 assert 'actions: write' in workflow and 'pull-requests: read' in workflow
 assert 'actions/checkout' not in workflow and 'download-artifact' not in workflow
+assert 'runs-on: ci1-priority' in workflow, 'main-owned metadata admission must not wait for hosted dispatch'
+assert 'Qualify the owned control Python runtime' in workflow
+assert 'sys.version_info >= (3, 10)' in workflow
+assert 'secrets.' not in workflow, 'fork-triggered admission must not acquire a new secret'
 assert 'Draft CI admission' not in workflow.split('workflows:', 1)[1].split('types:', 1)[0]
 for candidate in (ROOT / '.github/workflows').glob('*.yml'):
     text = candidate.read_text()

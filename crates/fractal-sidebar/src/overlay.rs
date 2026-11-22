@@ -9,7 +9,7 @@ impl Edits {
     /// not be replayed while their completion journal write or fresh-base read is pending.
     /// Refused intent remains available for feedback/retry, not optimistic positioning.
     pub fn project<'a>(&self, observed: &'a SidebarTree) -> Result<Cow<'a, SidebarTree>, ProjectionError> {
-        if !matches!(self.status, Status::AwaitingPersistence | Status::Sending | Status::UnknownDelivery | Status::AwaitingObservation) {
+        if !matches!(self.status(), Status::AwaitingPersistence | Status::Sending | Status::UnknownDelivery | Status::AwaitingObservation) {
             return Ok(Cow::Borrowed(observed));
         }
         let Some(request) = self.request() else { return Ok(Cow::Borrowed(observed)); };

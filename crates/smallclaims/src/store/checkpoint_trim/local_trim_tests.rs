@@ -1,6 +1,6 @@
 use super::*;
 use crate::store::{
-    checkpoint_agreement::{CHECKPOINT_SEALED, CheckpointContext, DAY_MS},
+    checkpoint_agreement::{CheckpointContext, CheckpointPhase, DAY_MS},
     runtime::Plain,
 };
 use std::sync::Arc;
@@ -8,9 +8,7 @@ use std::sync::Arc;
 fn context(scratch: &Path) -> CheckpointContext {
     CheckpointContext {
         now_unix_ms: 30 * DAY_MS,
-        configured_peers: Vec::new(),
         scratch: scratch.to_path_buf(),
-        reviewer: "person/example".into(),
     }
 }
 
@@ -34,7 +32,7 @@ fn seals(store: &Store) -> i64 {
     store
         .readers
         .get()
-        .query_row("SELECT COUNT(*) FROM claims WHERE kind=?1", [CHECKPOINT_SEALED], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM claims WHERE kind LIKE 'checkpoint.%'", [], |row| row.get(0))
         .unwrap()
 }
 
@@ -46,30 +44,19 @@ fn state(store: &Store, checkpoint: &str) -> String {
         .unwrap()
 }
 
-fn manifest() -> CheckpointManifest {
-    CheckpointManifest {
-        checkpoint: "checkpoint/1970-01-29".into(),
-        cut_unix_ms: 28 * DAY_MS,
-        envelopes: Vec::new(),
-        claims: Vec::new(),
-    }
-}
-
 #[test]
-fn a_member_that_trims_locally_seals_verifies_and_adopts_nothing() {
+fn a_member_trims_its_own_cut_and_writes_no_checkpoint_claim() {
     let scratch = tempfile::tempdir().unwrap();
-    // Control: an ordinary member seals the due checkpoint and takes up a manifest.
-    let ordinary = Store::open_memory("writer", Arc::new(Plain)).unwrap();
-    let actions = ordinary.checkpoint_step(&context(scratch.path())).unwrap();
-    assert!(actions.iter().any(|action| matches!(action, CheckpointAction::Sealed { .. })));
-    assert_eq!(seals(&ordinary), 1);
-    let refused = ordinary.adopt_checkpoint(&manifest()).err().map(|error| error.code);
-    assert_ne!(refused, Some("trim-is-local"));
+    // With trimming off, a step does nothing.
+    let off = local_store();
+    assert!(off.checkpoint_step(&context(scratch.path())).unwrap().is_empty());
+    assert_eq!(off.trim_status().unwrap().worker.unwrap().phase, CheckpointPhase::Disabled);
+    assert!(off.trimmed_checkpoint().unwrap().is_none());
 
     let local = local_store();
     local.trim_locally(true).unwrap();
     assert!(local.trims_locally());
-    // It trims its own due cut, once, and never seals, verifies or asks for a manifest.
+    // It trims its own due cut, once, and writes no seal, verification or excusal.
     let first = local.checkpoint_step(&context(scratch.path())).unwrap();
     assert!(
         first.iter().all(|action| matches!(action, CheckpointAction::Trimmed { .. })),
@@ -77,12 +64,14 @@ fn a_member_that_trims_locally_seals_verifies_and_adopts_nothing() {
     );
     assert!(local.checkpoint_step(&context(scratch.path())).unwrap().is_empty());
     assert_eq!(seals(&local), 0);
-    assert!(local.checkpoint_manifest_need().unwrap().is_none());
-    assert_eq!(local.adopt_checkpoint(&manifest()).unwrap_err().code, "trim-is-local");
+    let status = local.trim_status().unwrap();
+    assert_eq!(status.trimmed, Some(checkpoint_name(checkpoint::newest_due_cut(30 * DAY_MS))));
+    assert!(!status.halted);
+    assert_eq!(status.blocking_summary(), None);
 }
 
 #[test]
-fn a_member_that_trims_locally_finishes_a_committed_trim_and_keeps_an_uncommitted_one() {
+fn a_member_finishes_a_committed_trim_and_keeps_an_uncommitted_one() {
     let scratch = tempfile::tempdir().unwrap();
     let store = local_store();
     store

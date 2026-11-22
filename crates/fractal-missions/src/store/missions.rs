@@ -462,7 +462,6 @@ pub fn github_posted_by_tx(
 fn batch_entries_tx(
     transaction: &rusqlite::Transaction<'_>,
     origin: &str,
-    batch_id: &str,
     subscription_subject: &str,
     subscription: &crate::model::SubscriptionSpec,
     mission: &str,
@@ -516,7 +515,6 @@ fn batch_entries_tx(
                 message_subjects.extend(route_item_to_owner_tx(
                     transaction,
                     origin,
-                    batch_id,
                     subscription_subject,
                     item_subject,
                     &owner,
@@ -594,7 +592,6 @@ fn batch_entries_tx(
                 message_subjects.extend(route_item_to_owner_tx(
                     transaction,
                     origin,
-                    batch_id,
                     subscription_subject,
                     item_subject,
                     &owner,
@@ -733,6 +730,47 @@ fn renew_nested_ancestor_leases_tx(
             ],
         )
         .map_err(internal)?;
+    Ok(())
+}
+
+/// Send a message an observation causes, from inside its transaction. Its route can't be read
+/// there, so it goes through the outbox and the daemon's drain routes it after the commit. The
+/// one exception is the observation's receipt, which rides on the observation's first graph
+/// claim: a message that would be that claim stays on the graph and carries it, as before.
+#[allow(clippy::too_many_arguments)]
+fn send_observation_message_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    fields: Value,
+    evidence: Vec<String>,
+    batches: &mut ObservationBatches,
+    receipt_key: &mut Option<&str>,
+) -> Result<(), FractalError> {
+    if receipt_key.is_some() {
+        append_first_receipt_claim_tx(
+            transaction,
+            origin,
+            subject,
+            "message.sent",
+            None,
+            &json!({"fields": fields, "evidence": evidence}),
+            &[],
+            Some(&batches.for_kind(transaction, origin, "message.sent")?),
+            receipt_key,
+        )
+        .map_err(claim_append_error)?;
+        return Ok(());
+    }
+    fractal_store::store::message_routing::queue_tx(transaction, &ClaimInput {
+        subject: subject.to_owned(),
+        kind: "message.sent".into(),
+        actor: None,
+        fields: serde_json::from_value(fields).map_err(internal)?,
+        evidence,
+        expected_subject: None,
+        idempotency_key: None,
+    })?;
     Ok(())
 }
 
@@ -883,7 +921,7 @@ fn subscription_condition_matches(condition: &SubscriptionConditionSpec, facts: 
     }
 }
 
-fn set_mission_run_state_tx(
+pub(super) fn set_mission_run_state_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     run: &str,
@@ -1252,7 +1290,7 @@ fn run_generation_rows_tx(
     Ok(view)
 }
 
-fn step_generation_is_current(
+pub(super) fn step_generation_is_current(
     connection: &Connection,
     step: &StepRunView,
 ) -> rusqlite::Result<bool> {
@@ -1331,7 +1369,6 @@ fn item_owner_tx(connection: &Connection, facts: &Value) -> Result<Option<(Strin
 fn route_item_to_owner_tx(
     transaction: &rusqlite::Transaction<'_>,
     origin: &str,
-    batch_id: &str,
     subscription: &str,
     resource: &str,
     owner: &str,
@@ -1345,24 +1382,24 @@ fn route_item_to_owner_tx(
         return Ok(None);
     }
     let subject = format!("message/route-{}", &delivery_key[..20]);
-    append_claim_tx(
-        transaction,
-        origin,
-        &subject,
-        "message.sent",
-        None,
-        &json!({"fields": {
+    // Through the outbox: its route can't be read inside this batch.
+    fractal_store::store::message_routing::queue_tx(transaction, &ClaimInput {
+        subject: subject.clone(),
+        kind: "message.sent".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
             "from": format!("daemon/{origin}"),
             "to": owner,
             "title": title,
             "content": format!("{detail}\n\nst sent this to you because {why}; no review or person request was made."),
             "status": "sent",
             "tags": ["resource-route", subscription, resource],
-        }, "evidence": evidence}),
-        &[],
-        Some(batch_id),
-    )
-    .map_err(claim_append_error)?;
+        }))
+        .map_err(internal)?,
+        evidence: evidence.to_vec(),
+        expected_subject: None,
+        idempotency_key: None,
+    })?;
     Ok(Some(subject))
 }
 
@@ -1472,15 +1509,9 @@ fn routed_to_owner_tx(
     transaction: &rusqlite::Transaction<'_>,
     delivery_key: &str,
 ) -> Result<bool, FractalError> {
-    Ok(transaction
-        .query_row(
-            "SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent' LIMIT 1",
-            [format!("message/route-{}", &delivery_key[..20])],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(internal)?
-        .is_some())
+    // Sent through the graph, the stream or the outbox, as message_sent_tx sees all three.
+    fractal_store::store::message_sent::message_sent_tx(transaction, &format!("message/route-{}", &delivery_key[..20]))
+        .map_err(|error| internal(format!("{error:#}")))
 }
 
 /// Each step's effective state, and with `summaries` its latest progress and completion
@@ -1710,6 +1741,8 @@ pub trait MissionsStore {
     fn run_generations(&self, run: &str) -> Result<Vec<RunGenerationView>>;
     fn run_generation(&self, generation: &str) -> Result<Option<RunGenerationView>>;
     fn descendant_run_generations(&self, generation: &str) -> Result<Vec<String>>;
+    /// Descendant owners, using the same traversal as durable cancellation.
+    fn descendant_mission_run_subjects(&self, generation: &str) -> Result<Vec<String>>;
     fn revision_proposal_for_run(&self, run: &str) -> Result<Option<RevisionProposalView>>;
     fn revision_proposal(&self, proposal: &str) -> Result<Option<RevisionProposalView>>;
     fn create_revision_proposal(
@@ -3463,6 +3496,21 @@ impl MissionsStore for Store {
         let generation = generation_id_from_subject(generation);
         let connection = self.readers.get();
         Ok(run_generation_view_tx(&connection, generation).optional()?)
+    }
+
+    fn descendant_mission_run_subjects(&self, generation: &str) -> Result<Vec<String>> {
+        let generation = generation_id_from_subject(generation);
+        let connection = self.readers.get();
+        // Cancellation changes these owners even when their synthetic subscription
+        // parent is not a step. Register those same reads for incremental cleanup.
+        Ok(descendant_mission_run_ids_tx(&connection, generation)?
+            .into_iter()
+            .map(|id| {
+                let subject = format!("mission-run/{id}");
+                smallclaims::touched::note_read(|| subject.clone());
+                subject
+            })
+            .collect())
     }
 
     fn descendant_run_generations(&self, generation: &str) -> Result<Vec<String>> {
@@ -6582,6 +6630,10 @@ impl MissionsStore for Store {
                     Some(successor) => (successor.subject.clone(), successor),
                     None => (subject.clone(), current),
                 };
+                adhoc_work::admit_native_turn_work(transaction, &current)?;
+                if handoff.is_some() && current.run.starts_with("mission-run/native-turn/") {
+                    return Err(FractalError::new("native-turn-assignment", "a native turn's literal assignee cannot be handed off"));
+                }
                 if handoff.is_some() {
                     enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
                 }
@@ -7563,6 +7615,8 @@ impl MissionsStore for Store {
             )>,
             mirrored: Option<&crate::model::MirroredPrior>,
         ) -> Result<Option<(ResourceObservationOutcome, bool)>, FractalError> {
+        // The mail an observation causes is queued in its transaction and leaves on return.
+        let _drain = fractal_store::store::message_outbox::DrainOnReturn(self);
         let facts = canonical_json_value(facts);
         let operation_hash = canonical_hash(&(
             observer,
@@ -7616,7 +7670,17 @@ impl MissionsStore for Store {
                 let previous_object = previous.as_ref().and_then(Value::as_object);
                 let current_object = facts.as_object()
                     .expect("prepared resource facts are an object");
-                if !should_record {
+                // Unavailable-node state belongs to observer continuity, not resource facts.
+                // Persist both additions and recoveries even when the facts were already known.
+                let tombstones = |cursor: Option<&str>| {
+                    cursor.and_then(|cursor| serde_json::from_str::<Value>(cursor).ok())
+                        .and_then(|mut cursor| cursor.get_mut("tombstones").map(Value::take))
+                        .filter(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+                };
+                let previous_cursor = fractal_store::store::resources::claimed_observer_cursor_at(transaction, observer)
+                    .map_err(internal)?;
+                let tombstones_changed = tombstones(previous_cursor.as_deref()) != tombstones(cursor);
+                if !should_record && !tombstones_changed {
                     return Ok(Some((ResourceObservationOutcome {
                         baseline,
                         changed_fields,
@@ -7648,7 +7712,7 @@ impl MissionsStore for Store {
                     )
                     .map_err(internal)?;
                 }
-                if changed || attempt.is_some() {
+                if changed || attempt.is_some() || tombstones_changed {
                     let observer_predecessors = latest_claim_id_tx(transaction, observer)
                         .map_err(internal)?
                         .into_iter()
@@ -7656,8 +7720,8 @@ impl MissionsStore for Store {
                     let mut observer_fields = json!({
                         "status": "healthy",
                         "revision": desired_revision,
-                        // For a repository observer, only how far it has read: its version maps
-                        // stay in the polling member's GitHub plugin database.
+                        // Repository cursors carry read position and unavailable identities;
+                        // version maps stay in the polling member's GitHub plugin database.
                         "cursor": cursor,
                         "changed": changed,
                     });
@@ -8060,25 +8124,23 @@ impl MissionsStore for Store {
                                 && !fractal_store::store::message_sent::message_sent_tx(transaction, &wake.subject)
                                     .map_err(internal)?
                             {
-                                append_first_receipt_claim_tx(
+                                let fields = json!({
+                                    "from": format!("daemon/{}", self.origin),
+                                    "to": subscription.to,
+                                    "title": wake.title,
+                                    "content": wake.content,
+                                    "status": "sent",
+                                    "tags": wake.tags,
+                                });
+                                send_observation_message_tx(
                                     transaction,
                                     &self.origin,
                                     &wake.subject,
-                                    "message.sent",
-                                    None,
-                                    &json!({"fields": {
-                                        "from": format!("daemon/{}", self.origin),
-                                        "to": subscription.to,
-                                        "title": wake.title,
-                                        "content": wake.content,
-                                        "status": "sent",
-                                        "tags": wake.tags,
-                                    }, "evidence": [item_claim]}),
-                                    &[],
-                                    Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
+                                    fields,
+                                    vec![item_claim.clone()],
+                                    &mut batches,
                                     &mut receipt_key,
-                                )
-                                .map_err(claim_append_error)?;
+                                )?;
                                 message_subjects.push(wake.subject.clone());
                             }
                             if ended {
@@ -8139,7 +8201,6 @@ impl MissionsStore for Store {
                             let entries = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 &subscription.to,
@@ -8216,7 +8277,6 @@ impl MissionsStore for Store {
                             let unowned = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 mission,
@@ -8392,7 +8452,6 @@ impl MissionsStore for Store {
                                     message_subjects.extend(route_item_to_owner_tx(
                                         transaction,
                                         &self.origin,
-                                        &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                         subscription_subject,
                                         &delivery_resource,
                                         &owner,
@@ -8478,25 +8537,22 @@ impl MissionsStore for Store {
                                     .map(|(_, _, claim, _)| claim.clone()),
                             )
                             .collect::<Vec<_>>();
-                        append_first_receipt_claim_tx(
+                        send_observation_message_tx(
                             transaction,
                             &self.origin,
                             &message_subject,
-                            "message.sent",
-                            None,
-                            &json!({"fields": {
+                            json!({
                                 "from": format!("daemon/{}", self.origin),
                                 "to": subscription.to,
                                 "title": format!("Resource changed: {resource}"),
                                 "content": content,
                                 "status": "sent",
                                 "tags": ["resource-change", subscription_subject],
-                            }, "evidence": evidence}),
-                            &[],
-                            Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
+                            }),
+                            evidence,
+                            &mut batches,
                             &mut receipt_key,
-                        )
-                        .map_err(claim_append_error)?;
+                        )?;
                         message_subjects.push(message_subject);
                     }
                 }

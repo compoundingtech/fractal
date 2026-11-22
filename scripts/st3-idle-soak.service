@@ -1,5 +1,5 @@
 [Unit]
-Description=Continuous local st3 idle stability samples
+Description=Continuous local Fractal idle stability samples
 After=st3.service network-online.target
 
 [Service]

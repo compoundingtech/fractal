@@ -24,6 +24,51 @@ fn claim(store: &Store, subject: &str, kind: &str, fields: Value, evidence: Vec<
 }
 
 #[test]
+fn recovered_unsupported_queue_rows_never_join_or_retain_executable_waits() {
+    use crate::store::resource_membership::{Admission, Fit, LaneRequest};
+    use fractal_runtime::RequestClass;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let request: LaneRequest = serde_json::from_value(json!({
+        "id":"future-queued", "name":"executor/future", "host":"node", "maxMembers":1,
+        "capacity":{"cores":1,"memory":1024}, "coverage":"logical", "admissionTimeoutMs":null,
+        "owner":{"run":"mission-run/test","step":"step-run/test","attempt":1,"invocation":null}
+    })).unwrap();
+    {
+        let store = Store::open(&path, "node").unwrap();
+        store.start_resource_authority("node", "epoch-a").unwrap();
+        let fit = Fit { room: request.capacity, fifo_predecessor: Some("seat/predecessor".into()), ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&request, fit, 1).unwrap(), Admission::Queued { .. }));
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let body: String = connection.query_row("SELECT body FROM resource_memberships_v1 WHERE id=?1",
+        [&request.id], |row| row.get(0)).unwrap();
+    let mut body: Value = serde_json::from_str(&body).unwrap();
+    body["request"]["class"] = json!("future-class");
+    let body = serde_json::to_string_pretty(&body).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-habd7ccdf313a owner=fractal_reconcile::reconcile::tests::seat_admission_queue TODO=bound-or-reference-values-and-reclamation */ "UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
+        rusqlite::params![request.id, body]).unwrap();
+    let store = Arc::new(Store::open(&path, "node").unwrap());
+    store.start_resource_authority("node", "epoch-b").unwrap();
+    let runtime = fractal_runtime::ExecRuntime::new(root.path().join("runtime"), root.path().join("logs"));
+    assert_eq!(store.recover_resource_memberships("node", &runtime, 2).unwrap(), 0);
+    let status = Arc::new(Status::default());
+    let reconciler = Reconciler::new(store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+        .with_seat_admission(None, status.clone());
+    // Cover both cold recovery and a waiter already present before the refresh.
+    for stale_waiter in [false, true] {
+        if stale_waiter {
+            status.lane_wait_class(&request.id, "old waiter".into(), true, 0, RequestClass::Unknown("future-class".into()));
+        }
+        reconciler.cancel_invalid_admissions(&[]).unwrap();
+        assert!(status.state().lane_waits.is_empty());
+    }
+    let retained: String = connection.query_row("SELECT body FROM resource_memberships_v1 WHERE id=?1",
+        [&request.id], |row| row.get(0)).unwrap();
+    assert_eq!(retained, body);
+}
+
+#[test]
 fn pending_precedes_workspace_preparation_and_durable_start() {
     for kind in ["agent", "exec", "pty"] {
         let (store, runtime, reconciler, status) = fixture();

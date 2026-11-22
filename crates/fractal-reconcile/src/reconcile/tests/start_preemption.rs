@@ -73,9 +73,9 @@ use super::*;
         }
     }
     fn start(&self, member: &MemberSpec) -> Result<()> {
-        self.start_guarded(member, &|| Ok(()))
+        self.start_guarded(member, None, &|| Ok(()))
     }
-    fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_guarded(&self, member: &MemberSpec, _operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         if member.runtime_id == "example.worker"
             || member.runtime_id == "example-worker.main"
             || member.runtime_id.starts_with("example.held")
@@ -326,6 +326,64 @@ use super::*;
             None,
         )
         .unwrap()
+}
+
+#[tokio::test]
+async fn activation_lease_survives_non_waiting_dispatch_through_completion_publication() {
+    let (directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    let repository = crate::checkout::test_support::repository(directory.path());
+    apply_source(&store, &format!(
+        "version 2\nagent \"example/worker\" {{ workspace {:?}; command \"true\" }}",
+        repository.to_str().unwrap()), "leased-detached-start");
+    let pass_lease = reconciler.worktree_activation_lease(&repository, &repository).unwrap();
+    assert!(launch(&reconciler, "agent/example/worker"));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    drop(pass_lease);
+    let contend = || crate::checkout::activation_lease(&repository, &repository);
+    assert!(contend().is_err(), "the detached worker lost the pass's deletion fence");
+    release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+    assert!(store.observations_for("agent/example/worker", "runtime.action.succeeded").unwrap().is_empty());
+    assert!(contend().is_err(), "worker exit released admission before result adoption");
+    let owner = repository.clone();
+    *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(move || {
+        assert!(crate::checkout::activation_lease(&owner, &owner).is_err(),
+            "completion publication must remain fenced");
+    }));
+    let operation = store.runtime_start_for("agent/example/worker").unwrap().unwrap();
+    assert!(reconciler.apply_start_result(&operation.id, "agent/example/worker").unwrap());
+    assert!(!store.observations_for("agent/example/worker", "runtime.action.succeeded").unwrap().is_empty());
+    assert!(contend().is_ok(), "published completion did not release admission");
+}
+
+#[tokio::test]
+async fn activation_lease_is_reacquired_for_a_recovered_queued_start() {
+    let (directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let repository = crate::checkout::test_support::repository(directory.path());
+    apply_source(&store, &format!(
+        "version 2\nagent \"example/queued\" {{ workspace {:?}; command \"true\" }}",
+        repository.to_str().unwrap()), "leased-recovered-start");
+    store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "queued launches must keep their activation lease");
+    drop(reconciler);
+    let _released = crate::checkout::activation_lease(&repository, &repository).unwrap();
+    drop(_released);
+    let reopened = Arc::new(Store::open(&directory.path().join("claims.db"), "node").unwrap());
+    let restarted = Arc::new(Reconciler::new(reopened.clone(), runtime, "node".into(), Arc::new(Notify::new())));
+    restarted.wait_for_test_starts.store(false, Ordering::Release);
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "a recovered frozen queue must reacquire admission");
+    reopened.clear_launch_freeze("person/operator", "activation").unwrap();
+    restarted.reconcile_start_jobs().unwrap();
+    workers_done(&restarted).await;
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "recovered worker completion is not publication");
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(reopened.runtime_start_for("agent/example/queued").unwrap().is_none());
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_ok());
 }
 
 #[tokio::test]
@@ -1795,7 +1853,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             Arc::new(Notify::new()),
         );
         // Exercise NativeRuntime's producer boundary directly through the durable jobs.
-        // The ordinary exec member preparation wraps its command in the st3 driver;
+        // The ordinary exec member preparation wraps its command in the Fractal driver;
         // a missing command inside that wrapper is a later readiness failure.
         let dispatch = |desired: &DesiredSubject| {
             let member = desired.member.as_ref().unwrap().clone();
@@ -2034,7 +2092,7 @@ fn native_rollout_guard_rejection_proves_no_producer_was_created() {
     let runtime = NativeRuntime::new(&state, None, &pty);
     let guard_called = AtomicBool::new(false);
     let error = runtime
-        .start_guarded(&member, &|| {
+        .start_guarded(&member, Some(&fractal_runtime::LaunchOperation(member.tags[start_jobs::OPERATION_TAG].clone())), &|| {
             guard_called.store(true, Ordering::Release);
             anyhow::bail!("declaration changed before launch")
         })
@@ -2093,7 +2151,7 @@ fn native_pty_publication_guard_after_a_launcher_does_not_prove_producer_closure
     let runtime = NativeRuntime::new(&state, None, &pty);
     let guards = std::sync::atomic::AtomicUsize::new(0);
     let error = runtime
-        .start_guarded(&member, &|| {
+        .start_guarded(&member, Some(&fractal_runtime::LaunchOperation(member.tags[start_jobs::OPERATION_TAG].clone())), &|| {
             guards.fetch_add(1, Ordering::Relaxed);
             anyhow::ensure!(
                 !called.exists(),
@@ -2160,7 +2218,7 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
         let state = root.path().join("state");
         std::fs::create_dir(&state).unwrap();
         let runtime = NativeRuntime::new(&state, None, &pty);
-        let error = runtime.start_guarded(&member, &|| Ok(())).unwrap_err();
+        let error = runtime.start_guarded(&member, Some(&fractal_runtime::LaunchOperation("pty-operation".into())), &|| Ok(())).unwrap_err();
         assert_eq!(
             error.downcast_ref::<fractal_runtime::StartRejected>().is_some(),
             rejected,

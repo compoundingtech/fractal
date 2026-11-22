@@ -312,11 +312,17 @@ fn queried_launchd_domain(layout: &Layout, uid: u32, inspect: impl FnMut(&str) -
 }
 
 
+fn load_daemon_config(path: Option<&Path>) -> Result<Config> {
+    let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
+    // Unlike ordinary client discovery, moving state requires a readable daemon config.
+    Config::load_unvalidated(Some(&selected))
+}
+
 pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Result<()> {
     ensure!(fractal_daemon::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
     ensure!(endpoint.unix_socket().is_some(), "host migration requires the local Unix API, not a remote endpoint");
     let mut layout = Layout::discover()?;
-    let mut config = Config::load_unvalidated(args.config.as_deref())?;
+    let mut config = load_daemon_config(args.config.as_deref())?;
     if let Some(state) = &args.state_dir { config.state_dir = state.clone(); }
     if let Some(store) = &args.store_dir { config.store_dir = Some(store.clone()); }
     layout.configure_state(&config.state_dir)?;
@@ -510,7 +516,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     ensure!(!services.legacy.is_empty() && !services.target.is_empty(), "legacy and pre-staged Fractal daemon definitions are required");
     ensure!(services.legacy[0].installed, "legacy daemon unit is not installed");
     ensure!(!services.legacy.iter().any(|unit| unit.running) || !services.target.iter().any(|unit| unit.running), "legacy and Fractal services both run; stop and investigate before cutover");
-    ensure!(services.legacy[0].running, "legacy daemon must be running so checkpoint/sync quiescence can be checked");
+    ensure!(services.legacy[0].running, "legacy daemon must be running so sync quiescence can be checked");
     ensure!(services.legacy.iter().all(|unit| unit.file.is_file()),
         "legacy definitions must be present in the user's service directory; global or orphaned loaded units need operator repair before cutover");
     for unit in &services.target {

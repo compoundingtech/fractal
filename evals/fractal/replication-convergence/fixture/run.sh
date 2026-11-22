@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(mktemp -d "${TMPDIR:-/tmp}/st3-replication.XXXXXX")"
+root="$(mktemp -d "${TMPDIR:-/tmp}/fractal-replication.XXXXXX")"
 export XDG_CONFIG_HOME="$root/config"
 declare -a daemons=()
 declare -a workers=()

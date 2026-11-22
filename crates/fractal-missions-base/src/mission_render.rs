@@ -18,6 +18,37 @@ pub fn render_mission_kdl(mission: &MissionSpec) -> Result<MissionDeclarationTex
     Ok(MissionDeclarationText { text: document.to_string(), legacy: has_legacy_loop_shapes(mission) })
 }
 
+fn escalation_node(value: &crate::model::EscalationOverride) -> Option<KdlNode> {
+    use crate::model::{EscalationClock, EscalationAction, EscalationOverride};
+    let policies = match value {
+        EscalationOverride::Inherit => return None,
+        EscalationOverride::Disable => {
+            let mut root = node("escalation", []);
+            root.push(kdl::KdlEntry::new_prop("disabled", true));
+            return Some(root);
+        }
+        EscalationOverride::Replace { policies } => policies,
+    };
+    Some(block(node("escalation", []), policies.iter().map(|policy| {
+        let mut root = text("policy", &policy.id);
+        property(&mut root, "state", policy.state.as_str());
+        property(&mut root, "clock", match policy.clock {
+            EscalationClock::SinceProgress => "since-progress",
+            EscalationClock::SinceEntered => "since-entered",
+        });
+        block(root, policy.stages.iter().map(|stage| {
+            let delay = [(86_400_000, "d"), (3_600_000, "h"), (60_000, "m"), (1_000, "s"), (1, "ms")]
+                .into_iter().find(|(unit, _)| stage.after_ms % unit == 0).unwrap();
+            let mut stage_node = text("stage", &format!("{}{}", stage.after_ms / delay.0, delay.1));
+            match &stage.action {
+                EscalationAction::Notify(to) => property(&mut stage_node, "notify", to.as_str()),
+                EscalationAction::Ask(to) => property(&mut stage_node, "ask", to.as_str()),
+            }
+            stage_node
+        }).collect())
+    }).collect()))
+}
+
 fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
     let mut root = text("mission", &mission.id);
     property(&mut root, "state", match mission.state { MissionState::Draft => "draft", MissionState::Ready => "ready", MissionState::Retired => "retired" });
@@ -25,6 +56,7 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
     property(&mut root, "revision-cutover", match mission.revision_cutover { RevisionCutover::RestartActive => "restart-active", RevisionCutover::WhenIdle => "when-idle" });
     if let Some(agent) = &mission.report_to { property(&mut root, "report-to", agent.as_str()); }
     if let Some(ms) = mission.stalled_after_ms { property(&mut root, "stalled-after", format!("{ms}ms")); }
+    if let Some(at) = &mission.target_at { property(&mut root, "target-at", at.as_str()); }
     if mission.report_to.is_some() {
         property(&mut root, "report-stalls", mission.report_stalls);
         property(&mut root, "report-completed", mission.report_completed);
@@ -35,8 +67,8 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
 
 fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, FractalError> {
     // Exhaustive destructuring makes a new MissionSpec field a renderer coverage decision.
-    let MissionSpec { id: _, subject: _, state: _, revision: _, system, resources, authority, inputs,
-        max_active_runs, timeout_ms: _, report_to: _, stalled_after_ms: _, report_stalls: _,
+    let MissionSpec { id: _, subject: _, state: _, revision: _, escalation, system, resources, authority, inputs,
+        max_active_runs, timeout_ms: _, target_at: _, milestones, report_to: _, stalled_after_ms: _, report_stalls: _,
         report_completed: _, revision_owners: _, revisions_human_only: _, revision_reviewer: _,
         revision_cutover: _, declarations_kdl: _, capacity, work_selector, completion, goals,
         declared_priority, declared_lane, declared_budgets,
@@ -44,6 +76,12 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
     let goals = if parent.is_some() { goals.get(1..).ok_or_else(||
         FractalError::new("unrenderable-mission", "embedded loop mission lacks its injected goal"))? } else { goals.as_slice() };
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
+    if let Some(node) = escalation_node(escalation) { children.push(node); }
+    for milestone in milestones {
+        let mut item = text("milestone", &milestone.id);
+        property(&mut item, "at", milestone.at.as_str());
+        children.push(item);
+    }
     if let Some(priority) = declared_priority { children.push(text("declared-priority", priority.as_str())); }
     if let Some(lane) = declared_lane { children.push(text("declared-lane", lane.as_str())); }
     if let Some(budgets) = declared_budgets {
@@ -129,7 +167,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
 }
 
 fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
-    let StepSpec { id, path: _, fresh_context, keep_open, queue: _, queue_position: _, title,
+    let StepSpec { id, path: _, escalation, fresh_context, keep_open, queue: _, queue_position: _, title,
         goals, constraints, agent_constraints, timeout_ms, capacity, resource_lane, retry, finally: _,
         work_selector, revision_owners, revisions_human_only, revision_reviewer, dependencies: after,
         baselines, documents, declarations_kdl, products, produces_mission, uses_mission, after_run,
@@ -141,6 +179,7 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         comment(&mut root, "display-only resource lane: embedded exec redacted; this step is not republishable source");
     }
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
+    if let Some(node) = escalation_node(escalation) { children.push(node); }
     for (name, value) in [("fresh-context", fresh_context), ("keep-open", keep_open)] {
         if *value { children.push(node(name, [])); }
     }
@@ -154,12 +193,14 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
     if let Some(lane) = resource_lane {
         let mut lane_node = text("lane", &lane.name);
         property(&mut lane_node, "host", lane.host.as_str());
+        if let Some(profile) = &lane.profile {
+            property(&mut lane_node, "profile", profile.as_str());
+        }
+        if lane.disk.is_none() && let Some(path) = &lane.disk_path {
+            property(&mut lane_node, "disk-path", path.as_str());
+        }
         property(&mut lane_node, "max-members", i128::from(lane.max_members));
-        property(&mut lane_node, "class", match lane.class {
-            fractal_runtime::RequestClass::Landing => "landing",
-            fractal_runtime::RequestClass::Check => "check",
-            fractal_runtime::RequestClass::Agent => "agent",
-        });
+        property(&mut lane_node, "class", lane.class.as_str());
         if let Some(disk) = &lane.disk {
             property(&mut lane_node, "disk", fractal_runtime::show_lane_memory(disk.bytes));
             property(&mut lane_node, "disk-path", disk.path.as_str());
@@ -491,6 +532,32 @@ mod tests {
     }
 
     #[test]
+    fn keyed_lane_preserves_declaration_without_resolving_host_estimates() {
+        let mission = parse(r#"mission "test" state="ready" {
+            goal "Verify."
+            step "verify" {
+                agentless
+                lane "checks" host="node" profile="check.unit" disk-path="/workspace" max-members=3 class="check"
+                exec "verify" { command "true"; }
+            }
+        }"#);
+        let lane = mission.steps["verify"].resource_lane.as_ref().unwrap();
+        assert_eq!(lane.profile.as_deref(), Some("check.unit"));
+        assert_eq!(lane.disk_path.as_deref(), Some("/workspace"));
+        assert!(lane.capacity.is_none());
+        assert!(lane.disk.is_none());
+        let rendered = render_mission_kdl(&mission).unwrap();
+        let document: KdlDocument = rendered.text.parse().unwrap();
+        let rendered_lane = document.get("mission").unwrap().children().unwrap()
+            .get("step").unwrap().children().unwrap().get("lane").unwrap();
+        assert_eq!(rendered_lane["profile"].as_string(), Some("check.unit"));
+        assert_eq!(rendered_lane["disk-path"].as_string(), Some("/workspace"));
+        let stored = serde_json::to_value(lane).unwrap();
+        assert!(stored.get("profile_estimate").is_none());
+        assert_eq!(serde_json::from_value::<crate::model::ResourceLaneSpec>(stored).unwrap(), *lane);
+    }
+
+    #[test]
     fn finite_exec_lane_displays_redacted_execution_without_changing_seat_capacity() {
         let source = r#"mission "test" state="ready" {
             goal "Verify."
@@ -556,7 +623,7 @@ mod tests {
         assert!(assigned.steps["verify"].resource_lane.as_ref().unwrap().capacity.is_none());
         assert_eq!(assigned.steps["verify"].resource_lane.as_ref().unwrap().class, fractal_runtime::RequestClass::Agent);
         let stored_lane = serde_json::to_value(assigned.steps["verify"].resource_lane.as_ref().unwrap()).unwrap();
-        for field in ["class", "disk", "io"] {
+        for field in ["class", "disk", "io", "profile", "disk_path"] {
             assert!(stored_lane.get(field).is_none(), "default fields must preserve historical lane bytes");
         }
         let historical_lane: crate::model::ResourceLaneSpec = serde_json::from_value(stored_lane.clone()).unwrap();
@@ -568,6 +635,9 @@ mod tests {
     fn finite_lane_rejects_ambiguous_or_invalid_policies() {
         for body in [
             r#"lane "verify"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" profile=""; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" profile="check.unit" disk-path=""; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" profile-estimate="caller"; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" max-members=0; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" max-members=1.5; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" coverage="advisory"; exec "check" { command "true"; }"#,

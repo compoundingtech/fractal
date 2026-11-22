@@ -110,6 +110,16 @@ mission "gated" state="ready" report-to="agent/node.reporter" stalled-after="10m
     gate "signal" { field "status" "resource/loop-result" is "ready" }
   }
 }
+mission "queued-exec" state="ready" report-to="agent/node.reporter" {
+  concurrent-runs
+  goal "Wait for external queue admission without synthetic progress."
+  completion { when "all-steps-exhausted" }
+  step "check" timeout="2h" {
+    agentless
+    exec "check" { host "node"; workspace "/tmp"; command "true"; restart "never" }
+    gate "check succeeded" { field "exit_code" "exec/${ST_MISSION_RUN}/check" is 0 }
+  }
+}
 mission "loop-parent" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
   concurrent-runs
   goal "Watch progress in child rounds."
@@ -414,6 +424,66 @@ fn a_cancelled_run_is_reported_without_the_reason() {
 }
 
 #[test]
+fn cancelling_ready_work_settles_steps_and_never_reports_a_later_stall() {
+    for mission in ["watched", "unwatched"] {
+        let (_clock, fixture) = fixture();
+        let run = fixture.start_by(mission, "cancel-ready-run", REPORTER);
+        fixture.passes(3);
+        let ready = fixture.store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(
+            ready.steps.iter().find(|step| step.step == "build").unwrap().status,
+            "ready"
+        );
+        fixture
+            .store
+            .request_mission_run_cancellation(&run.id, "operator cancelled")
+            .unwrap();
+        // Cancellation owns settlement, before a reconciler pass or a stall deadline.
+        let cancelling = fixture.store.mission_run(&run.id).unwrap().unwrap();
+        assert!(cancelling.steps.iter().all(|step| step.status == "cancelled"));
+        fixture.passes(6);
+        let cancelled = fixture.store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+
+        let _later = Clock::at(&fixture.store, fixture.quiet_since(&run) + 40 * MINUTE);
+        fixture.passes(4);
+        let reports = fixture.reports(REPORTER);
+        assert!(reports.iter().all(|message| {
+            !message.tags.contains(&"st3-run-report:stalled".to_owned())
+        }), "{reports:?}");
+        assert_eq!(reports.len(), usize::from(mission == "watched"));
+    }
+}
+
+#[test]
+fn terminal_status_prevents_stalls_even_with_an_active_phase_and_ready_steps() {
+    let (_clock, fixture) = fixture();
+    let mut run = fixture.start_by("watched", "terminal-ready-run", REPORTER);
+    fixture.passes(3);
+    run = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    assert!(run.steps.iter().any(|step| step.status == "ready"));
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    fixture.reconciler.set_default_stall_reports(true);
+    let late = crate::reconcile::run_report::run_activity(&run) + 40 * MINUTE;
+    let _later = Clock::at(&fixture.store, late);
+
+    // Exercise the reporting boundary independently of cancellation's step settlement.
+    // Historical or inconsistent views must not turn terminal runs into timed work.
+    for status in ["cancelled", "completed", "failed"] {
+        for phase in ["normal", "revision-draining", "final"] {
+            run.status = status.into();
+            run.phase = phase.into();
+            assert_eq!(fixture.reconciler.report_run(&run, &report, late).unwrap(), None);
+            assert_eq!(
+                fixture.reconciler.report_stall_by_default(&run, late).unwrap(),
+                None
+            );
+        }
+    }
+    assert_eq!(fixture.report_claims(), 0);
+}
+
+#[test]
 fn a_queued_run_gets_its_full_timeout_after_admission() {
     let (_clock, fixture) = fixture();
     let source = SOURCE.replace(
@@ -629,6 +699,94 @@ fn a_stalled_run_is_reported_once_and_again_only_after_more_progress() {
             .count(),
         2
     );
+}
+
+#[test]
+fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("queued-exec", "live-queued-exec");
+    fixture.passes(3);
+    let subject = format!("exec/{}/check", run.id);
+    let (desired, _) = fixture.store.desired_subject_with_writer(&subject).unwrap().unwrap();
+    let member = desired.member.unwrap();
+    let receipt = fixture.store.latest_observation(&subject, "runtime.action.succeeded").unwrap().unwrap();
+    let incarnation = receipt.body["fields"]["incarnation_id"].as_str().unwrap().to_owned();
+    fixture.reconciler.runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), RuntimeObservation {
+        runtime_id: member.runtime_id.clone(),
+        terminal: false,
+        status: "running".into(),
+        exit_code: None,
+        incarnation_id: Some(incarnation),
+    });
+    let run = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    let since = crate::reconcile::run_report::run_activity(&run);
+    let now = since + 31 * MINUTE;
+    let _later = Clock::at(&fixture.store, now);
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    assert_eq!(fixture.reconciler.report_run(&run, &report, now).unwrap(), Some(now + 30 * MINUTE));
+    assert!(fixture.reports(REPORTER).is_empty());
+
+    // A live process must not suppress its independent execution deadline.
+    let _expired = Clock::at(&fixture.store, since + 121 * MINUTE);
+    // Deliver the step timer's wake explicitly: this synchronous fixture has no Tokio timers.
+    fixture.reconciler.incremental.touch(&run.steps[0].subject);
+    fixture.passes(4);
+    let expired = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(expired.steps[0].status, "failed");
+    assert_eq!(expired.steps[0].blocked_reason.as_deref(), Some("the active execution timeout expired"));
+    assert_eq!(expired.phase, "cleanup-failed");
+    let reports = fixture.reports(REPORTER);
+    assert!(reports.iter().any(|report| report.tags.contains(&"st3-run-report:failed".to_owned())));
+
+    // A process that ignores stop cannot hold failure cleanup open forever either.
+    let _cleanup_expired = Clock::at(
+        &fixture.store,
+        since + 121 * MINUTE + fixture.reconciler.cleanup_deadline.as_millis() + 1,
+    );
+    fixture.reconciler.incremental.touch(&run.subject);
+    fixture.passes(4);
+    assert_eq!(fixture.store.mission_run(&run.id).unwrap().unwrap().status, "failed");
+}
+
+#[test]
+fn dead_missing_and_stale_owned_execs_still_stall() {
+    for state in ["missing", "exited", "stale-incarnation", "foreign-operation", "old-generation", "agent"] {
+        let (_clock, fixture) = fixture();
+        let run = fixture.start("queued-exec", state);
+        fixture.passes(3);
+        let subject = format!("exec/{}/check", run.id);
+        let (desired, _) = fixture.store.desired_subject_with_writer(&subject).unwrap().unwrap();
+        let member = desired.member.unwrap();
+        let receipt = fixture.store.latest_observation(&subject, "runtime.action.succeeded").unwrap().unwrap();
+        let incarnation = receipt.body["fields"]["incarnation_id"].as_str().unwrap().to_owned();
+        if state != "missing" {
+            fixture.reconciler.runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: false,
+                status: if state == "exited" { "exited" } else { "running" }.into(),
+                exit_code: None,
+                incarnation_id: Some(if state == "stale-incarnation" { "previous-generation".into() } else { incarnation.clone() }),
+            });
+        }
+        if state == "foreign-operation" {
+            fixture.reconciler.runtime.start_operations.lock().unwrap()
+                .insert((member.runtime_id, incarnation), "foreign-start".into());
+        }
+        let mut run = fixture.store.mission_run(&run.id).unwrap().unwrap();
+        if state == "old-generation" {
+            // A retained declaration/physical process from before a revision is not its work.
+            run.generation = "run-generation/successor".into();
+            run.steps[0].generation = run.generation.clone();
+        }
+        if state == "agent" {
+            run.steps[0].agentless = false;
+        }
+        let now = crate::reconcile::run_report::run_activity(&run) + 31 * MINUTE;
+        let _later = Clock::at(&fixture.store, now);
+        let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+        assert_eq!(fixture.reconciler.report_run(&run, &report, now).unwrap(), None, "{state}");
+        assert_eq!(fixture.reports(REPORTER).len(), 1, "{state}");
+    }
 }
 
 /// A live seat's driver renews its lease every minute. Renewals move the lease end and the step's

@@ -6,8 +6,14 @@ export * as Fractal from './fractal-effect.ts'
 export {
   AskAnswer,
   AskCancelled,
+  AwaitPrFailed,
+  AwaitPrOutcome,
   ChildFailed,
   ChildRun,
+  WorkerReport,
+  SeatTurnContext,
+  TurnProduct,
+  type TurnOptions,
   type InputSchema,
   type Journaled,
   type ProgramIntent,
@@ -28,3 +34,13 @@ export {
 } from './program-engine.ts'
 export { LaneMembership, type Lane, type LaneOptions, type LaneCommandOptions } from './resources.ts'
 export { StepExecution, StepExecutionUsage } from './step-execution.ts'
+export {
+  ReviewError,
+  ReviewFinding,
+  ReviewResult,
+  ReviewRubric,
+  ReviewSubject,
+  ReviewVerdict,
+  ReviewerSeat,
+  type ReviewOptions,
+} from './review.ts'

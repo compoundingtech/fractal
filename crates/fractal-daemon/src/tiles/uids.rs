@@ -5,7 +5,7 @@
 //! acquired one kept in the task's state) and systemd's `DynamicUser=`. One thing differs: a
 //! Nomad task gives its ID back when it stops, but a tile's state outlives every launch and is
 //! owned by its ID. So a tile keeps its ID while its state, or a process of its, exists.
-//! `st tiles remove` ends the tile, removes its state and only then gives the ID back, and the
+//! `fractal tiles remove` ends the tile, removes its state and only then gives the ID back, and the
 //! launcher never hands out an ID that still owns a file under the state root.
 //!
 //! Root runs all of this, single-threaded, before any runtime starts: the account enumeration
@@ -67,7 +67,7 @@ fn write(registry: &Registry, uids: &BTreeMap<String, u32>) -> Result<()> {
     let path = registry.uids_file();
     let temporary = registry.state_root.join(".uids.toml.new");
     let mut text = String::from(
-        "# Each tile's user ID, allocated by `st tiles`. Root's launcher writes this file.\n",
+        "# Each tile's user ID, allocated by `fractal tiles`. Root's launcher writes this file.\n",
     );
     for (name, uid) in uids {
         text.push_str(&format!("{name} = {uid}\n"));

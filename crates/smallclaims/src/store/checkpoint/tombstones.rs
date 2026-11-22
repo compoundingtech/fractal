@@ -1,5 +1,5 @@
-//! Tombstones: what a node keeps of the envelopes and claims a checkpoint dropped, and the
-//! manifest a node that did not take part adopts them from. Inventories list a dropped
+//! Tombstones: what a node keeps of the envelopes and claims its trims dropped, and the manifest
+//! a backup carries them in. Inventories list a dropped
 //! envelope's identity, so the authority digest does not change and no peer sends it back.
 //! Evidence checks, ancestry walks and idempotent retries read a dropped claim's tombstone.
 
@@ -8,9 +8,8 @@ use super::*;
 /// The most tombstones one page of a checkpoint manifest carries.
 pub const CHECKPOINT_MANIFEST_PAGE_LIMIT: usize = 10_000;
 
-/// Every tombstone a node holds for one checkpoint and the checkpoints before it: what a node
-/// that did not take part needs to adopt it. Its `drop_digest` must equal the one every
-/// participant verified.
+/// Every tombstone a node holds for one checkpoint and the checkpoints before it, as a backup
+/// archives them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointManifest {
     pub checkpoint: String,
@@ -28,7 +27,7 @@ pub enum CheckpointManifestCursor {
     Claim(String),
 }
 
-/// One page of a checkpoint's manifest, as `/v1/peer/checkpoint` asks for it.
+/// One page of a checkpoint's manifest, as a backup reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointManifestRequest {
     pub checkpoint: String,
@@ -73,13 +72,10 @@ pub fn invalid_manifest(message: impl Into<String>) -> FractalError {
     FractalError::new("checkpoint-manifest-invalid", message)
 }
 
-/// Check a manifest against the `drop_digest` that a stable checkpoint's participants verified,
-/// before anything from it is stored. The digest covers every field of every tombstone, so a
-/// changed field, or a tombstone added or left out, is rejected here.
-pub fn verify_checkpoint_manifest(
-    manifest: &CheckpointManifest,
-    expected_drop_digest: &str,
-) -> Result<(), FractalError> {
+/// Check a manifest read from a backup before anything from it is stored: every tombstone is
+/// before the cut and listed once. A local cut may drop a claim and keep its envelope, so a
+/// claim need not name an envelope the manifest lists. Returns the manifest's drop digest.
+pub fn check_checkpoint_manifest(manifest: &CheckpointManifest) -> Result<String, FractalError> {
     let mut envelopes = BTreeSet::new();
     for envelope in &manifest.envelopes {
         if envelope.accepted_at_unix_ms >= manifest.cut_unix_ms {
@@ -101,17 +97,6 @@ pub fn verify_checkpoint_manifest(
     }
     let mut claims = BTreeSet::new();
     for claim in &manifest.claims {
-        // A checkpoint drops a claim only with its whole envelope.
-        if !envelopes.contains(&(
-            claim.writer.as_str(),
-            claim.sequence,
-            claim.envelope_hash.as_str(),
-        )) {
-            return Err(invalid_manifest(format!(
-                "claim `{}` names an envelope the manifest keeps",
-                claim.id
-            )));
-        }
         if claim.accepted_at_unix_ms >= manifest.cut_unix_ms {
             return Err(invalid_manifest(format!(
                 "claim `{}` is not before the cut",
@@ -125,19 +110,7 @@ pub fn verify_checkpoint_manifest(
             )));
         }
     }
-    let digest = drop_digest(&manifest.envelopes, &manifest.claims);
-    if digest != expected_drop_digest {
-        return Err(FractalError::new(
-            "checkpoint-manifest-mismatch",
-            format!(
-                "the manifest of `{}` does not match the drop its participants verified",
-                manifest.checkpoint
-            ),
-        )
-        .with_detail("drop_digest", digest)
-        .with_detail("expected_drop_digest", expected_drop_digest.to_owned()));
-    }
-    Ok(())
+    Ok(drop_digest(&manifest.envelopes, &manifest.claims))
 }
 
 pub fn row_millis(value: i64) -> u128 {
@@ -380,7 +353,6 @@ impl Store {
     /// Record a checkpoint's tombstones and delete the rows they stand for, in one transaction.
     /// A trim deletes in chunks with `record_checkpoint_tombstones_tx` and
     /// `delete_dropped_rows_tx` instead, and calls `replica_rows_changed` after each.
-    #[cfg_attr(not(test), allow(dead_code))] // Adoption calls it (P5).
     pub fn apply_checkpoint_drop(
         &self,
         checkpoint: &str,

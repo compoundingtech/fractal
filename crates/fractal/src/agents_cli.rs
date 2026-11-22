@@ -1,5 +1,5 @@
 use super::*;
-// The same print macros as main.rs: CLI output goes through st3's writer.
+// The same print macros as main.rs: CLI output goes through fractal's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
 async fn run_handoff(
@@ -780,7 +780,7 @@ pub(super) async fn run_agents(
     }
 }
 
-/// What `st agents start` found for a seat its mission run declared.
+/// What `fractal agents start` found for a seat its mission run declared.
 enum MissionSeatStart {
     /// The run still declares it; the run's mission run subject.
     Declared(String),
@@ -1063,7 +1063,7 @@ async fn resolve_start_workspace(
         .or(configured_person)
         .with_context(|| {
             format!(
-                "asking {placement} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
+                "asking {placement} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the fractal config; or pass --workspace"
             )
         })?;
     let path = format!(
@@ -1149,7 +1149,7 @@ async fn run_agent_new(
                 "{} is not installed on the daemon's login PATH; install it and open a new login shell before creating a seat",
                 args.harness
             ),
-            // An install does not restart the daemon, so a new st can meet an older daemon.
+            // An install does not restart the daemon, so a new fractal can meet an older daemon.
             Err(error)
                 if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
@@ -1360,7 +1360,7 @@ async fn agent_new_workspace(
         };
         let person = person.with_context(|| {
             format!(
-                "asking {host} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
+                "asking {host} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the fractal config; or pass --workspace"
             )
         })?;
         Client::unix_as(socket.as_ref(), person)?.with_endpoint(endpoint.clone())
@@ -1622,7 +1622,7 @@ async fn run_agent_queue(
         return show_agent_queue(endpoint, &agent, json_output).await;
     };
     let actor = args.actor.as_deref().or(configured_person).context(
-        "fractal agents queue move needs `--as person/NAME`, `--as agent/PATH`, or `person = \"person/NAME\"` in the st config",
+        "fractal agents queue move needs `--as person/NAME`, `--as agent/PATH`, or `person = \"person/NAME\"` in the fractal config",
     )?;
     let actor = parse_queue_move_actor(actor).map_err(anyhow::Error::msg)?;
     let agent = seat_subject(&args.agent);

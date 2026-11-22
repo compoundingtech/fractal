@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve task and read-loan attribution across blocking callbacks and expose process CPU, bounded reconcile stage costs, and completed read-loan duration.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No durable or wire schema changes."},
+  "rules": {"status": "none", "detail": "No runtime admission rules change."},
+  "compatibility": {"status": "changed", "detail": "Telemetry adds process CPU, metrics-gated reconcile stage CPU and duration, and read-loan duration counters. Blocking callbacks install their originating task and read-loan origin before reader acquisition, without retaining thread-local guards across awaits. Diagnostic snapshot tokens do not add duplicate physical-loan duration."},
+  "downtime": {"status": "none", "detail": "No migration or coordinated downtime is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persisted state changes; ordinary binary rollback applies."}
+}

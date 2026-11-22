@@ -39,6 +39,10 @@ tempfile = { version = "3", optional = true }
 tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1", features = ["v7"] }
 
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+# sha2 0.10 gates its runtime-detected ARM SHA instructions behind this feature.
+sha2 = { version = "0.10", features = ["asm"] }
+
 [features]
 # Counters that tests of a runtime built on the graph read, such as the SQLite statements a
 # thread ran. Off in every non-test build.
