@@ -520,7 +520,7 @@ mod tests {
         meter.record_request(
             now,
             "/v1/doctor",
-            Some("st3 doctor"),
+            Some("fractal doctor"),
             Duration::from_secs(2),
         );
         meter.record_request(now, "/v1/health", None, Duration::from_millis(1));
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(report["request_count"], 32);
         assert_eq!(report["clients"][0]["client"], "agent/a · claude");
         assert_eq!(report["clients"][0]["count"], 30);
-        assert_eq!(report["clients"][1]["client"], "st3 doctor");
+        assert_eq!(report["clients"][1]["client"], "fractal doctor");
         assert_eq!(report["client_requests"][0]["kind"], "/v1/messages/page");
         assert_eq!(report["client_requests"][0]["count"], 30);
         assert_eq!(report["clients"].as_array().unwrap().len(), 2);
@@ -544,12 +544,12 @@ mod tests {
                 .find(|row| row["cause"] == cause)
                 .map_or(0, |row| row["count"].as_u64().unwrap())
         };
-        with_cpu(Some("/v1/claims"), Some("agent/a · st3 claim"), || {
+        with_cpu(Some("/v1/claims"), Some("agent/a · fractal claim"), || {
             record_wake("api", Some("message.read"));
         });
         record_wake("timer step-timeout", None);
         let after = snapshot();
-        let cause = "/v1/claims · agent/a · st3 claim · message.read";
+        let cause = "/v1/claims · agent/a · fractal claim · message.read";
         assert_eq!(count(&after, cause) - count(&before, cause), 1);
         assert_eq!(
             count(&after, "timer step-timeout") - count(&before, "timer step-timeout"),

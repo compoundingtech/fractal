@@ -103,7 +103,7 @@ impl Trie<'_> {
 
 /// Allocate `count` canonical keys strictly inside the bounds. Use the shortest sufficient
 /// maximum length, selecting evenly spaced ranks over its union of all shorter legal lengths.
-/// None means invalid bounds, unrepresentable allocation, or insufficient canonical capacity.
+/// None means invalid bounds, more than 4096 keys, or insufficient canonical capacity.
 pub fn spread(lower: Option<&str>, upper: Option<&str>, count: usize) -> Option<Vec<String>> {
     spread_with_max(lower, upper, count, MAX)
 }
@@ -112,7 +112,8 @@ fn spread_with_max(lower: Option<&str>, upper: Option<&str>, count: usize, max: 
         || lower.zip(upper).is_some_and(|(lo, hi)| lo >= hi) { return None; }
     if count == 0 { return Some(Vec::new()); }
     let denominator = count.checked_add(1)?;
-    if count > isize::MAX as usize / std::mem::size_of::<String>() { return None; }
+    // Sidebar frontiers admit at most 4096 members; refuse before any count-sized allocation.
+    if count > 4096 { return None; }
     let mut powers = [Rank::default(); MAX + 1];
     powers[0] = Rank::small(1);
     for index in 1..=max { powers[index] = powers[index - 1]; powers[index].mul(62); }
@@ -187,11 +188,16 @@ mod tests {
     }
     #[test]
     fn huge_counts_refuse_before_allocation_with_or_without_bounds() {
-        for count in [usize::MAX - 1, usize::MAX] {
+        for count in [1usize << 40, usize::MAX - 1, usize::MAX] {
             for (lower, upper) in [(None, None), (Some("a0"), None), (None, Some("a1")), (Some("a0"), Some("a1"))] {
                 assert!(spread(lower, upper, count).is_none());
             }
         }
+    }
+    #[test]
+    fn sidebar_member_budget_is_inclusive() {
+        assert_eq!(spread(None, None, 4096).unwrap().len(), 4096);
+        assert!(spread(None, None, 4097).is_none());
     }
     #[test]
     fn invalid_and_full_gaps_are_explicit() {

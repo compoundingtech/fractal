@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Subject-status cache invalidation probes at most 4097 claim-index entries before reading delta bodies. An overflowing interval clears rebuildable subject caches and advances their frontier; subsequent selected reads rebuild only their requested subjects, not the fleet.",
+  "replay": {"status": "none", "detail": "No persisted projection replay. Subject caches rebuild lazily from claims on demand."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No dependency, membership, retention or checkpoint semantics change. Overflow conservatively invalidates cached reductions."},
+  "compatibility": {"status": "none", "detail": "No client or wire change."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

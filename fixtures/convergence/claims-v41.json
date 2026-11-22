@@ -4488,6 +4488,12 @@
         "immutable": false,
         "reference": false
       },
+      "message_id": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "observed_since_ms": {
         "value_type": "integer",
         "required": false,
@@ -6467,6 +6473,24 @@
         "immutable": false,
         "reference": false
       },
+      "native_turn": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "native_turn_key": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "parent_attempt": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "parent_step_run": {
         "value_type": "subject-reference",
         "required": false,
@@ -8235,6 +8259,25 @@
       "program"
     ]
   },
+  "program.turn.report": {
+    "kind": "program.turn.report",
+    "subjects": [
+      "mission-run"
+    ],
+    "fields": {
+      "report": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": true
+  },
   "publication.operation": {
     "kind": "publication.operation",
     "subjects": [
@@ -9028,6 +9071,12 @@
       "resource"
     ],
     "fields": {
+      "admissionDecision": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "argv": {
         "value_type": "array",
         "required": false,
@@ -9044,6 +9093,7 @@
         "value_type": "string",
         "required": true,
         "values": [
+          "recovery",
           "landing",
           "check",
           "agent"
@@ -9130,8 +9180,37 @@
         "immutable": false,
         "reference": false
       },
+      "ioStat": {
+        "value_type": "array",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "launched": {
         "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "learningCoverage": {
+        "value_type": "string",
+        "required": false,
+        "values": [
+          "full",
+          "client-only",
+          "unknown"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "learningDecision": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "memoryEvents": {
+        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -9151,6 +9230,12 @@
       "owner": {
         "value_type": "object",
         "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "preRetirementPopulated": {
+        "value_type": "boolean",
+        "required": false,
         "immutable": false,
         "reference": false
       },
@@ -10348,12 +10433,6 @@
         "immutable": false,
         "reference": false
       },
-      "exec_exited_at_unix_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "exit_code": {
         "value_type": "integer",
         "required": false,
@@ -10410,12 +10489,6 @@
       },
       "shutdown_timeout_ms": {
         "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "start_operation": {
-        "value_type": "string",
         "required": false,
         "immutable": false,
         "reference": false
@@ -11630,86 +11703,6 @@
     "write_policy": "system-only",
     "cardinality": "state-transition",
     "projection": "step-runs",
-    "wakes_reconciler": true,
-    "source_kdl": [
-      "step"
-    ]
-  },
-  "step.execution-phase": {
-    "kind": "step.execution-phase",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "at_unix_ms": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "exec": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "host": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "incarnation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "phase": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "dispatched",
-          "received",
-          "admitted",
-          "exec-started",
-          "exec-exited",
-          "result-replicated",
-          "dispatch-stalled",
-          "execution-timeout"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "start_operation": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "timeout_extension_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
     "wakes_reconciler": true,
     "source_kdl": [
       "step"

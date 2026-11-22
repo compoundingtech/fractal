@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS local_resource_projection_pending (subject TEXT PRIMA
 // A newer `vcs.item.state` lays its compact facts over an item's observed facts, so either kind
 // marks the subject pending. The existence probes use the pending subject primary key. Avoiding the duplicate INSERT
 // entirely also works when the statement firing a trigger has its own conflict policy.
-const PENDING_TRIGGERS: &str = /* sqlite-large-value: allow-for-now lv-h81c266ee908d owner=fractal_store::store::resources TODO=chunk-or-reference-exact-wire-values */ r#"
+const PENDING_TRIGGERS: &str = /* sqlite-large-value: allow-for-now lv-h9ce59b34e0d2 owner=fractal_store::store::resources TODO=chunk-or-reference-exact-wire-values */ r#"
 CREATE TRIGGER IF NOT EXISTS resource_observations_insert AFTER INSERT ON claims
 WHEN NEW.kind IN ('resource.observed','vcs.item.state') BEGIN
     INSERT INTO local_resource_projection_pending(subject)
@@ -65,7 +65,9 @@ WHEN NEW.claim_id IS NOT NULL BEGIN
             SELECT 1 FROM local_resource_projection_pending WHERE subject=claims.subject
         );
 END;
-CREATE TRIGGER IF NOT EXISTS resource_observations_record_update AFTER UPDATE ON replica_records
+CREATE TRIGGER IF NOT EXISTS resource_observations_record_change AFTER UPDATE OF record_ref,writer,
+    sequence,envelope_hash,position,state,claim_id,subject_hint,kind_hint,error_code,error_message,
+    replacement_claim_id,updated_at_unix_ms ON replica_records
 WHEN NEW.claim_id IS NOT NULL BEGIN
     INSERT INTO local_resource_projection_pending(subject)
     SELECT claims.subject FROM claims WHERE claims.id=NEW.claim_id AND claims.kind IN ('resource.observed','vcs.item.state')
@@ -79,6 +81,9 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(/* sqlite-large-value: allow-for-now lv-hbbb29f6a8f86 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ SCHEMA)
         .context("creating resource observation projection")?;
+    // The record trigger lists every column but `raw` (`record_bytes`); replace the one that
+    // fired on any update.
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h6fd8fbc3dee9 owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS resource_observations_record_update")?;
     connection
         .execute_batch(/* sqlite-large-value: allow-for-now lv-hdb152501a3ff owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ PENDING_TRIGGERS)
         .context("creating resource observation pending triggers")?;
@@ -87,10 +92,11 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
 
 fn replace_pending_triggers(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h80d2f77f5ac1 owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS resource_observations_insert;
+        /* sqlite-large-value: allow-for-now lv-hdc82dbdbbc0b owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS resource_observations_insert;
          DROP TRIGGER IF EXISTS resource_observations_delete;
          DROP TRIGGER IF EXISTS resource_observations_record_insert;
-         DROP TRIGGER IF EXISTS resource_observations_record_update;",
+         DROP TRIGGER IF EXISTS resource_observations_record_update;
+         DROP TRIGGER IF EXISTS resource_observations_record_change;",
     )?;
     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcb447f52d4d5 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ PENDING_TRIGGERS)?;
     Ok(())
@@ -1181,7 +1187,8 @@ END;
                 "DROP TRIGGER resource_observations_insert;
                  DROP TRIGGER resource_observations_delete;
                  DROP TRIGGER resource_observations_record_insert;
-                 DROP TRIGGER resource_observations_record_update;
+                 DROP TRIGGER IF EXISTS resource_observations_record_update;
+                 DROP TRIGGER IF EXISTS resource_observations_record_change;
                  DELETE FROM meta WHERE key='resource_pending_trigger_version';",
             ).unwrap();
             transaction.execute_batch(OLD_PENDING_TRIGGERS).unwrap();
@@ -1240,7 +1247,8 @@ END;
                 "DROP TRIGGER resource_observations_insert;
                  DROP TRIGGER resource_observations_delete;
                  DROP TRIGGER resource_observations_record_insert;
-                 DROP TRIGGER resource_observations_record_update;
+                 DROP TRIGGER IF EXISTS resource_observations_record_update;
+                 DROP TRIGGER IF EXISTS resource_observations_record_change;
                  DELETE FROM meta WHERE key='resource_pending_trigger_version';",
             ).unwrap();
             transaction.execute_batch(OLD_PENDING_TRIGGERS).unwrap();
@@ -1254,7 +1262,7 @@ END;
         ).unwrap();
         assert_eq!(version, PENDING_TRIGGER_VERSION);
         for name in ["resource_observations_insert", "resource_observations_delete",
-                     "resource_observations_record_insert", "resource_observations_record_update"] {
+                     "resource_observations_record_insert", "resource_observations_record_change"] {
             let sql: String = connection.query_row(
                 "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?1", [name], |row| row.get(0),
             ).unwrap();
@@ -1417,7 +1425,8 @@ END;
                 "DROP TRIGGER resource_observations_insert;
                  DROP TRIGGER resource_observations_delete;
                  DROP TRIGGER resource_observations_record_insert;
-                 DROP TRIGGER resource_observations_record_update;
+                 DROP TRIGGER IF EXISTS resource_observations_record_update;
+                 DROP TRIGGER IF EXISTS resource_observations_record_change;
                  UPDATE meta SET value='1' WHERE key='resource_pending_trigger_version';",
             ).unwrap();
             transaction.execute_batch(&older).unwrap();
@@ -1497,7 +1506,8 @@ END;
                 "DROP TRIGGER resource_observations_insert;
                  DROP TRIGGER resource_observations_delete;
                  DROP TRIGGER resource_observations_record_insert;
-                 DROP TRIGGER resource_observations_record_update;
+                 DROP TRIGGER IF EXISTS resource_observations_record_update;
+                 DROP TRIGGER IF EXISTS resource_observations_record_change;
                  DELETE FROM meta WHERE key='resource_pending_trigger_version';",
             ).unwrap();
             transaction.execute_batch(OLD_PENDING_TRIGGERS).unwrap();

@@ -42,13 +42,13 @@ pub struct Measurement {
 
 /// Fourteen civil days, including today, and exactly [cut-1h, cut). Named IANA zones
 /// use their real offsets at each boundary, not a fixed 24-hour subtraction.
-pub fn measure(projection: &Projection, now_ms: u64, cut: Cut, timezone: &str, latency: bool) -> anyhow::Result<Measurement> {
+pub fn measure(projection: &Projection, now_ms: u64, cut: Cut, timezone: &str, latency: bool, author_logins: &[String]) -> anyhow::Result<Measurement> {
     let timezone: Tz = timezone.parse()?;
     let cut_ms = match cut { Cut::Now => now_ms, Cut::Watermark => now_ms.min(projection.frontier_ms) };
     let instant = timestamp(cut_ms)?;
     let today = instant.with_timezone(&timezone).date_naive();
     let mut days = Vec::with_capacity(14);
-    let index = Index::new(projection);
+    let index = Index::new(projection, author_logins);
     for ago in (0..14).rev() {
         let date = today.checked_sub_days(Days::new(ago)).ok_or_else(|| anyhow::anyhow!("calendar underflow"))?;
         let next = date.succ_opt().ok_or_else(|| anyhow::anyhow!("calendar overflow"))?;
@@ -101,6 +101,7 @@ fn midnight(zone: Tz, date: NaiveDate) -> anyhow::Result<u64> {
 
 struct Index<'a> {
     projection: &'a Projection,
+    author_logins: &'a [String],
     prs: BTreeMap<(&'a str, &'a str), &'a PullRequestFact>,
     events: BTreeMap<(&'a str, &'a str), Vec<&'a LifecycleFact>>,
     merges: BTreeMap<(&'a str, &'a str), &'a MergeFact>,
@@ -109,10 +110,10 @@ struct Index<'a> {
 }
 
 impl<'a> Index<'a> {
-    fn new(projection: &'a Projection) -> Self {
+    fn new(projection: &'a Projection, author_logins: &'a [String]) -> Self {
         let ready_cycles = projection.ready_cycles.iter()
             .map(|((repository, pr), ready)| ((repository.as_str(), pr.as_str()), *ready)).collect();
-        let mut index = Self { projection, prs: BTreeMap::new(), events: BTreeMap::new(), merges: BTreeMap::new(), ready_cycles, conflicts: BTreeSet::new() };
+        let mut index = Self { projection, author_logins, prs: BTreeMap::new(), events: BTreeMap::new(), merges: BTreeMap::new(), ready_cycles, conflicts: BTreeSet::new() };
         for pr in &projection.pull_requests {
             let key = (pr.repository_id.as_str(), pr.id.as_str());
             if index.prs.insert(key, pr).is_some_and(|old| old != pr) { index.conflicts.insert(key); }
@@ -180,6 +181,17 @@ impl<'a> Index<'a> {
                 if latency { result.unknown_cycles += 1; }
                 continue;
             };
+            if !self.author_logins.is_empty() {
+                let Some(author) = &pr.author_login else {
+                    result.unknown.push(format!("{}/{}: missing author login for selector", key.0, key.1));
+                    if latency { result.unknown_cycles += 1; }
+                    continue;
+                };
+                if !self.author_logins.iter().any(|login| login.eq_ignore_ascii_case(author)) {
+                    result.observed_merges -= 1;
+                    continue;
+                }
+            }
             if pr.merged_at_ms != Some(merge.merged_at_ms) {
                 result.unknown.push(format!("{}/{}: merge image disagrees with pull request", key.0, key.1));
                 if latency { result.unknown_cycles += 1; }

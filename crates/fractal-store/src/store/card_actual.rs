@@ -27,6 +27,12 @@ pub(super) struct Reduction {
 }
 
 impl Reduction {
+    pub(super) fn activity_fields(&self) -> Option<Value> {
+        self.latest.as_ref().map(|actual| Value::Object(
+            ["status", "workspace", "host"].into_iter().filter_map(|field|
+                actual.get(field).map(|value| (field.into(), value.clone()))).collect()
+        ))
+    }
     pub fn apply(&mut self, rows: Vec<(String, String, String, String, bool)>) -> Result<()> {
         for (id, kind, origin, body, folded) in rows {
             #[cfg(any(test, feature = "test-support"))]

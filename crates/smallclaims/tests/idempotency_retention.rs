@@ -210,8 +210,11 @@ fn retention_recovers_after_process_exit_before_response_delivery() {
     );
 }
 
+/// The deployment+30d follow-up: receipts from before expiry was recorded go when their effect
+/// has a durable operation identity, while the claim keeps recognizing the key. One without it
+/// stays: cleanup never discards an effect's only protection.
 #[test]
-fn retention_migration_preserves_legacy_keys_and_old_insert_shape() {
+fn retention_expires_legacy_keys_and_keeps_the_old_insert_shape() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite");
     let original = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
@@ -224,21 +227,28 @@ fn retention_migration_preserves_legacy_keys_and_old_insert_shape() {
         .execute_batch(
             "DROP TRIGGER idempotency_completed_expiry;
          ALTER TABLE idempotency DROP COLUMN expires_at_unix_ms;
-         DELETE FROM meta WHERE key='idempotency_legacy_rowid';",
+         DELETE FROM meta WHERE key='idempotency_legacy_rowid';
+         INSERT INTO idempotency(operation_id,response) VALUES('legacy-unrecorded','{}');",
         )
         .unwrap();
     drop(connection);
     let before = smallclaims::store::now_ms() as i64;
     let upgraded = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
-    assert_eq!(upgraded.next_idempotency_expiry().unwrap(), None);
-    commit_clock_anchor(&upgraded, before + RETENTION_MS * 8);
-    assert_eq!(
-        upgraded
-            .cleanup_idempotency(before + RETENTION_MS * 8)
-            .unwrap()
-            .deleted,
-        0
-    );
+    assert_eq!(upgraded.next_idempotency_expiry().unwrap(), Some(0), "legacy receipts are due");
+    commit_clock_anchor(&upgraded, before);
+    let cleaned = upgraded.cleanup_idempotency(before).unwrap();
+    assert_eq!((cleaned.deleted, cleaned.extended), (1, 1));
+    let kept: (i64, i64) = upgraded
+        .readers
+        .get()
+        .query_row(
+            "SELECT COUNT(*),MAX(expires_at_unix_ms) FROM idempotency WHERE operation_id='legacy-unrecorded'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kept, (1, before + RETENTION_MS), "an effect without a durable identity keeps its receipt");
+    assert_eq!(upgraded.next_idempotency_expiry().unwrap(), Some(before + RETENTION_MS));
     assert_eq!(
         upgraded
             .put_document("doc/example/upgrade", b"old", &None, "old-key")
@@ -547,4 +557,158 @@ fn retention_expired_document_keeps_recognition_after_claim_tombstoning() {
         assert_eq!(error.details["claim_id"], first.binding_claim_id);
     }
     assert_eq!(store.index().unwrap(), before);
+}
+
+
+const HOUR: i64 = idempotency::REPLAY_SAFE_WINDOW_MS;
+
+/// A receipt as a request writes it; `replay_safe` marks a lease renewal's.
+fn receipt(store: &Store, key: &str, replay_safe: bool) -> i64 {
+    let writer = store.connection.write();
+    writer
+        .execute(
+            "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES(?1,'{}',?2)",
+            params![key, replay_safe],
+        )
+        .unwrap();
+    writer.last_insert_rowid()
+}
+
+fn keys(store: &Store) -> Vec<String> {
+    let writer = store.connection.write();
+    let mut statement = writer.prepare("SELECT operation_id FROM idempotency ORDER BY rowid").unwrap();
+    statement.query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+}
+
+/// Every receipt completed at `at`, so a test's clock does not depend on how fast it inserted.
+fn completed_at(store: &Store, at: i64) {
+    store.connection.write().execute("UPDATE idempotency SET expires_at_unix_ms=?1", [at + RETENTION_MS]).unwrap();
+}
+
+/// As if `key` completed `by` milliseconds later than it did.
+fn age(store: &Store, key: &str, by: i64) {
+    store.connection.write().execute(
+        "UPDATE idempotency SET expires_at_unix_ms=expires_at_unix_ms+?2 WHERE operation_id=?1",
+        params![key, by]).unwrap();
+}
+
+fn drain_replay_safe(store: &Store, now: i64, window: i64) -> usize {
+    let mut deleted = 0;
+    loop {
+        let cleaned = store.cleanup_replay_safe_idempotency(now, window).unwrap();
+        assert!(cleaned.examined + cleaned.passed <= CLEANUP_CHUNK);
+        deleted += cleaned.deleted;
+        if cleaned.examined + cleaned.passed == 0 {
+            return deleted;
+        }
+    }
+}
+
+#[test]
+fn replay_safe_receipts_go_after_the_window_while_published_ones_keep_the_week() {
+    let store = memory();
+    for (key, replay_safe) in [("published-old", false), ("renewal-old", true), ("published-young", false),
+        ("renewal-old-2", true), ("renewal-young", true)] {
+        receipt(&store, key, replay_safe);
+    }
+    let completed = expiry(&store) - RETENTION_MS;
+    completed_at(&store, completed);
+    // Two hours later than the rest, so it is still inside the window below.
+    age(&store, "renewal-young", 2 * HOUR);
+    let now = completed + HOUR + 1;
+    commit_clock_anchor(&store, now);
+    assert_eq!(store.next_replay_safe_expiry(HOUR).unwrap(), Some(completed + HOUR));
+    assert_eq!(store.cleanup_idempotency(now).unwrap().deleted, 0, "published receipts keep 7 days");
+    assert_eq!(drain_replay_safe(&store, now, HOUR), 2, "a young published receipt holds nothing back");
+    assert_eq!(keys(&store), ["published-old", "published-young", "renewal-young"]);
+    assert_eq!(store.next_replay_safe_expiry(HOUR).unwrap(), Some(completed + 3 * HOUR));
+    // Off, or as long as the ordinary retention: the pass leaves everything to the 7-day rule.
+    for window in [0, RETENTION_MS] {
+        assert_eq!(store.next_replay_safe_expiry(window).unwrap(), None);
+        assert_eq!(drain_replay_safe(&store, now + 4 * HOUR, window), 0);
+    }
+    assert_eq!(keys(&store).len(), 3);
+}
+
+#[test]
+fn a_receipt_written_after_the_pass_emptied_the_table_is_still_found() {
+    let store = memory();
+    receipt(&store, "renewal-1", true);
+    completed_at(&store, expiry(&store) - RETENTION_MS);
+    let now = expiry(&store) - RETENTION_MS + HOUR + 1;
+    commit_clock_anchor(&store, now);
+    assert_eq!(drain_replay_safe(&store, now, HOUR), 1);
+    // The table is empty, so the next receipt reuses rowid 1, at the cursor.
+    assert_eq!(receipt(&store, "renewal-2", true), 1);
+    let completed = now + 1;
+    completed_at(&store, completed);
+    let later = expiry(&store) - RETENTION_MS + HOUR + 1;
+    commit_clock_anchor(&store, later);
+    assert_eq!(drain_replay_safe(&store, later, HOUR), 1);
+    assert!(keys(&store).is_empty());
+}
+
+#[test]
+fn a_pinned_replay_safe_receipt_stays_for_the_ordinary_pass_and_chunks_stay_bounded() {
+    let store = memory();
+    for index in 0..300 {
+        receipt(&store, &format!("renewal-{index}"), index % 3 != 0);
+    }
+    completed_at(&store, expiry(&store) - RETENTION_MS);
+    let now = expiry(&store) - RETENTION_MS + HOUR + 1;
+    commit_clock_anchor(&store, now);
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    // The first chunk's receipts are all pinned.
+    let first = idempotency::cleanup_replay_safe_tx(&transaction, now, HOUR, CLEANUP_CHUNK, |_, _| Ok(true)).unwrap();
+    transaction.commit().unwrap();
+    drop(writer);
+    assert!(first.examined > 0 && first.examined <= CLEANUP_CHUNK);
+    assert_eq!((first.deleted, first.extended), (0, 0), "pinned: kept where it is, not moved");
+    let deleted = drain_replay_safe(&store, now, HOUR);
+    assert_eq!(deleted, 200 - first.examined, "every other renewal goes; the pass does not revisit the pinned");
+    assert_eq!(keys(&store).len(), 100 + first.examined);
+    assert_eq!(keys(&store)[..3], ["renewal-0", "renewal-1", "renewal-2"], "nothing moved to the tail");
+    // The ordinary pass still governs the pinned ones at the full retention.
+    assert_eq!(store.next_idempotency_expiry().unwrap(), Some(now - HOUR - 1 + RETENTION_MS));
+}
+
+#[test]
+fn a_chunk_of_only_published_receipts_moves_the_pass_on() {
+    let store = memory();
+    for index in 0..100 {
+        receipt(&store, &format!("published-{index}"), false);
+    }
+    receipt(&store, "renewal", true);
+    completed_at(&store, expiry(&store) - RETENTION_MS);
+    let now = expiry(&store) - RETENTION_MS + HOUR + 1;
+    commit_clock_anchor(&store, now);
+    let first = store.cleanup_replay_safe_idempotency(now, HOUR).unwrap();
+    assert_eq!((first.examined, first.passed), (0, CLEANUP_CHUNK), "nothing examined, but the cursor moved");
+    assert_eq!(drain_replay_safe(&store, now, HOUR), 1);
+    assert_eq!(keys(&store).len(), 100);
+}
+
+#[test]
+fn receipts_written_after_the_ordinary_pass_emptied_the_table_are_still_found() {
+    let store = memory();
+    for index in 0..5 {
+        receipt(&store, &format!("renewal-young-{index}"), true);
+    }
+    let completed = expiry(&store) - RETENTION_MS;
+    completed_at(&store, completed);
+    // The replay-safe pass leaves its cursor at the end, then the ordinary pass empties the table.
+    commit_clock_anchor(&store, completed + RETENTION_MS + 1);
+    assert_eq!(drain_replay_safe(&store, completed + 1, HOUR), 0);
+    store.connection.write().execute(
+        "UPDATE meta SET value='5' WHERE key='idempotency_replay_safe_through'", []).unwrap();
+    assert_eq!(store.cleanup_idempotency(completed + RETENTION_MS + 1).unwrap().deleted, 5);
+    // New receipts reuse rowids 1 and 2, below where the cursor was.
+    assert_eq!(receipt(&store, "renewal-a", true), 1);
+    receipt(&store, "renewal-b", true);
+    let later = expiry(&store) - RETENTION_MS;
+    completed_at(&store, later);
+    commit_clock_anchor(&store, later + HOUR + 1);
+    assert_eq!(drain_replay_safe(&store, later + HOUR + 1, HOUR), 2);
+    assert!(keys(&store).is_empty());
 }

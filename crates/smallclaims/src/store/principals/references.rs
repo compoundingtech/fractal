@@ -7,11 +7,23 @@ use sha2::Sha256;
 const PAGE: usize = 64;
 const PAGE_TIME: std::time::Duration = std::time::Duration::from_millis(10);
 const REFERENCE_STORAGE_VERSION: u32 = 21;
+/// The reference writer's own switch, set by the release that activates it. `user_version` is
+/// only a reader fence: a store at 21 or later needs a build that reads references, but a later
+/// format's fence (23, say) must not turn this writer on as a side effect.
+pub const REFERENCE_WRITER_FLAG: &str = "claim_signature_reference_writer";
 
-/// Reader support ships before the default writer format changes in a later release.
+/// Reader support ships before the default writer format changes in a later release. The
+/// writer runs only on a store fenced at 21 or later whose activation flag is set.
 pub(super) fn enabled(connection: &Connection) -> Result<bool> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    Ok(version >= REFERENCE_STORAGE_VERSION)
+    if version < REFERENCE_STORAGE_VERSION {
+        return Ok(false);
+    }
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value='1')",
+        [REFERENCE_WRITER_FLAG],
+        |row| row.get(0),
+    )?)
 }
 
 pub(super) enum SignatureValue<'a> {
@@ -365,8 +377,40 @@ mod tests {
     fn old_schema() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(PRINCIPAL_SCHEMA).unwrap();
-        connection.pragma_update(None, "user_version", REFERENCE_STORAGE_VERSION).unwrap();
+        activate(&connection);
         connection
+    }
+
+    fn activate(connection: &Connection) {
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT OR REPLACE INTO meta(key,value) VALUES ('{REFERENCE_WRITER_FLAG}','1');"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", REFERENCE_STORAGE_VERSION).unwrap();
+    }
+
+    #[test]
+    fn a_later_reader_fence_alone_does_not_turn_the_writer_on() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(PRINCIPAL_SCHEMA).unwrap();
+        connection
+            .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        for version in [20, 21, 23] {
+            connection.pragma_update(None, "user_version", version).unwrap();
+            assert!(!enabled(&connection).unwrap(), "user_version {version} without the flag");
+        }
+        connection
+            .execute("INSERT INTO meta(key,value) VALUES (?1,'1')", [REFERENCE_WRITER_FLAG])
+            .unwrap();
+        connection.pragma_update(None, "user_version", 20).unwrap();
+        assert!(!enabled(&connection).unwrap(), "the flag needs the reader fence too");
+        for version in [21, 23] {
+            connection.pragma_update(None, "user_version", version).unwrap();
+            assert!(enabled(&connection).unwrap(), "user_version {version} with the flag");
+        }
     }
 
     fn advance(connection: &Connection) -> usize {
@@ -650,7 +694,7 @@ mod tests {
             .unwrap();
         connection.execute_batch(PRINCIPAL_SCHEMA).unwrap();
         // Exercise the later format flip explicitly; this release defaults to v20 TEXT.
-        connection.pragma_update(None, "user_version", REFERENCE_STORAGE_VERSION).unwrap();
+        activate(&connection);
         {
             let tx = connection.unchecked_transaction().unwrap();
             for index in 0..CLAIMS {

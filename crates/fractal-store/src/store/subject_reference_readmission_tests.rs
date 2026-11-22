@@ -2,6 +2,20 @@ use smallclaims::fleet::{MemberKey, envelope_signature_message};
 
 type RetainedReplicaRecord = (String, String, u64, String, Vec<u8>, Option<String>);
 
+/// `rows` as `store` keeps them: a record admitted on retry becomes valid and keeps no bytes
+/// (`record_bytes`); every other record keeps its identity and bytes.
+fn unless_valid(store: &Store, rows: &[RetainedReplicaRecord]) -> Vec<RetainedReplicaRecord> {
+    let valid: std::collections::BTreeSet<String> = store.readers.get()
+        .prepare("SELECT record_ref FROM replica_records WHERE state='valid'").unwrap()
+        .query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    rows.iter()
+        .map(|(record, writer, sequence, hash, raw, claim)| {
+            let raw = if valid.contains(record) { Vec::new() } else { raw.clone() };
+            (record.clone(), writer.clone(), *sequence, hash.clone(), raw, claim.clone())
+        })
+        .collect()
+}
+
 #[test]
 fn historical_subject_reference_readmission_uses_normal_signed_admission_once_per_schema() {
     for case in ["ack", "invalid-reference", "malformed", "forged", "unsigned", "untrusted", "late-signature"] {
@@ -136,7 +150,7 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
             "malformed" => assert_eq!((after.valid, after.invalid), (0, 0), "{after:?}"),
             _ => assert_eq!((after.valid, after.held), (0, 1), "{case}: {after:?}"),
         }
-        assert_eq!(retained(&upgraded), records, "{case}: record identity and bytes are immutable");
+        assert_eq!(retained(&upgraded), unless_valid(&upgraded, &records), "{case}: record identity and bytes are immutable");
         if case == "late-signature" {
             assert_eq!((after.valid, after.invalid, after.held), (0, 0, 1));
             drop(upgraded);
@@ -165,7 +179,7 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
                     assert_eq!((admission.valid, admission.invalid, admission.held), (1, 0, 0));
                 }
             }
-            assert_eq!(retained(&waiting), records);
+            assert_eq!(retained(&waiting), unless_valid(&waiting, &records));
             assert_eq!(waiting.latest_claim(&claim.subject, Some(&claim.kind)).unwrap().unwrap().id, claim.id);
             let converged = waiting.validate_replication_backlog().unwrap();
             assert_eq!((converged.valid, converged.invalid, converged.held), (0, 0, 0));
@@ -173,7 +187,7 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
             let reopened = Store::open(&path, "target").unwrap();
             let converged = reopened.validate_replication_backlog().unwrap();
             assert_eq!((converged.valid, converged.invalid, converged.held), (0, 0, 0));
-            assert_eq!(retained(&reopened), records);
+            assert_eq!(retained(&reopened), unless_valid(&reopened, &records));
             continue;
         }
         let relayed = exchange_from(&upgraded, &ReplicationInventory::default());

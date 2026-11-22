@@ -122,12 +122,30 @@ impl Store {
                 qualified.push((subject, receipt));
             }
         }
+        // A stream item's proof is this member's own fenced read record in the shard, kept with
+        // the read as the graph keeps it beside its claim; it counts toward the same limit.
+        let stream_ids = ids.iter().cloned().collect::<Vec<_>>();
+        for (native, subject) in super::messages_shard::mailbox_reads::native_receipts(self, session, owner, &stream_ids)? {
+            *counts.entry(native.clone()).or_default() += 1;
+            let receipt = NativeReceipt { session_id: session.into(), message_id: native };
+            if receipt.valid() && subject.len() <= 512 {
+                qualified.push((subject, receipt));
+            }
+        }
         qualified.retain(|(_, receipt)| {
             counts
                 .get(&receipt.message_id)
                 .is_some_and(|count| *count < 3)
         });
         Ok(qualified)
+    }
+
+    /// Whether `owner` recorded a native read of a stream item between two positions of the
+    /// shard's lifecycle record (`conversation_delivery_changed` for stream items).
+    pub fn conversation_stream_delivery_changed(&self, owner: &str, after: u64, through: u64) -> Result<bool> {
+        super::messages_shard::mailbox_reads::native_receipt_between(
+            self, owner, i64::try_from(after)?, i64::try_from(through)?,
+        )
     }
 
     /// A new receipt for this owner can alter a previously delivered native turn.

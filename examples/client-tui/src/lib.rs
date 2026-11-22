@@ -291,7 +291,7 @@ impl App {
         );
         let tail = doc.lines.len().saturating_sub(inner.height as usize);
         frame.render_widget(
-            Paragraph::new(doc.lines.into_iter().skip(tail).collect::<Vec<_>>()),
+            Paragraph::new(doc.lines.iter().skip(tail).map(|line| line.to_ratatui()).collect::<Vec<_>>()),
             inner,
         );
         frame.render_widget(

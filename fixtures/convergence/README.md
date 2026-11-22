@@ -564,18 +564,48 @@ reader; widening the evidence reader does not widen admission authority.
 The prior seed characterizations remain historical. Exact per-seed trim equality,
 mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.
 
-`claims-v41.json` adds durable `step.execution-phase` evidence and the
-`exec_exited_at_unix_ms` and `start_operation` fields on `runtime.observed`,
-separating native execution and delivery deadline phases. Versions 1 through 40
-remain frozen; the colliding execution-phase v38 snapshot was superseded, not
-written over the historical admission snapshot. Generate v41 with
-`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`.
-The simulation, diagnostics and audit reports select v41. The focused execution-phase
+## Local trim (2026-11-20)
+
+Shared checkpoint agreement is removed: members no longer seal, verify, excuse or adopt, and
+each trims its own cuts. The suite keeps the v40 corpus and its seeds, and the scheduler keeps
+partitions, offline days, clock skew, crashes at trim boundaries, restarts, new empty nodes and
+an old build, which is now a node with `[trim] local = false`. Each modern node's step is its
+own trim (`checkpoint_step` with trim on); the former excusal slot is another trim step, and
+`NEVER_TRIMS` and the old build's excusal continuation are gone. After quiescence the checks
+are: the same retained claims, outside those some node retired, on every trimming node; the
+oracle's projection digests and reader answers on every node; every claim no rule lets a node
+drop, and every person's claim, with the oracle's body; a lacked claim only of a
+`LOCAL_TRIM_KINDS` kind and retired; no invalid or pending record. Exact equality of retained
+and retired sets across trimming nodes, and a node retiring a claim another retired before it
+ever held it, wait for retired IDs to travel with an exchange (TODO: T-wins deletion,
+set-sync S2d); until then such a claim is allowed and that node's `claim_sources`,
+`operations` and graph digest are not compared. The sabotage check is a trim that forgets a
+claim it retired.
+
+## Native turn claim registration
+
+`claims-v41.json` adds the durable `program.turn.report` receipt and optional
+`native_turn`, `native_turn_key`, and `parent_attempt` creation fields. Versions 1 through
+40 remain frozen. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`;
+do not hand-edit the snapshot. The simulation and audit reports select v41. The native
+report is a system-only once-per-run fact; neither its retention nor its schema grants work
+authority. Local-trim convergence, retained claim equality, oracle reader comparisons,
+person-authored claim preservation, and invalid/pending-record checks remain unchanged.
+
+## Native execution and delivery phases
+
+`claims-v42.json` adds durable `step.execution-phase` evidence and the
+`exec_exited_at_unix_ms` and `start_operation` fields on `runtime.observed` to
+main's native-turn registry. Versions 1 through 41 remain frozen, including
+main's native-turn v41 snapshot. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
+The simulation, diagnostics and audit reports select v42. The focused execution-phase
 regression compares both specs with the registry and validates a generated phase input.
-The prior `[2, 34, 179]` trim characterization is retained for hosted characterization,
-not claimed as a measured v41 result. Exact per-seed equality, old-build-excusal
-continuation, the three-seed cap and majority trim coverage remain enforced.
+Main's local-trim convergence and oracle checks remain unchanged; obsolete shared
+checkpoint agreement and its historical never-trim characterizations are not restored.
 
 Native execution wait accounting is shared through
 `fractal_kernel::step_execution::execution_wait`; both the store's timing fold
 and the reconciler's executor attestation use that leaf helper after the crate split.
+

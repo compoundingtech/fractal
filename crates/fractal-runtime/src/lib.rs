@@ -22,7 +22,11 @@ mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+pub mod store_worktree_lease;
 mod resource_profile;
+pub mod resource_pressure;
+pub mod resource_class;
+pub mod resource_readiness;
 pub use resource_profile::{
     ResourceLearningCoverage, ResourceProfileEstimate, ResourceProfileSamples, ResourceProfileSeed, validate_profile_key,
 };
@@ -48,6 +52,7 @@ pub use isolate::{
     initialize_isolation, mode as isolation_mode, scope_unit, signal_scope, systemd_user_available,
     warn_if_degraded, wrap as wrap_isolated,
 };
+pub use isolate::darwin_slot;
 pub use priority::{
     BACKGROUND_IO_LEVEL, BACKGROUND_NICE, LIVE_WEIGHT, PRIORITY_ENV, SeatPriority, ServerPlacement,
     protect_server, protect_servers, report as priority_report, server_unit,

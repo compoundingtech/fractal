@@ -27,9 +27,11 @@ concurrency:
 jobs:
   admission:
     if: github.event.workflow_run.event == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ci1-priority
     timeout-minutes: 3
     steps:
+      - name: Qualify the owned control Python runtime
+        run: python3 -c "import sys; assert sys.version_info >= (3, 10), sys.version; print(sys.version)"
       - name: Cancel only a currently draft PR run
         env:
           GH_TOKEN: ${{ github.token }}

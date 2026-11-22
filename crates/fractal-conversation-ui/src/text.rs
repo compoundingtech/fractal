@@ -8,7 +8,10 @@ pub use crate::pane::truncate;
 use crate::theme::{self, Theme};
 use ratatui::layout::Alignment;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use std::sync::Arc;
+#[path = "semantic_text.rs"]
+mod semantic;
+pub use semantic::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[path = "ask_markdown.rs"]
@@ -17,7 +20,7 @@ pub use ask::markdown as ask_markdown;
 
 /// Ask prose with per-cell safe link targets; activation belongs to the caller.
 pub fn ask_markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
-    record_links(base, &[], || ask_markdown(input, width, base, theme))
+    with_drawn_links(ask_markdown(input, width, base, theme))
 }
 
 /// Remove escape sequences, control characters and zero-width marks; expand tabs.
@@ -75,13 +78,20 @@ pub fn width(text: &str) -> usize {
 pub struct Run {
     pub text: String,
     pub style: Style,
+    pub link: Option<Arc<str>>,
 }
 
 pub fn run(text: impl Into<String>, style: Style) -> Run {
     Run {
         text: text.into(),
         style,
+        link: None,
     }
+}
+
+/// A labeled link with an independent, shared target (never inferred from drawn cells).
+pub fn link(label: impl Into<String>, target: impl Into<Arc<str>>, style: Style) -> Run {
+    Run { text: label.into(), style, link: Some(target.into()) }
 }
 
 /// Word-wrap runs into lines of `width` columns. The first line starts with `first`, later
@@ -106,7 +116,7 @@ pub fn wrap(
     };
     let start = |current: &mut Vec<Span<'static>>, used: &mut usize, prefix: &[Run]| {
         for run in prefix {
-            current.push(Span::styled(run.text.clone(), with_bg(run.style, fill)));
+            current.push(Span { content: run.text.clone().into(), style: with_bg(run.style, fill), link: run.link.clone() });
         }
         *used = prefix_width(prefix);
     };
@@ -143,10 +153,10 @@ pub fn wrap(
                 line_has_words = false;
                 next += 1;
             }
-            Token::Space(style) => {
+            Token::Space(style, link) => {
                 // A space: keep it unless it would start a line.
                 if line_has_words && used < width {
-                    push(&mut current, " ", *style);
+                    push(&mut current, " ", *style, link);
                     used += 1;
                 }
                 next += 1;
@@ -158,15 +168,15 @@ pub fn wrap(
                     .iter()
                     .position(|token| !matches!(token, Token::Piece(..)))
                     .map_or(tokens.len(), |offset| next + offset);
-                let word: Vec<(&str, Style)> = tokens[next..end]
+                let word: Vec<(&str, Style, &Option<Arc<str>>)> = tokens[next..end]
                     .iter()
                     .filter_map(|token| match token {
-                        Token::Piece(text, style) => Some((text.as_str(), *style)),
+                        Token::Piece(text, style, link) => Some((text.as_str(), *style, link)),
                         _ => None,
                     })
                     .collect();
                 next = end;
-                let word_width = word.iter().map(|(text, _)| self::width(text)).sum::<usize>();
+                let word_width = word.iter().map(|(text, _, _)| self::width(text)).sum::<usize>();
                 if used + word_width > width && line_has_words {
                     trim_trailing_space(&mut current, &mut used);
                     finish(&mut current, used, &mut lines, joining);
@@ -174,13 +184,13 @@ pub fn wrap(
                     start(&mut current, &mut used, rest);
                 }
                 if used + word_width <= width {
-                    for (text, style) in word {
-                        push(&mut current, text, style);
+                    for (text, style, link) in word {
+                        push(&mut current, text, style, link);
                     }
                     used += word_width;
                 } else {
                     // A word longer than the line: break it by character.
-                    for (text, style) in word {
+                    for (text, style, link) in word {
                         for character in text.chars() {
                             let w = character.width().unwrap_or(0);
                             if used + w > width {
@@ -188,7 +198,7 @@ pub fn wrap(
                                 joining = Some(WORD_WRAP);
                                 start(&mut current, &mut used, rest);
                             }
-                            push(&mut current, &character.to_string(), style);
+                            push(&mut current, &character.to_string(), style, link);
                             used += w;
                         }
                     }
@@ -232,23 +242,25 @@ impl crate::SelectionLine for Line<'_> {
 /// `line` drawn after `prefix` (an edge, an indent), still wrapping the line before it if it did.
 pub fn prefixed(prefix: Vec<Span<'static>>, line: Line<'static>) -> Line<'static> {
     let alignment = line.alignment;
+    let style = line.style;
     let mut spans = prefix;
     spans.extend(line.spans);
     let mut line = Line::from(spans);
     line.alignment = alignment;
+    line.style = style;
     line
 }
 
 /// What `wrap` lays out: the runs cut at every space and newline, each piece keeping its style.
 enum Token {
-    Piece(String, Style),
-    Space(Style),
+    Piece(String, Style, Option<Arc<str>>),
+    Space(Style, Option<Arc<str>>),
     Newline,
 }
 
 fn tokens(runs: &[Run], fill: Option<Color>) -> Vec<Token> {
     let mut tokens = Vec::new();
-    for run in runs {
+    for run in mark_urls(runs).iter() {
         let style = with_bg(run.style, fill);
         for (line_index, logical_line) in run.text.split('\n').enumerate() {
             if line_index > 0 {
@@ -256,10 +268,10 @@ fn tokens(runs: &[Run], fill: Option<Color>) -> Vec<Token> {
             }
             for (index, piece) in logical_line.split(' ').enumerate() {
                 if index > 0 {
-                    tokens.push(Token::Space(style));
+                    tokens.push(Token::Space(style, run.link.clone()));
                 }
                 if !piece.is_empty() {
-                    tokens.push(Token::Piece(piece.to_owned(), style));
+                    tokens.push(Token::Piece(piece.to_owned(), style, run.link.clone()));
                 }
             }
         }
@@ -277,16 +289,14 @@ fn trim_trailing_space(current: &mut [Span<'static>], used: &mut usize) {
     }
 }
 
-fn push(current: &mut Vec<Span<'static>>, text: &str, style: Style) {
+fn push(current: &mut Vec<Span<'static>>, text: &str, style: Style, link: &Option<Arc<str>>) {
     if let Some(last) = current.last_mut()
-        && last.style == style
+        && last.style == style && last.link == *link
     {
-        let mut content = last.content.to_string();
-        content.push_str(text);
-        last.content = content.into();
+        last.content.to_mut().push_str(text);
         return;
     }
-    current.push(Span::styled(text.to_owned(), style));
+    current.push(Span { content: text.to_owned().into(), style, link: link.clone() });
 }
 
 fn with_bg(style: Style, fill: Option<Color>) -> Style {
@@ -296,87 +306,60 @@ fn with_bg(style: Style, fill: Option<Color>) -> Style {
     }
 }
 
-/// What `markdown_with_links` notes while it draws: each link or reference drawn, in order (its
-/// address, and the underline colour its runs had before they were marked with their place
-/// here), and the references written out in the text that it looks for.
-#[derive(Default)]
-struct Recording {
-    drawn: Vec<(String, Option<Color>)>,
-    references: Vec<String>,
-}
-
-thread_local! {
-    /// The address behind each markdown link's text, so a client can open what it drew.
-    static LINKS: std::cell::RefCell<std::collections::HashMap<String, String>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-    /// The links drawn so far while `markdown_with_links` draws.
-    static RECORDING: std::cell::RefCell<Option<Recording>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The address of a markdown link drawn with this text, once it has been drawn.
-pub fn link_for(text: &str) -> Option<String> {
-    LINKS.with(|links| links.borrow().get(text.trim()).cloned())
-}
-
-fn remember_link(text: &str, url: &str) {
-    LINKS.with(|links| {
-        let mut links = links.borrow_mut();
-        if links.len() > 2048 {
-            links.clear();
-        }
-        links.insert(text.trim().to_owned(), url.trim().to_owned());
-    });
-}
-
-/// A link's runs: while `markdown_with_links` records, they carry the link's place in the
-/// recording as their underline colour, so wrapping and tables cannot lose which link a cell
-/// belongs to. Two links with the same text stay two links.
-fn link_style(style: Style, url: &str) -> Style {
-    RECORDING.with(|recording| {
-        let mut recording = recording.borrow_mut();
-        let Some(recording) = recording.as_mut() else { return style };
-        mark(recording, style, url.trim())
-    })
-}
-
-fn mark(recording: &mut Recording, style: Style, address: &str) -> Style {
-    let place = recording.drawn.len();
-    if place >= 1 << 24 {
-        return style;
+/// Split raw HTTP(S) URLs before wrapping, preserving punctuation and existing targets.
+fn mark_urls(runs: &[Run]) -> std::borrow::Cow<'_, [Run]> {
+    if !runs.iter().any(|run| run.link.is_none() && (run.text.contains("http://") || run.text.contains("https://") || run.text.contains("doc/"))) {
+        return std::borrow::Cow::Borrowed(runs);
     }
-    recording.drawn.push((address.to_owned(), style.underline_color));
-    style.underline_color(Color::Rgb((place >> 16) as u8, (place >> 8) as u8, place as u8))
+    let mut marked = Vec::new();
+    for run in runs {
+        if run.link.is_some() {
+            marked.push(run.clone());
+            continue;
+        }
+        let mut rest = run.text.as_str();
+        while let Some(start) = rest.find("https://").into_iter().chain(rest.find("http://")).min() {
+            if start > 0 { marked.push(self::run(&rest[..start], run.style)); }
+            rest = &rest[start..];
+            let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'')).unwrap_or(rest.len());
+            let mut target = &rest[..end];
+            target = target.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            // Balanced URL parentheses belong to the URL; surrounding prose parentheses do not.
+            while target.ends_with(')') && target.matches(')').count() > target.matches('(').count() {
+                target = &target[..target.len() - 1];
+            }
+            while target.ends_with(']') && target.matches(']').count() > target.matches('[').count() {
+                target = &target[..target.len() - 1];
+            }
+            marked.push(link(target, target, run.style));
+            rest = &rest[target.len()..];
+        }
+        if !rest.is_empty() { marked.push(self::run(rest, run.style)); }
+    }
+    let references = marked.iter().filter(|run| run.link.is_none())
+        .flat_map(|run| fractal_ui_model::documents::document_links(&run.text))
+        .map(|link| link.reference).collect::<Vec<_>>();
+    std::borrow::Cow::Owned(mark_references(marked, &references))
 }
 
-/// While `markdown_with_links` records, split out each reference it looks for that is written
-/// out in these runs and mark it like a link, so a reference that wraps keeps its whole address
-/// on every row it reaches. Runs already marked (links) are left as they are.
-fn mark_references(runs: Vec<Run>) -> Vec<Run> {
-    RECORDING.with(|recording| {
-        let mut recording = recording.borrow_mut();
-        let Some(recording) = recording.as_mut().filter(|recording| !recording.references.is_empty()) else { return runs };
-        let mut marked = Vec::with_capacity(runs.len());
-        for run in runs {
-            if run.style.underline_color.is_some() {
-                marked.push(run);
-                continue;
-            }
-            let mut rest = run.text.as_str();
-            while let Some((start, reference)) = next_reference(rest, &recording.references) {
-                if start > 0 {
-                    marked.push(self::run(&rest[..start], run.style));
-                }
-                let reference = reference.to_owned();
-                let style = mark(recording, run.style, &reference);
-                marked.push(self::run(&rest[start..start + reference.len()], style));
-                rest = &rest[start + reference.len()..];
-            }
-            if !rest.is_empty() {
-                marked.push(self::run(rest, run.style));
-            }
+/// Explicit references share the same metadata path as labeled and raw links.
+fn mark_references(runs: Vec<Run>, references: &[String]) -> Vec<Run> {
+    if references.is_empty() { return runs; }
+    let mut marked = Vec::with_capacity(runs.len());
+    for run in runs {
+        if run.link.is_some() {
+            marked.push(run);
+            continue;
         }
-        marked
-    })
+        let mut rest = run.text.as_str();
+        while let Some((start, reference)) = next_reference(rest, references) {
+            if start > 0 { marked.push(self::run(&rest[..start], run.style)); }
+            marked.push(link(&rest[start..start + reference.len()], reference, run.style));
+            rest = &rest[start + reference.len()..];
+        }
+        if !rest.is_empty() { marked.push(self::run(rest, run.style)); }
+    }
+    marked
 }
 
 /// The first of `references` written out in `text` as a whole word, the longest where several
@@ -385,6 +368,7 @@ fn next_reference<'a>(text: &str, references: &'a [String]) -> Option<(usize, &'
     let name = |c: char| c.is_ascii_alphanumeric() || "_~+-".contains(c);
     let mut best: Option<(usize, &str)> = None;
     for reference in references {
+        if reference.is_empty() { continue; }
         let mut from = 0;
         while let Some(offset) = text[from..].find(reference.as_str()) {
             let start = from + offset;
@@ -424,35 +408,13 @@ pub struct DrawnLink {
 /// written out in the text (a document's `doc/...` references): each place one is drawn, on every
 /// row it wraps to, comes back with its whole address too.
 pub fn markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme, references: &[String]) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
-    record_links(base, references, || markdown(input, width, base, theme))
+    with_drawn_links(markdown_references(input, width, base, theme, references))
 }
 
-fn record_links(base: Style, references: &[String], render: impl FnOnce() -> Vec<Line<'static>>) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
-    // Places are marked as underline colours; a caller's own underline colour could read as one.
-    if base.underline_color.is_some() {
-        return (render(), Vec::new());
-    }
-    let recording = Recording { drawn: Vec::new(), references: references.to_vec() };
-    let outer = RECORDING.with(|cell| cell.replace(Some(recording)));
-    let mut lines = render();
-    let recorded = RECORDING.with(|cell| cell.replace(outer)).map(|recording| recording.drawn).unwrap_or_default();
-    let mut drawn = Vec::new();
-    for (index, line) in lines.iter_mut().enumerate() {
-        let mut column = 0;
-        for span in &mut line.spans {
-            let span_width = span.width();
-            if let Some(Color::Rgb(high, middle, low)) = span.style.underline_color
-                && let Some((url, underline)) = recorded.get(((high as usize) << 16) | ((middle as usize) << 8) | low as usize)
-            {
-                span.style.underline_color = *underline;
-                match drawn.last_mut() {
-                    Some(DrawnLink { line, column: start, width, url: last }) if *line == index && *start + *width == column && last == url => *width += span_width,
-                    _ => drawn.push(DrawnLink { line: index, column, width: span_width, url: url.clone() }),
-                }
-            }
-            column += span_width;
-        }
-    }
+fn with_drawn_links(lines: Vec<Line<'static>>) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
+    let drawn = lines.iter().enumerate().flat_map(|(index, line)| {
+        line.drawn_links().into_iter().map(move |mut link| { link.line = index; link })
+    }).collect();
     (lines, drawn)
 }
 
@@ -488,11 +450,7 @@ pub fn inline(text: &str, base: Style, theme: &Theme) -> Vec<Run> {
             let alt = after[..close].trim();
             let label = format!("▣ {}", if alt.is_empty() { "image" } else { alt });
             let url = &after[close + 2..close + 2 + end];
-            remember_link(&label, url);
-            runs.push(run(
-                label,
-                link_style(base.fg(theme.blue).add_modifier(Modifier::UNDERLINED), url),
-            ));
+            runs.push(link(label, url.trim(), base.fg(theme.blue).add_modifier(Modifier::UNDERLINED)));
             runs.push(run(" · image link", base.add_modifier(Modifier::DIM)));
             rest = &after[close + 2 + end + 1..];
         } else if let Some(after) = rest.strip_prefix('[')
@@ -501,11 +459,7 @@ pub fn inline(text: &str, base: Style, theme: &Theme) -> Vec<Run> {
         {
             flush(&mut plain, &mut runs);
             let url = &after[close + 2..close + 2 + end];
-            remember_link(&after[..close], url);
-            runs.push(run(
-                &after[..close],
-                link_style(base.fg(theme.blue).add_modifier(Modifier::UNDERLINED), url),
-            ));
+            runs.push(link(&after[..close], url.trim(), base.fg(theme.blue).add_modifier(Modifier::UNDERLINED)));
             rest = &after[close + 2 + end + 1..];
         } else {
             let character = rest.chars().next().unwrap_or(' ');
@@ -514,12 +468,20 @@ pub fn inline(text: &str, base: Style, theme: &Theme) -> Vec<Run> {
         }
     }
     flush(&mut plain, &mut runs);
-    mark_references(runs)
+    runs
 }
 
 /// Block markdown, rendered the way pi renders an assistant reply: real headings, bullets
 /// with a hanging indent, code set off in a gutter, quotes in a bar, and simple tables.
 pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Line<'static>> {
+    markdown_references(input, width, base, theme, &[])
+}
+
+fn inline_references(text: &str, base: Style, theme: &Theme, references: &[String]) -> Vec<Run> {
+    mark_references(inline(text, base, theme), references)
+}
+
+fn markdown_references(input: &str, width: usize, base: Style, theme: &Theme, references: &[String]) -> Vec<Line<'static>> {
     let input = sanitize(input);
     let source = input.lines().collect::<Vec<_>>();
     let mut lines = Vec::new();
@@ -543,7 +505,7 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
                 let spaces = code.len() - code.trim_start_matches(' ').len();
                 let indent = run(format!("  {}", " ".repeat(spaces.saturating_sub(fence).min(deepest))), base);
                 lines.extend(wrap(
-                    &mark_references(vec![run(&code[spaces..], Style::default().fg(theme.subtext1))]),
+                    &mark_references(vec![run(&code[spaces..], Style::default().fg(theme.subtext1))], references),
                     width,
                     std::slice::from_ref(&indent),
                     std::slice::from_ref(&indent),
@@ -561,7 +523,7 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
                 rows.push(source[index].trim());
                 index += 1;
             }
-            lines.extend(table(&rows, width, base, theme));
+            lines.extend(table(&rows, width, base, theme, references));
             continue;
         }
         if trimmed.is_empty() {
@@ -574,7 +536,7 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
             if level == 1 {
                 style = style.add_modifier(Modifier::UNDERLINED);
             }
-            lines.extend(wrap(&inline(text, style, theme), width, &[], &[], None));
+            lines.extend(wrap(&inline_references(text, style, theme, references), width, &[], &[], None));
         } else if matches!(trimmed, "---" | "***" | "___") {
             lines.push(Line::from(Span::styled(
                 "─".repeat(width.min(80)),
@@ -583,7 +545,7 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
         } else if let Some(quote) = trimmed.strip_prefix("> ").or(trimmed.strip_prefix('>')) {
             let style = base.fg(theme.subtext0).add_modifier(Modifier::ITALIC);
             let bar = [run("│ ", theme::fg(theme.surface2))];
-            lines.extend(wrap(&inline(quote, style, theme), width, &bar, &bar, None));
+            lines.extend(wrap(&inline_references(quote, style, theme, references), width, &bar, &bar, None));
         } else if let Some((marker, item)) = list_item(trimmed) {
             let indent = " ".repeat(line.len() - trimmed.len());
             let first = [
@@ -591,9 +553,9 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
                 run(marker.clone(), theme::fg(theme.lavender)),
             ];
             let rest = [run(indent + &" ".repeat(width_of(&marker)), base)];
-            lines.extend(wrap(&inline(item, base, theme), width, &first, &rest, None));
+            lines.extend(wrap(&inline_references(item, base, theme, references), width, &first, &rest, None));
         } else {
-            lines.extend(wrap(&inline(trimmed, base, theme), width, &[], &[], None));
+            lines.extend(wrap(&inline_references(trimmed, base, theme, references), width, &[], &[], None));
         }
         index += 1;
     }
@@ -631,7 +593,7 @@ const MIN_COLUMN: usize = 6;
 /// columns are narrowed and their cells wrap inside them, so it is still a table. Only when even
 /// the narrowest columns cannot fit is each row shown as a record, one `heading: value` per cell.
 /// Cells are read as inline markdown: bold, code and links keep their look and stay clickable.
-fn table(rows: &[&str], width: usize, base: Style, theme: &Theme) -> Vec<Line<'static>> {
+fn table(rows: &[&str], width: usize, base: Style, theme: &Theme, references: &[String]) -> Vec<Line<'static>> {
     let cells = rows
         .iter()
         .filter(|row| !row.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')))
@@ -653,7 +615,7 @@ fn table(rows: &[&str], width: usize, base: Style, theme: &Theme) -> Vec<Line<'s
                 base
             };
             (0..columns)
-                .map(|column| inline(row.get(column).map(String::as_str).unwrap_or(""), style, theme))
+                .map(|column| inline_references(row.get(column).map(String::as_str).unwrap_or(""), style, theme, references))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -833,6 +795,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn raw_url_segments_retain_the_full_target_style_and_width() {
+        let target = "https://example.com/界/path?q=long-value";
+        let style = Style::default().fg(Color::Green).underline_color(Color::Magenta);
+        let lines = wrap(&[run(format!("Read ({target})."), style)], 12, &[], &[], Some(Color::Black));
+        let linked = lines.iter().flat_map(|line| &line.spans).filter(|span| span.link.is_some()).collect::<Vec<_>>();
+        assert!(linked.len() > 2);
+        assert_eq!(linked.iter().map(|span| span.content.as_ref()).collect::<String>(), target);
+        assert!(linked.iter().all(|span| span.link.as_deref() == Some(target) && span.style == style.bg(Color::Black)));
+        assert!(lines.iter().all(|line| line.width() == 12));
+        for line in &lines {
+            let native = line.to_ratatui();
+            assert_eq!(native.width(), line.width());
+            assert_eq!(native.style, line.style);
+            assert_eq!(native.alignment, line.alignment);
+        }
+    }
+
+    #[test]
+    fn equal_labels_keep_distinct_targets_without_style_encoding() {
+        let style = Style::default().underline_color(Color::Rgb(1, 2, 3));
+        let lines = wrap(&[link("same", "https://a", style), link("same", "https://b", style)], 4, &[], &[], None);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].link.as_deref(), Some("https://a"));
+        assert_eq!(lines[1].spans[0].link.as_deref(), Some("https://b"));
+        assert!(lines.iter().flat_map(|line| &line.spans).all(|span| span.style == style));
+    }
+
+    #[test]
+    fn automatic_document_references_keep_pinned_targets_across_wraps() {
+        let target = format!("doc/example/plan@{}", "a".repeat(64));
+        let lines = wrap(&[run(format!("Read {target}."), Style::default())], 16, &[], &[], None);
+        let linked = lines.iter().flat_map(|line| &line.spans).filter(|span| span.link.is_some()).collect::<Vec<_>>();
+        assert!(linked.len() > 4);
+        assert_eq!(linked.iter().map(|span| span.content.as_ref()).collect::<String>(), target);
+        assert!(linked.iter().all(|span| span.link.as_deref() == Some(target.as_str())));
+    }
+
+    #[test]
+    fn tables_prefixes_and_document_appends_preserve_link_ranges() {
+        let theme = Theme::default();
+        let source = "| key | value |\n|---|---|\n| row | [long label wraps here](https://example.com/target) |";
+        for width in [10, 24, 80] {
+            let (lines, links) = markdown_with_links(source, width, Style::default(), &theme, &[]);
+            assert!(!links.is_empty());
+            assert!(links.iter().all(|link| link.url == "https://example.com/target"));
+            let mut child = crate::doc::Doc::<()>::new();
+            child.lines(lines.clone());
+            let mut parent = crate::doc::Doc::<()>::new();
+            parent.append(child, 3);
+            for (line, prefixed) in lines.iter().zip(&parent.lines) {
+                assert_eq!(prefixed.width(), line.width() + 3);
+                let expected = line.drawn_links().into_iter().map(|mut link| { link.column += 3; link }).collect::<Vec<_>>();
+                assert_eq!(prefixed.drawn_links(), expected);
+            }
+        }
+        let line = Line::from(Span { content: "label".into(), style: theme.dim(), link: Some(Arc::from("https://target")) })
+            .style(Style::default().bg(Color::Blue)).alignment(WORD_WRAP);
+        let prefixed = prefixed(vec![Span::raw("│ ")], line.clone());
+        assert_eq!(prefixed.style, line.style);
+        assert_eq!(prefixed.alignment, line.alignment);
+        assert_eq!(prefixed.drawn_links()[0].column, 2);
+        assert_eq!(Line::from(line.to_ratatui()).width(), line.width());
+    }
+
+    #[test]
     fn sanitize_drops_escapes_and_zero_width_marks() {
         assert_eq!(
             sanitize("a\u{1b}[38;5;97mb\u{1b}[0m\tc\u{200b}d⚠\u{fe0f}"),
@@ -902,8 +929,8 @@ mod tests {
         let base = Style::default().add_modifier(Modifier::UNDERLINED).underline_color(Color::Rgb(0, 0, 0));
         let input = "plain [link](doc/a) and doc/b";
         let (lines, links) = markdown_with_links(input, 80, base, &theme, &["doc/b".to_owned()]);
-        assert!(links.is_empty(), "{links:?}");
-        assert_eq!(lines, markdown(input, 80, base, &theme));
+        assert_eq!(links.iter().map(|link| link.url.as_str()).collect::<Vec<_>>(), ["doc/a", "doc/b"]);
+        assert!(lines.iter().flat_map(|line| &line.spans).all(|span| span.style.underline_color == base.underline_color));
     }
 
     #[test]

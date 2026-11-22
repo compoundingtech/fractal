@@ -112,18 +112,37 @@ impl Admission {
     }
 
     pub fn next(&mut self) -> Option<WriterJob> {
+        self.next_until(None).ok().flatten()
+    }
+
+    pub fn next_until(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<WriterJob>, std::sync::mpsc::RecvTimeoutError> {
+        let receive = |queue: &Receiver<WriterJob>| match deadline {
+            Some(deadline) => queue.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
+            None => queue.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+        };
         loop {
             let job = match self.next.take() {
                 Some(job) => job,
-                None if self.background.is_none() => self.queue.recv().ok()?,
+                None if self.background.is_none() => match receive(&self.queue) {
+                    Ok(job) => job,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+                    Err(error) => return Err(error),
+                },
                 None => match self.queue.try_recv() {
                     Ok(job) => job,
                     Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
-                        if let Some(job) = self.background.as_ref()?.pop(u64::MAX) {
+                        if let Some(job) = self.background.as_ref().and_then(|queue| queue.pop(u64::MAX)) {
                             self.foreground_turns = 0;
-                            return Some(job);
+                            return Ok(Some(job));
                         }
-                        self.queue.recv().ok()?
+                        match receive(&self.queue) {
+                            Ok(job) => job,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+                            Err(error) => return Err(error),
+                        }
                     }
                 },
             };
@@ -152,7 +171,7 @@ impl Admission {
                         {
                             self.next = Some(job);
                             self.foreground_turns = 0;
-                            return Some(loan);
+                            return Ok(Some(loan));
                         }
                         if background.has_pending() {
                             self.foreground_turns += 1;
@@ -160,7 +179,7 @@ impl Admission {
                             self.foreground_turns = 0;
                         }
                     }
-                    return Some(job);
+                    return Ok(Some(job));
                 }
             }
         }

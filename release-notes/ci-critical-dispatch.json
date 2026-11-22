@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Workspace CI routes all four required gates and their tiny evidence/control jobs to the existing owned priority role for trusted merge-group and protected-main push events. Fourteen Workspace job definitions change placement, avoiding nine of fourteen initial hosted dispatches in the sampled merge run. Every PR retains its existing placement. Main-owned metadata-only Draft CI admission also uses owned capacity without checking out or executing the triggering PR. Required names, validation and permissions are unchanged; no metered capacity is added.",
+  "replay": { "status": "none", "detail": "No replay change." },
+  "schema": { "status": "none", "detail": "No schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "none", "detail": "Required check names and semantics are unchanged. Every PR, including forks and same-repository heads, retains existing Workspace placement. Genie and TypeScript keep their Nix commands; web receipt validation explicitly provisions Node on owned workers. Draft admission qualifies Python and executes only the main-owned embedded metadata helper with unchanged token scopes." },
+  "downtime": { "status": "none", "detail": "New workflow runs use the changed labels; existing runs retain their placement." },
+  "manual": { "status": "none", "detail": "Uses the existing owned priority role; no provisioning, subscription or variable change." },
+  "recovery": { "status": "none", "detail": "Revert the workflow source and regenerate." }
+}

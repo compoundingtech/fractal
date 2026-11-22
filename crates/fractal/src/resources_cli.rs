@@ -55,9 +55,9 @@ pub(super) enum ResourcesCommand {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub(super) enum Class { Landing, Check, Agent }
+pub(super) enum Class { Recovery, Landing, Check, Agent }
 impl From<Class> for RequestClass {
-    fn from(value: Class) -> Self { match value { Class::Landing => Self::Landing, Class::Check => Self::Check, Class::Agent => Self::Agent } }
+    fn from(value: Class) -> Self { match value { Class::Recovery => Self::Recovery, Class::Landing => Self::Landing, Class::Check => Self::Check, Class::Agent => Self::Agent } }
 }
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(super) enum CliCoverage { Logical, Enforced }
@@ -79,6 +79,8 @@ pub(super) struct ExecArgs {
     #[arg(long)] require_parent: bool,
     /// Execute under the authenticated parent's frozen lane; implies --require-parent.
     #[arg(long)] inherit_parent: bool,
+    /// Payload directory; Darwin defaults to a fresh admitted per-job workspace.
+    #[arg(long)] cwd: Option<PathBuf>,
     /// Defaults to the inherited membership class, or agent outside a resource execution.
     #[arg(long, value_enum)] class: Option<Class>,
     #[arg(long, requires = "memory")] cores: Option<u32>,
@@ -112,12 +114,15 @@ fn default_coverage() -> &'static str {
     if cfg!(target_os = "linux") { "enforced" } else { "logical" }
 }
 
-fn require_exec_platform() -> Result<()> {
-    if cfg!(target_os = "macos") {
-        return Err(fractal_daemon::FractalError::new("unsupported-platform",
-            "resource exec is unavailable on macOS: no whole-tree retirement proof").into());
+fn exec_members(lane: &str, macos: bool, helper: bool) -> Result<u32> {
+    if !macos { return Ok(1); }
+    let slots = fractal_runtime::darwin_slot::Slot::for_lane(lane)
+        .map_err(|error| fractal_daemon::FractalError::new("darwin-custody-lane", error.to_string()))?;
+    if !helper {
+        return Err(fractal_daemon::FractalError::new("helperUnavailable",
+            "requested Darwin custody lane has no authorized helper").into());
     }
-    Ok(())
+    Ok(slots.len() as u32)
 }
 
 impl ResourcesCommand {
@@ -137,7 +142,7 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: Resource
         ResourcesCommand::Ls { host, class, head, .. } => {
             let mut query = Vec::new();
             if let Some(host) = host { query.push(format!("host={}", urlencoding::encode(&host))); }
-            if let Some(class) = class { query.push(format!("class={}", match class { Class::Landing => "landing", Class::Check => "check", Class::Agent => "agent" })); }
+            if let Some(class) = class { query.push(format!("class={}", match class { Class::Recovery => "recovery", Class::Landing => "landing", Class::Check => "check", Class::Agent => "agent" })); }
             if let Some(head) = head { query.push(format!("head={}", urlencoding::encode(&head))); }
             let inventory: Value = client.get(&format!("/v1/internal/resources?{}", query.join("&"))).await?;
             if json_output { return print_value(&inventory, true); }
@@ -211,11 +216,14 @@ fn require_transient_environment_daemon(capabilities: &Value) -> Result<()> {
 }
 
 async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
-    require_exec_platform()?;
-    let capabilities: Value = client.get("/v1/health").await?;
-    require_transient_environment_daemon(&capabilities)?;
     let parent = std::env::var(shell_resources::PARENT_ENV).ok().map(|value| serde_json::from_str::<shell_resources::ParentContext>(&value)).transpose()
         .context("invalid nested resource membership marker")?;
+    let lane_name = args.lane.as_deref().or_else(|| parent.as_ref().map(|parent| parent.request.name.as_str())).unwrap_or_default();
+    let platform_members = exec_members(lane_name, cfg!(target_os = "macos"),
+        !cfg!(target_os = "macos") || fractal_runtime::darwin_slot::Helper::detect_in(&std::env::vars().collect()).is_some())?;
+    let max_members = if cfg!(target_os = "macos") { platform_members } else { args.max_members };
+    let capabilities: Value = client.get("/v1/health").await?;
+    require_transient_environment_daemon(&capabilities)?;
     validate_receipt_scope(&args, parent.is_some())?;
     anyhow::ensure!(!(args.require_parent || args.inherit_parent) || parent.is_some(),
         "refused: nested-only execution requires an inherited resource membership marker; FRACTAL_RESOURCE_EXEC_ID is not authority");
@@ -252,7 +260,7 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
     let keyed_disk_path = if profile.is_some() && parent.is_none() && disk.is_none() {
         Some(disk_path.unwrap_or_else(|| cwd.to_string_lossy().into_owned()))
     } else if profile.is_some() && disk.is_none() { disk_path } else { None };
-    let mut lane = LaneRequest { id: format!("shell:{id}"), name: args.lane.unwrap_or_default(), host: String::new(), max_members: args.max_members,
+    let mut lane = LaneRequest { id: format!("shell:{id}"), name: args.lane.unwrap_or_default(), host: String::new(), max_members,
         profile, profile_estimate: None, disk_path: keyed_disk_path,
         capacity, class, disk, io: args.io.map(|_| IoClass::Heavy),
         coverage: match args.coverage { CliCoverage::Logical => Coverage::Logical, CliCoverage::Enforced => Coverage::Enforced },
@@ -272,7 +280,9 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
         lane.owner = owner;
         lane.profile_estimate = None;
     }
-    let command = shell_resources::Command { id: id.clone(), lane, argv: args.argv, cwd: cwd.to_string_lossy().into_owned(),
+    let payload_cwd = args.cwd.map(|path| if path.is_absolute() { path } else { cwd.join(path) })
+        .unwrap_or_else(|| if cfg!(target_os = "macos") { PathBuf::new() } else { cwd });
+    let command = shell_resources::Command { id: id.clone(), lane, argv: args.argv, cwd: payload_cwd.to_string_lossy().into_owned(),
         request_id: args.request_id.map(|request_id| request_id.to_string()),
         environment: std::env::vars().collect(), timeout_ms: args.timeout, parent: parent.map(|parent| parent.grant) };
     let mut execution: Execution = client.post("/v1/internal/resources/exec", &command).await?;
@@ -376,7 +386,7 @@ pub(super) async fn payload(result_path: &Path, argv: Vec<String>) -> Result<()>
             .and_then(|group| fs::read_to_string(Path::new("/sys/fs/cgroup").join(group.trim_start_matches('/')).join("memory.peak")).ok())
             .and_then(|peak| peak.trim().parse().ok())
     } else { None };
-    let result = PayloadResult { head_start, head_end, clean_start, clean_end, exit_code: status.code(), exit_signal: status.signal(), wall_duration_ms, memory_peak_bytes };
+    let result = PayloadResult { head_start, head_end, clean_start, clean_end, exit_code: status.code(), exit_signal: status.signal(), wall_duration_ms, memory_peak_bytes, ..PayloadResult::default() };
     let temporary = result_path.with_extension("pending");
     let mut file = fs::File::create(&temporary)?;
     std::io::Write::write_all(&mut file, &serde_json::to_vec(&result)?)?;
@@ -513,6 +523,7 @@ mod tests {
         completed.result = Some(PayloadResult {
             head_start: Some("start-head".into()), head_end: Some("end-head".into()), clean_start: Some(true), clean_end: Some(false),
             exit_code: Some(37), exit_signal: None, wall_duration_ms: 91, memory_peak_bytes: Some(42),
+            ..PayloadResult::default()
         });
         write_receipt(&path, &completed).unwrap();
         let receipt: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -561,14 +572,15 @@ mod tests {
         assert!(Cli::try_parse_from(["fractal", "resources", "exec", "--lane", "checks", "--exec-id", id, "--", "true"]).is_err());
     }
     #[test]
-    fn platform_refusal_precedes_daemon_contact_and_capacity_acquisition() {
-        let result = require_exec_platform();
-        if cfg!(target_os = "macos") {
-            let error = result.unwrap_err();
-            assert_eq!(error.downcast_ref::<fractal_daemon::FractalError>().unwrap().code, "unsupported-platform");
-        } else {
-            result.unwrap();
-        }
+    fn darwin_exec_requires_a_known_lane_and_authorized_helper() {
+        assert_eq!(exec_members("gate", true, true).unwrap(), 3);
+        assert_eq!(exec_members("heavy", true, true).unwrap(), 1);
+        assert_eq!(exec_members("eval", true, true).unwrap(), 1);
+        let error = exec_members("gate", true, false).unwrap_err();
+        assert_eq!(error.downcast_ref::<fractal_daemon::FractalError>().unwrap().code, "helperUnavailable");
+        let error = exec_members("other", true, true).unwrap_err();
+        assert_eq!(error.downcast_ref::<fractal_daemon::FractalError>().unwrap().code, "darwin-custody-lane");
+        assert_eq!(exec_members("arbitrary-linux-lane", false, false).unwrap(), 1);
     }
     #[test]
     fn v1_daemon_is_rejected_before_environment_transport() {

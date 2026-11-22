@@ -1,4 +1,4 @@
-//! Read-only installation routing. The operator, not st3, resolves the host token root.
+//! Read-only installation routing. The operator, not Fractal, resolves the host token root.
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
