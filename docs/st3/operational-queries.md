@@ -94,6 +94,16 @@ Rows with no actual, no origin, or indeterminate authority are always included a
 incomplete under `--host`; only rows with a known, different host are excluded.
 Continue with the returned opaque cursor and unchanged selection options.
 The native page cache retains the same snapshot cut across those pages.
+`min_cut` guarantees only that this answering store has reached that local index;
+it does not establish replication freshness or that remote observations are current.
+
+Membership includes every current-layer agent and historical-layer agents whose
+runtime is non-terminal or unresolved. An owner's terminal run or superseded
+generation does not prove its agent stopped. Both complete and incomplete rows
+carry `layer: current|historical`. A historical agent is omitted only when its
+resolved actual status is `stopped`, `retired`, or `failed` and the selected runtime
+claim proves that incarnation ended (or records an unnamed runtime end).
+Terminal folded state without matching runtime-end evidence remains listed.
 
 Activity status reads actual `status` using the existing `AgentState` values:
 `desired`, `starting`, `running`, `waiting`, `down`, `stopped`, `failed`,
@@ -110,6 +120,11 @@ Page through `next_cursor` until it is null, then evaluate `complete` on that la
 page. It is true only there, when the entire cut-bound fold has no incomplete
 evidence; it certifies the whole selection at that cut, not merely the last page.
 Earlier pages always report false, even if their rows have no omissions.
+The cursors are opaque but unsigned. Consumers must accumulate the full page chain
+from the first page; a final `complete: true` does not prove earlier pages were read.
+The limit (default and maximum 200) bounds `agents.length + incomplete.length`,
+not each list separately. There is no separate response-byte ceiling for this
+internal envelope: exact workspace paths and identifiers make encoded row sizes variable.
 Host-filtered completeness covers that host plus unknown-host evidence, not the
 whole fleet. This is an internal read, not a client-v0 operation.
 

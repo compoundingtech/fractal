@@ -43,6 +43,53 @@ impl ActivityStatus {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ActivityLayer {
+    Current,
+    Historical,
+}
+
+fn terminal_status(actual: &Value) -> bool {
+    matches!(actual.get("status").and_then(Value::as_str), Some("stopped" | "retired" | "failed"))
+}
+
+/// Only selected runtime end claims prove that a terminal folded status has no live
+/// incarnation. Read those claims by primary key, in the roster's bounded chunks;
+/// do not walk each historical agent's runtime history.
+fn selected_runtime_ends(
+    store: &Store,
+    subjects: &[crate::model::SubjectStatus],
+    cut: u64,
+) -> anyhow::Result<BTreeMap<String, Option<String>>> {
+    let claims = subjects.iter()
+        .filter(|subject| subject.projection.layer != "current"
+            && subject.actual.as_ref().is_some_and(terminal_status))
+        .filter_map(|subject| subject.actual_claim.as_deref())
+        .collect::<Vec<_>>();
+    if claims.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let connection = store.readers.get();
+    let mut query = connection.prepare_cached(
+        "SELECT id, json_extract(body, '$.fields.incarnation_id') FROM claims
+         WHERE id IN (SELECT value FROM json_each(?1)) AND store_index<=?2
+           AND kind='runtime.observed'
+           AND json_extract(body, '$.fields.status') IN ('stopped','retired','failed')"
+    )?;
+    let mut ends = BTreeMap::new();
+    for chunk in claims.chunks(crate::store::card_fold::CHUNK) {
+        smallclaims::read_budget::check()?;
+        for row in query.query_map(rusqlite::params![serde_json::to_string(chunk)?, cut], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })? {
+            let (claim, incarnation) = row?;
+            ends.insert(claim, incarnation);
+        }
+    }
+    Ok(ends)
+}
+
 enum ActivityClassification<'a> {
     Complete {
         origin: &'a str,
@@ -70,8 +117,27 @@ fn classify_activity(subject: &crate::model::SubjectStatus) -> ActivityClassific
     ActivityClassification::Complete { origin, workspace, actual, claim }
 }
 
-fn activity_row(subject: &crate::model::SubjectStatus, host: Option<&str>) -> Option<Value> {
+fn activity_row(
+    subject: &crate::model::SubjectStatus,
+    host: Option<&str>,
+    runtime_ends: &BTreeMap<String, Option<String>>,
+) -> Option<Value> {
     let classification = classify_activity(subject);
+    let layer = if subject.projection.layer == "current" {
+        ActivityLayer::Current
+    } else {
+        // Presentation history is not runtime death: owners and generations can end
+        // before their child runtime. Omit only resolved, terminal runtime evidence.
+        if let ActivityClassification::Complete { actual, claim, .. } = &classification
+            && terminal_status(actual)
+            && runtime_ends.get(*claim).is_some_and(|ended| ended.as_deref().is_none_or(
+                |incarnation| actual.get("incarnation_id").and_then(Value::as_str) == Some(incarnation)
+            ))
+        {
+            return None;
+        }
+        ActivityLayer::Historical
+    };
     // Missing workspace still has an authoritative origin. Every other incomplete
     // classification has an unknown host and must remain visible under any host filter.
     let known_origin = match &classification {
@@ -86,11 +152,13 @@ fn activity_row(subject: &crate::model::SubjectStatus, host: Option<&str>) -> Op
         return None;
     }
     Some(match classification {
-        ActivityClassification::Incomplete(reason) => json!({"id": subject.subject, "reason": reason}),
+        ActivityClassification::Incomplete(reason) =>
+            json!({"id": subject.subject, "layer": layer, "reason": reason}),
         ActivityClassification::Complete { origin, workspace, actual, claim } => {
             let (status, status_raw) = ActivityStatus::from_actual(actual.get("status").and_then(Value::as_str));
             let mut row = json!({
                 "id": subject.subject,
+                "layer": layer,
                 "status": status,
                 "host": client_host_id(origin),
                 "workspace": workspace,
@@ -141,13 +209,14 @@ pub(super) async fn list(
                 return Err(error);
             }
         }
-        let (snapshot, items) = tokio::task::spawn_blocking(move || {
+        let (snapshot, items) = read_deadline::spawn_blocking(move || {
             reader.store.read_snapshot(|cut| {
-                // This is the roster's current-layer membership and chunked desired/actual fold,
-                // not the presented card (whose workspace may come from the declaration).
-                let status = reader.store.agent_card_status_for_generic_reads_at(None, cut, false)?;
+                // Read both presentation layers with the roster's chunked desired/actual
+                // fold. Runtime evidence, not owner lifecycle, decides activity membership.
+                let status = reader.store.agent_card_status_for_generic_reads_at(None, cut, true)?;
+                let runtime_ends = selected_runtime_ends(&reader.store, &status.subjects, cut)?;
                 let items = status.subjects.iter()
-                    .filter_map(|subject| activity_row(subject, host.as_deref()))
+                    .filter_map(|subject| activity_row(subject, host.as_deref(), &runtime_ends))
                     .collect::<Vec<_>>();
                 Ok((client_snapshot_at(&reader, cut), items))
             })

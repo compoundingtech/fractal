@@ -3046,17 +3046,17 @@ enum AgentsCommand {
     Tree(AgentsArgs),
     /// Print one raw internal agent activity page as a JSON envelope.
     ///
-    /// Page to the last response (next_cursor is null), then evaluate complete.
-    /// It is true only there and certifies the whole cut-bound fold, not one page.
-    /// With --host, unknown-host agents always remain included as incomplete.
+    /// Accumulate the entire page chain, then evaluate complete on the last response.
+    /// Cursors are opaque and unsigned: a final complete page does not prove earlier
+    /// pages were consumed. With --host, unknown-host agents remain incomplete.
     Activity {
-        /// Maximum number of agents in this page.
+        /// Maximum total number of agents and incomplete entries in this page (1-200).
         #[arg(long)]
         limit: Option<usize>,
         /// Continue with the opaque cursor from the previous page.
         #[arg(long)]
         cursor: Option<String>,
-        /// Require the projection to have reached this claim cut.
+        /// Require this local store cut; this does not guarantee replication freshness.
         #[arg(long)]
         min_cut: Option<u64>,
         /// Select this exact host ID, retaining unknown-host agents as incomplete.

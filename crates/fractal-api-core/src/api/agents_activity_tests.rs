@@ -5,14 +5,14 @@ const ROUTE: &str = "/v1/internal/agents/activity";
 
 fn declare(state: &AppState, name: &str) {
     let intent = parse_intent(&format!(
-        "version 2\nagent \"{name}\" {{ command \"true\"; workspace \"/declared/workspace\"; restart \"never\"; }}\n"
+        "version 2\nagent \"activity/{name}\" {{ command \"true\"; workspace \"/declared/workspace\"; restart \"never\"; }}\n"
     ), state.store.origin()).unwrap();
     state.store.apply_internal(&intent, &format!("declare-{name}")).unwrap();
 }
 
 fn observe(store: &Store, name: &str, fields: Value) -> String {
     store.append_claim(&ClaimInput {
-        subject: format!("agent/{name}"), kind: "runtime.observed".into(), actor: None,
+        subject: format!("agent/activity/{name}"), kind: "runtime.observed".into(), actor: None,
         fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
         expected_subject: None, idempotency_key: None,
     }).unwrap().id
@@ -20,6 +20,43 @@ fn observe(store: &Store, name: &str, fields: Value) -> String {
 
 fn running() -> Value {
     json!({"status":"running", "workspace":"/actual/../workspace", "incarnation_id":"one"})
+}
+
+fn owned_agent(state: &AppState, name: &str) -> MissionRunView {
+    let mut intent = parse_intent(&format!(
+        "version 2\nagent \"activity/{name}\" {{ command \"true\"; workspace \"/declared/workspace\"; restart \"never\"; }}\n\
+         mission \"activity-owner-{name}\" state=\"ready\" {{ goal \"Own runtime evidence.\"; step \"work\" {{ agentless }} }}\n"
+    ), state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, &format!("owner-initial-{name}")).unwrap();
+    let run = state.store.create_mission_run(&MissionRunRequest {
+        mission: format!("activity-owner-{name}"), revision: None,
+        workspace: "/declared/workspace".into(), requester: Some("person/operator".into()),
+        mode: Some("run".into()), inputs: BTreeMap::new(),
+        idempotency_key: format!("activity-run-{name}"),
+    }).unwrap();
+    let desired = intent.subjects.get_mut(&format!("agent/activity/{name}")).unwrap();
+    desired.owner_run = Some(run.subject.clone());
+    desired.owner_generation = Some(run.generation.clone());
+    state.store.apply_internal(&intent, &format!("owner-bound-{name}")).unwrap();
+    run
+}
+
+fn state_claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
+    state.store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: kind.into(), actor: None,
+        fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+        expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+fn supersede(state: &AppState, run: &MissionRunView) {
+    let generation = if run.generation.starts_with("run-generation/") {
+        run.generation.clone()
+    } else {
+        format!("run-generation/{}", run.generation)
+    };
+    state_claim(state, &generation, "run-generation.state",
+        json!({"status":"superseded", "reason":"The generation was replaced."}));
 }
 
 async fn activity(state: &AppState, suffix: &str) -> Value {
@@ -40,7 +77,7 @@ async fn actual_workspace_and_selected_origin_override_declaration() {
     crate::test_support::replicate(&worker, &state.store);
     let body = activity(&state, "").await;
     assert_eq!(body["agents"], json!([{
-        "id":"agent/actual", "status":"running", "host":"host/worker",
+        "id":"agent/activity/actual", "layer":"current", "status":"running", "host":"host/worker",
         "workspace":"/actual/../workspace", "incarnation_id":"one",
         "actual_claim":claim, "actual_origin":"worker"
     }]));
@@ -60,7 +97,7 @@ async fn declaration_without_actual_is_incomplete() {
     declare(&state, "missing");
     let body = activity(&state, "").await;
     assert_eq!(body["agents"], json!([]));
-    assert_eq!(body["incomplete"], json!([{"id":"agent/missing", "reason":"no-actual"}]));
+    assert_eq!(body["incomplete"], json!([{"id":"agent/activity/missing", "layer":"current", "reason":"no-actual"}]));
     assert_eq!(body["complete"], false);
 }
 
@@ -93,14 +130,14 @@ async fn host_filter_uses_actual_origin_and_scopes_completeness() {
     observe(&state.store, "local", fields);
     let body = activity(&state, "?host=host%2Fnode").await;
     assert_eq!(body["agents"].as_array().unwrap().len(), 1);
-    assert_eq!(body["agents"][0]["id"], "agent/local");
+    assert_eq!(body["agents"][0]["id"], "agent/activity/local");
     assert_eq!(body["agents"][0]["host"], "host/node");
-    let unknown = json!([{"id":"agent/unobserved", "reason":"no-actual"}]);
+    let unknown = json!([{"id":"agent/activity/unobserved", "layer":"current", "reason":"no-actual"}]);
     assert_eq!(body["incomplete"], unknown);
     assert_eq!(body["complete"], false);
     let remote = activity(&state, "?host=host%2Fother").await;
     assert_eq!(remote["agents"].as_array().unwrap().len(), 1);
-    assert_eq!(remote["agents"][0]["id"], "agent/remote");
+    assert_eq!(remote["agents"][0]["id"], "agent/activity/remote");
     assert_eq!(remote["incomplete"], unknown);
     assert_eq!(remote["complete"], false);
     let empty = activity(&state, "?host=host%2Fabsent").await;
@@ -119,7 +156,7 @@ async fn pagination_keeps_one_cut_and_completes_only_on_last_page() {
     }
     let first = activity(&state, "?limit=1").await;
     assert_eq!(first["complete"], false);
-    assert_eq!(first["agents"][0]["id"], "agent/a");
+    assert_eq!(first["agents"][0]["id"], "agent/activity/a");
     let mut moved = running();
     moved["workspace"] = json!("/new/workspace");
     observe(&state.store, "b", moved);
@@ -129,7 +166,7 @@ async fn pagination_keeps_one_cut_and_completes_only_on_last_page() {
         let cursor = page["next_cursor"].as_str().unwrap();
         page = activity(&state, &format!("?cursor={}", urlencoding::encode(cursor))).await;
         assert_eq!(page["snapshot"], first["snapshot"]);
-        assert_eq!(page["agents"][0]["id"], format!("agent/{name}"));
+        assert_eq!(page["agents"][0]["id"], format!("agent/activity/{name}"));
         assert_eq!(page["agents"][0]["workspace"], "/actual/../workspace");
         assert_eq!(page["complete"], complete);
     }
@@ -225,7 +262,7 @@ async fn concurrent_actual_authorities_remain_incomplete() {
         let body = activity(&state, suffix).await;
         assert_eq!(body["agents"], json!([]));
         assert_eq!(body["incomplete"], json!([{
-            "id":"agent/concurrent", "reason":"indeterminate-authority"
+            "id":"agent/activity/concurrent", "layer":"current", "reason":"indeterminate-authority"
         }]));
         assert_eq!(body["complete"], false);
     }
@@ -238,5 +275,103 @@ async fn invalid_page_limits_are_rejected() {
     for limit in [0, 201] {
         let (status, _) = get_request(router(state.clone()), &format!("{ROUTE}?limit={limit}")).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
+
+#[tokio::test]
+async fn terminal_owner_never_hides_a_nonterminal_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let run = owned_agent(&state, "terminal-owner");
+    state.store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+    for status in ["running", "starting", "waiting", "suspended", "down", "future-status"] {
+        let mut fields = running();
+        fields["status"] = json!(status);
+        observe(&state.store, "terminal-owner", fields);
+        for suffix in ["", "?host=host%2Fnode"] {
+            let body = activity(&state, suffix).await;
+            assert_eq!(body["agents"].as_array().unwrap().len(), 1, "{body}");
+            assert_eq!(body["agents"][0]["id"], "agent/activity/terminal-owner");
+            assert_eq!(body["agents"][0]["layer"], "historical");
+            assert_eq!(body["agents"][0]["workspace"], "/actual/../workspace");
+            assert_eq!(body["complete"], true);
+        }
+    }
+}
+
+#[tokio::test]
+async fn superseded_generation_never_hides_a_running_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let run = owned_agent(&state, "superseded");
+    observe(&state.store, "superseded", running());
+    supersede(&state, &run);
+    for suffix in ["", "?host=host%2Fnode"] {
+        let body = activity(&state, suffix).await;
+        assert_eq!(body["agents"].as_array().unwrap().len(), 1, "{body}");
+        assert_eq!(body["agents"][0]["id"], "agent/activity/superseded");
+        assert_eq!(body["agents"][0]["layer"], "historical");
+        assert_eq!(body["agents"][0]["status"], "running");
+        assert_eq!(body["complete"], true);
+    }
+}
+
+#[tokio::test]
+async fn historical_agents_without_actual_remain_incomplete() {
+    for superseded in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let run = owned_agent(&state, "unresolved-owner");
+        if superseded {
+            supersede(&state, &run);
+        } else {
+            state.store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+        }
+        for suffix in ["", "?host=host%2Fnode"] {
+            let body = activity(&state, suffix).await;
+            assert_eq!(body["agents"], json!([]));
+            assert_eq!(body["incomplete"], json!([{
+                "id":"agent/activity/unresolved-owner", "layer":"historical", "reason":"no-actual"
+            }]));
+            assert_eq!(body["complete"], false);
+        }
+    }
+}
+
+#[tokio::test]
+async fn historical_terminal_runtime_ends_are_omitted() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let run = owned_agent(&state, "ended");
+    observe(&state.store, "ended", running());
+    state.store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+    for status in ["stopped", "retired", "failed"] {
+        let mut fields = running();
+        fields["status"] = json!(status);
+        observe(&state.store, "ended", fields);
+        for suffix in ["", "?host=host%2Fnode"] {
+            let body = activity(&state, suffix).await;
+            assert_eq!(body["agents"], json!([]), "{body}");
+            assert_eq!(body["incomplete"], json!([]));
+            assert_eq!(body["complete"], true);
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_fold_does_not_hide_a_still_running_selected_incarnation() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let run = owned_agent(&state, "live-incarnation");
+    observe(&state.store, "live-incarnation", running());
+    state.store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+    state_claim(&state, "agent/activity/live-incarnation", "workspace.observed",
+        json!({"workspace":"/actual/../workspace", "status":"failed"}));
+    for suffix in ["", "?host=host%2Fnode"] {
+        let body = activity(&state, suffix).await;
+        assert_eq!(body["agents"].as_array().unwrap().len(), 1, "{body}");
+        assert_eq!(body["agents"][0]["layer"], "historical");
+        assert_eq!(body["agents"][0]["status"], "failed");
+        assert_eq!(body["complete"], true);
     }
 }
