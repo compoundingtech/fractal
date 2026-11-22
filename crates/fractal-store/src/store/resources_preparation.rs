@@ -911,6 +911,22 @@ fn defer_insert(transaction: &Transaction<'_>, subject: &str, id: &str, key: &[u
     Ok(())
 }
 
+/// A trim deletes `claims`: a staged rebuild whose walk already passed one of them folded it in,
+/// so it starts over, a budgeted step at a time, as an earlier insert's does (`defer_insert`).
+/// Left staged, the walk would finish having counted more claims than the subject has, and the
+/// drain would rebuild the whole subject in one writer turn. One still ahead of the cursor is
+/// skipped as stale when the walk reaches it.
+pub(super) fn restart_stages_behind_trimmed_tx(transaction: &Transaction<'_>, claims: &[ClaimTombstone]) -> Result<()> {
+    let mut restart = transaction.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-hf906a004b18f owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild WHERE subject=?1
+           AND after_key >= (SELECT sort_key FROM local_resource_preparation_claims WHERE claim_id=?2)",
+    )?;
+    for claim in claims {
+        restart.execute(/* sqlite-large-value: allow-for-now lv-h04b1716d32c0 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ params![claim.subject, claim.id])?;
+    }
+    Ok(())
+}
+
 // Unlike ClaimKey's numeric wire-time representation, canonical SQL deliberately orders the
 // stored text by length then text. Preserve that order even for legacy unparseable timestamps.
 pub(crate) fn sort_key(connection: &Connection, id: &str) -> Result<Vec<u8>> {
