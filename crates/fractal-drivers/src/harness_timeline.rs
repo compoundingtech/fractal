@@ -1249,6 +1249,16 @@ fn normalize_body(entry_type: EntryType, source_id: &str, value: Value) -> (Valu
             )
         }
         EntryType::Status => {
+            if value["code"] == "model-fallback" {
+                let allowed = ["status", "code", "observation", "native_session",
+                    "source_event", "episode_id", "from", "to", "cause"];
+                let omitted = omitted_keys(&value, &allowed);
+                let mut body = value;
+                if let Some(object) = body.as_object_mut() {
+                    object.retain(|key, _| allowed.contains(&key.as_str()));
+                }
+                return (body, 0, omitted, 0);
+            }
             let status = value
                 .get("status")
                 .and_then(Value::as_str)

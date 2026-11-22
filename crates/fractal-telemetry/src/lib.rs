@@ -4,6 +4,7 @@
 
 mod attempt_trace;
 pub mod incremental;
+pub mod model_drift;
 pub mod otel;
 pub mod otel_client_class;
 /// Wake and pass telemetry of the reconcile loop.
