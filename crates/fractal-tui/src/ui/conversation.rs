@@ -29,6 +29,7 @@ impl Cache {
             lines: rendered.lines,
             messages: rendered.messages,
             entries: rendered.entries,
+            copy_blocks: rendered.copy_blocks,
             targets: rendered
                 .targets
                 .into_iter()

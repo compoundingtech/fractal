@@ -558,7 +558,7 @@ cap and majority trim coverage remain enforced; the v38 observations above are u
 future class strings and the `recovery-not-allowed` refusal. Versions 1 through 39
 remain frozen. Generate it with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v40.json`.
-The simulation and audit reports select v40. Publication still withholds unsupported
+The v40 simulation and audit reports selected it. Publication still withholds unsupported
 classes and fences recovery refusal observations on signed support from every active
 reader; widening the evidence reader does not widen admission authority.
 The prior seed characterizations remain historical. Exact per-seed trim equality,
@@ -586,10 +586,26 @@ claim it retired.
 
 `claims-v41.json` adds the durable `program.turn.report` receipt and optional
 `native_turn`, `native_turn_key`, and `parent_attempt` creation fields. Versions 1 through
-40 remain frozen. Generate the complete merged registry with
+40 remain frozen. It was generated from the native-turn registry with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`;
-do not hand-edit the snapshot. The simulation and audit reports select v41. The native
+do not hand-edit the snapshot. The simulation and audit reports selected v41. The native
 report is a system-only once-per-run fact; neither its retention nor its schema grants work
 authority. Local-trim convergence, retained claim equality, oracle reader comparisons,
 person-authored claim preservation, and invalid/pending-record checks remain unchanged.
 
+## Native spend source evidence
+
+`claims-v42.json` adds the optional bounded `usage.limits.observed` source frontiers,
+reset-period observations and explicit unsupported account gaps to the complete
+merged registry. Versions 1 through 41 remain frozen, including main's native-turn
+v41 corpus. Generate v42 with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
+The current simulation loader and audit report select v42. Existing producers may
+omit the new optional fields, but omission cannot assert source completeness.
+The existing usage draw deliberately exercises that legacy-compatible shape;
+authenticated source chains, reordered replay, native owner bindings and period
+bounds have dedicated regressions. No claim kind or historical-kind exclusion is
+added. Member-local trim convergence, retained claim equality, oracle reader
+comparisons, person-authored claim preservation, invalid/pending-record checks and
+majority trim coverage remain enforced. The former shared-checkpoint never-trim
+sets and post-excusal continuation remain historical, not active assertions.

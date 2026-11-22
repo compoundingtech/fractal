@@ -35,6 +35,9 @@ impl Store {
         envelopes: u64,
         authority_digest: &str,
     ) -> Result<()> {
+        if !self.first_sync()?.is_some_and(|first| matches!(first.state.as_str(), "syncing" | "failed")) {
+            return Ok(());
+        }
         let connection = self.connection.write();
         let Some(mut first) = first_sync_tx(&connection)? else {
             return Ok(());
@@ -57,6 +60,9 @@ impl Store {
     /// and has admitted and projected them all. It settles on claims alone: comparing
     /// projections is not part of sync.
     pub fn observe_first_sync(&self, peer: &str, envelopes: u64) -> Result<()> {
+        if self.first_sync()?.is_none_or(|first| first.state == "verified") {
+            return Ok(());
+        }
         let connection = self.connection.write();
         let Some(mut first) = first_sync_tx(&connection)? else {
             return Ok(());

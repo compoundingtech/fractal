@@ -138,7 +138,7 @@ def main(binary: str, name: str) -> None:
         value = wait_screen(session, lambda value: text_row(value) is not None, "conversation text")
         row, column = text_row(value)
         drag(session, column + 1, row + 1, column + 12)
-        wait_screen(session, lambda value: "Copied 1 line" in value, "drag to copy")
+        wait_screen(session, lambda value: "Clipboard request sent (OSC 52)" in value, "drag to copy")
         assert FIRST_FRAME in screen(session), "a drag must not leave the conversation"
         # The tab strip contains the opened agent and the new-tab control.
         value = screen(session)
