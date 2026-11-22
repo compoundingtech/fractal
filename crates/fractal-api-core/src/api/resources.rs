@@ -736,15 +736,19 @@ mod tests {
             evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
     }
 
-    async fn resource_agent_execution(state: &AppState, agent: &str, request_id: uuid::Uuid) -> Execution {
+    fn resource_agent_command(state: &AppState, request_id: uuid::Uuid) -> Command {
         let id = uuid::Uuid::now_v7().to_string();
         let transport = format!("shell:{id}");
         let mut lane = request();
         lane.id = transport.clone();
         lane.host.clone_from(&state.node);
         lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport) };
-        let command = Command { id, lane, request_id:Some(request_id.to_string()), argv:vec!["true".into()],
-            cwd:"/work".into(), environment:BTreeMap::new(), timeout_ms:None, parent:None };
+        Command { id, lane, request_id:Some(request_id.to_string()), argv:vec!["true".into()],
+            cwd:"/work".into(), environment:BTreeMap::new(), timeout_ms:None, parent:None }
+    }
+
+    async fn resource_agent_execution(state: &AppState, agent: &str, request_id: uuid::Uuid) -> Execution {
+        let command = resource_agent_command(state, request_id);
         let (status, body) = bound_request(state, Some(agent), None, "POST",
             "/v1/internal/resources/exec", serde_json::to_value(command).unwrap()).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
@@ -752,6 +756,106 @@ mod tests {
         execution.state = "completed".into();
         state.store.update_shell_resource(&execution).unwrap();
         state.store.shell_resource(&execution.command.id).unwrap()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn cancel_before_acceptance_survives_primary_owner_ending() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        let key = uuid::Uuid::now_v7();
+        let (status, body) = bound_request(&state, Some(agent), None, "POST",
+            &format!("/v1/internal/resources/by-request/{key}/cancel"), Value::Null).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["tombstone"], true);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Ended);
+        assert_eq!(state.store.shell_resource_agent_owners(agent).unwrap()[0].invocation.as_deref(), Some("invocation/a"));
+        let error = submit(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            Json(resource_agent_command(&state, key))).await.unwrap_err();
+        assert_eq!(error.code, "resource-request-cancelled");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn newest_ended_owner_falls_back_for_uncancelled_request() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Ended);
+        let execution = resource_agent_execution(&state, agent, uuid::Uuid::now_v7()).await;
+        assert_eq!(execution.command.lane.owner.invocation.as_deref(), Some("invocation/a"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn later_observation_reorders_primary_without_losing_cancellation() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        let key = uuid::Uuid::now_v7();
+        cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            AxumPath(key.to_string())).await.unwrap();
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Observed);
+        assert_eq!(state.store.shell_resource_agent_owners(agent).unwrap()[0].invocation.as_deref(), Some("invocation/a"));
+        let error = submit(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            Json(resource_agent_command(&state, key))).await.unwrap_err();
+        assert_eq!(error.code, "resource-request-cancelled");
+        let execution = resource_agent_execution(&state, agent, uuid::Uuid::now_v7()).await;
+        assert_eq!(execution.command.lane.owner.invocation.as_deref(), Some("invocation/a"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn cancellation_reaches_owner_that_appears_after_acknowledgement() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        let key = uuid::Uuid::now_v7();
+        cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            AxumPath(key.to_string())).await.unwrap();
+        resource_agent_receipt(&state, agent, "c", None, InvocationPhase::Started);
+        let error = submit(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            Json(resource_agent_command(&state, key))).await.unwrap_err();
+        assert_eq!(error.code, "resource-request-cancelled");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn owner_ending_during_submission_does_not_lose_acknowledged_cancellation() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        let caller = CallerOwner::resolve(&state, Some(BoundActor::Agent(agent.into())), None).unwrap().unwrap();
+        let key = uuid::Uuid::now_v7();
+        // Pause after API owner resolution, before the store's acceptance transaction.
+        let mut command = resource_agent_command(&state, key);
+        command.id = crate::store::shell_resources::request_execution_id(&request_scope(&state, Some(&caller)), key).unwrap();
+        command.lane.owner = caller.owner;
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Ended);
+        cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            AxumPath(key.to_string())).await.unwrap();
+        let error = state.store.submit_shell_resource(command, u64::try_from(client_now_ms()).unwrap()).unwrap_err();
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "resource-request-cancelled");
     }
 
     #[cfg(not(target_os = "macos"))]
