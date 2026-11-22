@@ -253,10 +253,19 @@ notifications require neither an authority-guard request nor a membership read.
 Membership refreshes follow the membership subscription; direct leave and
 signature-protection decisions retain their explicit fresh-authority reads.
 
+Unsealed local batches are authority inputs: a local append wakes the snapshot
+that seals its envelope, rather than waiting for an envelope to already exist.
+Shard discovery separately waits at
+`POST /v1/internal/replication/shard/{shard}/peers/revision`, using a null initial
+cursor or its previous cursor as the body. Its cursor follows admitted
+`daemon.started` advertisements and fleet membership, not merely envelope receipt.
+Receipt before admission therefore cannot consume the only discovery wake.
+
 The performance report exposes `replication/authority-revision` and
 `replication/membership-revision` observer counts, `replication/authority-wait` and
 `replication/membership-wait` subscription work, `replication/authority-root-read`
-snapshot work, and `replication/membership-read` fleet-view work.
+snapshot work, and `replication/membership-read` fleet-view work. Discovery exposes
+`replication/discovery-revision` and `replication/discovery-wait`.
 
 ## Root-first peer exchanges
 
