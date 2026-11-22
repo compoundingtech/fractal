@@ -11301,7 +11301,7 @@ async fn omp_successor_drains_predecessor_readiness_and_preparation_failure() {
     ).unwrap(), 2);
     // A real local preparation write failure must fail open, not park the outbox head.
     connection.execute_batch(
-        "CREATE TRIGGER refuse_readiness BEFORE INSERT ON prepared
+        /* sqlite-large-value: allow-for-now lv-h2b538cb9a6cc owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER refuse_readiness BEFORE INSERT ON prepared
          WHEN NEW.slot='omp-channel-readiness' BEGIN SELECT RAISE(ABORT,'readiness preparation refused'); END;",
     ).unwrap();
     let ownership = harness_state::claim(root.path(), "example/seat", "omp", "provider-next").unwrap();
@@ -11320,5 +11320,24 @@ async fn omp_successor_drains_predecessor_readiness_and_preparation_failure() {
     assert!(store.claims_for(subject, Some("harness.observed")).unwrap().iter().any(|claim|
         claim.body["fields"]["incarnation_id"] == "runtime-b" && claim.body["fields"]["state"] == "working"
     ));
+    assert_eq!(connection.query_row(
+        "SELECT count(*) FROM metadata WHERE key='omp-channel-readiness:runtime-b'",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap(), 0, "fallback invalidates the stale ready fence");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4c38471e37f8 owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER refuse_readiness;").unwrap();
+    let mut recovered = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    recovered.channel_ready = Some(true);
+    writer.observe(recovered).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    let latest = diagnostics.iter().rev().find(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b"
+            && matches!(claim.body["fields"]["code"].as_str(), Some("omp-channel-ready" | "omp-channel-unready"))
+    ).unwrap();
+    assert_eq!(latest.body["fields"]["code"], "omp-channel-ready",
+        "preparation recovery must publish ready after the fallback unready edge");
     server.abort();
 }

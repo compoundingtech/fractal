@@ -676,17 +676,27 @@ pub fn prepare_channel_readiness(
         |r| r.get(0),
     )?;
     tx.execute(
-        "INSERT INTO prepared(sequence,slot,body) VALUES (?1,?2,?3)",
+        /* sqlite-large-value: allow-for-now lv-h167c33090bba owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO prepared(sequence,slot,body) VALUES (?1,?2,?3)",
         params![sequence, SLOT, if unchanged { "false" } else { "true" }],
     )?;
     if !unchanged {
         tx.execute(
-            "INSERT INTO metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            /* sqlite-large-value: allow-for-now lv-ha7e65391ff10 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![key, state],
         )?;
     }
     tx.commit()?;
     Ok(!unchanged)
+}
+
+/// A fail-open publication bypassed preparation, so the previous fence can no longer prove
+/// the latest graph edge. Invalidate it separately from the failed preparation transaction.
+pub fn invalidate_channel_readiness(agent_dir: &Path, runtime: &str) -> Result<()> {
+    open(agent_dir)?.execute(
+        /* sqlite-large-value: allow-for-now lv-he6f8ffaece65 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM metadata WHERE key=?1",
+        [format!("omp-channel-readiness:{runtime}")],
+    )?;
+    Ok(())
 }
 
 pub fn acknowledge(agent_dir: &Path, sequence: u64) -> Result<()> {

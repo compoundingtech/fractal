@@ -18485,6 +18485,9 @@ async fn publish_harness_activity(
                     Ok(emit) => emit.then(|| format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}")),
                     Err(error) => {
                         tracing::warn!(%error, "preparing channel readiness failed; publishing without coalescing");
+                        if let Err(error) = fractal_drivers::harness_events::invalidate_channel_readiness(dir, runtime) {
+                            tracing::warn!(%error, "invalidating channel readiness fence failed");
+                        }
                         Some(legacy_key())
                     }
                 }
