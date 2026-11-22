@@ -13,7 +13,7 @@
 //! The tables are the planner's contract: a runtime's `plan_staged_checkpoint_drops` reads
 //! `claims` and marks `dropped`, and `finish` derives the plan from those marks.
 use super::checkpoint::{
-    CheckpointCaptureChanged, ClaimTombstone, DropCount, EnvelopeKey, EnvelopeTombstone, ProofInput,
+    CheckpointCaptureChanged, ClaimTombstone, DropCount, EnvelopeKey, EnvelopeTombstone,
     RECORDED_TOMBSTONE_FILTER, checkpoint_accepted_time, checkpoint_name, digest_field,
     sealed_records_page_sql,
 };
@@ -304,16 +304,16 @@ impl Store {
     ) -> Result<StagedSet> {
         let scope = scope.map(|kinds| kinds.iter().map(|kind| (*kind).to_owned()).collect::<Vec<_>>());
         self.runtime.checkpoint_preflight()?;
-        let _span = super::checkpoint_accounting::Phase::start("capture", "checkpoint.capture");
+        let _span = crate::profile::span_with_io("checkpoint.capture");
         // Admit before lock_staging creates the scratch directory or lock file.
         let space = if self.shared_memory { None } else {
             Some(match scope.as_deref() {
                 Some(kinds) => super::checkpoint_space::SpaceGuard::admit_scoped_capture(&self.path, dir, self.claim_share(kinds)?)?,
-                None => super::checkpoint_space::SpaceGuard::admit(&self.path, dir, true)?,
+                None => super::checkpoint_space::SpaceGuard::admit(&self.path, dir)?,
             })
         };
-        // The startup checkpoint pass sweeps only proof scratch that has lost its owner lock.
-        // A dry-run captures in `scratch/plan`, while the proof files live in `scratch`.
+        // Sweep what an older build's checkpoint proof left in the scratch directory, under its
+        // lock. A capture in `scratch/plan` locks `scratch`, where those files lived.
         let proof_root = if dir.file_name().is_some_and(|name| name == std::ffi::OsStr::new("plan")) {
             dir.parent().unwrap_or(dir)
         } else {
@@ -405,9 +405,8 @@ impl Store {
     /// the set and the rules, and the file's identity fixes both.
     pub fn plan_staged_checkpoint(&self, staged: &StagedSet) -> Result<StagedPlan> {
         self.runtime.checkpoint_preflight()?;
-        let mut phase = super::checkpoint_accounting::Phase::start("plan", "checkpoint.plan");
+        let _span = crate::profile::span_with_io("checkpoint.plan");
         if let Some(plan) = staged.plan()? {
-            phase.count(plan.dropped_claims as u64);
             return Ok(plan);
         }
         // One transaction on the staging file: a plan cut short leaves no marks behind.
@@ -417,7 +416,6 @@ impl Store {
         )?;
         self.runtime.plan_staged_checkpoint_drops(&StagedPlanner { store: self, staged })?;
         let plan = staged.finish(&transaction, self.runtime.checkpoint_rules_digest())?;
-        phase.count(plan.dropped_claims as u64);
         transaction.commit()?;
         #[cfg(any(test, feature = "test-support"))]
         if REFERENCE_PLAN.with(std::cell::Cell::get) {
@@ -638,13 +636,11 @@ impl StagedSet {
             let connection = store.readers.get();
             let page = connection
                 .prepare_cached(
-                    "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
-                            envelopes.accepted_at_unix_ms,
-                            (SELECT COUNT(*) FROM replica_records records
-                             WHERE records.writer=envelopes.writer AND records.sequence=envelopes.sequence
-                               AND records.envelope_hash=envelopes.envelope_hash)
+                    /* sqlite-large-value: allow-for-now lv-h0957c7ddabac owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ &format!("SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+                            envelopes.accepted_at_unix_ms, {}
                      FROM replica_envelopes envelopes
                      WHERE envelopes.rowid > ?1 AND envelopes.rowid <= ?2",
+                     super::record_bytes::envelope_record_count_sql("envelopes")),
                 )?
                 .query_map([after, upto], |row| {
                     let accepted: String = row.get(3)?;
@@ -1231,13 +1227,37 @@ impl StagedSet {
         Ok(())
     }
 
+    /// The claims the plan could still drop that were accepted after `cutoff_unix_ms`, from
+    /// `from_unix_ms` on: candidates for the forget bound of the freshness window.
+    pub fn unprotected_younger_than(&self, cutoff_unix_ms: u64, from_unix_ms: u64) -> Result<Vec<String>> {
+        Ok(self.staging
+            .prepare("SELECT DISTINCT id FROM claims WHERE protected=0 AND accepted_at>?1 AND accepted_at>=?2")?
+            .query_map(params![i64::try_from(cutoff_unix_ms).unwrap_or(i64::MAX), i64::try_from(from_unix_ms).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Keep these claims, and forget any plan made without that.
+    pub fn protect_ids(&self, ids: &[String]) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        {
+            let mut protect = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-hec01ad462496 owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET protected=1 WHERE id=?1")?;
+            for id in ids {
+                protect.execute(/* sqlite-large-value: allow-for-now lv-hf96af6b8d191 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ [id])?;
+            }
+        }
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0c9cd59bf805 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Let the plan drop a claim whose envelope it keeps, and forget any plan made without that.
     /// Only a member that trims locally does: the envelope stays whole and servable, and only
     /// this member's own copies of the claim go. A shared checkpoint's envelopes stay atomic.
     pub fn split_envelopes(&self) -> Result<()> {
         let transaction = self.staging.unchecked_transaction()?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h38a606664b66 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO split_envelopes(id) VALUES (1)", [])?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0c9cd59bf805 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hd0c5e669ec1a owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
         transaction.commit()?;
         Ok(())
     }
@@ -1271,15 +1291,6 @@ impl StagedSet {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Mark the newest claim of the set dropped, as a planner defect would. `TrimFault` only.
-    pub(super) fn drop_newest_for_test(&self) -> Result<()> {
-        self.staging.execute(
-            /* sqlite-large-value: allow-for-now lv-hf150403979fb owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET dropped=1 WHERE pos=(SELECT MAX(pos) FROM claims WHERE first=1)",
-            [],
-        )?;
-        Ok(())
-    }
-
     /// Whether the plan drops this claim.
     pub fn drops_claim(&self, id: &str) -> Result<bool> {
         Ok(self.staging.query_row(
@@ -1289,123 +1300,15 @@ impl StagedSet {
         )?)
     }
 
-    /// The identity a failed proof records: what `proof_input_digest` hashes, read in canonical
-    /// order from the staging file.
-    pub fn proof_input_digest(&self, plan: &StagedPlan, executable: &str, build: &str, protocol: u64) -> Result<String> {
-        let mut digest = Sha256::new();
-        digest.update(b"smallclaims-checkpoint-proof-input-v1\0");
-        digest.update(protocol.to_be_bytes());
-        digest.update(self.cut_unix_ms.to_be_bytes());
-        let tombstones = self.drop_digest(&self.staging, false)?;
-        for field in [
-            plan.sealed_digest.as_str(),
-            plan.drop_digest.as_str(),
-            plan.retained_digest.as_str(),
-            plan.rules_digest.as_str(),
-            build,
-            executable,
-            tombstones.as_str(),
-        ] {
-            digest_field(&mut digest, Some(field));
-        }
-        let count: i64 = self.staging.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))?;
-        digest.update((count as u64).to_be_bytes());
-        let mut statement =
-            self.staging.prepare("SELECT id, accepted_at, valid FROM claims ORDER BY pos")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            digest_field(&mut digest, Some(&row.get::<_, String>(0)?));
-            digest.update(u128_of(row.get(1)?).to_be_bytes());
-            digest.update([u8::from(row.get::<_, bool>(2)?)]);
-        }
-        Ok(hex::encode(digest.finalize()))
-    }
-}
-
-/// Tombstones a proof or a trim reads from the staging file at a time.
-const TOMBSTONE_PAGE: usize = 256;
-
-/// A staged set and its plan, as a proof reads them.
-pub struct StagedProof<'a> {
-    pub staged: &'a StagedSet,
-    pub plan: &'a StagedPlan,
-}
-
-impl ProofInput for StagedProof<'_> {
-    fn cut_unix_ms(&self) -> u128 {
-        self.staged.cut_unix_ms
-    }
-
-    fn seal_rowid(&self) -> i64 {
-        self.staged.seal_rowid
-    }
-
-    fn sealed_digest(&self) -> &str {
-        &self.plan.sealed_digest
-    }
-
-    fn rules_digest(&self) -> &str {
-        &self.plan.rules_digest
-    }
-
-    fn drop_digest(&self) -> &str {
-        &self.plan.drop_digest
-    }
-
-    fn attach(&self, connection: &Connection) -> Result<()> {
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h0f06faaf001d owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS staged", [self.staged.path.to_string_lossy()])?;
-        Ok(())
-    }
-
-    fn fill_sealed(&self, transaction: &Transaction<'_>) -> Result<()> {
-        transaction.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hb35a797d1f6e owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO temp.sealed_claims(id) SELECT id FROM staged.claims;
-             INSERT OR IGNORE INTO temp.sealed_blobs(hash) SELECT hash FROM staged.blobs;
-             INSERT OR IGNORE INTO temp.sealed_envelopes(writer, sequence, envelope_hash)
-                 SELECT writer, sequence, envelope_hash FROM staged.envelopes WHERE included=1;",
+    /// Mark the newest claim of the set dropped, as a planner defect would. `TrimFault` only.
+    pub(super) fn drop_newest_for_test(&self) -> Result<()> {
+        self.staging.execute(
+            /* sqlite-large-value: allow-for-now lv-hf150403979fb owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET dropped=1 WHERE pos=(SELECT MAX(pos) FROM claims WHERE first=1)",
+            [],
         )?;
         Ok(())
     }
 
-    fn subjects(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>> {
-        Ok(self
-            .staged
-            .staging
-            .prepare_cached(
-                "SELECT DISTINCT subject FROM dropped_claims WHERE ?1 IS NULL OR subject > ?1
-                 ORDER BY subject LIMIT ?2",
-            )?
-            .query_map(params![after, i64::try_from(limit)?], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    fn envelope_pages(&self, visit: &mut dyn FnMut(&[EnvelopeTombstone]) -> Result<()>) -> Result<()> {
-        let mut after = 0;
-        loop {
-            let page = self.staged.dropped_envelopes(after, TOMBSTONE_PAGE)?;
-            if page.is_empty() {
-                return Ok(());
-            }
-            visit(&page)?;
-            after += page.len();
-        }
-    }
-
-    fn claim_pages(&self, visit: &mut dyn FnMut(&[ClaimTombstone]) -> Result<()>) -> Result<()> {
-        let mut after = 0;
-        loop {
-            let page = self.staged.dropped_claims(after, TOMBSTONE_PAGE)?;
-            if page.is_empty() {
-                return Ok(());
-            }
-            visit(&page)?;
-            after += page.len();
-        }
-    }
-
-    fn drops_claim(&self, id: &str) -> Result<bool> {
-        self.staged.drops_claim(id)
-    }
 }
 
 /// Remove a SQLite file and its journal files.

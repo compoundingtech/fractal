@@ -68,6 +68,7 @@ describe('native assigned turns', () => {
     const products = [{ path: 'review/verdict', kind: 'custom.example.verdict', fields: { kind: 'custom.example.verdict', accepted: true, count: 2 } }]
     const program = Fractal.seatTurn({ meta, reportTo })
     expect(program.intent.id).toBe('fractal/seat-turn')
+    expect(program.intent.authority).toEqual({ start: ['native-turn'] })
     expect(Object.keys(program.intent.input.fields)).toEqual(['agent', 'instructions', 'context'])
     for (const freshContext of [undefined, false, true]) {
       const context = { inputs, products, ...(freshContext === undefined ? {} : { freshContext }) }

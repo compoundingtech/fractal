@@ -1,5 +1,6 @@
 //! The production watch stage skips only after a successful dependency-recorded evaluation.
 use super::*;
+use crate::RetirementsStore as _;
 use serde_json::json;
 
 const START: u128 = 1_900_000_000_000;
@@ -160,6 +161,68 @@ fn a_watch_stage_keeps_and_evaluates_its_clock_only_deadline() {
     assert_eq!(fixture.wakes("agent/example.planner").len(), 1);
     reconciler.reconcile_github_watches_stage();
     assert_eq!(fixture.wakes("agent/example.planner").len(), 1);
+}
+
+#[test]
+fn a_retired_recipient_ends_an_expired_watch_without_a_wake_or_fault() {
+    let clock = Clock::at(START);
+    let (fixture, reconciler) = fixture();
+    apply_source(&fixture.store, &SEATS.replace("\"away\"", "\"node\""), "local-retirement-seat");
+    let agent = "agent/example.planner";
+    let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+    fixture.store.declare_watch(&thread, agent, Some(START + 1_000)).unwrap();
+    let watch = thread.watch(agent);
+    let token = fixture.store.selected_desired_token(agent).unwrap().unwrap();
+    fixture.store.retire_agent(
+        agent, "person/avery", "Work finished", &token, None, "retire-watch-recipient", &[],
+    ).unwrap();
+    clock.set(START + 1_001);
+    reconciler.reconcile_github_watches_stage();
+    assert_eq!(fixture.store.watch_view(&watch).unwrap().unwrap()["ended"], "seat-ended");
+    assert!(fixture.wakes(agent).is_empty());
+    assert!(!fixture.running(&watch));
+    assert!(!fixture.running(&fixture.observer));
+    assert!(fixture.store.reconcile_fault("daemon/node", ITEM).unwrap().is_none());
+    assert!(fixture.store.reconcile_fault(&watch, "github-watch").unwrap().is_none());
+}
+
+#[test]
+fn a_failed_watch_does_not_skip_later_deadlines_ensures_or_observer_cleanup() {
+    struct FailWatch(String);
+    impl FaultInjection for FailWatch {
+        fn fault(&self, scope: &str, subject: &str) -> Option<String> {
+            (scope == "github-watch" && subject == self.0)
+                .then(|| "watch evaluation failed".into())
+        }
+    }
+
+    let clock = Clock::at(START);
+    let (fixture, mut reconciler) = fixture();
+    let agent = "agent/example.planner";
+    let failed = fixture.watch("acme/alpha#11", agent);
+    let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+    fixture.store.declare_watch(&thread, agent, Some(START + 1_000)).unwrap();
+    let expired = thread.watch(agent);
+    let live = fixture.watch("acme/live#13", agent);
+    let live_observer = crate::github_watch::ThreadRef::parse("acme/live#13").unwrap().observer();
+    fixture.store.stop_watch_declaration(&live_observer).unwrap();
+    reconciler.fault_injection = Some(Arc::new(FailWatch(failed.clone())));
+    let mut desired = fixture.store.github_watch_declarations().unwrap();
+    desired.sort_by(|left, right| left.subject.cmp(&right.subject));
+    clock.set(START + 1_001);
+    reconciler.reconcile_github_watches(&desired).unwrap();
+    assert!(fixture.running(&failed));
+    assert_eq!(fixture.store.watch_view(&expired).unwrap().unwrap()["ended"], "deadline");
+    assert_eq!(fixture.wakes(agent).len(), 1);
+    assert!(!fixture.running(&fixture.observer), "unused observer was cleaned up");
+    assert!(fixture.running(&live) && fixture.running(&live_observer));
+    assert_eq!(
+        fixture.store.reconcile_fault(&failed, "github-watch").unwrap().as_deref(),
+        Some("watch evaluation failed"),
+    );
+    reconciler.fault_injection = None;
+    reconciler.reconcile_github_watches(&fixture.store.github_watch_declarations().unwrap()).unwrap();
+    assert!(fixture.store.reconcile_fault(&failed, "github-watch").unwrap().is_none());
 }
 
 #[test]

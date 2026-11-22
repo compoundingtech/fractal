@@ -184,6 +184,40 @@ schedule "orchard" { host "ivory"; standby { host "jade"; after "50ms" }
     }
 
     #[tokio::test(start_paused = true)]
+    async fn write_free_empty_receipt_renews_sub_checkpoint_standby_deadline() {
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+        }
+        let _clock = Clock;
+        let (primary, standby, spec) = pair();
+        let wall = now();
+        smallclaims::store::set_thread_clock(Some(wall));
+        let exchange = primary.export_replication_summary(FLEET).unwrap();
+        assert!(exchange.envelopes.is_empty());
+        standby.receive_replication_exchange("ivory", FLEET, &exchange).unwrap();
+        let initial = waiting(readiness(&standby, "schedule/orchard", &spec, "revision", 7, 0, wall).unwrap());
+        assert_eq!(spec.standby.as_ref().unwrap().after_ms, 50);
+        tokio::time::advance(Duration::from_millis(40)).await;
+        smallclaims::store::set_thread_clock(Some(wall + 40));
+        let metrics = smallclaims::receive_metrics::RequestMetrics::default();
+        {
+            let _metrics = metrics.enter();
+            standby.receive_replication_exchange("ivory", FLEET, &exchange).unwrap();
+        }
+        assert_eq!(metrics.snapshot().commits, 0);
+        let renewed = waiting(readiness(&standby, "schedule/orchard", &spec, "revision", 7, 0, wall + 40).unwrap());
+        assert!(renewed.1 > initial.1);
+        tokio::time::advance(Duration::from_millis(11)).await;
+        assert_eq!(waiting(readiness(&standby, "schedule/orchard", &spec, "revision", 7, 0, wall + 51).unwrap()), renewed,
+            "old durable checkpoint incorrectly permitted early takeover");
+        tokio::time::advance(Duration::from_millis(40)).await;
+        let Readiness::Ready(detail) = readiness(&standby, "schedule/orchard", &spec, "revision", 7, 0, wall + 91).unwrap()
+            else { panic!("the renewed heartbeat never became stale") };
+        assert_eq!(detail["primary_heartbeat_age_ms"], 51);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn unchanged_heartbeat_has_one_finite_deadline_equal_age_is_fresh_then_stale() {
         let (_primary, standby, spec) = pair();
         let wall = now();

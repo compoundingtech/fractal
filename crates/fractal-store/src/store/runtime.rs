@@ -43,6 +43,7 @@ pub struct FractalRuntime {
     pub actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
     pub(super) card_actuals: Mutex<HashMap<(String, bool), Arc<card_actual::Reduction>>>,
     pub observer_actuals: Arc<observer_actuals::Actuals>,
+    pub(super) mail_objective_inputs: Arc<observer_mail_inputs::Inputs>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
     pub placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
     /// Per-subject status reductions and current-view answers, until their claims change.
@@ -61,6 +62,8 @@ pub struct FractalRuntime {
     /// claims: readers serve it, under its own cut, until the roster refolds. A fold never
     /// starts from it, and a forget drops it.
     pub agent_roster_previous: Mutex<PreviousRoster>,
+    #[cfg(test)]
+    roster_retained_before_clear: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Acquire before opening a SQLite snapshot, never while pinning a WAL read mark.
     pub agent_resources_admission: Arc<tokio::sync::Mutex<()>>,
     pub agent_resources_admission_state: Mutex<roster_admission::AdmissionState>,
@@ -275,7 +278,10 @@ impl FractalRuntime {
 
 impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
-        Some(self.observer_actuals.clone())
+        Some(Arc::new(observer_mail_inputs::Observer {
+            actuals: self.observer_actuals.clone(),
+            mail: self.mail_objective_inputs.clone(),
+        }))
     }
     fn admit_writer_tx(
         &self,
@@ -697,7 +703,8 @@ impl Runtime for FractalRuntime {
             self.agent_roster_requested_at.store(0, std::sync::atomic::Ordering::Release);
             self.presented_agents.forget();
         }
-        self.forget_reductions();
+        self.forget_reductions(false);
+        self.mail_objective_inputs.invalidate();
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
         self.glass_list.forget();
@@ -715,9 +722,8 @@ impl Runtime for FractalRuntime {
     fn claims_trimmed(&self) {
         // A trim's run goes on: every list refolds, keeping its generation, so a fold under way
         // still publishes and readers keep their rows.
-        // Forgetting them here, after every chunk, restarted the roster's fold of seconds
-        // before it could publish, all through the run. The trim forgets the views once when
-        // the run stops, which also drops what the caches hold of the claims it deleted.
+        // Keep published rows throughout the run and at completion: each chunk proves that
+        // the graph is unchanged. Completion separately releases history-dependent reductions.
         self.presented_agents.refold();
         self.published_missions.refold();
         self.published_work.refold();
@@ -735,29 +741,19 @@ impl Runtime for FractalRuntime {
         }
     }
 
+    fn claims_trim_finished(&self) {
+        // Invalidate inputs before either the roster revision or attention-owner wake is sent.
+        self.summary_list.refold();
+        self.forget_reductions(true);
+        self.claims_trimmed();
+    }
+
     fn projection_advanced(&self, caught_up: bool) {
         // Readers keep the roster they had while it refolds from nothing: keep it before the
         // caches it lives in are cleared.
-        {
-            let resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
-            let refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut previous = self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner);
-            for history in [false, true] {
-                if let Some(entry) = resources.iter()
-                    .filter(|entry| entry.history == history && entry.covered.is_none())
-                    .max_by_key(|entry| (entry.index, entry.local))
-                {
-                    previous.resources.retain(|kept| kept.history != history);
-                    previous.resources.push(entry.clone());
-                }
-            }
-            if let Some(entry) = refs.iter().filter(|entry| !entry.history).max_by_key(|entry| entry.index) {
-                previous.page_refs = Some(entry.clone());
-            }
-        }
         // Reductions keyed by graph cut alone would answer from the prefix projected before:
         // the cut did not move. They go, as on a forget.
-        self.forget_reductions();
+        self.forget_reductions(true);
         // The missions, work, attention, glasses and arrangements lists read the projection
         // frontier and refold what it newly covers on their own; they keep serving meanwhile.
         self.summary_list.forget();
@@ -801,15 +797,6 @@ impl Runtime for FractalRuntime {
         checkpoint_rules::plan_staged(planner)
     }
 
-    fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        checkpoint_rules::clear_projections(transaction)
-    }
-
-    fn replay_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        checkpoint_rules::replay_from_nothing(transaction)?;
-        Ok(())
-    }
-
     fn checkpoint_subject_answers(
         &self,
         connection: &Connection,
@@ -819,18 +806,6 @@ impl Runtime for FractalRuntime {
         checkpoint_rules::subject_answers(connection, subject, cut)
     }
 
-    fn checkpoint_global_answers(&self, transaction: &Transaction<'_>) -> Result<Option<Value>> {
-        checkpoint_rules::global_answers(transaction).map(Some)
-    }
-
-    fn checkpoint_subject_answers_with_sources(
-        &self,
-        connection: &Connection,
-        subject: &str,
-        cut: u128,
-    ) -> Result<(Value, smallclaims::store::checkpoint::CheckpointAnswerSources)> {
-        checkpoint_rules::subject_answers_with_sources(connection, subject, cut)
-    }
 }
 
 /// The version of Fractal's shared projection layout, beside the claim vocabulary. Nodes whose
@@ -877,9 +852,45 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
 
 
 impl FractalRuntime {
+    /// Retention and clearing share the publication locks: a refresher must not publish
+    /// between copying the previous roster and clearing its claim-dependent cache.
+    fn forget_roster_reductions(&self, retain: bool) {
+        let mut resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if retain {
+            let mut previous = self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner);
+            for history in [false, true] {
+                if let Some(entry) = resources.iter()
+                    .filter(|entry| entry.history == history && entry.covered.is_none())
+                    .max_by_key(|entry| (entry.index, entry.local))
+                {
+                    previous.resources.retain(|kept| kept.history != history);
+                    previous.resources.push(entry.clone());
+                }
+            }
+            if let Some(entry) = refs.iter().filter(|entry| !entry.history).max_by_key(|entry| entry.index) {
+                // A bounded startup head needs its cards and matching page order.
+                if let Some(head) = resources.iter()
+                    .filter(|cards| !cards.history && cards.index == entry.index && cards.covered.is_some())
+                    .max_by_key(|cards| cards.local)
+                {
+                    previous.resources.retain(|kept| kept.history || kept.covered.is_none());
+                    previous.resources.push(head.clone());
+                }
+                previous.page_refs = Some(entry.clone());
+            }
+        }
+        #[cfg(test)]
+        if let Some(observe) = self.roster_retained_before_clear.lock().unwrap().take() {
+            observe();
+        }
+        resources.clear();
+        refs.clear();
+    }
+
     /// Drop every reduction kept by graph cut: statuses, views, conversation owners, agent
     /// cards and the roster built from them, usage folds and agent page order.
-    fn forget_reductions(&self) {
+    fn forget_reductions(&self, retain_roster: bool) {
         self.observer_actuals.invalidate();
         let mut cache = self
             .subject_cache
@@ -901,21 +912,14 @@ impl FractalRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
-        self.agent_resources_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
         self.exact_agent_resources_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
         self.card_actuals.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.forget_roster_reductions(retain_roster);
         self.agent_roster_published.send_modify(|revision| *revision += 1);
-        self.agent_page_refs_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
     }
 
     /// The roster's caches were cleared, and a refold from the log takes seconds on a large
@@ -1852,5 +1856,60 @@ mod preparation_admission_tests {
             "SELECT COUNT(*) FROM replica_restore_quarantine", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(quarantined, 0);
+    }
+}
+
+#[cfg(test)]
+mod roster_retention_tests {
+    use super::*;
+
+    fn publication(index: u64, history: bool) -> AgentResourcesEntry {
+        AgentResourcesEntry {
+            index, local: index, history,
+            idle_residency: crate::config::idle_residency_policy(),
+            covered: None, valid_until_unix_ms: None,
+            items: Arc::new(vec![json!({"id": format!("agent/publication-{index}")})]),
+            published_at_unix_ms: u128::from(index),
+        }
+    }
+
+    #[test]
+    fn trim_and_projection_retention_clear_atomically_with_new_publications() {
+        for trim in [true, false] {
+            let runtime = Arc::new(FractalRuntime::default());
+            runtime.agent_resources_cache.lock().unwrap().push_back(publication(1, false));
+            runtime.agent_page_refs_cache.lock().unwrap().push_back(publication(1, false));
+            let (publish, ready) = std::sync::mpsc::channel();
+            let observer = Arc::clone(&runtime);
+            *runtime.roster_retained_before_clear.lock().unwrap() = Some(Box::new(move || {
+                // This exact seam used to release these locks after copying the retained
+                // rows, letting a first history publication be erased by the later clear.
+                assert!(observer.agent_resources_cache.try_lock().is_err());
+                assert!(observer.agent_page_refs_cache.try_lock().is_err());
+                publish.send(()).unwrap();
+            }));
+            let writer = Arc::clone(&runtime);
+            let publisher = std::thread::spawn(move || {
+                ready.recv().unwrap();
+                let mut resources = writer.agent_resources_cache.lock().unwrap();
+                resources.push_back(publication(2, false));
+                resources.push_back(publication(2, true));
+                drop(resources);
+                writer.agent_page_refs_cache.lock().unwrap().push_back(publication(2, false));
+            });
+            if trim {
+                runtime.claims_trim_finished();
+            } else {
+                runtime.projection_advanced(true);
+            }
+            publisher.join().unwrap();
+            let resources = runtime.agent_resources_cache.lock().unwrap();
+            assert_eq!(resources.len(), 2, "the newly published current and history rosters survive");
+            assert!(resources.iter().all(|entry| entry.index == 2));
+            assert_eq!(runtime.agent_page_refs_cache.lock().unwrap().front().unwrap().index, 2);
+            let previous = runtime.agent_roster_previous.lock().unwrap();
+            assert_eq!(previous.resources[0].index, 1);
+            assert_eq!(previous.page_refs.as_ref().unwrap().index, 1);
+        }
     }
 }

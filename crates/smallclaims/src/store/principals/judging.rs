@@ -199,6 +199,12 @@ pub(super) fn advance(
     let (verdict, links, signature) =
         judge_candidates(connection, roots, row, candidates, 0, memo)?;
     blocked |= matches!(&verdict,Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:"));
+    // Final once found: later batches only add constraints, and a forgotten one must not undo it.
+    if matches!(&verdict, Verdict::Invalid(reason) if reason == crate::principal::BATCH_DISORDER) {
+        connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-he263347cc8da owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_batch_disorder(claim_id) VALUES (?1)")?
+            .execute(/* sqlite-large-value: allow-for-now lv-h81fa36b9b7b4 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id])?;
+    }
     for link in &links {
         connection
             .prepare_cached(
@@ -246,7 +252,7 @@ pub(super) fn advance(
     if !finished {
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8ef495ef23ca owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)")?
-            .execute(/* sqlite-large-value: allow-for-now lv-h81fa36b9b7b4 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-hbacf8f94aea6 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id])?;
         return Ok((None, texts.len()));
     }
     if count != 0 && best.is_none() {

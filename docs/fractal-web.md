@@ -176,6 +176,9 @@ The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
 the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
 to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
 expiry or daemon restart. The launch token is not printed by the daemon.
+If the browser opener fails, the launcher exits with a non-secret error instead
+of printing the token URL. Configure a local default browser and opener, then
+retry `fractal web` on the daemon's machine.
 `FRACTAL_WEB_URL` remains an explicit override. Do not publish this listener through
 Tailscale Serve: it is a same-machine browser boundary, not the tailnet publisher.
 
@@ -215,6 +218,17 @@ never the person's email. Tags never become person logins. Host and Origin check
 are identical for both: canonical or listener Host, exact published browser
 Origin, mandatory Origin for upgrades and unsafe methods. Origin-less GET/HEAD
 also require absent, `same-origin`, or `none` Sec-Fetch-Site.
+
+When the host enables browser pairing (`pairing` middleware options), client API
+HTTP requests and WebSocket upgrades require a browser device cookie. Missing,
+malformed or duplicate device cookies receive 401; the publisher credential is
+used only by the login-only pairing wrapper, never as a browser fallback. The
+daemon validates the browser grant and its scopes. Hosts without pairing retain
+the pre-adoption preview credential. Publisher startup checks that its credential
+grants only `read.*` scopes and fails closed on introspection errors. Tagged
+preview readers continue to use their separate read-only credential.
+Projected terminal streams retain the original browser session and close on
+grant revocation, expiry or loss of `terminal.read`, including while idle.
 
 Tagged readers receive preview access only: GET/HEAD and the
 `/v1/client/collections/stream` read WebSocket. Pairing, non-read HTTP and all

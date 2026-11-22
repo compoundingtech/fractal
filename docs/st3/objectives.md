@@ -202,6 +202,23 @@ Their TypeScript constructors are `Fractal.indicator.githubMergedCount` and
 references, an IANA `timezone`, explicit `cut: 'now' | 'watermark'`, and
 `measurement: 'only' | 'targeted'`. There are no default hosts, repository lists or target values.
 
+Both GitHub indicators optionally accept `authorLogins: ['example-bot', 'example-human']`.
+The DSL emits repeated `author-login "example-bot"` indicator children, lowercases ASCII
+logins, sorts them and removes duplicates. An authored list must be nonempty; omitting it
+retains the intentional all-author default. The selector is part of the objective declaration
+and its revision, not consumer-side policy, repository membership or source acquisition.
+It applies identically to rolling-hour counts, civil-day bars and final-ready samples.
+Login matching is ASCII case-insensitive. Missing PR/author evidence and conflicting canonical
+images remain unknown; known nonmatching authors are excluded. Coverage is still required
+for every effective roster member before an empty selected cohort can be a real zero.
+
+This is a declaration grammar extension only: no claim fields, registry digest, SQLite
+tables/indexes or storage version change, and no new `include_str!` lane inputs. Existing
+generic declaration bodies retain the selector and replay from their authored declarations;
+GitHub facts/projection schemas are unchanged. N-1 readers that lack `author-login` reject
+the declaration as unsupported and show no-data, never silently count all authors. Publish
+selected declarations only to upgraded evaluators; the release adds no observer or activation.
+
 Merged-count requires `PullRequest` and `Merge` coverage; ready-to-merged additionally
 requires `Lifecycle` coverage. The finite evidence horizon is the latest authoritative
 required-family coverage endpoint intersecting effective roster membership. Retired
@@ -1112,8 +1129,10 @@ family; missing agent ownership is unknown, never a successful delivery.
 The producer reads retained source metadata in indexed 128-row keyset pages and releases
 each SQLite reader before processing another page or message's lifecycle. No read
 transaction spans the 30-day scan, so WAL RESTART checkpoints can proceed during capture.
-Local change bursts are coalesced in a fixed 100ms window (not a quiet-period debounce);
-a capture overlapping graph writes remains unknown rather than certifying a mixed cut.
+Only relevant mail-input changes recapture source data; unrelated API and reconciliation
+notifications do not. There is no cooldown. Identity references are resolved once per distinct
+spelling per capture. Pending relevant changes and overlapping source cuts remain unknown
+rather than certifying stale or mixed observations; idle heartbeat and boundary timers remain active.
 
 `POST /v1/mailbox/receipts` accepts `lifecycle: "accepted"` with
 `input_acceptance: { "accepted_at_unix_ms": ... }`. The native peer, physical provider
@@ -1156,6 +1175,13 @@ can renew its own capture heartbeat without querying mail, but cannot advance a 
 producer frontier. One-shot lifecycle/budget/freshness boundaries wake evaluation; no source
 polling or request-time sampling is used. Native ownership/response declarations bind this
 host row through the existing native indicator mechanism, without a separate alert evaluator.
+
+Mail source publication follows a source-specific committed-input generation, not global
+API or reconciliation notifications. Mail source, acceptance, lifecycle, identity/conflict,
+declared ownership, native runtime/frontier and shard mirror changes invalidate it; unrelated
+notifications do not recapture retained history. Identity/conflict checks remain authoritative
+at each source cut. Incremental keyed maintenance is tracked
+in [#6921](https://github.com/compoundingtech/fractal/issues/6921).
 
 The local acceptance and lifecycle ledgers retain metadata across restarts and source-mark
 retention. They contain recipient identity, source timestamps, sender/tags and lifecycle

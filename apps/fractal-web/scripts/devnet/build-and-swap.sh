@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Build/activate only. The integration-loop owner manages the new devnet purpose.
+activate() {
 set -Eeuo pipefail
 ROOT=${FRACTAL_BUILD_ROOT:?missing required input: FRACTAL_BUILD_ROOT}
 SNAPSHOT_ROOT=${FRACTAL_BUILD_SNAPSHOT_ROOT:?missing required input: FRACTAL_BUILD_SNAPSHOT_ROOT}
 DEPCACHE=${FRACTAL_DEP_CACHE:?missing required input: FRACTAL_DEP_CACHE}
-script_dir=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
+script_dir=$(dirname -- "$(realpath -- "$0")")
 SOURCE=${1:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 requested=${2:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 name=${3:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
@@ -143,16 +144,17 @@ for stale in "$snapshot_root"/*; do
   (
     exec 7>"$stale.lock"
     if flock -n 7; then
-      if python3 -I "$script_dir/candidate_sandbox.py" --prepare-removal "$stale" --snapshot-root "$snapshot_root"; then
-        git -C "$SOURCE" worktree remove --force "$stale" || rm -rf -- "$stale"
-      else
-        cleanup_warning 'cannot safely unseal stale snapshot directories'
+      if ! mr store lease --owner-path "$stale" --repo-path "$SOURCE" -- bash -c '
+        python3 -I "$1/candidate_sandbox.py" --prepare-removal "$3" --snapshot-root "$4" &&
+          { python3 -I "$1/host-git.py" -C "$2" worktree remove --force "$3" || rm -rf -- "$3"; }
+      ' _ "$script_dir" "$SOURCE" "$stale" "$snapshot_root"; then
+        cleanup_warning 'cannot lease or safely remove stale snapshot'
       fi
       rm -f -- "$stale.lock"
     fi
   )
 done
-next_snapshot=$snapshot_root/$sha-$$
+next_snapshot=${4:?missing leased snapshot path}
 exec 8>"$next_snapshot.lock"
 if ! flock -n 8; then outcome=skipped; reason='snapshot-lock-held'; exit 0; fi
 snapshot=$next_snapshot
@@ -213,3 +215,17 @@ outcome=built
 reason=$mode
 # The integrator prunes only after the published edge confirms activation.
 printf 'BUILD_DIR=%s\nCURRENT=%s\nSHA=%s\n' "$build" "$P/current" "$sha"
+}
+
+# Run the entire transaction, including failure cleanup and pointer publication,
+# as a descendant of mr. No environment flag can bypass admission.
+set -Eeuo pipefail
+script_dir=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
+source_dir=$(realpath -- "${1:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}")
+requested=${2:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
+name=${3:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
+[[ $name =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ && $name != . && $name != .. ]] || { echo 'Invalid deployment name' >&2; exit 2; }
+sha=$(python3 -I "$script_dir/host-git.py" -C "$source_dir" rev-parse --verify "$requested^{commit}")
+owner=$(realpath -m -- "${FRACTAL_BUILD_SNAPSHOT_ROOT:?}/$name/$sha-$$")
+exec mr store lease --owner-path "$owner" --repo-path "$source_dir" -- \
+  bash -c "$(declare -f activate); activate \"\$@\"" "$0" "$source_dir" "$sha" "$name" "$owner"

@@ -66,6 +66,8 @@ pub struct Github {
     pub timezone: String,
     pub as_of_watermark: bool,
     pub measured_only: bool,
+    /// Empty means all authors; otherwise canonical lowercase GitHub logins.
+    pub author_logins: Vec<String>,
 }
 
 impl Indicator {
@@ -458,7 +460,7 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
     };
     Ok(match kind {
         "github-merged-count" | "github-ready-to-merged" => {
-            allow(&["source", "roster", "timezone", "cut", "measurement"])?;
+            allow(&["source", "roster", "timezone", "cut", "measurement", "author-login"])?;
             let source = single("source")?;
             let roster = single("roster")?;
             let timezone = single("timezone")?;
@@ -475,7 +477,14 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
                 "targeted" => false,
                 _ => return Err(fail("GitHub measurement must be only or targeted".into())),
             };
-            let config = Github { source, roster, timezone, as_of_watermark, measured_only };
+            let mut author_logins = strings("author-login")?;
+            if author_logins.iter().any(|login| login.is_empty() || !login.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'[' | b']'))) {
+                return Err(fail("GitHub author-login must be a nonempty ASCII login".into()));
+            }
+            author_logins.iter_mut().for_each(|login| login.make_ascii_lowercase());
+            author_logins.sort_unstable();
+            author_logins.dedup();
+            let config = Github { source, roster, timezone, as_of_watermark, measured_only, author_logins };
             if kind == "github-merged-count" { Indicator::GithubMergedCount(config) }
             else { Indicator::GithubReadyToMerged(config) }
         }

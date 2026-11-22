@@ -6473,6 +6473,24 @@
         "immutable": false,
         "reference": false
       },
+      "native_turn": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "native_turn_key": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "parent_attempt": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "parent_step_run": {
         "value_type": "subject-reference",
         "required": false,
@@ -8240,6 +8258,25 @@
       "step",
       "program"
     ]
+  },
+  "program.turn.report": {
+    "kind": "program.turn.report",
+    "subjects": [
+      "mission-run"
+    ],
+    "fields": {
+      "report": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": true
   },
   "publication.operation": {
     "kind": "publication.operation",
@@ -12454,27 +12491,9 @@
         "immutable": false,
         "reference": false
       },
-      "gaps": {
-        "value_type": "array",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "period_readings": {
-        "value_type": "array",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "readings": {
         "value_type": "array",
         "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "source_frontier": {
-        "value_type": "object",
-        "required": false,
         "immutable": false,
         "reference": false
       }

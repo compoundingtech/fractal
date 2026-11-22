@@ -1058,7 +1058,7 @@ invariants; no growing receipt body is synthesized by this update.
 
 `fractal_store::store::escalation` owns the restart index writes
 `lv-h0003f1ad06a3` and `lv-ha65878244411`, and the clock projection schema
-`lv-hfeeb5c6bf008` (replacing `lv-h6232d25a79e0`). The restart index stores only run and origin identifiers,
+`lv-h08c7d25eba0f`. The restart index stores only run and origin identifiers,
 never policy text, messages, or ask bodies. Its key is removed when the terminal
 ladder has no remaining deadline.
 
@@ -1105,17 +1105,24 @@ reference or physically bound the complete execution values and keys, preserving
 request identity and cleanup semantics.
 
 The same maintainer owns cancellation schema `lv-h68c595b5ab84`, insertion
-`lv-hc433437e984c` and expiry `lv-h3ecd1f97c431`. These retain a derived
-UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp,
-so cancellation-before-submission is atomic with request lookup. The 36-character
-check and seven-day retention are not general encoded-size or statement-cost
-proofs: an expiry can delete an unbounded number of rows inside submission.
-Values remain inline to retain the existing cancellation authority transition.
+`lv-hd7eb21c24865` and expiry `lv-h77ddc7013964`. These retain a derived
+UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp.
+Immediate transactions serialize acceptance with cancellation; cancellation
+always records evidence for every resolved owner key, including when an execution
+already exists. Acceptance also checks sibling executions and cancellation state.
+Expiry reclaims at most 128 tombstones per submission; timestamp checks prevent
+unreclaimed expired rows from blocking acceptance. The 36-character check and
+seven-day retention are not general encoded-size or statement-cost proofs.
+Refreshing owners under the writer lock scans the indexed invocation-receipt
+interval since this incarnation's start: O(R), without a cap or truncation.
+Long-lived incarnations can therefore increase writer-lock time. The durable
+owner projection and canonical incarnation/request row are deferred to #7012:
+legacy cancel-only rows contain opaque owner hashes and require a versioned
+contract transition. Values remain inline to preserve cancellation authority.
 The schema's `chunk-or-reference-variable-columns` task covers the identifier
-and index representation; the insertion/expiry
-`bound-or-reference-values-and-reclamation` tasks must bound physical storage
-and incremental reclamation without weakening cancellation tombstones or replay.
-This review records transitional debt, not a permanent exemption or size proof.
+and index representation; insertion/expiry retain the
+`bound-or-reference-values-and-reclamation` obligation. This records transitional
+debt, not a permanent exemption or size proof.
 
 ### Durable phone service minutes
 
@@ -1134,3 +1141,22 @@ The first uses source/report strings as variable index keys; the second combines
 a numeric minute with a variable subject key. Both index existing canonical
 claims without adding authoritative tables. Any later reference conversion must
 preserve exact retry, conflict exclusion, minute range and replication semantics.
+
+### Trim recording preserves ready publications (#6977)
+
+The `smallclaims::store::checkpoint_trim` maintainer retains
+`flow-h39d714b2bc13` for `trim_checkpoint_from`. Recording a cut now calls
+`replica_inventory_changed` rather than withdrawing claim projections: recording
+changes the replication ledger, while deletion and its graph-equivalence checks
+remain delegated to `finish_trim`. This changes the function's comment-free token
+fingerprint, so the flow record is refreshed from
+`python3 scripts/propose-sqlite-large-values`; the flow ID, owner, adjacent marker,
+disposition and `stage-generation-and-keyed-reclamation` obligation are unchanged.
+
+The producer still writes the exact checkpoint ID, drop digest, serialized
+tombstone counts and paged envelope/claim tombstones inline, preserving restart
+and certification semantics. Paging does not prove a physical value-size or
+reclamation-cost bound. The existing generation-staging and certified keyed
+reclamation work therefore remains necessary; this review neither removes the
+exception nor grants a wider exemption. No statement, column catalog or other
+flow record changes are accepted by this refresh.

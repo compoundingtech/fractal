@@ -564,15 +564,48 @@ reader; widening the evidence reader does not widen admission authority.
 The prior seed characterizations remain historical. Exact per-seed trim equality,
 mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.
 
-`claims-v41.json` adds the optional bounded `usage.limits.observed` source frontiers,
-reset-period observations and explicit unsupported account gaps to the combined
-current registry. Versions 1 through 40 remain frozen; main's published v40
-admission corpus is unchanged. Generate v41 with
-`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`.
-The current simulation loader and audit report select v41. Existing producers may
+## Local trim (2026-11-20)
+
+Shared checkpoint agreement is removed: members no longer seal, verify, excuse or adopt, and
+each trims its own cuts. The suite keeps the v40 corpus and its seeds, and the scheduler keeps
+partitions, offline days, clock skew, crashes at trim boundaries, restarts, new empty nodes and
+an old build, which is now a node with `[trim] local = false`. Each modern node's step is its
+own trim (`checkpoint_step` with trim on); the former excusal slot is another trim step, and
+`NEVER_TRIMS` and the old build's excusal continuation are gone. After quiescence the checks
+are: the same retained claims, outside those some node retired, on every trimming node; the
+oracle's projection digests and reader answers on every node; every claim no rule lets a node
+drop, and every person's claim, with the oracle's body; a lacked claim only of a
+`LOCAL_TRIM_KINDS` kind and retired; no invalid or pending record. Exact equality of retained
+and retired sets across trimming nodes, and a node retiring a claim another retired before it
+ever held it, wait for retired IDs to travel with an exchange (TODO: T-wins deletion,
+set-sync S2d); until then such a claim is allowed and that node's `claim_sources`,
+`operations` and graph digest are not compared. The sabotage check is a trim that forgets a
+claim it retired.
+
+## Native turn claim registration
+
+`claims-v41.json` adds the durable `program.turn.report` receipt and optional
+`native_turn`, `native_turn_key`, and `parent_attempt` creation fields. Versions 1 through
+40 remain frozen. It was generated from the native-turn registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`;
+do not hand-edit the snapshot. The simulation and audit reports selected v41. The native
+report is a system-only once-per-run fact; neither its retention nor its schema grants work
+authority. Local-trim convergence, retained claim equality, oracle reader comparisons,
+person-authored claim preservation, and invalid/pending-record checks remain unchanged.
+
+## Native spend source evidence
+
+`claims-v42.json` adds the optional bounded `usage.limits.observed` source frontiers,
+reset-period observations and explicit unsupported account gaps to the complete
+merged registry. Versions 1 through 41 remain frozen, including main's native-turn
+v41 corpus. Generate v42 with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
+The current simulation loader and audit report select v42. Existing producers may
 omit the new optional fields, but omission cannot assert source completeness.
 The existing usage draw deliberately exercises that legacy-compatible shape;
 authenticated source chains, reordered replay, native owner bindings and period
 bounds have dedicated regressions. No claim kind or historical-kind exclusion is
-added. Exact per-seed equality, mandatory post-excusal trimming, the three-seed cap
-and majority coverage remain enforced; no new seed characterization is assumed.
+added. Member-local trim convergence, retained claim equality, oracle reader
+comparisons, person-authored claim preservation, invalid/pending-record checks and
+majority trim coverage remain enforced. The former shared-checkpoint never-trim
+sets and post-excusal continuation remain historical, not active assertions.

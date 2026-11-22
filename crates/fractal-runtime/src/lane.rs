@@ -754,10 +754,15 @@ pub(crate) fn app_slice_cgroup() -> Option<std::path::PathBuf> {
 pub(crate) fn user_manager_cgroup() -> Option<std::path::PathBuf> {
     let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let own = own.lines().find_map(|line| line.strip_prefix("0::"))?;
-    let parts: Vec<&str> = own.split('/').filter(|part| !part.is_empty()).collect();
-    let manager = parts.iter().position(|part| part.starts_with("user@") && part.ends_with(".service"))?;
-    let mut path = std::path::PathBuf::from("/sys/fs/cgroup");
-    path.extend(&parts[..=manager]);
+    user_manager_cgroup_in(own, std::path::Path::new("/sys/fs/cgroup"))
+}
+
+/// Resolve a unified placement against a cgroup mount without reading the host.
+pub(crate) fn user_manager_cgroup_in(own: &str, root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let parts = own.split('/').filter(|part| !part.is_empty());
+    let manager = parts.clone().position(|part| part.starts_with("user@") && part.ends_with(".service"))?;
+    let mut path = root.to_path_buf();
+    path.extend(parts.take(manager + 1));
     Some(path)
 }
 
