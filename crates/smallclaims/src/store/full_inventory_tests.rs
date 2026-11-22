@@ -127,3 +127,91 @@ fn an_equal_digest_answer_stays_compact_after_a_concurrent_write() {
         "the answer retains the compact identity page bound"
     );
 }
+
+#[test]
+fn unchanged_root_exchanges_construct_no_full_summaries() {
+    let store = source();
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    let full = store.export_replication_summary(FLEET).unwrap();
+    assert!(!full.inventory.buckets.is_empty(), "exercise a nonempty proof list");
+    assert!(full.claim_ranges.as_ref().unwrap().retired.is_some());
+    let before = store.full_summary_constructions.load(Ordering::Relaxed);
+    for _ in 0..32 {
+        let request = store.export_replication_root_summary(FLEET).unwrap();
+        let response = store.export_replication_exchange_answering(
+            FLEET, &request.inventory, &request.signature_requests,
+        ).unwrap();
+        assert!(request.inventory.can(ROOT_FIRST));
+        assert!(request.inventory.can(ROOT_SUMMARY));
+        assert!(response.inventory.can(ROOT_SUMMARY));
+        for exchange in [&request, &response] {
+            assert_eq!(exchange.authority_digest, full.authority_digest);
+            assert_eq!(exchange.projection_digests, full.projection_digests);
+            assert_eq!(exchange.projection_versions, full.projection_versions);
+            assert_eq!(exchange.claim_ranges, full.claim_ranges);
+            assert_eq!(exchange.signature_requests, full.signature_requests);
+            assert!(exchange.inventory.buckets.is_empty());
+            assert!(exchange.inventory.envelopes.is_empty());
+            assert!(exchange.envelopes.is_empty());
+            let wire = serde_json::to_value(exchange).unwrap();
+            assert!(wire["inventory"].get("buckets").is_none());
+            let ranges = exchange.claim_ranges.as_ref().unwrap();
+            assert!(ranges.tops.is_none());
+            assert!(ranges.leaves.is_empty());
+            assert!(ranges.ids.is_empty());
+        }
+    }
+    assert_eq!(store.full_summary_constructions.load(Ordering::Relaxed), before);
+    // Negative control proves the counter observes the work the root path avoids.
+    store.export_replication_summary(FLEET).unwrap();
+    assert_eq!(store.full_summary_constructions.load(Ordering::Relaxed), before + 1);
+}
+
+#[test]
+fn mismatching_root_probes_negotiate_proofs_then_converge() {
+    let left = node("alder");
+    let right = node("birch");
+    let before = answers();
+    for _ in 0..8 {
+        let probe = left.export_replication_root_summary(FLEET).unwrap();
+        let response = right.export_replication_exchange_answering(
+            FLEET, &probe.inventory, &probe.signature_requests,
+        ).unwrap();
+        if response.inventory.digest == probe.inventory.digest {
+            assert!(response.inventory.can(ROOT_SUMMARY));
+            break;
+        }
+        assert!(!response.inventory.can(ROOT_SUMMARY));
+        assert!(!response.inventory.buckets.is_empty());
+        assert!(response.inventory.envelopes.is_empty(), "negotiate proofs, not a full inventory");
+        let push = left.export_replication_exchange_answering(
+            FLEET, &response.inventory, &response.signature_requests,
+        ).unwrap();
+        right.receive_replication_exchange("alder", FLEET, &push).unwrap();
+        let pull = right.export_replication_exchange_answering(
+            FLEET, &push.inventory, &push.signature_requests,
+        ).unwrap();
+        left.receive_replication_exchange("birch", FLEET, &pull).unwrap();
+    }
+    assert_eq!(
+        left.export_replication_root_summary(FLEET).unwrap().inventory.digest,
+        right.export_replication_root_summary(FLEET).unwrap().inventory.digest,
+    );
+    assert_eq!(answers(), before, "root mismatch must not request a full inventory");
+}
+
+#[test]
+fn peers_without_root_first_keep_full_summary_semantics() {
+    let store = source();
+    let mut legacy = store.export_replication_summary(FLEET).unwrap().inventory;
+    legacy.capabilities.clear();
+    let answer = store.export_replication_exchange(FLEET, &legacy).unwrap();
+    assert!(!answer.inventory.can(ROOT_SUMMARY));
+    assert_eq!(answer.inventory.buckets, legacy.buckets);
+    // A stray marker is not negotiation: both capability and marker are required.
+    legacy.capabilities.push(ROOT_SUMMARY.to_owned());
+    let answer = store.export_replication_exchange(FLEET, &legacy).unwrap();
+    assert!(!answer.inventory.can(ROOT_SUMMARY));
+    assert_eq!(answer.inventory.buckets, legacy.buckets);
+}

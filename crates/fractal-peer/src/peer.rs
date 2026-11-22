@@ -19,7 +19,6 @@ use axum::routing::{get, post};
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
-use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
@@ -1857,6 +1856,13 @@ fn started_at_unix_ms() -> u64 {
 }
 
 impl Backend for MainBackend {
+    async fn wait_revision(
+        &self,
+        request: smallclaims::sync::revision::RevisionRequest,
+    ) -> Result<smallclaims::sync::revision::StoreRevision> {
+        self.client.post(&self.replication_path("revision"), &request).await
+    }
+
     async fn ready(&self) {
         loop {
             if let Ok(health) = self.client.get::<serde_json::Value>("/v1/health").await {
@@ -1896,43 +1902,6 @@ impl Backend for MainBackend {
             ))
     }
 
-    async fn guard_summary(&self, fleet_id: &str) -> Result<ReplicationExportResponse> {
-        // This marker goes only to our local daemon, never into a signed peer exchange.
-        // Old daemons ignore it and return the same complete summary.
-        self.client
-            .post(
-                &self.replication_path("export"),
-                &ReplicationExportRequest {
-                    fleet_id: fleet_id.to_owned(),
-                    inventory: ReplicationInventory::default(),
-                    summary_only: true,
-                    authority_guard: true,
-                    authority_digest_only: false,
-                    signature_requests: Vec::new(),
-                },
-            )
-            .await
-    }
-
-    async fn authority_digest(&self, fleet_id: &str) -> Result<String> {
-        // New daemons omit only the unused buckets. An old daemon ignores the additive
-        // option and returns its full response; consume its digest from this same call.
-        let response: ReplicationExportResponse = self
-            .client
-            .post(
-                &self.replication_path("export"),
-                &ReplicationExportRequest {
-                    fleet_id: fleet_id.to_owned(),
-                    inventory: ReplicationInventory::default(),
-                    summary_only: true,
-                    authority_guard: true,
-                    authority_digest_only: true,
-                    signature_requests: Vec::new(),
-                },
-            )
-            .await?;
-        Ok(response.exchange.authority_digest)
-    }
 
     async fn receive(
         &self,
@@ -2142,47 +2111,24 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
         peer_listen: config.peer_listen.clone(),
         fleet: config.fleet.clone(),
     };
-    // Pace before fan-out: raw file events must not bypass round coalescing through
-    // authority guards or the membership follower.
-    let (raw_wake, raw_events) = watch::channel(0_u64);
+    // Outbound and membership followers subscribe to daemon-owned store revisions.
     let (wake, _) = watch::channel(0_u64);
-    let wake_pacer = tokio::spawn(smallclaims::sync::coalesce_replication_wakes(
-        raw_events, wake.clone(),
-    ));
-    let wake_file = config.state_dir.join("replication.wake");
-    if !wake_file.exists() {
-        fs::write(&wake_file, b"worker-start\n")?;
-    }
-    let watcher_wake = raw_wake.clone();
-    let mut database_watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if event.is_ok() {
-                smallclaims::sync::telemetry::record_wake(
-                    smallclaims::sync::telemetry::WakeStage::Raw,
-                );
-                watcher_wake.send_modify(|generation| *generation = generation.saturating_add(1));
-            }
-        })?;
-    database_watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive)?;
     started_at_unix_ms();
     tokio::spawn(MainBackend::new(config.socket.clone()).report_process_cpu());
     let main = MainBackend::new(config.socket.clone());
     main.ready().await;
     let mut shards = Vec::new();
-    // Graph sync never waits on the shard. A 404 or 405 means this daemon holds none. Any other
-    // failure is taken as passing on a daemon that holds it: the shard is followed from an empty
-    // peer set, and if that guess is wrong the sync stays idle and dials nobody.
-    let held = match shard_peers(&main, MESSAGES_SHARD).await {
-        Ok(peers) => peers,
-        Err(error) => {
-            eprintln!("st replication-worker: messages shard peers unavailable, following: {error:#}");
-            Some(BTreeSet::new())
-        }
-    };
+    let discovery_revision = main.wait_revision(smallclaims::sync::revision::RevisionRequest {
+        kind: smallclaims::sync::revision::RevisionKind::Authority, after: None,
+    }).await?;
+    let mut followers = tokio::task::JoinSet::new();
+    let held = shard_peers(&main, MESSAGES_SHARD).await?;
     if let Some(peers) = held {
         let (sender, receiver) = watch::channel(peers);
-        let shard_wake = wake.clone();
-        tokio::spawn(follow_shard_peers(main.clone(), MESSAGES_SHARD, sender, wake.subscribe()));
+        let (shard_wake, _) = watch::channel(0_u64);
+        followers.spawn(follow_shard_peers(
+            main.clone(), MESSAGES_SHARD, sender, Some(discovery_revision),
+        ));
         shards.push(smallclaims::sync::ShardSync {
             id: smallclaims::shards::ShardId::parse(MESSAGES_SHARD)?,
             backend: MainBackend::for_shard(config.socket.clone(), MESSAGES_SHARD),
@@ -2190,37 +2136,12 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
             wake: shard_wake,
         });
     }
-    run_with_wake_drain(
-        smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards),
-        database_watcher,
-        raw_wake,
-        wake_pacer,
-    ).await
+    tokio::select! {
+        result = smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards) => result,
+        Some(result) = followers.join_next() => result.context("shard discovery follower failed")?,
+    }
 }
 
-async fn run_with_wake_drain(
-    worker: impl Future<Output = Result<()>>,
-    watcher: notify::RecommendedWatcher,
-    raw_wake: watch::Sender<u64>,
-    mut pacer: tokio::task::JoinHandle<()>,
-) -> Result<()> {
-    let result = worker.await;
-    // Dropping the watcher may discard kernel events not yet delivered to its handler.
-    // Force one final dirty generation, then drain generations already delivered by the
-    // watcher. Some backends retain their raw producer, so keep the drain bounded.
-    drop(watcher);
-    raw_wake.send_modify(|generation| *generation = generation.saturating_add(1));
-    drop(raw_wake);
-    let drained = match tokio::time::timeout(Duration::from_secs(2), &mut pacer).await {
-        Ok(joined) => joined.context("replication wake pacer failed"),
-        Err(_) => {
-            pacer.abort();
-            eprintln!("st replication-worker: wake drain exceeded 2s; aborting pacer");
-            Ok(())
-        }
-    };
-    result.and(drained)
-}
 
 /// The shard the daemon keeps messages in; see `fractal_store::store::messages_shard`.
 const MESSAGES_SHARD: &str = "messages";
@@ -2243,29 +2164,24 @@ async fn shard_peers(backend: &MainBackend, shard: &str) -> Result<Option<BTreeS
     }
 }
 
-/// Keep a shard's peer set current: advertisements arrive as graph claims, so look again
-/// when the graph wakes the dialers, at most every 5 seconds and at least every 30.
+/// Follow graph authority changes; local worker/status writes never refresh shard peers.
 async fn follow_shard_peers(
     backend: MainBackend,
     shard: &'static str,
     peers: watch::Sender<BTreeSet<String>>,
-    mut wake: watch::Receiver<u64>,
-) {
+    mut after: Option<smallclaims::sync::revision::StoreRevision>,
+) -> Result<()> {
     loop {
-        tokio::select! {
-            changed = wake.changed() => if changed.is_err() { return },
-            () = tokio::time::sleep(Duration::from_secs(30)) => {}
-        }
-        // Graph wakes come in bursts; one look covers every wake in the pause.
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        wake.mark_unchanged();
-        if let Ok(Some(current)) = shard_peers(&backend, shard).await {
-            peers.send_if_modified(|known| {
-                let changed = *known != current;
-                *known = current;
-                changed
-            });
-        }
+        let revision = backend.wait_revision(smallclaims::sync::revision::RevisionRequest {
+            kind: smallclaims::sync::revision::RevisionKind::Authority, after,
+        }).await?;
+        let current = shard_peers(&backend, shard).await?.unwrap_or_default();
+        peers.send_if_modified(|known| {
+            let changed = *known != current;
+            *known = current;
+            changed
+        });
+        after = Some(revision);
     }
 }
 
@@ -2302,138 +2218,6 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn worker_failure_closes_raw_producer_and_awaits_the_trailing_wake() {
-        let (raw, events) = watch::channel(0_u64);
-        let (paced, mut observed) = watch::channel(0_u64);
-        let producer = raw.clone();
-        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if event.is_ok() {
-                producer.send_modify(|generation| *generation += 1);
-            }
-        }).unwrap();
-        let pacer = tokio::spawn(smallclaims::sync::coalesce_replication_wakes(events, paced));
-        raw.send_modify(|generation| *generation += 1);
-        observed.changed().await.unwrap();
-        assert_eq!(*observed.borrow(), 1);
-        for _ in 0..100 {
-            raw.send_modify(|generation| *generation += 1);
-        }
-        // Retirement releases both the watcher closure and the explicit final producer.
-        let shutdown = run_with_wake_drain(
-            async { Err(anyhow::anyhow!("settings-task-failure")) }, watcher, raw, pacer,
-        );
-        tokio::pin!(shutdown);
-        assert!(futures_util::poll!(&mut shutdown).is_pending());
-        tokio::time::advance(Duration::from_millis(999)).await;
-        assert_eq!(*observed.borrow(), 1);
-        assert!(futures_util::poll!(&mut shutdown).is_pending());
-        tokio::time::advance(Duration::from_millis(1)).await;
-        tokio::time::timeout(Duration::from_secs(1), observed.changed())
-            .await.expect("shutdown dropped the trailing wake").unwrap();
-        assert_eq!(*observed.borrow(), 2);
-        let error = tokio::time::timeout(Duration::from_secs(2), shutdown)
-            .await.expect("raw producer remained open").unwrap_err();
-        assert_eq!(error.to_string(), "settings-task-failure");
-
-        // A backend retaining its handler must not strand the failed process.
-        let watcher = notify::recommended_watcher(|event: notify::Result<notify::Event>| {
-            drop(event);
-        }).unwrap();
-        let pacer = tokio::spawn(std::future::pending::<()>());
-        let (raw, _events) = watch::channel(0_u64);
-        let aborted = pacer.abort_handle();
-        let started = tokio::time::Instant::now();
-        let error = run_with_wake_drain(
-            async { Err(anyhow::anyhow!("original-worker-failure")) }, watcher, raw, pacer,
-        ).await.unwrap_err();
-        assert_eq!(started.elapsed(), Duration::from_secs(2));
-        assert_eq!(error.to_string(), "original-worker-failure");
-        tokio::task::yield_now().await;
-        assert!(aborted.is_finished());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn watcher_retirement_wakes_for_a_write_during_an_in_flight_round() {
-        for fail in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let wake_file = root.path().join("replication.wake");
-            fs::write(&wake_file, b"before-round\n").unwrap();
-            let (raw, events) = watch::channel(0_u64);
-            let (paced, mut observed) = watch::channel(0_u64);
-            let producer = raw.clone();
-            // Model a backend with pending kernel events that never reach the raw channel.
-            // Keep its producer alive until retirement, but do not deliver file events.
-            let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                let _ = &producer;
-                drop(event);
-            }).unwrap();
-            watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive).unwrap();
-            let pacer = tokio::spawn(smallclaims::sync::coalesce_replication_wakes(events, paced));
-            raw.send_modify(|generation| *generation += 1);
-            observed.changed().await.unwrap();
-            assert_eq!(*observed.borrow(), 1);
-            let (finish, round_finished) = tokio::sync::oneshot::channel();
-            let worker = async {
-                round_finished.await.unwrap();
-                if fail { Err(anyhow::anyhow!("round-failed")) } else { Ok(()) }
-            };
-            let shutdown = run_with_wake_drain(worker, watcher, raw, pacer);
-            tokio::pin!(shutdown);
-            // The round is in flight before the write, and cannot retire until released.
-            assert!(futures_util::poll!(&mut shutdown).is_pending());
-            fs::write(&wake_file, b"during-round\n").unwrap();
-            assert!(!observed.has_changed().unwrap());
-            finish.send(()).unwrap();
-            assert!(futures_util::poll!(&mut shutdown).is_pending());
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::time::timeout(Duration::from_secs(1), observed.changed())
-                .await.expect("retirement lost a write not delivered by the watcher").unwrap();
-            assert_eq!(*observed.borrow_and_update(), 2);
-            let result = tokio::time::timeout(Duration::from_secs(2), shutdown)
-                .await.expect("retirement waited for the idle timer");
-            assert_eq!(result.is_err(), fail);
-            if let Err(error) = result {
-                assert_eq!(error.to_string(), "round-failed");
-            }
-            // Retirement contributes exactly one final broadcast, including clean returns.
-            assert_eq!(*observed.borrow(), 2);
-            assert!(observed.changed().await.is_err());
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn filesystem_burst_has_one_leading_and_one_trailing_shared_wake() {
-        let (raw, events) = watch::channel(0_u64);
-        let (paced, _) = watch::channel(0_u64);
-        let followers = [paced.subscribe(), paced.subscribe(), paced.subscribe()];
-        let pacer = smallclaims::sync::coalesce_replication_wakes(events, paced);
-        tokio::pin!(pacer);
-        raw.send_modify(|generation| *generation += 1);
-        assert!(futures_util::poll!(&mut pacer).is_pending());
-        for _ in 0..100 {
-            raw.send_modify(|generation| *generation += 1);
-            assert!(futures_util::poll!(&mut pacer).is_pending());
-        }
-        // Graph, messages and membership all see only the leading broadcast.
-        for follower in &followers {
-            assert_eq!(*follower.borrow(), 1);
-        }
-        tokio::time::advance(Duration::from_millis(999)).await;
-        assert!(futures_util::poll!(&mut pacer).is_pending());
-        for follower in &followers {
-            assert_eq!(*follower.borrow(), 1);
-        }
-        // Closing the producer must not drop an outstanding trailing write.
-        drop(raw);
-        tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(futures_util::poll!(&mut pacer).is_pending());
-        for follower in &followers {
-            assert_eq!(*follower.borrow(), 2);
-        }
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(futures_util::poll!(&mut pacer).is_ready());
-    }
 
     #[tokio::test]
     async fn peer_envelope_versions_are_accepted_by_the_client_relay() {

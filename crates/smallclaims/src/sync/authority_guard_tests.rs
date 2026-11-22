@@ -1,33 +1,22 @@
-//! Exercise the actual dialer branch as well as the default scalar method. No live fleet or
-//! daemon is used. The mock changes only the guard's response; ordinary exports stay full.
+//! Count actual worker requests while store-scoped subscriptions follow committed changes.
 use super::*;
 use crate::fleet::handshake::JoinRequest;
 use crate::replication::{ReceiveOptions, ReplicationExportResponse, ReplicationReceiveResponse};
 use crate::store::Runtime as _;
 use crate::sync::Local;
-use std::sync::{
-    Mutex,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const FLEET: &str = "fixture-fleet";
 
-#[derive(Default)]
-struct Gate {
-    entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
 #[derive(Clone)]
 struct GuardBackend {
-    answer: Arc<Mutex<Result<String, String>>>,
-    calls: Arc<AtomicUsize>,
+    authority_waits: Arc<AtomicUsize>,
     exports: Arc<AtomicUsize>,
     views: Arc<AtomicUsize>,
     receives: Arc<AtomicUsize>,
     changes: Arc<AtomicUsize>,
     receive_changed: bool,
-    gate: Option<Arc<Gate>>,
+    store: Arc<crate::store::Store>,
 }
 
 fn response(digest: String) -> ReplicationExportResponse {
@@ -62,21 +51,31 @@ fn response(digest: String) -> ReplicationExportResponse {
 }
 
 impl GuardBackend {
-    fn new(answer: Result<&str, &str>) -> Self {
+    fn new() -> Self {
         Self {
-            answer: Arc::new(Mutex::new(answer.map(str::to_owned).map_err(str::to_owned))),
-            calls: Arc::default(),
+            authority_waits: Arc::default(),
             exports: Arc::default(),
             views: Arc::default(),
             receives: Arc::default(),
             changes: Arc::default(),
             receive_changed: false,
-            gate: None,
+            store: Arc::new(crate::store::Store::open_memory(
+                "local", Arc::new(crate::store::runtime::Plain),
+            ).unwrap()),
         }
     }
 }
 
 impl Backend for GuardBackend {
+    async fn wait_revision(
+        &self,
+        request: crate::sync::revision::RevisionRequest,
+    ) -> Result<crate::sync::revision::StoreRevision> {
+        if matches!(request.kind, crate::sync::revision::RevisionKind::Authority) {
+            self.authority_waits.fetch_add(1, Ordering::Relaxed);
+        }
+        self.store.wait_replication_revision(request).await
+    }
     async fn export(
         &self,
         _fleet: &str,
@@ -87,22 +86,6 @@ impl Backend for GuardBackend {
         self.exports.fetch_add(1, Ordering::Relaxed);
         Ok(response("ordinary-full-export".into()))
     }
-    async fn guard_summary(&self, _fleet: &str) -> Result<ReplicationExportResponse> {
-        let call = self.calls.fetch_add(1, Ordering::Relaxed);
-        if let Some(gate) = &self.gate
-            && call == 0
-        {
-            gate.entered.notify_one();
-            gate.release.notified().await;
-        }
-        self.answer
-            .lock()
-            .unwrap()
-            .clone()
-            .map(response)
-            .map_err(anyhow::Error::msg)
-    }
-    // Do not override authority_digest: test the compatibility default and its one call.
     async fn receive(
         &self,
         _peer: &str,
@@ -151,53 +134,52 @@ impl Backend for GuardBackend {
 }
 
 #[tokio::test(start_paused = true)]
-async fn paced_wake_burst_bounds_actual_guard_export_and_membership_work() {
-    let backend = GuardBackend::new(Ok("same"));
+async fn unrelated_wakes_make_zero_guard_and_membership_requests() {
+    use crate::sync::revision::{RevisionKind, RevisionRequest};
+    let backend = GuardBackend::new();
     let fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
     let now = tokio::time::Instant::now();
     fleet.online.write().unwrap().insert("peer".into(), now);
     fleet.inbound.write().unwrap().insert("peer".into(), now);
-    fleet.inbound_authority.write().unwrap().insert("peer".into(), "same".into());
-    let (raw, events) = watch::channel(0_u64);
-    let (paced, _) = watch::channel(0_u64);
+    let authority = backend.store.replication_revision_snapshot(RevisionKind::Authority).unwrap();
+    fleet.inbound_authority.write().unwrap().insert(
+        "peer".into(), authority.authority_root.clone().unwrap(),
+    );
+    *fleet.local_authority.write().unwrap() = Some(authority);
+    let initial = backend.wait_revision(RevisionRequest {
+        kind: RevisionKind::Membership, after: None,
+    }).await.unwrap();
+    let (wake, _) = watch::channel(0_u64);
     let (_routes, routes) = watch::channel(vec![Route::Http("http://127.0.0.1:1".into())]);
-    let pacer = coalesce_replication_wakes(events, paced.clone());
-    let membership = keep_fleet_view_current(backend.clone(), fleet.clone(), paced.subscribe());
+    let membership = keep_fleet_view_current(backend.clone(), fleet.clone(), Some(initial));
     let dialer = dial_peer(
         backend.clone(), "local".into(), "peer".into(), routes,
-        FleetAuth::test(FLEET, &[7; 32]), fleet.clone(), paced.subscribe(),
+        FleetAuth::test(FLEET, &[7; 32]), fleet.clone(), wake.subscribe(),
     );
-    tokio::pin!(pacer, membership, dialer);
-    raw.send_modify(|generation| *generation += 1);
-    assert!(futures_util::poll!(&mut pacer).is_pending());
-    assert!(futures_util::poll!(&mut membership).is_pending());
-    assert!(futures_util::poll!(&mut dialer).is_pending());
+    tokio::pin!(membership, dialer);
     for _ in 0..100 {
-        raw.send_modify(|generation| *generation += 1);
-        // Other notifications may re-enter the guard even without a new paced wake.
+        wake.send_modify(|generation| *generation += 1);
         fleet.inbound_changed.send_modify(|generation| *generation += 1);
-        assert!(futures_util::poll!(&mut pacer).is_pending());
         assert!(futures_util::poll!(&mut membership).is_pending());
         assert!(futures_util::poll!(&mut dialer).is_pending());
     }
-    assert_eq!(*paced.borrow(), 1);
-    assert_eq!(backend.calls.load(Ordering::Relaxed), 1);
-    assert_eq!(backend.views.load(Ordering::Relaxed), 1);
-    assert_eq!(backend.exports.load(Ordering::Relaxed), 0);
     tokio::time::advance(REPLICATION_WAKE_COALESCE).await;
-    assert!(futures_util::poll!(&mut pacer).is_pending());
-    assert!(futures_util::poll!(&mut membership).is_pending());
     assert!(futures_util::poll!(&mut dialer).is_pending());
-    assert_eq!(*paced.borrow(), 2);
-    assert_eq!(backend.calls.load(Ordering::Relaxed), 2);
-    assert_eq!(backend.views.load(Ordering::Relaxed), 2);
+    assert_eq!(backend.authority_waits.load(Ordering::Relaxed), 0);
+    assert_eq!(backend.views.load(Ordering::Relaxed), 0);
     assert_eq!(backend.exports.load(Ordering::Relaxed), 0);
+    backend.store.connection.write().execute(
+        "UPDATE fleet_generation SET value=value+1 WHERE id=1", [],
+    ).unwrap();
+    assert!(futures_util::poll!(&mut membership).is_pending());
+    assert_eq!(backend.views.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.authority_waits.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
 async fn shard_exchanges_and_empty_offers_do_not_fold_graph_membership() {
     for changed in [false, true] {
-        let mut backend = GuardBackend::new(Ok("same"));
+        let mut backend = GuardBackend::new();
         backend.receive_changed = changed;
         let mut fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
         fleet.own_key = Some("local-key".into());
@@ -215,139 +197,29 @@ async fn shard_exchanges_and_empty_offers_do_not_fold_graph_membership() {
         assert_eq!(backend.changes.load(Ordering::Relaxed), if changed { 100 } else { 0 });
         assert_eq!(backend.views.load(Ordering::Relaxed), 0);
         assert_eq!(backend.exports.load(Ordering::Relaxed), 0);
-        // Default-store admission still reads fresh membership, including on a quiet reply.
+        // Empty graph replies and ordinary graph records also do no membership reads.
         exchange.shard_id = None;
         receive_from_peer(
             &backend, &fleet, "peer", FLEET, &exchange, ReceiveOptions::default(),
         ).await.unwrap();
-        assert_eq!(backend.views.load(Ordering::Relaxed), if changed { 2 } else { 1 });
+        assert_eq!(backend.views.load(Ordering::Relaxed), 0);
+        backend.store.append_claim(&crate::claim::ClaimInput {
+            subject: "note/ordinary".into(), kind: "example.note".into(), actor: None,
+            fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let ordinary = backend.store.export_replication_exchange(
+            FLEET, &ReplicationInventory::default(),
+        ).unwrap();
+        receive_from_peer(
+            &backend, &fleet, "peer", FLEET, &ordinary, ReceiveOptions::default(),
+        ).await.unwrap();
+        select_leave_confirmer(&backend, &fleet, "peer", &ordinary).await.unwrap();
+        assert_eq!(backend.views.load(Ordering::Relaxed), 0);
     }
 }
 
-#[tokio::test]
-async fn default_scalar_calls_unchanged_full_guard_once_and_preserves_errors() {
-    let backend = GuardBackend::new(Ok("current"));
-    assert_eq!(backend.authority_digest(FLEET).await.unwrap(), "current");
-    assert_eq!(backend.calls.load(Ordering::Relaxed), 1);
-    let backend = GuardBackend::new(Err("injected guard error"));
-    assert_eq!(
-        backend
-            .authority_digest(FLEET)
-            .await
-            .unwrap_err()
-            .to_string(),
-        "injected guard error"
-    );
-    assert_eq!(
-        backend.calls.load(Ordering::Relaxed),
-        1,
-        "no retry on failure"
-    );
-}
 
-async fn dial_case(
-    backend: GuardBackend,
-    offered: Option<&str>,
-    recent_inbound: bool,
-    expect_dial: bool,
-    change_in_flight: bool,
-) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
-    // Presence requests a local push; only the existing recent-inbound guard can suppress it.
-    fleet
-        .online
-        .write()
-        .unwrap()
-        .insert("peer".into(), tokio::time::Instant::now());
-    if recent_inbound {
-        fleet
-            .inbound
-            .write()
-            .unwrap()
-            .insert("peer".into(), tokio::time::Instant::now());
-    }
-    if let Some(offered) = offered {
-        fleet
-            .inbound_authority
-            .write()
-            .unwrap()
-            .insert("peer".into(), offered.into());
-    }
-    let (_routes, route_rx) = watch::channel(vec![Route::Http(url)]);
-    let (_wake, wake_rx) = watch::channel(0_u64);
-    let task = tokio::spawn(dial_peer(
-        backend.clone(),
-        "local".into(),
-        "peer".into(),
-        route_rx,
-        FleetAuth::test(FLEET, &[7; 32]),
-        fleet,
-        wake_rx,
-    ));
-    if change_in_flight {
-        let gate = backend.gate.as_ref().unwrap();
-        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
-            .await
-            .unwrap();
-        *backend.answer.lock().unwrap() = Ok("changed-during-guard".into());
-        gate.release.notify_one();
-    }
-    // A matching recent-inbound witness waits30s; a new/different/empty/error guard keeps
-    // the existing1s coalescing window, or the immediate bootstrap path. No timer is changed.
-    let timeout = if expect_dial {
-        Duration::from_secs(3)
-    } else {
-        Duration::from_millis(1400)
-    };
-    let attempted = tokio::time::timeout(timeout, listener.accept())
-        .await
-        .is_ok();
-    task.abort();
-    let _ = task.await;
-    assert_eq!(
-        attempted, expect_dial,
-        "offered={offered:?}, recent={recent_inbound}, in_flight={change_in_flight}"
-    );
-    let calls = backend.calls.load(Ordering::Relaxed);
-    if recent_inbound && offered.is_some() {
-        assert!(
-            calls >= 1,
-            "the actual guard was reached; coalescing can read it again"
-        );
-    } else {
-        assert_eq!(
-            calls, 0,
-            "no new guard on bootstrap or without an offered witness"
-        );
-    }
-}
-
-#[tokio::test]
-async fn actual_dialer_matches_old_nonempty_decisions_and_never_skips_empty_error_or_bootstrap() {
-    for (answer, offered, recent) in [
-        (Ok("same"), Some("same"), true),
-        (Ok("different"), Some("same"), true),
-        (Ok(""), Some("same"), true),
-        (Err("read failed"), Some("same"), true),
-        (Ok("same"), None, true),
-        (Ok("same"), Some("same"), false),
-    ] {
-        // The independent old branch used the full guard's digest, at the same mocked cut.
-        let old_skip = recent && offered.is_some() && answer.as_ref().ok().copied() == offered;
-        dial_case(GuardBackend::new(answer), offered, recent, !old_skip, false).await;
-    }
-    // Invalid empty/empty cannot authorize a quiet skip, even though raw string equality can.
-    dial_case(GuardBackend::new(Ok("")), Some(""), true, true, false).await;
-}
-
-#[tokio::test]
-async fn local_change_while_guard_is_in_flight_keeps_the_existing_push_path() {
-    let mut backend = GuardBackend::new(Ok("same"));
-    backend.gate = Some(Arc::default());
-    dial_case(backend, Some("same"), true, true, true).await;
-}
 
 #[tokio::test]
 async fn signed_peer_request_cannot_select_the_local_reduced_mode() {
