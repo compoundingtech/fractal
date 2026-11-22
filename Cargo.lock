@@ -2273,7 +2273,6 @@ dependencies = [
  "futures-util",
  "hex",
  "jsonschema",
- "notify",
  "parking_lot",
  "pty-client",
  "pty-core",
@@ -6888,6 +6887,7 @@ dependencies = [
  "atomic",
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
