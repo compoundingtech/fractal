@@ -340,3 +340,61 @@ fn sigkill_between_intent_create_and_receipt_resumes_exact_object() {
         assert!(release(&store, &resumed).unwrap());
     }
 }
+
+thread_local! {
+    static BEFORE_REMOVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn before_remove() {
+    BEFORE_REMOVE.with(|hook| {
+        if let Some(hook) = hook.take() { hook(); }
+    });
+}
+
+#[test]
+fn renamed_root_after_final_check_never_deletes_symlink_target() {
+    let (store, directory, request) = fixture();
+    let handle = store.acquire_scratch(&request).unwrap();
+    fs::create_dir(Path::new(&handle.path).join("nested")).unwrap();
+    fs::write(Path::new(&handle.path).join("nested/payload"), b"owned").unwrap();
+    let root = Path::new(&request.root).to_path_buf();
+    let displaced = directory.path().join("displaced");
+    let foreign = directory.path().join("foreign");
+    let basename = Path::new(&handle.path).file_name().unwrap();
+    fs::create_dir_all(foreign.join(basename)).unwrap();
+    let sentinel = foreign.join(basename).join("sentinel");
+    fs::write(&sentinel, b"unrelated").unwrap();
+    let original = displaced.join(basename);
+    BEFORE_REMOVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        fs::rename(&root, &displaced).unwrap();
+        std::os::unix::fs::symlink(&foreign, &root).unwrap();
+    })));
+    assert!(release(&store, &handle).unwrap());
+    assert_eq!(fs::read(sentinel).unwrap(), b"unrelated");
+    assert!(!original.exists());
+    assert_eq!(record(&store, &request.id).state, "released");
+}
+
+#[test]
+fn renamed_ancestor_after_final_check_never_deletes_symlink_target() {
+    let (store, directory, mut request) = fixture();
+    request.root = directory.path().join("ancestor/dedicated").to_string_lossy().into_owned();
+    let handle = store.acquire_scratch(&request).unwrap();
+    fs::write(Path::new(&handle.path).join("payload"), b"owned").unwrap();
+    let ancestor = directory.path().join("ancestor");
+    let displaced = directory.path().join("displaced");
+    let foreign = directory.path().join("foreign");
+    let basename = Path::new(&handle.path).file_name().unwrap();
+    fs::create_dir_all(foreign.join("dedicated").join(basename)).unwrap();
+    let sentinel = foreign.join("dedicated").join(basename).join("sentinel");
+    fs::write(&sentinel, b"unrelated").unwrap();
+    let original = displaced.join("dedicated").join(basename);
+    BEFORE_REMOVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        fs::rename(&ancestor, &displaced).unwrap();
+        std::os::unix::fs::symlink(&foreign, &ancestor).unwrap();
+    })));
+    assert!(release(&store, &handle).unwrap());
+    assert_eq!(fs::read(sentinel).unwrap(), b"unrelated");
+    assert!(!original.exists());
+    assert_eq!(record(&store, &request.id).state, "released");
+}

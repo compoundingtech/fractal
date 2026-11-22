@@ -286,6 +286,8 @@ impl Store {
             anyhow::ensure!(Some(identity(Path::new(&record.handle.path))?) == record.object,
                 "scratch object identity changed before removal");
         }
+        #[cfg(test)]
+        tests::before_remove();
         match fs::remove_dir_all(&record.handle.path) {
             Ok(()) => {},
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},

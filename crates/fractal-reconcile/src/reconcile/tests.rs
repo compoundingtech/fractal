@@ -2,6 +2,7 @@
     mod agent_review_loop_branches;
     mod restart_preparation;
     mod scratch_resources;
+    mod scratch_consumer_custody;
 
 mod native_effect_convergence {
     use super::*;
