@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Scope finite-work memory pressure to its lanes and protect host free memory",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No client schema, generated code or API shape changes."},
+  "rules": {"status": "changed", "detail": "Linux finite-work admission reads memory PSI from the aggregate lane cgroup instead of host-wide memory PSI. Lane pressure or MemAvailable below the configured absolute floor trips the existing sustained brake; recovery requires healthy lane pressure and available memory for the existing resume interval. An absent lane slice counts as zero lane pressure; with LogicalOnly coverage, memory protection comes from the MemAvailable floor alone. Existing lane cgroups with missing, unreadable or malformed PSI remain unknown. IO PSI remains host-wide. Missing, malformed or stale required observations still close admission."},
+  "compatibility": {"status": "none", "detail": "Existing psiBrake policies remain valid. Optional memoryAvailableFloorBytes defaults to 2147483648 bytes (2 GiB), an absolute floor rather than a percentage."},
+  "downtime": {"status": "none", "detail": "The new signal takes effect after daemon restart."},
+  "manual": {"status": "none", "detail": "No manual migration is required."},
+  "recovery": {"status": "none", "detail": "Binary rollback requires no data migration."}
+}

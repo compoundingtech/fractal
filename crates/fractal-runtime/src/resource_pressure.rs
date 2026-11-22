@@ -37,6 +37,8 @@ pub struct Policy {
     pub sustained_ms: u64,
     pub resume_ms: u64,
     pub freshness_ms: u64,
+    /// Absolute host MemAvailable floor; a shortage counts as memory pressure.
+    pub memory_available_floor_bytes: u64,
 }
 
 impl Default for Policy {
@@ -51,6 +53,7 @@ impl Default for Policy {
             sustained_ms: 60000,
             resume_ms: 120000,
             freshness_ms: 10000,
+            memory_available_floor_bytes: 2 << 30,
         }
     }
 }
@@ -207,14 +210,22 @@ pub fn parse_millipercent(line: &str, window: Window) -> Result<u32> {
 pub struct Reader {
     memory: String,
     io: String,
+    meminfo: String,
     readings: Vec<Reading>,
 }
 
 impl Reader {
     pub fn read(&mut self, policy: &Policy, now_ms: u64) -> Result<&[Reading]> {
-        self.read_paths(policy, now_ms,
-            std::path::Path::new("/proc/pressure/memory"),
-            std::path::Path::new("/proc/pressure/io"))
+        let lane = if policy.rules.iter().any(|rule|
+            matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull))
+        {
+            crate::lane::app_slice_cgroup()
+                .ok_or_else(|| anyhow::anyhow!("missing lane cgroup"))?
+                .join(crate::lane::LANES_SLICE)
+        } else { std::path::PathBuf::new() };
+        self.read_paths(policy, now_ms, &lane.join("memory.pressure"),
+            std::path::Path::new("/proc/pressure/io"),
+            std::path::Path::new("/proc/meminfo"))
     }
 
     fn read_paths(
@@ -223,6 +234,7 @@ impl Reader {
         now_ms: u64,
         memory_path: &std::path::Path,
         io_path: &std::path::Path,
+        meminfo_path: &std::path::Path,
     ) -> Result<&[Reading]> {
         use std::io::Read as _;
         self.readings.clear();
@@ -230,9 +242,39 @@ impl Reader {
             matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull));
         let needs_io = policy.rules.iter().any(|rule|
             matches!(rule.signal, Signal::IoSome | Signal::IoFull));
+        let mut shortage = false;
+        let mut lane_absent = false;
         if needs_memory {
             self.memory.clear();
-            std::fs::File::open(memory_path)?.read_to_string(&mut self.memory)?;
+            match std::fs::File::open(memory_path) {
+                Ok(mut file) => { file.read_to_string(&mut self.memory)?; }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let cgroup = memory_path.parent().ok_or_else(|| anyhow::anyhow!("missing lane path"))?;
+                    match std::fs::metadata(cgroup) {
+                        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                            // The runtime creates this slice only when enforced work launches.
+                            // Require its containing hierarchy: an unavailable mount/manager
+                            // is not evidence that the lane alone is absent.
+                            let parent = cgroup.parent().ok_or_else(|| anyhow::anyhow!("missing lane parent"))?;
+                            ensure!(std::fs::metadata(parent)?.is_dir(), "missing lane hierarchy");
+                            lane_absent = true;
+                        }
+                        _ => return Err(error.into()),
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+            self.meminfo.clear();
+            std::fs::File::open(meminfo_path)?.read_to_string(&mut self.meminfo)?;
+            let mut available = self.meminfo.lines().filter_map(|line|
+                line.strip_prefix("MemAvailable:"));
+            let value = available.next().ok_or_else(|| anyhow::anyhow!("missing MemAvailable"))?;
+            ensure!(available.next().is_none(), "duplicate MemAvailable");
+            let mut fields = value.split_ascii_whitespace();
+            let kib: u64 = fields.next().ok_or_else(|| anyhow::anyhow!("missing MemAvailable value"))?.parse()?;
+            ensure!(fields.next() == Some("kB") && fields.next().is_none(), "invalid MemAvailable unit");
+            let bytes = kib.checked_mul(1024).ok_or_else(|| anyhow::anyhow!("MemAvailable overflow"))?;
+            shortage = bytes < policy.memory_available_floor_bytes;
         }
         if needs_io {
             self.io.clear();
@@ -245,13 +287,24 @@ impl Reader {
                 Signal::IoFull => (&self.io, "full"),
                 Signal::IoSome => (&self.io, "some"),
             };
-            let mut matching = source.lines().filter(|line|
-                line.split_ascii_whitespace().next() == Some(name));
-            let line = matching.next().ok_or_else(|| anyhow::anyhow!("missing PSI signal"))?;
-            ensure!(matching.next().is_none(), "duplicate PSI signal");
+            let memory_rule = matches!(rule.signal, Signal::MemoryFull | Signal::MemorySome);
+            let pressure = if lane_absent && memory_rule {
+                0
+            } else {
+                let mut matching = source.lines().filter(|line|
+                    line.split_ascii_whitespace().next() == Some(name));
+                let line = matching.next().ok_or_else(|| anyhow::anyhow!("missing PSI signal"))?;
+                ensure!(matching.next().is_none(), "duplicate PSI signal");
+                parse_millipercent(line, rule.window)?
+            };
+            // A real host shortage must trip even when the lane has no current holders.
+            // An existing lane's PSI must still parse, even during host shortage.
+            let pressure = if shortage && memory_rule {
+                100000
+            } else { pressure };
             self.readings.push(Reading {
                 signal: rule.signal, window: rule.window,
-                millipercent: parse_millipercent(line, rule.window)?,
+                millipercent: pressure,
                 observed_at_ms: now_ms,
             });
         }
@@ -266,24 +319,41 @@ pub struct Observer {
     reader: Reader,
     origin: std::time::Instant,
     sampled_at: Option<u64>,
+    paths: Option<[std::path::PathBuf; 3]>,
 }
 
 impl Observer {
     pub fn new(policy: Policy) -> Result<Self> {
         Ok(Self {
             brake: Brake::new(policy.clone())?, policy, reader: Reader::default(),
-            origin: std::time::Instant::now(), sampled_at: None,
+            origin: std::time::Instant::now(), sampled_at: None, paths: None,
         })
     }
 
+    /// Inject kernel-file locations, including the aggregate finite-lane memory PSI.
+    pub fn with_paths(policy: Policy, paths: [std::path::PathBuf; 3]) -> Result<Self> {
+        let mut observer = Self::new(policy)?;
+        observer.paths = Some(paths);
+        Ok(observer)
+    }
+
     pub fn observe(&mut self, policy: &Policy) -> Result<Decision> {
-        if &self.policy != policy { *self = Self::new(policy.clone())?; }
+        if &self.policy != policy {
+            self.brake = Brake::new(policy.clone())?;
+            self.policy = policy.clone();
+            self.sampled_at = None;
+        }
         let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
         if self.sampled_at.is_none_or(|at|
             u128::from(now.saturating_sub(at)) >= self.policy.sample_interval().as_millis())
         {
             self.sampled_at = Some(now);
-            return Ok(match self.reader.read(&self.policy, now) {
+            let readings = match &self.paths {
+                Some([memory, io, meminfo]) =>
+                    self.reader.read_paths(&self.policy, now, memory, io, meminfo),
+                None => self.reader.read(&self.policy, now),
+            };
+            return Ok(match readings {
                 Ok(readings) => self.brake.observe(readings, now),
                 Err(_) => { self.reader.readings.clear(); self.brake.observe(&[], now) },
             });
