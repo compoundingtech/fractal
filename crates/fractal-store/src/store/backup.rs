@@ -54,6 +54,19 @@ impl Store {
                 .collect(),
             ledgers: super::backup_ledgers::digests(&connection)?,
             shards: BTreeMap::new(),
+            source: connection.query_row(
+                "SELECT value FROM meta WHERE key IN ('local_node_writer','backup_restore_writer')
+                 ORDER BY CASE key WHEN 'local_node_writer' THEN 0 ELSE 1 END LIMIT 1",
+                [], |row| row.get::<_, String>(0),
+            ).optional()?.map(|writer_id| -> Result<_> {
+                Ok(super::backup_format::SourceIdentity {
+                    writer_id,
+                    max_store_index: connection.query_row(
+                        "SELECT COALESCE(MAX(store_index),0) FROM claims",
+                        [], |row| row.get(0),
+                    )?,
+                })
+            }).transpose()?,
         })
     }
 
@@ -166,6 +179,48 @@ impl Store {
                 return Ok(header);
             }
         }
+    }
+
+    /// Export an already sealed offline source using read-only graph and shard snapshots.
+    /// Unlike the live exporter, this never drains pending mail or creates missing envelopes.
+    pub fn write_backup_read_only(
+        &self,
+        output: &mut impl Write,
+        bodies: Option<&crate::message_body::Bodies>,
+    ) -> Result<Header> {
+        let shard = super::messages_shard::shard(self);
+        self.read_snapshot(|_| {
+            self.check_backup_sealed()?;
+            self.check_backup_projection()?;
+            anyhow::ensure!(
+                super::message_outbox::oldest(&self.readers.get())?.is_none(),
+                "read-only backup refuses pending messages in the outbox; let the daemon drain them before exporting"
+            );
+            let export = |shard: Option<&GraphStore>, output: &mut _| -> Result<Header> {
+                let mut owned = Vec::new();
+                if let Some(bodies) = bodies {
+                    for file in bodies.files().into_iter().filter(|file| !file.temporary && !file.expired) {
+                        let subject = format!("message/{}", file.id);
+                        let Some(message) = self.message(&subject)? else { continue };
+                        let (Some(named), true) = (message.body_attachment(), bodies.holds(&message.from, &file))
+                        else { continue };
+                        let Some(bytes) = bodies.read(&message.from, &subject)? else { continue };
+                        if hex::encode(Sha256::digest(&bytes)) == named.sha256 {
+                            owned.push((subject, message.from, named.sha256));
+                        }
+                    }
+                }
+                self.write_pinned_backup(output, bodies, &owned, shard)
+            };
+            if let Some(shard) = &shard {
+                shard.read_snapshot(|_| {
+                    shard.check_backup_sealed()?;
+                    export(Some(shard), output)
+                })
+            } else {
+                export(None, output)
+            }
+        })
     }
 
     /// Write the archive from the graph snapshot this thread has pinned and, when the shard is
@@ -727,6 +782,115 @@ fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> 
 mod tests {
     use super::*;
     use crate::backup;
+
+    fn offline_fixture(path: &Path, seal: bool) {
+        let source = Store::open(path, "alder").unwrap();
+        diagnostic(&source, "offline-source");
+        if seal {
+            source.write_backup(&mut Vec::new()).unwrap();
+        }
+        drop(source);
+        let connection = Connection::open(path).unwrap();
+        connection.execute(
+            "INSERT INTO meta(key,value) VALUES('local_node_writer','alder')", [],
+        ).unwrap();
+    }
+
+    #[test]
+    fn offline_export_preserves_source_bytes_and_round_trips() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, true);
+        let before = Sha256::digest(fs::read(&database).unwrap());
+        let source = Store::open_backup_read_only(&database).unwrap();
+        assert!(source.connection.thread.lock().unwrap().is_none());
+        assert!(source.connection.jobs.lock().unwrap().is_none());
+        let archive = root.path().join("offline.jsonl");
+        let header = source.write_backup_read_only(
+            &mut fs::File::create(&archive).unwrap(), None,
+        ).unwrap();
+        assert_eq!(header.source.as_ref().unwrap().writer_id, "alder");
+        assert!(header.source.as_ref().unwrap().max_store_index > 0);
+        drop(source);
+        assert_eq!(Sha256::digest(fs::read(&database).unwrap()), before);
+        let restored = root.path().join("restored.sqlite3");
+        let report = backup::restore(&archive, &restored, root.path()).unwrap();
+        assert!(report.projections_match);
+        let restored = Store::open(&restored, &report.writer).unwrap();
+        assert_eq!(restored.backup_header().unwrap().graph_digest, header.graph_digest);
+    }
+
+    #[test]
+    fn offline_export_refuses_unsealed_history_without_writing_output() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, false);
+        let before = Sha256::digest(fs::read(&database).unwrap());
+        let source = Store::open_backup_read_only(&database).unwrap();
+        let mut output = Vec::new();
+        let error = source.write_backup_read_only(&mut output, None).unwrap_err();
+        assert!(error.to_string().contains("unsealed history"), "{error:#}");
+        assert!(output.is_empty());
+        drop(source);
+        assert_eq!(Sha256::digest(fs::read(&database).unwrap()), before);
+    }
+
+    #[test]
+    fn offline_open_refuses_schema_migration_without_changing_source() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, true);
+        let connection = Connection::open(&database).unwrap();
+        connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION - 1).unwrap();
+        drop(connection);
+        let before = Sha256::digest(fs::read(&database).unwrap());
+        let error = Store::open_backup_read_only(&database).err().unwrap();
+        assert!(error.to_string().contains(&format!("requires schema version {CURRENT_SCHEMA_VERSION}")), "{error:#}");
+        assert_eq!(Sha256::digest(fs::read(&database).unwrap()), before);
+    }
+
+    #[test]
+    fn offline_open_refuses_missing_or_conflicting_writer_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, true);
+        let connection = Connection::open(&database).unwrap();
+        connection.execute("DELETE FROM meta WHERE key='local_node_writer'", []).unwrap();
+        drop(connection);
+        let error = Store::open_backup_read_only(&database).err().unwrap();
+        assert!(error.to_string().contains("persisted local writer identity"), "{error:#}");
+        let connection = Connection::open(&database).unwrap();
+        connection.execute_batch(
+            "INSERT INTO meta(key,value) VALUES('local_node_writer','alder');
+             INSERT INTO meta(key,value) VALUES('backup_restore_writer','birch');",
+        ).unwrap();
+        drop(connection);
+        let error = Store::open_backup_read_only(&database).err().unwrap();
+        assert!(error.to_string().contains("ambiguous persisted writer identity"), "{error:#}");
+    }
+
+    #[test]
+    fn offline_export_reads_existing_shard_without_changing_its_database() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, true);
+        let shard_path = super::super::backup_shards::database_path(root.path()).unwrap();
+        let shard = GraphStore::open(
+            &shard_path, "alder",
+            Arc::new(super::super::messages_shard::MessagesRuntime::default()),
+        ).unwrap();
+        shard.connection.write().execute(
+            "INSERT INTO stream_lifecycle(subject,kind,actor,fields,recorded_at_unix_ms)
+             VALUES('message/offline','message.read','agent/reader','{}',1)", [],
+        ).unwrap();
+        drop(shard);
+        let before = Sha256::digest(fs::read(&shard_path).unwrap());
+        let source = Store::open_backup_read_only(&database).unwrap();
+        let mut output = Vec::new();
+        let header = source.write_backup_read_only(&mut output, None).unwrap();
+        assert!(header.shards.contains_key(super::super::messages_shard::SHARD_ID));
+        assert_eq!(Sha256::digest(fs::read(&shard_path).unwrap()), before);
+    }
 
     /// Bind `store`, make it trim, and give it twelve observations of one observer: the newest
     /// stays, and its trim drops the rest.

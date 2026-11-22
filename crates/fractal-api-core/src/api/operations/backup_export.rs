@@ -90,6 +90,179 @@ pub(super) fn response(
     ).into_response()
 }
 
+fn wal_size(path: &std::path::Path) -> std::io::Result<u64> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+/// Direct exports deliberately keep their read snapshot through downstream backpressure.
+pub(super) fn direct_response(
+    permit: OwnedSemaphorePermit,
+    database: std::path::PathBuf,
+    max_wal_growth: u64,
+    produce: impl FnOnce(&mut dyn std::io::Write) -> anyhow::Result<()> + Send + 'static,
+) -> Response {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let cancellation = ReadBudget::cancellable("/v1/backup/direct");
+    let worker_budget = cancellation.clone();
+    let monitor_budget = cancellation.clone();
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let (abort, aborted) = tokio::sync::watch::channel(None::<String>);
+    let (done, mut finished) = tokio::sync::watch::channel(false);
+    let peak = Arc::new(AtomicU64::new(0));
+    let monitor_peak = peak.clone();
+    let mut wal_name = database.into_os_string();
+    wal_name.push("-wal");
+    let wal = std::path::PathBuf::from(wal_name);
+    let initial = wal_size(&wal);
+    let writer_wal = wal.clone();
+    let initial_size = initial.as_ref().copied().unwrap_or(0);
+    tokio::spawn(async move {
+        let initial = match initial {
+            Ok(initial) => initial,
+            Err(error) => {
+                let _ = abort.send(Some(format!("cannot inspect backup WAL: {error}")));
+                monitor_budget.cancel();
+                return;
+            }
+        };
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = finished.changed() => break,
+                _ = interval.tick() => {
+                    let result = wal_size(&wal).map(|size| size.saturating_sub(initial));
+                    let error = match result {
+                        Ok(growth) => {
+                            monitor_peak.fetch_max(growth, Ordering::Relaxed);
+                            (growth > max_wal_growth).then(|| format!(
+                                "backup WAL growth {growth} bytes exceeds --max-wal-growth {max_wal_growth}; snapshot cancelled"
+                            ))
+                        }
+                        Err(error) => Some(format!("cannot inspect backup WAL: {error}")),
+                    };
+                    if let Some(error) = error {
+                        let _ = abort.send(Some(error));
+                        monitor_budget.cancel();
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let mut writer = DirectWriter {
+            sender, aborted, handle, pending: Vec::new(), peak,
+            wal: writer_wal, initial_size, max_wal_growth,
+        };
+        let result = read_budget::with(Some(worker_budget), || produce(&mut writer));
+        let result = result.and_then(|()| {
+            anyhow::ensure!(writer.pending.is_empty(), "truncated producer record");
+            writer.check_abort()?;
+            Ok(())
+        });
+        if let Err(error) = result {
+            let message = writer.aborted.borrow().clone().unwrap_or_else(|| format!("{error:#}"));
+            let failure = crate::backup::Record::Failure { code: "backup-stream-failed".into(), message };
+            if let Ok(mut bytes) = serde_json::to_vec(&failure) {
+                bytes.push(b'\n');
+                let _ = writer.sender.blocking_send(bytes.into());
+            }
+        }
+        let _ = done.send(true);
+    });
+    let stream = futures_util::stream::unfold(
+        (receiver, Cancel(cancellation)),
+        |(mut receiver, cancel)| async move {
+            receiver.recv().await.map(|bytes| (Ok::<_, std::io::Error>(bytes), (receiver, cancel)))
+        },
+    );
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson"),
+         (axum::http::header::HeaderName::from_static("x-fractal-backup-stream"), "1")],
+        Body::from_stream(stream),
+    ).into_response()
+}
+
+struct DirectWriter {
+    sender: tokio::sync::mpsc::Sender<axum::body::Bytes>,
+    aborted: tokio::sync::watch::Receiver<Option<String>>,
+    handle: tokio::runtime::Handle,
+    pending: Vec<u8>,
+    peak: Arc<std::sync::atomic::AtomicU64>,
+    wal: std::path::PathBuf,
+    initial_size: u64,
+    max_wal_growth: u64,
+}
+
+impl DirectWriter {
+    fn check_abort(&self) -> std::io::Result<()> {
+        if let Some(error) = self.aborted.borrow().as_ref() {
+            return Err(std::io::Error::other(error.clone()));
+        }
+        read_budget::check().map_err(std::io::Error::other)
+    }
+
+    fn send(&mut self, bytes: axum::body::Bytes) -> std::io::Result<()> {
+        self.check_abort()?;
+        self.handle.block_on(async {
+            tokio::select! {
+                result = self.sender.send(bytes) => result.map_err(std::io::Error::other),
+                result = self.aborted.changed() => {
+                    result.map_err(std::io::Error::other)?;
+                    Err(std::io::Error::other(self.aborted.borrow().clone().unwrap_or_else(|| "backup cancelled".into())))
+                }
+            }
+        })
+    }
+}
+
+impl std::io::Write for DirectWriter {
+    fn write(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
+        self.check_abort()?;
+        let length = bytes.len();
+        while !bytes.is_empty() {
+            let count = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |index| index + 1);
+            if self.pending.len() as u64 + count as u64 > crate::backup::MAX_RECORD_BYTES {
+                return Err(std::io::Error::other("oversized backup record"));
+            }
+            self.pending.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.pending.last() == Some(&b'\n') {
+                let mut line = std::mem::take(&mut self.pending);
+                if line.starts_with(b"{\"record\":\"end\",") {
+                    let growth = wal_size(&self.wal)?.saturating_sub(self.initial_size);
+                    self.peak.fetch_max(growth, std::sync::atomic::Ordering::Relaxed);
+                    if growth > self.max_wal_growth {
+                        return Err(std::io::Error::other(format!(
+                            "backup WAL growth {growth} bytes exceeds --max-wal-growth {}; snapshot cancelled",
+                            self.max_wal_growth
+                        )));
+                    }
+                    let mut end: serde_json::Value = serde_json::from_slice(&line)?;
+                    end["data"]["peak_wal_growth"] = self.peak.load(std::sync::atomic::Ordering::Relaxed).into();
+                    line = serde_json::to_vec(&end)?;
+                    line.push(b'\n');
+                }
+                let line = axum::body::Bytes::from(line);
+                for offset in (0..line.len()).step_by(64 * 1024) {
+                    self.send(line.slice(offset..(offset + 64 * 1024).min(line.len())))?;
+                }
+            }
+        }
+        Ok(length)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.check_abort()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +313,55 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_secs(2), result).await.unwrap().unwrap());
         let permit = tokio::time::timeout(Duration::from_secs(2), pool.acquire()).await.unwrap().unwrap();
         drop(permit);
+    }
+
+    #[tokio::test]
+    async fn direct_backpressure_releases_the_worker_when_the_body_is_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let (started, begun) = tokio::sync::oneshot::channel();
+        let (finished, result) = tokio::sync::oneshot::channel();
+        let pool = Arc::new(Semaphore::new(1));
+        let response = direct_response(
+            reserve_from(&pool).unwrap(), root.path().join("claims.sqlite3"), u64::MAX,
+            move |output| {
+                started.send(()).unwrap();
+                let result = output.write_all(&vec![b'\n'; 256 * 1024]);
+                finished.send(result.is_err()).unwrap();
+                result.map_err(anyhow::Error::new)
+            },
+        );
+        begun.await.unwrap();
+        drop(response);
+        assert!(result.await.unwrap());
+        let permit = pool.acquire().await.unwrap();
+        drop(permit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wal_growth_cancels_a_direct_snapshot_and_reports_the_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        let wal = root.path().join("claims.sqlite3-wal");
+        std::fs::write(&wal, b"").unwrap();
+        let (release, gate) = std::sync::mpsc::channel();
+        let response = direct_response(
+            reserve_from(&Arc::new(Semaphore::new(1))).unwrap(), database, 1,
+            move |output| {
+                gate.recv()?;
+                output.write_all(b"{\"record\":\"header\"}\n")?;
+                Ok(())
+            },
+        );
+        std::fs::write(&wal, b"growth").unwrap();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        release.send(()).unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let failure: crate::backup::Record = serde_json::from_slice(&bytes).unwrap();
+        let crate::backup::Record::Failure { message, .. } = failure else {
+            panic!("WAL guard must reject the archive");
+        };
+        assert!(message.contains("--max-wal-growth 1"), "{message}");
     }
 
     #[tokio::test]

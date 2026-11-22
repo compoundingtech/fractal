@@ -488,6 +488,26 @@ pub struct WriterGuard<'a> {
 }
 
 impl WriterConnection {
+    /// A read-only store has no writer connection, queue, or background thread.
+    pub(crate) fn read_only(committed_index: Arc<AtomicU64>) -> Self {
+        Self {
+            jobs: Mutex::new(None),
+            thread: Mutex::new(None),
+            committed_index,
+            observers: Arc::new(CommitObservers::default()),
+            finalizers: Arc::new(TransactionFinalizers::default()),
+            background: Arc::new(writer_queue::BackgroundAdmission::default()),
+            deferred: Arc::new(Mutex::new(None)),
+            workers: Arc::new(Semaphore::new(writer_admission::constructor_write_limit())),
+            worker_queue: writer_admission::WorkerQueue::new(),
+            handler_policy: Arc::new(Mutex::new(None)),
+            mutation_observer: None,
+            batches: Arc::new((AtomicU64::new(0), AtomicU64::new(0))),
+            fifo: crate::fifo::Queue::new(crate::fifo::Kind::Writer),
+            telemetry: None,
+        }
+    }
+
     pub fn new(connection: Connection, committed_index: Arc<AtomicU64>) -> Self {
         Self::new_inner(connection, committed_index, None, None)
             .expect("writer without an observer needs no schema check")

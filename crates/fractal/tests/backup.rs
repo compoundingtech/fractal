@@ -1,5 +1,5 @@
 use serde_json::json;
-use fractal_daemon::api::{AppState, router, serve_unix};
+use fractal_daemon::api::{AppState, router};
 use fractal_daemon::backup;
 use fractal_daemon::client::{Client, Endpoint};
 use fractal_daemon::model::ClaimInput;
@@ -31,6 +31,8 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
     )
     .unwrap();
     let store = Arc::new(Store::open(&root.path().join("source.db"), "alder").unwrap());
+    rusqlite::Connection::open(root.path().join("source.db")).unwrap()
+        .execute("INSERT OR REPLACE INTO meta(key,value) VALUES('local_node_writer','alder')", []).unwrap();
     for index in 0..1100 {
         // Plain replicated claims: diagnostics as an older build wrote them.
         store
@@ -71,18 +73,12 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
     };
-    let server_socket = socket.clone();
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let server = tokio::spawn(async move {
-        serve_unix(&server_socket, router(state)).await.unwrap();
+        axum::serve(listener, router(state)).await.unwrap();
     });
     let endpoint = Endpoint::Unix(socket.clone());
     let client = Client::new(endpoint.clone());
-    for _ in 0..100 {
-        if client.get::<serde_json::Value>("/v1/health").await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     let file = root.path().join("backup.jsonl");
     let mut create = backup_cli(root.path(), &socket);
     create.args(["backup", "create"]).arg(&file);
@@ -103,6 +99,13 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(backup::create(&endpoint, &file).await.is_err());
+    let streamed = backup_cli(root.path(), &socket)
+        .args(["backup", "create", "-"])
+        .output().await.unwrap();
+    let header = assert_stdout_receipt(&streamed);
+    let streamed_file = root.path().join("streamed.jsonl");
+    std::fs::write(&streamed_file, &streamed.stdout).unwrap();
+    assert_restores_snapshot(root.path(), &socket, &streamed_file, &header, "streamed-restored.db").await;
     let target = root.path().join("restored.db");
     let output = backup_cli(root.path(), &socket)
         .args(["backup", "restore"])
@@ -150,7 +153,7 @@ async fn a_streamed_export_failure_names_the_cause_and_never_publishes_a_cli_bac
     std::fs::create_dir_all(root.path().join("config/st3")).unwrap();
     std::fs::write(root.path().join("config/st3/config.toml"), "node = \"alder\"\n").unwrap();
     let socket = root.path().join("error.sock");
-    let server_socket = socket.clone();
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let router = axum::Router::new().route("/v1/backup", axum::routing::get(|| async {
         let mut bytes = serde_json::to_vec(&backup::Record::Failure {
             code: "backup-fixture-io".into(),
@@ -159,12 +162,7 @@ async fn a_streamed_export_failure_names_the_cause_and_never_publishes_a_cli_bac
         bytes.push(b'\n');
         ([(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], bytes)
     }));
-    let server = tokio::spawn(async move { serve_unix(&server_socket, router).await.unwrap(); });
-    // A missing endpoint is the only startup condition being awaited here.
-    for _ in 0..100 {
-        if socket.exists() { break; }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
     let archive = root.path().join("failed-backup.jsonl");
     let output = backup_cli(root.path(), &socket)
         .args(["backup", "create"]).arg(&archive).output().await.unwrap();
@@ -274,4 +272,132 @@ async fn configured_store_directory_roundtrip(database_alias: bool) {
     assert!(!restored_state.join("claims.sqlite3").exists());
     let restored = Store::open(&restored_database_dir.join("claims.sqlite3"), &report.writer).unwrap();
     assert_eq!(restored.message(subject).unwrap().unwrap().body_bytes, Some(text.len() as u64));
+}
+
+fn assert_stdout_receipt(output: &std::process::Output) -> backup::Header {
+    use sha2::{Digest as _, Sha256};
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    let lines: Vec<_> = output.stdout.split_inclusive(|byte| *byte == b'\n').collect();
+    assert!(lines.iter().all(|line| line.ends_with(b"\n")));
+    let backup::Record::Header(header) = serde_json::from_slice(lines[0]).unwrap() else {
+        panic!("stdout must start with the unchanged archive header");
+    };
+    let end: serde_json::Value = serde_json::from_slice(lines.last().unwrap()).unwrap();
+    assert_eq!(end["record"], "end");
+    let sha256 = end["data"]["sha256"].as_str().unwrap();
+    let end_offset = output.stdout.len() - lines.last().unwrap().len();
+    assert_eq!(sha256, hex::encode(Sha256::digest(&output.stdout[..end_offset])));
+    assert_eq!(receipt["format"], header.format);
+    assert_eq!(receipt["version"], header.version);
+    assert_eq!(receipt["records"], lines.len() as u64);
+    assert_eq!(receipt["bytes"], output.stdout.len() as u64);
+    assert_eq!(receipt["sha256"], hex::encode(Sha256::digest(&output.stdout)));
+    assert_ne!(receipt["sha256"], sha256, "receipt hashes the end record too");
+    assert_eq!(receipt["writer_id"], "alder");
+    assert!(receipt["max_store_index"].as_u64().unwrap() > 0);
+    assert!(receipt["peak_wal_growth"].as_u64().unwrap() <= 4294967296);
+    let started = receipt["started_at"].as_str().unwrap().parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+    let finished = receipt["finished_at"].as_str().unwrap().parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+    assert!(finished >= started);
+    header
+}
+
+async fn assert_restores_snapshot(
+    root: &Path,
+    socket: &Path,
+    archive: &Path,
+    header: &backup::Header,
+    destination: &str,
+) {
+    let output = backup_cli(root, socket)
+        .args(["backup", "restore"]).arg(archive)
+        .arg("--database").arg(root.join(destination))
+        .output().await.unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: backup::RestoreReport = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report.projections_match);
+    assert_eq!(report.source_graph_digest, header.graph_digest);
+    assert_eq!(report.graph_digest, header.graph_digest);
+    assert_eq!(report.log_digest, header.log_digest);
+    assert_eq!(report.tables, header.tables);
+}
+
+#[tokio::test]
+async fn offline_stdout_backup_preserves_source_bytes_and_restores_the_source_graph_and_log() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("config/st3")).unwrap();
+    std::fs::write(root.path().join("config/st3/config.toml"), "node = \"alder\"\n").unwrap();
+    let database = root.path().join("source.db");
+    let source = Store::open(&database, "alder").unwrap();
+    source.put_document("doc/backup", b"Offline streaming backup.\n", &None, "backup-document").unwrap();
+    let mut expected_archive = Vec::new();
+    let expected = source.write_backup_with_bodies(&mut expected_archive, None).unwrap();
+    drop(source);
+    rusqlite::Connection::open(&database).unwrap()
+        .execute("INSERT OR REPLACE INTO meta(key,value) VALUES('local_node_writer','alder')", []).unwrap();
+    let source_paths = [database.clone(), root.path().join("source.db-wal")];
+    let before: Vec<_> = source_paths.iter().map(|path| std::fs::read(path).ok()).collect();
+    let socket = root.path().join("unused.sock");
+    let output = backup_cli(root.path(), &socket)
+        .args(["backup", "create", "-", "--database"]).arg(&database)
+        .args(["--max-wal-growth", "4294967296"])
+        .output().await.unwrap();
+    let header = assert_stdout_receipt(&output);
+    assert_eq!(header.graph_digest, expected.graph_digest);
+    assert_eq!(header.log_digest, expected.log_digest);
+    for (path, bytes) in source_paths.iter().zip(before) {
+        assert_eq!(std::fs::read(path).ok(), bytes, "source bytes changed: {}", path.display());
+    }
+    let archive = root.path().join("saved-stdout.jsonl");
+    std::fs::write(&archive, &output.stdout).unwrap();
+    assert_restores_snapshot(root.path(), &socket, &archive, &header, "restored/claims.sqlite3").await;
+}
+
+#[tokio::test]
+async fn truncated_http_stdout_backup_fails_without_a_success_receipt() {
+    use axum::extract::Query;
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("config/st3")).unwrap();
+    std::fs::write(root.path().join("config/st3/config.toml"), "node = \"alder\"\n").unwrap();
+    let source = Store::open_memory("alder").unwrap();
+    source.put_document("doc/truncated", b"Incomplete archive.\n", &None, "truncated-document").unwrap();
+    let mut archive = Vec::new();
+    source.write_backup_with_bodies(&mut archive, None).unwrap();
+    let end_offset = archive[..archive.len() - 1].iter().rposition(|byte| *byte == b'\n').unwrap() + 1;
+    archive.truncate(end_offset);
+    let app = axum::Router::new().route("/v1/backup", axum::routing::get(
+        move |Query(query): Query<BTreeMap<String, String>>| {
+            let archive = archive.clone();
+            async move {
+                assert_eq!(query.get("stream").map(String::as_str), Some("true"));
+                assert_eq!(query.get("max_wal_growth").map(String::as_str), Some("4294967296"));
+                ([
+                    ("content-type", "application/x-ndjson"),
+                    ("x-fractal-backup-stream", "1"),
+                ], archive)
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let output = {
+        let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
+        command.env("XDG_CONFIG_HOME", root.path().join("config"));
+        command.env("XDG_STATE_HOME", root.path().join("state"));
+        command.env("XDG_DATA_HOME", root.path().join("data"));
+        command.args(["--json", "--endpoint"]).arg(format!("http://{address}"))
+            .args(["backup", "create", "-"]).output().await.unwrap()
+    };
+    assert!(!output.status.success());
+    assert!(!output.stderr.is_empty());
+    for line in output.stderr.split(|byte| *byte == b'\n') {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) {
+            assert!(value.get("sha256").is_none(), "failed export emitted a success receipt: {value}");
+        }
+    }
+    server.abort();
 }

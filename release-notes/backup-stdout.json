@@ -1,0 +1,32 @@
+{
+  "summary": "Stream claim backups to stdout with a complete-output checksum receipt and a bounded WAL growth guard",
+  "version": 1,
+  "replay": {
+    "status": "none",
+    "detail": "No replay or backfill. Offline stdout export is read-only and refuses input needing migration, sealing, repair or projection recovery."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema or claim registry change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No claim admission, authority or projection rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "fractal backup create - streams the existing archive JSONL to stdout. Live export uses /v1/backup?stream=true&max_wal_growth=4294967296 and a bounded channel without an archive tempfile. Optional source writer identity/store-index metadata and end-record peak WAL growth do not require an archive version bump. Existing file-destination mode and file-based restore are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No deployment downtime or startup migration. Prefer a stopped daemon or a consistent copy for offline stdout export to avoid concurrent WAL growth."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Save stdout to a private file before restore. Successful stdout export emits a JSON receipt on stderr with format, version, records, sha256, bytes, writer_id, max_store_index, started_at, finished_at and peak_wal_growth. The receipt checksum covers all stdout, including the end record; the archive end checksum still covers preceding bytes only. Check command and pipeline exit statuses and discard partial output after failure. --max-wal-growth is a byte limit defaulting to 4294967296 (4 GiB); exceeding it aborts export without a successful receipt. --database PATH stdout mode requires current-schema, fully sealed, healthy state and persisted writer identity, and never mutates the source database or WAL."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Restore still reads a file and verifies archive checksums and restored graph/log digests. The source writer identity is not a physical database UUID."
+  }
+}
