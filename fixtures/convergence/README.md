@@ -610,28 +610,32 @@ comparisons, person-authored claim preservation, invalid/pending-record checks a
 majority trim coverage remain enforced. The former shared-checkpoint never-trim
 sets and post-excusal continuation remain historical, not active assertions.
 
-## Native model fallback claim registration
+## Native execution and delivery phases
 
-`claims-v43.json` adds `harness.model-fallback.observed` and the optional
-`runtime.action.requested.model_return_attempt` field to the complete merged
-registry. Versions 1 through 42 remain frozen. Regenerate it with
-`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v43.json`;
-do not hand-edit the snapshot. The simulation loader, exact registry equality check,
-and audit reports select v43.
+`claims-v43.json` adds durable `step.execution-phase` evidence and the
+`exec_exited_at_unix_ms` and `start_operation` fields on `runtime.observed` to
+main's spend-source registry. Versions 1 through 42 remain frozen, including
+main's native-turn v41 and spend-source v42 snapshots. Generate the complete
+merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v43.json`.
+The execution-phase simulation, diagnostics and audit reports select v43. The
+active-corpus freshness regression compares the complete generated registry byte-for-byte;
+the focused execution-phase regression also validates a generated phase input.
+Main's local-trim convergence and oracle checks remain unchanged; obsolete shared
+checkpoint agreement and its historical never-trim characterizations are not restored.
 
-This snapshot was recovered losslessly from the owning serialization's complete
-`the_current_corpus_matches_the_registry` assertion output in
-[hosted run 45040516209](https://github.com/compoundingtech/fractal/actions/runs/45040516209),
-`linux-tests-logs` artifact 14762756723, `_temp/ci-logs/tests.log`. The source receipt
-identifies tested merge `bbab7e9e0ea77396eef30d27b9dfe0c1e8eb08d2`; its
-`fractal-schema` and `fractal-storage-version` sources match head
-`2f95c896017d554fedc3115f9d473a616bcfabeb`. The recovered bytes are exactly
-`serde_json::to_string_pretty(&fractal_schema::registry().claims)`, with no added
-newline, as emitted by the `claim_corpus` example.
+Native execution wait accounting is shared through
+`fractal_kernel::step_execution::execution_wait`; both the store's timing fold
+and the reconciler's executor attestation use that leaf helper after the crate split.
+
+## Native model fallback evidence
 
 The native fallback input generator supplies bounded session, incarnation,
-source-event and episode provenance, an explicit sanitized cause, and the
-same-subject agent actor. Model mismatch alone does not establish fallback.
+source-event and episode provenance for `harness.model-fallback.observed`, an
+explicit sanitized cause, and the same-subject agent actor. Model mismatch alone
+does not establish fallback. `runtime.action.requested.model_return_attempt`
+records the durably admitted return attempt.
+
 Member-local trim convergence, retained claim equality, oracle reader comparisons,
 person-authored claim preservation, and invalid/pending-record checks remain unchanged.
 
