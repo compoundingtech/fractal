@@ -2168,13 +2168,13 @@ async fn published_missions_refresh_eta_after_a_projection_only_commit_at_the_sa
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         assert_eq!(tx.execute(
-            "INSERT INTO local_run_eta_samples
+            /* sqlite-large-value: allow-for-now lv-h37d8605f8522 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_run_eta_samples
              SELECT subject||'/sample',run_id||'/sample',definition_hash,step_path,1000,100
              FROM step_runs WHERE subject=?1",
             [&waiting.steps[0].subject],
         ).unwrap(), 1);
         tx.execute(
-            "INSERT INTO local_run_eta_mission_changes(mission_id,changed_index)
+            /* sqlite-large-value: allow-for-now lv-ha9ebd81a804a owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_run_eta_mission_changes(mission_id,changed_index)
              VALUES('eta',(SELECT COALESCE(MAX(changed_index),0)+1 FROM local_run_eta_mission_changes))
              ON CONFLICT(mission_id) DO UPDATE SET changed_index=excluded.changed_index",
             [],
