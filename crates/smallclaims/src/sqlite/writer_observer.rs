@@ -114,6 +114,13 @@ fn rollback_resolved(resolution: &Resolution) {
 }
 
 fn ensure_resolution(connection: &Connection) -> Result<Arc<Resolution>> {
+    // Check before either clientdata call, including bare connections whose work
+    // subscribers are registered before the native writer observer is constructed.
+    ensure!(
+        rusqlite::version_number() >= 3_044_000,
+        "writer transaction resolution requires SQLite 3.44.0 or newer for connection clientdata; found {}",
+        rusqlite::version()
+    );
     // SAFETY: this private name holds only the Arc<Resolution> transferred below. The
     // clientdata reference is not consumed, so the strong count is restored before use.
     unsafe {

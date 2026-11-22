@@ -650,6 +650,8 @@ mod tests {
             let (beta, _beta) = counter(&writer, Some(&["beta"]));
             {
                 let connection = writer.write();
+                // Deliberate ownership-loss probe: these removals must bypass the
+                // resolution hub so the loan boundary proves it detects lost coverage.
                 match hook {
                     "row" => connection.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>),
                     "authorizer" => connection.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>),
