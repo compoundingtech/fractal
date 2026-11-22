@@ -16,22 +16,6 @@ pub fn writer_required() -> FractalError {
     FractalError::new("native-attach-writer-required", "native attachment records require verified native attach admission")
 }
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h5d6244f528ee owner=fractal_store::store::native_attach TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS native_attach_requests ON claims(origin,json_extract(body,'$.fields.request_key'))
-         WHERE kind='custom.native-attach.prepared';
-         CREATE INDEX IF NOT EXISTS native_attach_agents ON claims(json_extract(body,'$.fields.candidate.agent'))
-         WHERE kind='custom.native-attach.committed';
-         CREATE INDEX IF NOT EXISTS native_attach_answers ON claims(json_extract(body,'$.fields.answer_id'))
-         WHERE kind='custom.native-attach.committed';
-         CREATE INDEX IF NOT EXISTS native_attach_processes ON claims(json_extract(body,'$.fields.process_key'))
-         WHERE kind='custom.native-attach.committed';
-         CREATE INDEX IF NOT EXISTS native_attach_sessions ON claims(json_extract(body,'$.fields.native_key'))
-         WHERE kind='custom.native-attach.committed';"
-    )?;
-    Ok(())
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
@@ -119,11 +103,18 @@ fn refused(message: impl Into<String>) -> FractalError { FractalError::new("nati
 fn data<T: serde::de::DeserializeOwned>(claim: &ClaimRecord) -> Result<T, FractalError> {
     serde_json::from_value(claim.body["fields"].clone()).map_err(internal)
 }
+// Reuse the existing claim indexes: creating attach-specific indexes would scan
+// the entire claim history during store startup.
+const ONE_QUERY: &str = "SELECT id FROM claims WHERE subject=?1 AND kind=?2 AND NOT EXISTS
+    (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired') LIMIT 2";
+const REQUEST_QUERY: &str = "SELECT id FROM claims WHERE kind='custom.native-attach.prepared' AND origin=?1 AND json_extract(body,'$.fields.request_key')=?2 LIMIT 1";
+const AGENT_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.candidate.agent')=?1)";
+const ANSWER_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.answer_id')=?1)";
+const PROCESS_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.process_key')=?1)";
+const NATIVE_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.native_key')=?1)";
+
 fn one(connection: &Connection, subject: &str, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
-    let mut statement = connection.prepare_cached(
-        "SELECT id FROM claims WHERE subject=?1 AND kind=?2 AND NOT EXISTS
-         (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired') LIMIT 2"
-    ).map_err(internal)?;
+    let mut statement = connection.prepare_cached(ONE_QUERY).map_err(internal)?;
     let ids = statement.query_map(params![subject,kind], |row| row.get::<_,String>(0))
         .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
     if ids.len() > 1 { return Err(refused("conflicting native attach authority records")); }
@@ -148,10 +139,10 @@ fn preparation(connection: &Connection, origin: &str, id: &str) -> Result<(Claim
 }
 fn conflict(connection: &Connection, column: &str, value: &str) -> Result<bool, FractalError> {
     match column {
-        "agent" => connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.candidate.agent')=?1)", [value], |row| row.get(0)),
-        "answer" => connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.answer_id')=?1)", [value], |row| row.get(0)),
-        "process" => connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.process_key')=?1)", [value], |row| row.get(0)),
-        "native" => connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.native_key')=?1)", [value], |row| row.get(0)),
+        "agent" => connection.query_row(AGENT_QUERY, [value], |row| row.get(0)),
+        "answer" => connection.query_row(ANSWER_QUERY, [value], |row| row.get(0)),
+        "process" => connection.query_row(PROCESS_QUERY, [value], |row| row.get(0)),
+        "native" => connection.query_row(NATIVE_QUERY, [value], |row| row.get(0)),
         _ => unreachable!("closed native attach reservation columns"),
     }.map_err(internal)
 }
@@ -172,7 +163,7 @@ impl Store {
         let mut connection = self.connection.write();
         let tx = connection.transaction().map_err(internal)?;
         let existing: Option<String> = tx.query_row(
-            "SELECT id FROM claims WHERE kind='custom.native-attach.prepared' AND origin=?1 AND json_extract(body,'$.fields.request_key')=?2 LIMIT 1",
+            REQUEST_QUERY,
             params![self.origin(),request_key],|row|row.get(0)).optional().map_err(internal)?;
         if let Some(id) = existing {
             let record = claim_by_id_tx(&tx,&id).map_err(internal)?.ok_or_else(||refused("preparation disappeared"))?;
@@ -292,6 +283,40 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_native_attach_store_reuses_existing_claim_indexes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        for _ in 0..2 {
+            let store = Store::open(&path, "node").unwrap();
+            let connection = store.readers.get();
+            let indexes: Vec<String> = connection.prepare(
+                "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='claims'"
+            ).unwrap().query_map([], |row| row.get(0)).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap();
+            assert!(indexes.iter().any(|name| name == "claims_kind_index"), "{indexes:?}");
+            assert!(!indexes.iter().any(|name| name.starts_with("native_attach_")), "{indexes:?}");
+
+            for query in [REQUEST_QUERY, AGENT_QUERY, ANSWER_QUERY, PROCESS_QUERY, NATIVE_QUERY] {
+                let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap();
+                let parameters = vec![None::<String>; statement.parameter_count()];
+                let plan = statement.query_map(rusqlite::params_from_iter(parameters), |row| row.get::<_, String>(3))
+                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert!(plan.iter().any(|step| step.contains("SEARCH claims USING INDEX claims_kind_index (kind=?)")), "{query}: {plan:?}");
+                assert!(!plan.iter().any(|step| step.contains("SCAN claims")), "{query}: {plan:?}");
+            }
+            // Authority records already have a more selective subject-and-kind seek.
+            for kind in [PREPARED, ASK_BOUND, COMMITTED, "work.person-asked",
+                "custom.client.pairing-native-attach-answer-admitted"] {
+                let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {ONE_QUERY}")).unwrap();
+                let plan = statement.query_map(params!["custom/native-attach/test", kind], |row| row.get::<_, String>(3))
+                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert!(plan.iter().any(|step| step.contains("SEARCH claims USING INDEX claims_subject_kind_index (subject=? AND kind=?)")), "{kind}: {plan:?}");
+                assert!(!plan.iter().any(|step| step.contains("SCAN claims")), "{kind}: {plan:?}");
+            }
+        }
+    }
 
     #[test]
     fn generic_append_cannot_forge_native_attach_authority() {
