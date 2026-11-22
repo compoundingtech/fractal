@@ -331,9 +331,9 @@ export const Inspector = ({ mission, stepId }: { readonly mission: ExploreMissio
   </aside>
 }
 
-export const Problems = ({ mission, onSelect }: { readonly mission: ExploreMission; readonly onSelect: (id: string) => void }) =>
+export const Problems = ({ mission, onSelect, stacked = false }: { readonly mission: ExploreMission; readonly onSelect: (id: string) => void; readonly stacked?: boolean }) =>
   <ol aria-label="Problems" style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column' }}>
-    {[...mission.problems].sort((a, b) => b.at - a.at).map((p, i) => <li key={i} style={{ display: 'grid', gridTemplateColumns: '90px 1fr auto', gap: 12, padding: '8px 12px', borderBottom: `1px solid ${C.line}`, fontSize: 12, alignItems: 'baseline' }}>
+    {[...mission.problems].sort((a, b) => b.at - a.at).map((p, i) => <li key={i} style={{ display: 'grid', gridTemplateColumns: stacked ? '1fr' : '90px 1fr auto', gap: stacked ? 2 : 12, padding: '8px 12px', borderBottom: `1px solid ${C.line}`, fontSize: 12, alignItems: 'baseline' }}>
       <span style={{ color: p.kind === 'failure' ? C.bad : p.kind === 'wait-you' ? C.you : C.soft }}>{p.kind === 'failure' ? 'Failed' : p.kind === 'retry' ? 'Retried' : p.kind === 'wait-you' ? 'Waits on you' : 'Stalled'}</span>
       <span><button type="button" onClick={() => onSelect(p.step)} style={{ border: 0, padding: 0, background: 'transparent', color: C.fg, font: 'inherit', cursor: 'pointer', textAlign: 'start' }}>{p.text}</button>
         <span style={{ color: C.muted }}> · {mission.steps.find(s => s.id === p.step)?.title}{p.agent ? ` · ${p.agent}` : ''}{p.turn ? ' · ' : ''}</span>{p.turn ? <a href="#" onClick={e => e.preventDefault()} style={{ color: C.soft }}>conversation turn</a> : null}</span>

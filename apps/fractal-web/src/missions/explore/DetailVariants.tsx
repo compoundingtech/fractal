@@ -65,14 +65,14 @@ export const VariantTraceFirst = ({ mission }: { readonly mission: ExploreMissio
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 16, minWidth: 0 }}>
         <button type="button" aria-expanded={plan} onClick={() => setPlan(!plan)} style={{ alignSelf: 'flex-start', border: 0, background: 'transparent', color: C.soft, font: 'inherit', fontSize: 12, cursor: 'pointer', padding: 0 }}>{plan ? '▾' : '▸'} Plan by agent</button>
-        {plan ? <Dag mission={mission} selected={selected} onSelect={setSelected} lanes height={260} /> : null}
+        {plan ? <Dag mission={mission} selected={selected} onSelect={setSelected} lanes height={400} /> : null}
         <Trace mission={mission} selected={selected} onSelect={setSelected} groupByAgent />
       </div>
       <div style={{ borderInlineStart: `1px solid ${C.line}`, display: 'flex', flexDirection: 'column' }}>
         <Inspector mission={mission} stepId={selected} />
         <div style={{ padding: '0 16px 16px', fontSize: 12 }}>
           <div style={{ color: C.muted, fontSize: 11, marginBlock: 6 }}>Problems on this step</div>
-          <Problems mission={{ ...mission, problems: mission.problems.filter(p => p.step === selected) }} onSelect={setSelected} />
+          <Problems stacked mission={{ ...mission, problems: mission.problems.filter(p => p.step === selected) }} onSelect={setSelected} />
         </div>
       </div>
     </div>

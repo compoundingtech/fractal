@@ -16,6 +16,8 @@ const planOrder = (mission: ExploreMission): readonly PlanStep[] => {
   const layout = layered(live(mission))
   return [...live(mission)].sort((a, b) => layout.nodes.get(a.id)!.layer - layout.nodes.get(b.id)!.layer || layout.nodes.get(a.id)!.order - layout.nodes.get(b.id)!.order)
 }
+/** The strip's window: start to now (or the end, once done), never shorter than expected. */
+const windowEnd = (mission: ExploreMission) => live(mission).every(s => s.state === 'done') ? Math.max(...mission.steps.map(s => stepEnd(s, mission.now) ?? 0)) : Math.max(mission.now, mission.startedAt + mission.expectedMs)
 const elapsedText = (mission: ExploreMission) => {
   const done = live(mission).every(s => s.state === 'done')
   const end = done ? Math.max(...mission.steps.map(s => stepEnd(s, mission.now) ?? 0)) : mission.now
@@ -45,7 +47,7 @@ export const RowCells = ({ mission }: { readonly mission: ExploreMission }) =>
 /** R2. Time strip: the mission's wall clock squeezed onto one line; parallel work overlaps, waits hatch, failures tick red. */
 export const RowTimeStrip = ({ mission }: { readonly mission: ExploreMission }) => {
   const t0 = mission.startedAt
-  const t1 = Math.max(mission.now, mission.startedAt + mission.expectedMs)
+  const t1 = windowEnd(mission)
   const pct = (t: number) => `${((t - t0) / (t1 - t0)) * 100}%`
   const attempts = live(mission).flatMap(step => step.attempts)
   const waits = live(mission).flatMap(step => step.waits)
@@ -61,7 +63,7 @@ export const RowTimeStrip = ({ mission }: { readonly mission: ExploreMission }) 
 /** R3. Mini trace: a few hairline lanes (parallel steps stack), the classic sparkline-of-a-Gantt. Densest, least legible. */
 export const RowMiniTrace = ({ mission }: { readonly mission: ExploreMission }) => {
   const t0 = mission.startedAt
-  const t1 = Math.max(mission.now, mission.startedAt + mission.expectedMs)
+  const t1 = windowEnd(mission)
   const W = 150
   const x = (t: number) => ((t - t0) / (t1 - t0)) * W
   // Greedy lane packing of each step's active span.
