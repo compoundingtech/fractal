@@ -221,7 +221,7 @@ mod wait_tests {
 
     #[test]
     fn missing_resume_restarts_clock_at_bounded_wait_deadline() {
-        let events = vec![progress("paused", 50, 500)];
+        let events = [progress("paused", 50, 500)];
         let fold_wait = |start, end| execution_wait(events.iter().map(|(kind, body, at)|
             (kind.as_str(), body, *at)), 1, start, end);
         assert_eq!(fold_wait(100, 400), (300, Some(500)));

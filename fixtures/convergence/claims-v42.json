@@ -10433,12 +10433,6 @@
         "immutable": false,
         "reference": false
       },
-      "exec_exited_at_unix_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "exit_code": {
         "value_type": "integer",
         "required": false,
@@ -10495,12 +10489,6 @@
       },
       "shutdown_timeout_ms": {
         "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "start_operation": {
-        "value_type": "string",
         "required": false,
         "immutable": false,
         "reference": false
@@ -11727,86 +11715,6 @@
       "step"
     ]
   },
-  "step.execution-phase": {
-    "kind": "step.execution-phase",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "at_unix_ms": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "exec": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "host": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "incarnation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "phase": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "dispatched",
-          "received",
-          "admitted",
-          "exec-started",
-          "exec-exited",
-          "result-replicated",
-          "dispatch-stalled",
-          "execution-timeout"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "start_operation": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "timeout_extension_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": true,
-    "source_kdl": [
-      "step"
-    ]
-  },
   "subagent.appeared": {
     "kind": "subagent.appeared",
     "subjects": [
@@ -12590,9 +12498,27 @@
         "immutable": false,
         "reference": false
       },
+      "gaps": {
+        "value_type": "array",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "period_readings": {
+        "value_type": "array",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "readings": {
         "value_type": "array",
         "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "source_frontier": {
+        "value_type": "object",
+        "required": false,
         "immutable": false,
         "reference": false
       }
