@@ -537,6 +537,7 @@ async fn run_st2_native_driver(
     let loop_state = NativeLoopState {
         paths: Some(paths.resolved()),
         predecessor_harness_record: fs::read(&harness_state_path).ok(),
+        provider_started_at_ms: fractal_drivers::subagents::now_ms(),
         ..NativeLoopState::default()
     };
     let task = spawn_st3_provider(
@@ -882,7 +883,7 @@ async fn drive_st2_native_loop(
             driver,
             &incarnation,
             &agent_dir,
-            fractal_drivers::subagents::now_ms(),
+            loop_state.provider_started_at_ms,
         )
     });
     let mut completion_announced = false;
@@ -2616,6 +2617,9 @@ async fn drive_codex_native_loop(
     ))
         .then(|| codex_continued_thread(&argv))
         .flatten();
+    if matches!(start, ProviderStart::Launch(..)) {
+        loop_state.provider_started_at_ms = fractal_drivers::subagents::now_ms();
+    }
     let task = task.insert(spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start));
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
@@ -2624,7 +2628,7 @@ async fn drive_codex_native_loop(
         "codex",
         &incarnation,
         &agent_dir,
-        fractal_drivers::subagents::now_ms(),
+        loop_state.provider_started_at_ms,
     );
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

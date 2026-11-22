@@ -17466,6 +17466,10 @@ impl NativePaths {
 struct NativeLoopState {
     #[serde(default)]
     paths: Option<fractal_drivers::driver_paths::Paths>,
+    /// Provider launch boundary, captured before its hooks can start children. Re-exec carries
+    /// the same boundary because it adopts the running provider rather than launching another.
+    #[serde(default)]
+    provider_started_at_ms: u64,
     ready: bool,
     /// Whether the harness-state file already belongs to this session. A resumed driver adopts a
     /// running session, so its record is always current.

@@ -238,6 +238,49 @@ async fn a_codex_subagent_run_ends_with_its_own_tokens_in_the_parents_usage() {
 }
 
 #[tokio::test]
+async fn a_child_started_before_publisher_initialization_belongs_to_its_live_provider() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, client, server) = serve(root.path()).await;
+    let agent_dir = root.path().join("agent");
+    // Deterministically place the child between provider launch and publisher initialization,
+    // as when mailbox attachment delays the driver while its harness already runs hooks.
+    let provider_started_at_ms = 10;
+    ledger::update(&agent_dir, |ledger| {
+        ledger.incarnation = Some("previous-incarnation".into());
+        for (id, started_at_ms) in [("previous-child", 1), ("current-child", 20)] {
+            ledger.running.insert(
+                id.into(),
+                ledger::Subagent {
+                    id: id.into(),
+                    started_at_ms,
+                    session_id: Some("current-session".into()),
+                    ..Default::default()
+                },
+            );
+        }
+    })
+    .unwrap();
+    let mut publisher = fractal_daemon::subagents::Publisher::start(
+        CLAUDE_SEAT,
+        "claude",
+        "current-incarnation",
+        &agent_dir,
+        provider_started_at_ms,
+    );
+    publisher.tick(&client).await.unwrap();
+    assert_eq!(fields(&store, CLAUDE_SEAT, "subagent.appeared").len(), 2);
+    let ended = fields(&store, CLAUDE_SEAT, "subagent.ended");
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0]["subagent_id"], "previous-child");
+    assert_eq!(ended[0]["outcome"], "harness-exited");
+    assert!(ledger::read(&agent_dir).running.contains_key("current-child"));
+    let running = store.running_subagents(ledger::now_ms()).unwrap();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].subagent_id, "current-child");
+    server.abort();
+}
+
+#[tokio::test]
 async fn a_new_driver_incarnation_ends_what_the_last_harness_left_running() {
     let root = tempfile::tempdir().unwrap();
     let (store, client, server) = serve(root.path()).await;
