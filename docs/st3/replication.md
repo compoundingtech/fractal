@@ -235,6 +235,66 @@ selects a confirmer, starts grace, or changes transport policy. External adapter
 own transport-policy reconciliation; neither daemon nor worker reconciles Fabric
 runtime peers.
 
+## Store-scoped revision subscriptions
+
+Workers wait on the daemon's `POST /v1/internal/replication/revision` endpoint,
+or `/v1/internal/replication/shard/{shard}/revision` for a shard. Requests select
+`kind: "authority"` or `kind: "membership"` and provide `after: null` for an
+initial snapshot, then the previous cursor to wait for a change. A cursor contains
+an `epoch` and `generation`; authority snapshots also contain `authority_root`.
+A new daemon epoch returns immediately, including after a restart.
+
+Each store owns separate authority and membership observers. Registering a wait
+precedes checking its cursor, so a change during subscription cannot be lost.
+Authority roots are read against a stable revision before the snapshot is
+returned. The worker updates its root witness before waking peer dialers, and
+compares it locally with authenticated inbound exchange evidence. Unrelated
+notifications require neither an authority-guard request nor a membership read.
+Membership refreshes follow the membership subscription; direct leave and
+signature-protection decisions retain their explicit fresh-authority reads.
+
+Unsealed local batches are authority inputs: a local append wakes the snapshot
+that seals its envelope, rather than waiting for an envelope to already exist.
+Shard discovery separately waits at
+`POST /v1/internal/replication/shard/{shard}/peers/revision`, using a null initial
+cursor or its previous cursor as the body. Its cursor follows admitted
+`daemon.started` advertisements and fleet membership, not merely envelope receipt.
+Receipt before admission therefore cannot consume the only discovery wake.
+
+The performance report exposes `replication/authority-revision` and
+`replication/membership-revision` observer counts, `replication/authority-wait` and
+`replication/membership-wait` subscription work, `replication/authority-root-read`
+snapshot work, and `replication/membership-read` fleet-view work. Discovery exposes
+`replication/discovery-revision` and `replication/discovery-wait`.
+
+## Root-first peer exchanges
+
+Peers advertise `root-first-v1` in inventory capabilities. A root-only probe also
+carries `root-summary-v1`, distinguishing a deliberately omitted bucket list from
+an ordinary inventory. Matching peers exchange roots and control metadata without
+constructing or serializing the full bucket summary. A differing root answers with
+bucket proofs and a bounded listing of complete ranges, prioritizing ranges with
+live payloads over checkpoint-only ranges. Omitted probe proofs mean unknown
+ranges, not empty ones: the responder does not send speculative payloads.
+
+The initiator uses those listings to push the reverse difference in its second
+request, alongside its own bounded range listings; the second answer pulls the
+remaining envelopes. Thus gaps within already-shared live ranges converge in one
+compact round (two requests when they fit the existing bounds), even with
+unsettled checkpoint lineages. Larger differences rotate listings across rounds.
+Modern peers, including empty stores with no buckets, never request a whole
+identity inventory.
+
+An older peer that does not advertise `root-first-v1` receives a full-summary
+exchange before reconciliation continues. An older peer's ordinary request also
+keeps its existing full-summary response. This is protocol capability negotiation,
+not a fallback for local export failures. Mixed-version fleets do not require a
+simultaneous upgrade.
+
+The existing `/v1/performance` request work counts distinguish
+`replication/root-summary` from `replication/full-summary`, including difference
+exports in the latter.
+
 ## Sync invariants
 
 Every shared projection folds claims in the canonical total order: numeric acceptance time,
