@@ -522,7 +522,7 @@ impl Reader {
         // A delegated service may contain the process in a child cgroup.
         let service_depth = path.components().enumerate()
             .filter(|(_, part)| part.as_os_str().to_string_lossy().ends_with(".service"))
-            .map(|(index, _)| index + 1).next_back();
+            .map(|(index, _)| index + 1).last();
         let service: PathBuf = path.components().take(service_depth.unwrap_or(usize::MAX)).collect();
         let mut protected = vec![rooted(root, &service), root.join("system.slice")];
         if let Some(manager) = crate::lane::user_manager_cgroup_in(own, root) {
