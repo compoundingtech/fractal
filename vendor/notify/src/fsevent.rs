@@ -96,7 +96,7 @@ unsafe impl Send for FsEventWatcher {}
 // It's Sync because all methods that change the mutable state use `&mut self`.
 unsafe impl Sync for FsEventWatcher {}
 
-fn translate_flags(flags: StreamFlags, precise: bool) -> Vec<Event> {
+fn translate_flags(flags: &StreamFlags, precise: bool) -> Vec<Event> {
     let mut evs = Vec::new();
 
     // «Denotes a sentinel event sent to mark the end of the "historical" events
@@ -562,7 +562,7 @@ unsafe fn callback_impl(
             delivered_id = delivered_id.max(event_id);
         }
 
-        let events = translate_flags(flag, true);
+        let events = translate_flags(&flag, true);
         // Loss flags are stream-wide even when their sentinel path is outside
         // the watched namespace. HistoryDone alone is only a replay barrier.
         let mut handle_event = events.iter().any(Event::need_rescan);
