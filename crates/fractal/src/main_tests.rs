@@ -2804,6 +2804,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
         },
         loop_state: NativeLoopState {
             paths: None,
+            provider_started_at_ms: 10,
             mailbox_fence: None,
             ready: true,
             harness_record_started: true,
