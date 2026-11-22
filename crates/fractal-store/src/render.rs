@@ -371,7 +371,12 @@ fn ensure_tracked_file_is_unchanged(
 
 /// Whether committing this write would change its destination.
 pub fn write_needed(write: &PlannedWrite) -> bool {
-    let bytes_match = fs::read(&write.destination).is_ok_and(|bytes| bytes == write.bytes);
+    write_needed_with_bytes(write, &write.bytes)
+}
+
+/// Compare a shared additive write using its graph-wide unioned bytes.
+pub fn write_needed_with_bytes(write: &PlannedWrite, expected: &[u8]) -> bool {
+    let bytes_match = fs::read(&write.destination).is_ok_and(|bytes| bytes == expected);
     let mode_matches = fs::metadata(&write.destination)
         .is_ok_and(|metadata| metadata.permissions().mode() & 0o7777 == write.mode);
     !bytes_match || !mode_matches

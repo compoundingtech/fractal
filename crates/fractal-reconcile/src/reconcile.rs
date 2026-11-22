@@ -1823,6 +1823,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Simulate reclamation after observation, before render admission.
     #[cfg(test)]
     before_workspace_render: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Simulate reclamation after unchanged rendering, before start admission.
+    #[cfg(test)]
+    after_workspace_render: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Where an item's evaluation started: how many writes this thread had recorded and how far the
@@ -2063,6 +2066,8 @@ impl Reconciler<NativeRuntime> {
             after_work_wake_observe: Mutex::new(None),
             #[cfg(test)]
             before_workspace_render: Mutex::new(None),
+            #[cfg(test)]
+            after_workspace_render: Mutex::new(None),
         })
     }
 }
@@ -2303,6 +2308,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             after_work_wake_observe: Mutex::new(None),
             #[cfg(test)]
             before_workspace_render: Mutex::new(None),
+            #[cfg(test)]
+            after_workspace_render: Mutex::new(None),
         }
     }
 
@@ -4019,6 +4026,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.observe_agent_workspace(&subject.subject, member)?;
             }
         }
+        self.observe_start_worktrees(active.iter().filter_map(|subject| {
+            let member = subject.member.as_ref()?;
+            let identity = observed_worktrees.get(&subject.subject)?;
+            Some((PathBuf::from(&member.workspace), identity.clone()))
+        }).collect());
         let renderable = active
             .iter()
             .copied()
@@ -4149,6 +4161,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })
                 .collect()
         });
+        #[cfg(test)]
+        if let Some(hook) = self.after_workspace_render.lock().unwrap().take() {
+            hook();
+        }
         let agents = renderable
             .iter()
             .filter(|subject| subject.kind == "agent")
@@ -8755,21 +8771,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let _activation_lease = self.member_activation_lease(member)?;
         let workspace = Path::new(&member.workspace);
-        if workspace.exists() {
-            anyhow::ensure!(
-                workspace.is_dir(),
-                "workspace {} is not a directory",
-                workspace.display()
-            );
-        } else if member.workspace_create {
-            std::fs::create_dir_all(workspace)
-                .with_context(|| format!("create workspace {}", workspace.display()))?;
-        } else {
-            anyhow::bail!(
-                "workspace {} does not exist; add create=#true to its workspace declaration to create it",
-                workspace.display()
-            );
-        }
+        anyhow::ensure!(workspace.is_dir(),
+            "workspace reclaimed before start; preparing on a later pass");
         // The runtime starts in `cwd`, which can lie inside the workspace. A launcher handed a
         // directory that does not exist exits without saying why in its status.
         let cwd = Path::new(&member.cwd);
