@@ -147,6 +147,27 @@ Keep the subscription open while reading and coalesce concurrent invalidations i
 a follow-up complete read. Bounded prefix contents cannot prove absence or select a
 winner across the full inventory. Reconnect/resync handling remains unchanged.
 
+An attention subscription also invalidates the complete authorized,
+compatibility-adjusted cohort for the selected `person` (all authorized persons
+when none is selected), before the visible window is sliced. A hidden row's
+content change, removal or admission sends the existing `changes` frame even
+when the prefix is identical: `upserts: []`, `removes: []`, unchanged `order`
+and `has_more`. The frame's `snapshot.store_index` can also remain unchanged
+when clock-driven admission changes the cohort at the same claim cut. There is
+no additional wire revision field. Do not suppress an attention data frame
+because its visible rows or snapshot fields are unchanged. Another person's
+changes stay quiet for a person-selected subscription, as do unrelated commits.
+A known Snooze timestamp expiring alone does not change the raw row or send an
+invalidation; clients recompute that item's eligibility at its known timestamp.
+Clock passage does not promote an item to Critical.
+
+Clients needing the complete attention backlog must paginate
+`GET /v1/client/attention` after the initial snapshot and every attention
+`changes` frame, including empty ones. Keep the subscription open while reading,
+pin the complete traversal to its snapshot/cursors, restart an expired read,
+and coalesce intervening invalidations into a follow-up complete read. Publish
+only a complete candidate; the bounded prefix cannot prove backlog membership.
+
 A window contains 1–200 current items. History remains on the
 corresponding paged HTTP reads. Send `{"kind":"unsubscribe","id":"missions-tab"}`
 to remove a subscription. IDs are chosen by the client and unique on the socket.

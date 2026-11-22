@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use crate::PublishedViewsAttentionStore;
+use crate::{PublishedViewsAttentionStore, PersonWorkStore};
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::WebSocketStream;
@@ -1420,4 +1420,148 @@ async fn a_revoked_grant_ends_a_waiting_work_window_through_the_real_read() {
     fixture.paused_quiet().await;
     assert_eq!(fixture.counts(), counts(&[("work", 3)]));
     assert_eq!(state.store.direct_work_reads(), direct);
+}
+
+fn cohort_owner(state: &AppState) {
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"cohort/asker\" { workspace \"/tmp\"; command \"true\"; }\n",
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "cohort-owner").unwrap();
+}
+
+fn cohort_ask(state: &AppState, key: &str, person: &str, priority: &str) -> crate::model::StepRunView {
+    state.store.ask_person(&serde_json::from_value(json!({
+        "person":person, "title":key, "reason":"Cohort stream proof", "actor":"agent/cohort/asker",
+        "priority":priority, "idempotency_key":key,
+    })).unwrap()).unwrap()
+}
+
+fn cohort_publish(state: &AppState, published: bool) {
+    if published { crate::api::refresh_attention_list(&state.store).unwrap(); }
+    signal_changed(state);
+}
+
+async fn cohort_stream(state: AppState, published: bool) -> Fixture {
+    if published {
+        state.store.start_attention_list_refresher().unwrap();
+        crate::api::refresh_attention_list(&state.store).unwrap();
+    }
+    let mut fixture = Fixture::open_as(state, ClientSession::local(Some("person/ada")).unwrap(), true, None, &[]).await;
+    fixture.send(json!({"kind":"subscribe","id":"cohort","collection":"attention","limit":1})).await;
+    fixture
+}
+
+fn assert_cohort_invalidation(frame: &Value, first: &Value) {
+    assert_eq!(frame["kind"], "changes", "{frame}");
+    assert_eq!(frame["upserts"], json!([]), "{frame}");
+    assert_eq!(frame["removes"], json!([]), "{frame}");
+    assert_eq!(frame["order"], first["order"]);
+    assert_eq!(frame["has_more"], true);
+    super::tests::assert_collection_frame_conforms(frame);
+}
+
+/// Real mutations beyond both the visible prefix and the shared200-row cache boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attention_cohort_hidden_changes_invalidate_both_published_and_cached_windows() {
+    use crate::store::attention_controls::Control;
+    for published in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::test_state_named(root.path(), "cohort-hidden");
+        cohort_owner(&state);
+        for n in 0..203 { cohort_ask(&state, &format!("cohort-{n}"), "person/ada", "normal"); }
+        let full = client_attention_resources_at(&state.store, Some("person/ada"), false, client_now_ms()).unwrap();
+        let hidden = full.last().unwrap().clone();
+        let mut fixture = cohort_stream(state.clone(), published).await;
+        let first = fixture.frame().await;
+        assert!(first["has_more"] == true);
+        state.store.record_attention_control("person/ada", hidden["id"].as_str().unwrap(), Control::Seen,
+            "host/cohort-hidden", "hidden-seen".into()).unwrap();
+        cohort_publish(&state, published);
+        assert_cohort_invalidation(&fixture.frame().await, &first);
+        // A different owner's complete cohort and a cut-only unrelated commit stay quiet.
+        cohort_ask(&state, "robin-only", "person/robin", "normal");
+        cohort_publish(&state, published);
+        fixture.quiet().await;
+        crate::test_support::note_local_claim(&state.store, "message/cohort-unrelated");
+        cohort_publish(&state, published);
+        fixture.quiet().await;
+        state.store.finish_person_step(&serde_json::from_value(json!({
+            "subject":hidden["source_id"], "actor":"person/ada", "summary":"Done",
+            "episode":hidden["episode"], "idempotency_key":"hidden-answer",
+        })).unwrap(), false).unwrap();
+        cohort_publish(&state, published);
+        assert_cohort_invalidation(&fixture.frame().await, &first);
+        // One observed cut replaces another hidden row: same count, head and has_more.
+        state.store.finish_person_step(&serde_json::from_value(json!({
+            "subject":full[201]["source_id"], "actor":"person/ada", "summary":"Done",
+            "episode":full[201]["episode"], "idempotency_key":"net-zero-answer",
+        })).unwrap(), false).unwrap();
+        cohort_ask(&state, "hidden-replacement", "person/ada", "low");
+        cohort_publish(&state, published);
+        assert_cohort_invalidation(&fixture.frame().await, &first);
+        // Critical is a supported new ask, never a deadline-based promotion.
+        cohort_ask(&state, "critical-arrival", "person/ada", "critical");
+        cohort_publish(&state, published);
+        let critical = fixture.frame().await;
+        assert!(critical["upserts"].as_array().unwrap().iter().any(|row| row["priority"] == "critical" && row["urgent"] == true));
+    }
+}
+
+/// The existing process-local clock hook is safe under nextest's per-test process isolation.
+#[tokio::test(start_paused = true)]
+async fn attention_cohort_clock_admission_invalidates_at_the_same_cut_but_snooze_expiry_does_not() {
+    use crate::store::attention_controls::Control;
+    struct Clock;
+    impl Drop for Clock { fn drop(&mut self) { crate::test_support::skew_client_clock(0); smallclaims::store::set_thread_clock(None); } }
+    let _clock = Clock;
+    for published in [false, true] {
+        crate::test_support::skew_client_clock(0);
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::test_state_named(root.path(), "cohort-clock");
+        cohort_owner(&state);
+        cohort_ask(&state, "head", "person/ada", "critical");
+        cohort_ask(&state, "ordinary", "person/ada", "normal");
+        let rows = client_attention_resources_at(&state.store, Some("person/ada"), false, client_now_ms()).unwrap();
+        let ordinary = rows.iter().find(|row| row["priority"] == "normal").unwrap();
+        let until = client_now_ms() + 1_000;
+        state.store.record_attention_control("person/ada", ordinary["id"].as_str().unwrap(),
+            Control::Snooze(Some(until)), "host/cohort-clock", "short-snooze".into()).unwrap();
+        let future = client_now_ms() + 30_000;
+        smallclaims::store::set_thread_clock(Some(future));
+        state.store.set_write_clock_at(future).unwrap();
+        cohort_ask(&state, "future-ordinary", "person/ada", "normal");
+        smallclaims::store::set_thread_clock(None);
+        state.store.set_write_clock_at(client_now_ms()).unwrap();
+        assert_eq!(client_attention_resources_at(&state.store, Some("person/ada"), false, client_now_ms()).unwrap().len(), 2);
+        let mut fixture = cohort_stream(state.clone(), published).await;
+        let first = fixture.paused_frame().await;
+        let cut = state.store.index().unwrap();
+        crate::test_support::skew_client_clock(2_000);
+        cohort_publish(&state, published);
+        fixture.paused_quiet().await; // Known Snooze expiry changes eligibility, not raw rows.
+        crate::test_support::skew_client_clock(31_000);
+        cohort_publish(&state, published);
+        tokio::time::advance(ATTENTION_CLOCK_INTERVAL).await;
+        let changed = fixture.paused_frame().await;
+        assert_cohort_invalidation(&changed, &first);
+        assert_eq!(changed["snapshot"]["store_index"], first["snapshot"]["store_index"]);
+        assert_eq!(state.store.index().unwrap(), cut, "clock writes no claim");
+        let now_rows = client_attention_resources_at(&state.store, Some("person/ada"), false, client_now_ms()).unwrap();
+        assert_eq!(now_rows.len(), 3);
+        assert!(now_rows.iter().filter(|row| row["priority"] == "normal").all(|row| row["urgent"] == false));
+        let snoozed = now_rows.iter().find(|row| row["id"] == ordinary["id"]).unwrap();
+        assert_eq!(snoozed["snoozed_until"], client_timestamp(until), "expiry retains the raw timestamp");
+        assert_eq!(snoozed["revision"], ordinary["revision"]);
+        // A later clock evaluation changes neither the raw timestamp nor priority.
+        let tokens = state.store.newest_attention_list().1.map(|p| p.cohort_fingerprints.clone());
+        crate::test_support::skew_client_clock(62_000);
+        cohort_publish(&state, published);
+        tokio::time::advance(ATTENTION_CLOCK_INTERVAL).await;
+        fixture.paused_quiet().await;
+        if let Some(tokens) = tokens {
+            let current = state.store.newest_attention_list().1.unwrap();
+            for (owner, token) in tokens { assert!(Arc::ptr_eq(&token, &current.cohort_fingerprints[&owner])); }
+        }
+    }
 }

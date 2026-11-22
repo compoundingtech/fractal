@@ -19,6 +19,13 @@ pub struct ViewHealth {
     pub withdrawn: AtomicBool,
 }
 
+/// Content fingerprint of one compatible cohort, before visible-window slicing.
+pub type AttentionCohortFingerprint = [u8; 32];
+
+/// Four existing compatibility profiles (custom forms bit0, model drift bit1), per owner;
+/// None selects every owner. Volatile publication data, never authority or wire metadata.
+pub type AttentionCohortFingerprints = BTreeMap<Option<String>, Arc<[AttentionCohortFingerprint; 4]>>;
+
 /// The rows of one attention fold and the cut they were folded at.
 pub struct AttentionPublication {
     /// The graph index the rows were folded at; windows serving them carry this snapshot.
@@ -42,6 +49,7 @@ pub struct AttentionPublication {
     pub rows: Arc<Vec<Value>>,
     /// Owner-indexed rows in the same order, built only when the refresher changes the rows.
     pub owners: BTreeMap<String, Arc<Vec<Value>>>,
+    pub cohort_fingerprints: AttentionCohortFingerprints,
     /// The agents the rows' presentations read, from the newest published roster; `None`
     /// before the first.
     pub fleet: Option<Arc<AttentionFleet>>,
