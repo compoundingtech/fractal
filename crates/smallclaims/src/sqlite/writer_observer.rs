@@ -45,6 +45,11 @@ pub(crate) struct MutationState {
     replacing_authorizer: AtomicBool,
     missed_rows: AtomicBool,
     missed_authorizer: AtomicBool,
+    ledger: Mutex<super::commit_scope::Ledger>,
+    replacing_scope: AtomicBool,
+    missed_scope: AtomicBool,
+    unknown_commit: AtomicBool,
+    main_schema_generation: Mutex<i64>,
 }
 
 struct HookLease {
@@ -66,11 +71,34 @@ impl Drop for HookLease {
     }
 }
 
+struct ScopeLease(Arc<MutationState>);
+impl Drop for ScopeLease {
+    fn drop(&mut self) {
+        if !self.0.replacing_scope.load(Ordering::Relaxed) {
+            self.0.missed_scope.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Writers without physical-row consumers still own the native mutation dispatcher.
+pub(crate) struct NoPhysicalObserver;
+impl WriterObserver for NoPhysicalObserver {
+    fn tables(&self) -> &'static [(&'static str, &'static str)] { &[] }
+    fn mutated(&self, _: &str, _: &str) {}
+    fn unobserved(&self, _: &str, _: &str) {}
+    fn failed(&self, _: Arc<str>) {}
+    fn published(&self, _: &Connection) {}
+}
+
 impl MutationState {
     pub(crate) fn new(
         connection: &Connection,
         observer: Arc<dyn WriterObserver>,
     ) -> Result<Arc<Self>> {
+        ensure!(
+            super::commit_scope::preupdate_available(),
+            "writer mutation routing requires SQLite compiled with SQLITE_ENABLE_PREUPDATE_HOOK"
+        );
         let schema = validate_tables(connection, observer.tables())?;
         let schema_generations = schema_generations(connection, observer.tables())?;
         let state = Arc::new(Self {
@@ -85,10 +113,58 @@ impl MutationState {
             replacing_authorizer: AtomicBool::new(false),
             missed_rows: AtomicBool::new(false),
             missed_authorizer: AtomicBool::new(false),
+            ledger: Mutex::new(super::commit_scope::Ledger::default()),
+            replacing_scope: AtomicBool::new(false),
+            missed_scope: AtomicBool::new(false),
+            unknown_commit: AtomicBool::new(false),
+            main_schema_generation: Mutex::new(connection.query_row("PRAGMA main.schema_version", [], |row| row.get(0))?),
         });
         install_rows(connection, Some(state.clone()));
         state.install_authorizer(connection);
+        state.install_scope(connection);
         Ok(state)
+    }
+
+    fn install_scope(self: &Arc<Self>, connection: &Connection) {
+        self.replacing_scope.store(true, Ordering::Relaxed);
+        super::commit_scope::install_preupdate(connection, &self.ledger);
+        let state = self.clone();
+        let lease = ScopeLease(self.clone());
+        connection.commit_hook(Some(move || {
+            let _lease = &lease;
+            state.ledger.lock().unwrap().committing();
+            false
+        }));
+        let state = self.clone();
+        let lease = ScopeLease(self.clone());
+        connection.rollback_hook(Some(move || {
+            let _lease = &lease;
+            state.ledger.lock().unwrap().rollback();
+        }));
+        super::commit_scope::install_trace(connection, &self.ledger);
+        self.replacing_scope.store(false, Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_committed(&self, connection: &Connection) -> super::commit_scope::Changes {
+        let mut changes = self.ledger.lock().unwrap().take(
+            connection,
+            self.unknown_commit.swap(false, Ordering::Relaxed),
+        );
+        if changes.schema {
+            // DDL can execute without changing any schema (IF [NOT] EXISTS), or affect
+            // only temp/attached databases. Read the main cookie only after executed DDL
+            // reached a commit, never on ordinary no-op/read-only/unrelated writer loans.
+            match connection.query_row("PRAGMA main.schema_version", [], |row| row.get::<_, i64>(0)) {
+                Ok(current) => {
+                    let mut previous = self.main_schema_generation.lock().unwrap();
+                    changes.schema = current != *previous;
+                    *previous = current;
+                }
+                Err(_) => changes.unknown = true,
+            }
+        }
+        super::commit_scope::boundary(&changes);
+        changes
     }
 
     fn install_authorizer(self: &Arc<Self>, connection: &Connection) {
@@ -194,8 +270,21 @@ impl MutationState {
         if !connection.is_autocommit() {
             return;
         }
+        // Raw preupdate replacement has no closure destructor. Registration returns the
+        // previous userdata, allowing ownership attestation without executing any SQL.
+        if !super::commit_scope::install_preupdate(connection, &self.ledger) {
+            self.missed_scope.store(true, Ordering::Relaxed);
+        }
+        super::commit_scope::install_trace(connection, &self.ledger);
         let missed_rows = self.missed_rows.swap(false, Ordering::Relaxed);
         let missed_authorizer = self.missed_authorizer.swap(false, Ordering::Relaxed);
+        let missed_scope = self.missed_scope.swap(false, Ordering::Relaxed);
+        if missed_scope || missed_rows || missed_authorizer {
+            // Lost native coverage is an explicit all-dependency invalidation, even when
+            // the replacement hid every mutation or transaction-resolution callback.
+            self.unknown_commit.store(true, Ordering::Relaxed);
+            self.install_scope(connection);
+        }
         if missed_rows || missed_authorizer {
             // This is an explicit missed-observation fence, not polling after unrelated SQL.
             // Hook replacement could hide receipt mutations or DDL, so rescan watched schema

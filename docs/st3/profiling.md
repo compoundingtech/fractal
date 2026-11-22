@@ -1303,6 +1303,22 @@ through the workspace Cargo configuration, including Cargo-based Nix builds. SQL
 are disabled by default, removing their shared allocator mutex; statement, process CPU and
 I/O accounting remain available.
 
+The workspace also enables `SQLITE_ENABLE_PREUPDATE_HOOK`. Writer construction verifies
+that compile option and refuses unsupported SQLite builds rather than silently using
+global invalidation. The writer-owned native hook records physical table mutations,
+including `WITHOUT ROWID` tables, and discards rolled-back transaction/savepoint work.
+Committed schema changes retain a conservative invalidation boundary. Returning a
+read-only or unchanged writer loan still resolves native observer coverage, but does
+not refresh the committed index or evaluate commit observers. Background consumers
+declare their source tables with `observe_tables`; unrelated committed tables do not
+wake them. Table-level dependencies intentionally do not distinguish keys within `meta`
+or kinds within `claims`.
+
+`GET /v1/performance` exports lifetime `writer_observers` counters: `boundaries`, `noops`,
+`rollbacks`, `index_refreshes`, `global_evaluations` and `scoped_evaluations`. Compare
+counter deltas under the same fixture/load; evaluation counts measure callback work,
+not operating-system wakes or CPU time.
+
 A full replication projection fallback always writes one bounded line to daemon stderr before
 replay starts, even without `ST3_PROFILE_DIR`. It names the phase, reason, previous frontier and
 entry target, for example `fractal: projection full replay phase=startup/project-replication-backlog

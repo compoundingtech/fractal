@@ -426,8 +426,8 @@ pub enum Notice {
 }
 
 /// One bridge per Store; graph-watch owns subscriber fanout outside the writer. The callback
-/// performs one fixed metadata query per committed batch/returned writer, and never scans keys.
-/// A returned lent writer can be a rollback/no-op; unchanged metadata emits no notice. Lagged
+/// performs one fixed metadata query after committed mutations of its source tables, and
+/// never scans keys. No-op and rolled-back writer work performs no metadata query. Lagged
 /// notices require a fresh snapshot and floor check. No notice proves authorization or output.
 pub struct Publisher {
     notices: broadcast::Sender<Notice>,
@@ -444,7 +444,9 @@ impl Publisher {
         let last = Arc::new(Mutex::new(Notice::Committed(initial)));
         let (notices, _) = broadcast::channel(capacity);
         let send = notices.clone();
-        let observer = store.connection.observe_commits(move |connection| {
+        let observer = store.connection.observe_tables(
+            &["ivm_event_state", "ivm_source", "ivm_key_frontier", "ivm_status_frontier"],
+            move |connection| {
             let notice = if !connection.is_autocommit() {
                 Notice::Unavailable("writer returned with an unfinished transaction".into())
             } else {
