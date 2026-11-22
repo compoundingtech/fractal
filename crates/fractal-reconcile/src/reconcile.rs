@@ -3793,8 +3793,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
         );
         let mut member_errors = BTreeMap::new();
-        // Keep every prepared worktree fenced through rendering, runtime initialization and
-        // publication later in this pass, including reuse of an existing checkout.
+        // Acquire only before creating or rendering a workspace, not validation/observation.
+        // Retain admission through runtime initialization and publication, including reuse.
         let mut activation_leases = BTreeMap::new();
         for subject in &active {
             if subject.kind == "stop" {
@@ -3835,6 +3835,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             let checkout = (subject.kind == "agent")
                 .then(|| Checkout::from_desired(&subject.desired))
                 .flatten();
+            if workspace.is_dir() {
+                if let Some(checkout) = &checkout
+                    && let Err(error) = checkout.validate_workspace(workspace)
+                {
+                    member_errors.insert(subject.subject.clone(), error);
+                    continue;
+                }
+                if subject.kind == "agent" {
+                    self.observe_agent_workspace(&subject.subject, member)?;
+                }
+                continue;
+            }
             let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
                 .or_else(|| crate::repositories::workspace_repository(workspace));
             let lease_owner = match fractal_runtime::store_worktree_lease::canonical_owner(
@@ -3847,6 +3859,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             };
             if let Some(repository) = repository
+                && (checkout.is_some() || member.workspace_create)
                 && !activation_leases.contains_key(&lease_owner)
             {
                 let lease = self.worktree_activation_lease(&lease_owner, &repository);
@@ -3857,18 +3870,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         continue;
                     }
                 }
-            }
-            if workspace.is_dir() {
-                if let Some(checkout) = &checkout
-                    && let Err(error) = checkout.validate_workspace(workspace)
-                {
-                    member_errors.insert(subject.subject.clone(), error);
-                    continue;
-                }
-                if subject.kind == "agent" {
-                    self.observe_agent_workspace(&subject.subject, member)?;
-                }
-                continue;
             }
             let result = if let Some(checkout) = checkout {
                 self.create_checkout(
