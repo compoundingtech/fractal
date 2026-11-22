@@ -2519,6 +2519,56 @@ fn a_stream_items_delivery_is_unknown_while_its_seat_runs_on_another_host() {
 }
 
 #[test]
+fn message_delivery_reports_stopped_recipients_until_they_start() {
+    let store = Store::open_memory("stopped-recipient-delivery").unwrap();
+    let seat = "agent/stopped-recipient";
+    let append = |subject: &str, kind: &str, fields: Value| {
+        store.append_client_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(seat.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    let sent = append("message/stopped-recipient", "message.sent", json!({
+        "from": "person/sender", "to": seat, "content": "waiting for startup", "status": "sent"
+    }));
+    let message = store.message(&sent.subject).unwrap().unwrap();
+    let at = sent.accepted_at_unix_ms;
+    let delivery = |message: &MessageView| message_delivery_for(&store, message, at, at, None).unwrap();
+    // No observation is not evidence that the recipient has stopped.
+    assert_eq!(delivery(&message)["state"], "pending");
+    for status in ["stopped", "exited", "absent"] {
+        append(seat, "runtime.observed", json!({"status": status}));
+        for phase in ["sent", "staged"] {
+            let mut queued = message.clone();
+            queued.status = phase.into();
+            let waiting = delivery(&queued);
+            assert_eq!(waiting["state"], "waiting");
+            assert_eq!(waiting["phase"], phase);
+            assert_eq!(waiting["reason"], "recipient stopped; queued message will be delivered when it starts");
+        }
+        // Accepted/read messages keep their receipt, even after the recipient stops.
+        for phase in ["delivered", "read", "closed"] {
+            let mut accepted = message.clone();
+            accepted.status = phase.into();
+            let accepted = delivery(&accepted);
+            assert_eq!(accepted["phase"], phase);
+            assert!(!accepted["reason"].as_str().unwrap().contains("recipient stopped"));
+        }
+    }
+    let resources = client_message_resources_at(&store, None, false, Some(seat), at).unwrap();
+    assert_eq!(resources[0]["delivery"], delivery(&message));
+    let rows = store.client_messages_page(None, Some(seat), false, store.index().unwrap(), None, 20).unwrap();
+    let (view, metadata, current) = rows.into_iter().next().unwrap();
+    let resource = client_message_resource(&store, view, &metadata, current, at).unwrap();
+    assert_eq!(resource["delivery"], delivery(&message));
+    append(seat, "runtime.observed", json!({"status": "running", "incarnation_id": "next"}));
+    let running = delivery(&message);
+    assert_eq!(running["state"], "pending");
+    assert_eq!(running["reason"], "waiting for delivery; the durable message remains queued");
+}
+
+#[test]
 fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
     let store = Store::open_memory("message-delivery-test").unwrap();
     let to = "agent/remote/message-delivery-test";
@@ -12808,6 +12858,22 @@ fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     assert!(card()["live_model"].is_null());
     let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
     assert!(typed.live_model.is_none());
+    assert_eq!(card()["declared_model"], "anthropic/claude-opus-5-5");
+    assert_eq!(card()["model_drift"]["state"], "unknown");
+    assert_eq!(card()["model_drift"]["return_attempts"], 0);
+    let roundtrip = serde_json::to_value(&typed).unwrap();
+    assert_eq!(roundtrip["declared_model"], "anthropic/claude-opus-5-5");
+    assert_eq!(roundtrip["model_drift"]["state"], "unknown");
+    assert_eq!(roundtrip["model_drift"]["return_attempts"], 0);
+    let mut legacy = card();
+    legacy.as_object_mut().unwrap().remove("declared_model");
+    legacy.as_object_mut().unwrap().remove("model_drift");
+    let legacy: fractal_client::Agent = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.header.id, typed.header.id);
+    assert!(legacy.live_model.is_none());
+    let legacy = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy.get("declared_model").is_none());
+    assert!(legacy.get("model_drift").is_none());
     // Usage on another incarnation does not leak into this card.
     append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "zero", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
     assert!(card()["live_model"].is_null());
@@ -12816,6 +12882,12 @@ fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     assert_eq!(card()["live_model"], "gpt-6.1-sol");
     let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
     assert_eq!(typed.live_model.as_deref(), Some("gpt-6.1-sol"));
+    // Untimestamped legacy observations cannot establish current health.
+    assert_eq!(card()["model_drift"]["state"], "stale");
+    append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "one", "model": "gpt-6.1-sol", "context_used_tokens": 1, "observed_at_unix_ms": now_ms() as u64}));
+    assert_eq!(card()["model_drift"]["state"], "drifted");
+    // No detector episode yet: do not fabricate an onset from the last sample.
+    assert!(card()["model_drift"]["drift_since"].is_null());
     // Response spend on another model (a subagent's, rolled up on the parent) is not what
     // the seat runs on: the card keeps the session's model.
     append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "one", "model": "claude-haiku-4-5", "total_tokens": 1}));
@@ -12824,6 +12896,7 @@ fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "two"}));
     append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "two"}));
     assert!(card()["live_model"].is_null());
+    assert_eq!(card()["model_drift"]["state"], "unknown");
 }
 
 #[test]

@@ -1144,6 +1144,29 @@ a numeric minute with a variable subject key. Both index existing canonical
 claims without adding authoritative tables. Any later reference conversion must
 preserve exact retry, conflict exclusion, minute range and replication semantics.
 
+### Background usage-period lookup
+
+`fractal_store::store::usage_period` owns `lv-h8c2a4192756e`,
+`lv-h3aca5e04dde4` and `lv-h2c8754e606af`. The rebuildable local lookup stores
+existing claim IDs, normalized cumulative-series JSON and padded observed-time
+TEXT, with series/time and time/series indexes. It deliberately does not copy
+claim bodies. Inline keys preserve exact historical identity and full-u64 time
+ordering while backfill visits at most 64 source rows per background loan.
+This bounds rows, not encoded key/body bytes or transaction duration. The
+maintainer retains the variable-column/index-key reference conversion and
+writer-side JSON preparation debt; any replacement must preserve canonical
+ties, deletion/update maintenance and the complete-before-read-switch cursor.
+
+`fractal_seats::store::usage_period` owns `lv-h65f06f9a314c`,
+`lv-h5dbb84e35027`, `lv-h003f0f479205`, `lv-h7186f3970656` and
+`lv-h336e19be1e61`. These readers bind reporting-window times and existing
+series keys, then load canonical claim bodies only for selected boundaries.
+The exact historical reader remains active until backfill completes. Values
+remain inline to preserve the existing billing fold and pending-local baseline
+semantics; the tracing TODO must retain those identities and tie-breaking when
+moving keys or bodies to references. No logical input cap or value-size proof
+is introduced by these exceptions.
+
 ### Trim recording preserves ready publications (#6977)
 
 The `smallclaims::store::checkpoint_trim` maintainer retains
@@ -1162,3 +1185,20 @@ reclamation-cost bound. The existing generation-staging and certified keyed
 reclamation work therefore remains necessary; this review neither removes the
 exception nor grants a wider exemption. No statement, column catalog or other
 flow record changes are accepted by this refresh.
+
+### Model-return admission ledger (#6803)
+
+The `fractal_store::store` schema identity is `lv-h25bdee44f9bb` after combining
+the model-return admission ledger, bounded local model-observation cache frontier
+index and the existing schema. The catalog is
+regenerated from the combined source using `scripts/propose-sqlite-large-values`,
+preserving existing declarations, reviewed metadata and flow records rather than
+replacing them with an older branch snapshot.
+
+The `fractal_store::store::model_return` maintainer owns `lv-h5004436e697c`.
+Durable admission evidence retains variable identifiers and serialized claim
+values inline. The schema retains `chunk-or-reference-variable-columns`; the
+sink retains `trace-statement-and-value-representation`. Neither the idle-only
+admission policy nor its restart-rate bound proves a physical SQLite value-size
+bound. Any later representation change must preserve episode, incarnation and
+declaration fencing and replay-safe admission identity.

@@ -292,7 +292,8 @@
    "extra": [
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
     "scripts/ci-test-paths.rs",
-    "slo"
+    "slo",
+    "vendor/notify/src/fsevent_cursor.rs"
    ]
   },
   "fractal-resource-protocol": {
@@ -376,6 +377,7 @@
     "crates/fractal-store/src/store/notice_authority_tests.rs",
     "crates/fractal-store/src/store/transaction_work.rs",
     "docs/st3/client-v0/fixtures/notice-conformance.json",
+    "docs/st3/open-indexes.json",
     "evals/fractal",
     "examples/fractal/custom-review.json",
     "examples/fractal/decision-tree.json",

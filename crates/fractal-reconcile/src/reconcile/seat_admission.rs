@@ -20,7 +20,7 @@ pub struct Controller {
     pressure_dirty: AtomicBool,
     #[cfg(test)]
     pressure_samples: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(
-        std::time::Instant, fractal_runtime::resource_pressure::Decision,
+        tokio::time::Instant, fractal_runtime::resource_pressure::Decision,
     )>>,
 }
 
@@ -48,13 +48,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let period = self.seat_admission.finite_policy.psi_brake.sample_interval();
         let mut interval = tokio::time::interval(period);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut previous = None;
         loop {
             interval.tick().await;
             let this = self.clone();
             let decision = match tokio::task::spawn_blocking(move || {
-                crate::task_cpu::blocking("resource.pressure", || this.seat_admission.pressure_decision())
+                crate::task_cpu::blocking("resource.pressure", || this.seat_admission.sample_pressure())
             }).await {
                 Ok(decision) => decision,
                 Err(error) => {
@@ -64,10 +64,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             #[cfg(test)]
             if let (Ok(decision), Some(samples)) = (&decision, self.seat_admission.pressure_samples.get()) {
-                let _ = samples.send((std::time::Instant::now(), *decision));
+                let _ = samples.send((tokio::time::Instant::now(), decision.clone()));
             }
             match decision {
-                Ok(decision) if previous != Some(decision) => {
+                Ok(decision) if previous.as_ref() != Some(&decision) => {
                     if previous.is_some() && decision.blocked {
                         tracing::warn!(reason = ?decision.reason, "host PSI brake blocked admission");
                     } else {
@@ -129,30 +129,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.refresh_seat_admission_at(u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX));
     }
 
-    fn record_pressure_layout_diagnostic(&self, placement: &str) -> Result<()> {
-        self.record_once(&format!("daemon/{}", self.host), "daemon.diagnostic", BTreeMap::from([
-            ("severity".into(), Value::String("warning".into())),
-            ("code".into(), Value::String("lane-psi-not-applicable".into())),
-            ("reason".into(), Value::String(format!(
-                "finite lane PSI is not applicable to cgroup placement {placement}; qualified root PSI and the memory floor remain active"
-            ))),
-        ]))
-    }
-
     fn refresh_seat_admission_at(&self, now: u64) {
         let admission = &self.seat_admission;
         if admission.pressure_dirty.swap(false, Ordering::AcqRel) {
             self.incremental.touch("host-lane-pressure");
-            // Copy under the pressure lock, then release it before touching the store.
-            let placement = admission.pressure.lock().unwrap_or_else(PoisonError::into_inner)
-                .as_ref().and_then(|observer| observer.lane_psi_not_applicable_placement())
-                .map(str::to_owned);
-            if let Some(placement) = placement
-                && let Err(error) = self.record_pressure_layout_diagnostic(&placement)
-            {
-                tracing::warn!(%error, "could not publish lane PSI coverage diagnostic");
-                admission.pressure_dirty.store(true, Ordering::Release);
-            }
         }
         if let Some(host) = admission.lanes {
             let observation = (host.outside)();
@@ -209,7 +189,16 @@ impl<R: RuntimeControl> Reconciler<R> {
 }
 
 impl Controller {
-    pub fn pressure_decision(&self) -> Result<fractal_runtime::resource_pressure::Decision> {
+    /// Admission reads the last sampler result, never kernel files or the brake clock.
+    pub fn pressure_decision(&self) -> fractal_runtime::resource_pressure::Decision {
+        use fractal_runtime::resource_pressure::{Decision, ObservationCause, Reason};
+        self.pressure.lock().unwrap_or_else(PoisonError::into_inner).as_ref()
+            .map_or(Decision { blocked: true,
+                reason: Some(Reason::UnknownObservation { cause: ObservationCause::NotYetSampled }) },
+                fractal_runtime::resource_pressure::Observer::decision)
+    }
+
+    pub(super) fn sample_pressure(&self) -> Result<fractal_runtime::resource_pressure::Decision> {
         // This guard covers only the Observer's kernel PSI read and pure Brake update.
         // Never acquire store, incremental or other reconciliation locks inside it.
         let mut pressure = self.pressure.lock().unwrap_or_else(PoisonError::into_inner);

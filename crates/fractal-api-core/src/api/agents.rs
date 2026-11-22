@@ -581,12 +581,12 @@ pub async fn report_native_session(
         ("harness".into(), Value::String(request.harness)),
         (
             "session_id".into(),
-            Value::String(request.session_id.clone()),
+            Value::String(request.session_id),
         ),
         ("agent".into(), Value::String(subject.clone())),
         (
             "incarnation_id".into(),
-            Value::String(request.incarnation_id.clone()),
+            Value::String(request.incarnation_id),
         ),
         ("status".into(), Value::String("active".into())),
     ]);
@@ -601,7 +601,7 @@ pub async fn report_native_session(
     }
     let claim = state
         .store
-        .append_claim(&ClaimInput {
+        .bind_native_session(&ClaimInput {
             subject: subject.clone(),
             kind: "harness.session-file".into(),
             actor: Some(subject.clone()),
