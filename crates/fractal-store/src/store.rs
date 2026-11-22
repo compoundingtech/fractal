@@ -27,6 +27,7 @@ pub mod launch_freeze;
 pub mod resource_membership;
 pub mod resource_admission_objectives;
 pub mod shell_resources;
+pub mod scratch_resources;
 pub mod resource_exec_receipts;
 pub mod resource_profile_learner;
 #[cfg(test)]
@@ -3003,6 +3004,7 @@ impl Store {
         launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
+        scratch_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
         storage_census::install(&graph.connection.write())?;
@@ -3040,6 +3042,7 @@ impl Store {
         launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
+        scratch_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
         storage_census::install(&graph.connection.write())?;
@@ -3082,6 +3085,7 @@ impl Store {
         launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
+        scratch_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
         storage_census::install(&graph.connection.write())?;

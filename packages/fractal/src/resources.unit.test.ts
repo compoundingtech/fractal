@@ -56,7 +56,9 @@ describe('scoped native resource lanes', () => {
         case 'resource.lane.run': return { _tag: 'Success', value: { run: 'mission-run/child', status: 'completed' } }
         case 'resource.lane.release': return { _tag: 'Success', value: null }
         // This lane fixture does not host native agent turns.
-        case 'agent.turn': return {
+        case 'agent.turn':
+        case 'resource.scratch.acquire':
+        case 'resource.scratch.inventory': return {
           _tag: 'Failure',
           error: { _tag: 'ResourceError', code: 'operation-refused', message: 'Unexpected native agent turn in lane fixture.' },
         }
@@ -400,3 +402,48 @@ it.effect('preserves concurrent non-lane commands through ordinary host spawn', 
   expect(spawned).toContainEqual(['first'])
   expect(spawned).toContainEqual(['second'])
 }))
+
+describe('mission-owned native scratch', () => {
+  const handle = {
+    id: 'scratch/output', host: 'executor', owner: 'mission-run/owner',
+    ownerGeneration: 'mission-generation/one', path: '/dedicated/output',
+    generation: 'scratch-generation/one', authorityEpoch: 'epoch/one',
+  }
+
+  it.effect('uses durable activity occurrence keys without registering JS finalizers', () => Effect.gen(function* () {
+    const requests: ResourceRequest[] = []
+    const program = Fractal.mission(intent, () => Fractal.step({ id: 'prepare' }, Effect.gen(function* () {
+      const first = yield* Fractal.resources.scratch('output', { host: 'executor', root: '/dedicated' })
+      const second = yield* Fractal.resources.scratch('output', { host: 'executor', root: '/dedicated' })
+      expect(first).toEqual(handle)
+      expect(second).toEqual(handle)
+    })))
+    const host = fakeHost({ resource: async (request) => {
+      requests.push(request)
+      return { _tag: 'Success', value: handle }
+    } })
+    expect((yield* start(program, host))._tag).toBe('Success')
+    expect(requests.map((request) => request.operation)).toEqual([
+      'resource.scratch.acquire', 'resource.scratch.acquire',
+    ])
+    expect(requests[0]?.key).toBe('prepare/resource.scratch/output')
+    expect(requests[1]?.key).not.toBe(requests[0]?.key)
+    expect(requests[0]?.payload).toEqual({ host: 'executor', root: '/dedicated' })
+  }))
+
+  it.effect('returns typed bounded dry-run rows including unknown owners', () => Effect.gen(function* () {
+    const row = { handle, state: 'held', ownerObservation: 'unknown', consumerObservation: 'unknown' }
+    const program = Fractal.mission(intent, () => Fractal.resources.scratchInventory({
+      host: 'executor', after: 'earlier', limit: 10,
+    }))
+    const requests: ResourceRequest[] = []
+    const host = fakeHost({ resource: async (request) => {
+      requests.push(request)
+      return { _tag: 'Success', value: [row] }
+    } })
+    expect(yield* start(program, host)).toEqual({ _tag: 'Success', value: [row] })
+    expect(requests).toMatchObject([{
+      operation: 'resource.scratch.inventory', payload: { host: 'executor', after: 'earlier', limit: 10 },
+    }])
+  }))
+})
