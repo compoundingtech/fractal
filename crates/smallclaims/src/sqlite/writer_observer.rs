@@ -163,7 +163,6 @@ impl MutationState {
                 Err(_) => changes.unknown = true,
             }
         }
-        super::commit_scope::boundary(&changes);
         changes
     }
 
