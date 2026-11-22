@@ -685,12 +685,6 @@ mod tests {
             .unwrap();
         assert_eq!(target["population"], "client-observed-latencies");
         assert!(target["windows"]["5m"]["count"].as_u64().unwrap() >= 100);
-        assert!(
-            crate::slo::doctor_lines(&report)
-                .iter()
-                .any(|(name, _, text)| name == "slo/ios-live-share"
-                    && text.contains("client-observed"))
-        );
         state
             .store
             .append_client_operation_claim(&ClaimInput {

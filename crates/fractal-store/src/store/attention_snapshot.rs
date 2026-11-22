@@ -1174,6 +1174,7 @@ impl Store {
             } else {
                 match code {
                     "access-denied" => ObserverCondition::Access(reason),
+                    "github-repository-not-found" => ObserverCondition::RepositoryNotFound(reason),
                     "rate-limited" => ObserverCondition::RateLimited {
                         reason,
                         outlasted: fields["next_check_unix_ms"]
@@ -2471,7 +2472,7 @@ impl Store {
         };
         let message_key = format!("st3-denial-answer:{episode}");
         let message_id = &hex::encode(sha2::Sha256::digest(message_key.as_bytes()))[..16];
-        self.append_claim(&ClaimInput {
+        super::message_routing::send(self, &ClaimInput {
             subject: format!("message/{message_id}"),
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),

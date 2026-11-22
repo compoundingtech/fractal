@@ -128,11 +128,10 @@ mod tests {
     #[test]
     fn inspection_actor_does_not_expand_neighboring_reads() {
         for path in [
-            &["fleet", "anchor"][..], &["replication", "checkpoint", "status"],
+            &["fleet", "anchor"][..],
             &["subject", "basis"], &["agents", "ls"],
             &["launch", "preview"],
             &["agents", "rename-id", "proof", "export"], &["missions", "rename-id", "proof", "export"],
-            &["replication", "checkpoint", "plan"],
         ] {
             let mut argv = vec!["fractal"];
             argv.extend_from_slice(path);

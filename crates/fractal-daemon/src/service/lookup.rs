@@ -35,6 +35,7 @@ fn check_conflicts<'a>(statuses: impl IntoIterator<Item = &'a ServiceStatus>) ->
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn select(mut statuses: Vec<ServiceStatus>) -> Result<ServiceStatus> {
     check_conflicts(&statuses)?;
     // Candidate order retains the original CLI target when legacy installs coexist.
@@ -97,6 +98,14 @@ pub(super) fn systemd(snapshot: &fractal_runtime::systemd::Snapshot) -> Result<S
 }
 
 #[cfg(target_os = "linux")]
+pub(super) fn replication_worker_identity(
+    snapshot: &fractal_runtime::systemd::Snapshot,
+) -> Result<fractal_runtime::PeerProcessIdentity> {
+    let service = systemd(snapshot)?.replication;
+    snapshot.worker_identity(&service.name)
+}
+
+#[cfg(target_os = "linux")]
 fn systemd_host_paths() -> Vec<PathBuf> {
     systemd_search_paths(|variable| match variable {
         "XDG_CONFIG_HOME" | "XDG_DATA_HOME" | "XDG_RUNTIME_DIR" => {
@@ -119,20 +128,90 @@ fn systemd_installed_in(name: &str, paths: &[PathBuf]) -> bool {
     })
 }
 
+/// Prove an unloaded local unit is usable but not pulled in by any user target.
+/// Missing, masked, dangling or unreadable evidence must never hide a conflict.
+#[cfg(target_os = "linux")]
+fn systemd_unloaded_staging(name: &str, paths: &[PathBuf]) -> Result<bool> {
+    let mut definitions = Vec::new();
+    for directory in paths {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let target = fs::canonicalize(&path)?;
+                if !fs::metadata(&target)?.is_file() { return Ok(false); }
+                definitions.push(target);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if definitions.is_empty() { return Ok(false); }
+    for directory in paths {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let filename = entry.file_name();
+            let filename = filename.as_encoded_bytes();
+            if !filename.ends_with(b".wants") && !filename.ends_with(b".requires") { continue; }
+            for dependency in fs::read_dir(entry.path())? {
+                let dependency = dependency?;
+                if dependency.file_name() == name
+                    || definitions.contains(&fs::canonicalize(dependency.path())?)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(target_os = "linux")]
 fn resolve_systemd(
     (old, home_manager_name): (&str, Option<&str>),
     snapshot: &fractal_runtime::systemd::Snapshot,
     paths: &[PathBuf],
 ) -> Result<ServiceStatus> {
-    select(candidate_names(old, home_manager_name).iter().map(|name| {
+    let mut statuses: Vec<_> = candidate_names(old, home_manager_name).iter().map(|name| {
         let mut status = systemd_service_status(name, snapshot.units.get(name));
         // Unloaded installed units are absent from list-units. Inspect only local
         // user-unit entries, including Home Manager links and /dev/null masks;
         // never ask the manager to load an absent candidate with `show`.
         status.installed |= systemd_installed_in(name, paths);
         status
-    }).collect())
+    }).collect();
+    let enabled = |status: &ServiceStatus| snapshot.units.get(&status.name).is_some_and(|unit| {
+        matches!(unit.unit_file_state.as_str(), "enabled" | "enabled-runtime")
+    });
+    if statuses.iter().any(|status| status.running || enabled(status)) {
+        // Ignore only proven staging in the alternate namespace. Loaded links
+        // retain the manager's explicit evidence; unloaded entries require a
+        // complete local enablement check, without loading them via `show`.
+        let authoritative_new = statuses.iter().any(|status| {
+            is_new_family(status) && (status.running || enabled(status))
+        });
+        let authoritative_legacy = statuses.iter().any(|status| {
+            !is_new_family(status) && (status.running || enabled(status))
+        });
+        statuses.retain(|status| {
+            let alternate = if is_new_family(status) { authoritative_legacy } else { authoritative_new };
+            if !alternate || status.running { return true; }
+            !match snapshot.units.get(&status.name) {
+                Some(unit) => unit.active == "inactive"
+                    && matches!(unit.unit_file_state.as_str(), "linked" | "linked-runtime"),
+                None => systemd_unloaded_staging(&status.name, paths).unwrap_or(false),
+            }
+        });
+    }
+    check_conflicts(&statuses)?;
+    let selected = statuses.iter().enumerate()
+        .max_by_key(|(index, status)| (status.running, enabled(status), status.installed, std::cmp::Reverse(*index)))
+        .map(|(index, _)| index).unwrap_or(0);
+    Ok(statuses.swap_remove(selected))
 }
 
 #[cfg(target_os = "linux")]
@@ -340,7 +419,7 @@ mod tests {
 
         let mut unit = fractal_runtime::systemd::Unit {
             load: "not-found".into(), active: "active".into(), sub: "running".into(),
-            main_pid: 42, control_group: None,
+            unit_file_state: String::new(), main_pid: 42, control_group: None,
         };
         // A manager-confirmed active service still counts after its unit file disappears.
         let active = systemd_service_status("fractal.service", Some(&unit));
@@ -350,6 +429,149 @@ mod tests {
         unit.sub = "dead".into();
         let loaded = systemd_service_status("st3.service", Some(&unit));
         assert!(loaded.installed && !loaded.running);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn staged_snapshot(
+        legacy: (&str, &str), renamed: (&str, &str),
+    ) -> fractal_runtime::systemd::Snapshot {
+        let mut snapshot = fractal_runtime::systemd::Snapshot {
+            units: Default::default(),
+            service_identities: Default::default(),
+            captured_at: std::time::Instant::now(),
+        };
+        for (family, (active, unit_file_state)) in [("smalltalk", legacy), ("fractal", renamed)] {
+            for suffix in ["", "-replication"] {
+                snapshot.units.insert(format!("{family}{suffix}.service"), fractal_runtime::systemd::Unit {
+                    load: "loaded".into(), active: active.into(),
+                    sub: if active == "active" { "running" } else { "dead" }.into(),
+                    unit_file_state: unit_file_state.into(),
+                    main_pid: if active == "active" { std::process::id() } else { 0 },
+                    control_group: None,
+                });
+            }
+        }
+        snapshot
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_lookup_staged_links_prefer_running_or_enabled_family() {
+        for (legacy, renamed, expected) in [
+            (("active", "enabled"), ("inactive", "linked"), "smalltalk"),
+            (("inactive", "enabled"), ("inactive", "linked"), "smalltalk"),
+            (("inactive", "linked"), ("active", "enabled"), "fractal"),
+            (("inactive", "linked-runtime"), ("inactive", "enabled-runtime"), "fractal"),
+        ] {
+            let snapshot = staged_snapshot(legacy, renamed);
+            for (old, hm, suffix) in [
+                ("st3.service", "smalltalk.service", ""),
+                ("st3-replication.service", "smalltalk-replication.service", "-replication"),
+            ] {
+                let selected = resolve_systemd((old, Some(hm)), &snapshot, &[]).unwrap();
+                assert_eq!(selected.name, format!("{expected}{suffix}.service"));
+                assert!(selected.installed);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_lookup_both_running_or_both_enabled_still_conflict() {
+        for (legacy, renamed) in [
+            (("active", "linked"), ("active", "linked")),
+            (("inactive", "enabled"), ("inactive", "enabled")),
+            (("active", "enabled"), ("inactive", "enabled")),
+            (("inactive", "enabled-runtime"), ("inactive", "enabled")),
+            (("active", "enabled"), ("inactive", "")),
+            (("active", "enabled"), ("inactive", "masked")),
+            (("active", "enabled"), ("inactive", "disabled")),
+        ] {
+            let snapshot = staged_snapshot(legacy, renamed);
+            let error = resolve_systemd(("st3.service", Some("smalltalk.service")), &snapshot, &[]).unwrap_err();
+            assert!(error.downcast_ref::<ConflictingServices>().is_some());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_lookup_replication_worker_pid_uses_running_home_manager_unit_with_staged_links() {
+        let mut snapshot = staged_snapshot(("active", "enabled"), ("inactive", "linked"));
+        let identity = fractal_runtime::PeerProcessIdentity::capture_pid(std::process::id()).unwrap();
+        snapshot.service_identities.insert("smalltalk-replication.service".into(), identity);
+        let snapshot = std::sync::Arc::new(snapshot);
+        let mut cached = None;
+        let pid = cached_worker_pid(&mut cached, snapshot, replication_worker_identity, |identity| {
+            identity.validate()?;
+            Ok(identity.pid())
+        }).unwrap();
+        assert_eq!(pid, std::process::id());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unloaded_unenabled_alternate_resolves_legacy_main_pid_and_admits_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = [root.path().to_path_buf()];
+        let definition = root.path().join("unit-definition");
+        fs::write(&definition, "[Service]\nExecStart=/example/fractal\n").unwrap();
+        let mut snapshot = staged_snapshot(("active", "enabled"), ("inactive", "linked"));
+        let peer = fractal_api_core::api::LocalPeer {
+            pid: std::process::id(), ancestor: None,
+            peer_process: Some(fractal_runtime::PeerProcessIdentity::capture_pid(std::process::id()).unwrap()),
+        };
+        snapshot.service_identities.insert("smalltalk-replication.service".into(), peer.peer_process.clone().unwrap());
+        for (old, legacy, renamed) in [
+            ("st3.service", "smalltalk.service", "fractal.service"),
+            ("st3-replication.service", "smalltalk-replication.service", "fractal-replication.service"),
+        ] {
+            snapshot.units.remove(renamed);
+            std::os::unix::fs::symlink(&definition, root.path().join(renamed)).unwrap();
+            let selected = resolve_systemd((old, Some(legacy)), &snapshot, &paths).unwrap();
+            assert_eq!(selected.name, legacy);
+            assert!(selected.running);
+        }
+        let selected = resolve_systemd(("st3-replication.service", Some("smalltalk-replication.service")), &snapshot, &paths).unwrap();
+        let worker = snapshot.worker_identity(&selected.name).unwrap();
+        assert_eq!(worker.pid(), snapshot.units[&selected.name].main_pid);
+        fractal_api_core::api::authorize_worker(Some(&peer), &|| {
+            worker.validate()?;
+            Ok(worker.pid())
+        }).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unloaded_alternate_enablement_masks_and_unknown_evidence_still_conflict() {
+        for evidence in ["wants", "requires", "alias", "mask", "dangling", "unreadable-directory"] {
+            let root = tempfile::tempdir().unwrap();
+            let paths = [root.path().join("config"), root.path().join("global")];
+            for directory in &paths { fs::create_dir_all(directory).unwrap(); }
+            let definition = root.path().join("unit-definition");
+            fs::write(&definition, "[Service]\nExecStart=/example/fractal\n").unwrap();
+            let target = match evidence {
+                "mask" => PathBuf::from("/dev/null"),
+                "dangling" => root.path().join("missing"),
+                _ => definition.clone(),
+            };
+            std::os::unix::fs::symlink(target, paths[0].join("fractal.service")).unwrap();
+            match evidence {
+                "wants" | "requires" | "alias" => {
+                    let directory = paths[1].join(if evidence == "requires" { "default.target.requires" } else { "default.target.wants" });
+                    fs::create_dir(&directory).unwrap();
+                    let name = if evidence == "alias" { "alias.service" } else { "fractal.service" };
+                    std::os::unix::fs::symlink(&definition, directory.join(name)).unwrap();
+                }
+                // A malformed dependency directory gives an I/O error without
+                // depending on the test runner's privilege or permission bits.
+                "unreadable-directory" => { fs::write(paths[1].join("default.target.wants"), "").unwrap(); }
+                _ => {}
+            }
+            let mut snapshot = staged_snapshot(("active", "enabled"), ("inactive", "linked"));
+            snapshot.units.remove("fractal.service");
+            let error = resolve_systemd(("st3.service", Some("smalltalk.service")), &snapshot, &paths).unwrap_err();
+            assert!(error.downcast_ref::<ConflictingServices>().is_some(), "{evidence}: {error:#}");
+        }
     }
 
     #[cfg(target_os = "linux")]

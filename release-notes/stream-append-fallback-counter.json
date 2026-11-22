@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A message routed to the messages shard that the graph takes instead, because its stream append failed or the shard refused it from the outbox until its retries ran out, is now counted by error code, logged at warn with its subject and exact error, exported as the st.messages.stream.append_fallback counter (site, code), and shown since start by st replication status as a stream-fallbacks line (stream_fallbacks in its JSON). Before, the fallback was silent.",
+  "replay": {"status": "none", "detail": "No claim is written, admitted or projected differently; the counts live in daemon memory only."},
+  "schema": {"status": "none", "detail": "No table, index, trigger or user_version change."},
+  "rules": {"status": "none", "detail": "Routing and the fallback itself are unchanged."},
+  "compatibility": {"status": "changed", "detail": "GET /v1/replication/status gains an optional stream_fallbacks object (code to count since the daemon started). A daemon without it omits the field, which the CLI reads as unknown and prints no line for; an older CLI ignores it. The metric's code label comes from a fixed list, else other, so its series stay bounded."},
+  "downtime": {"status": "none", "detail": "No migration."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "Rolling back drops the counter, the status field and the log line, and nothing else."}
+}

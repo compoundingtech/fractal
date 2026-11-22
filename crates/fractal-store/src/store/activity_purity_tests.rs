@@ -308,8 +308,21 @@ fn last_prose_reads_do_not_scan_growing_non_prose_history() {
                     expected_subject: None,
                     idempotency_key: None,
                 }).unwrap();
-            } else {
+            } else if entry == 0 || entry == count {
+                // Keep the prose frontier and the final append on the ordinary path.
+                // Intermediate history is fixture data: flushing every append would
+                // repeatedly refold this same growing subject before the read is measured.
                 append_at(&store, entry as u128 + 1, AGENT, "harness.timeline", fields);
+            } else {
+                store.set_write_clock_at(entry as u128 + 1).unwrap();
+                let mut connection = store.connection.write();
+                let tx = connection.transaction().unwrap();
+                let body = json!({"fields": fields});
+                let claim = append_claim_record_tx(
+                    &tx, &store.origin, AGENT, "harness.timeline", Some(AGENT), &body, &[], None,
+                ).unwrap();
+                insert_event(&tx, claim.store_index, "harness.timeline", AGENT, &body).unwrap();
+                tx.commit().unwrap();
             }
         };
         if has_prose {

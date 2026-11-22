@@ -3,8 +3,7 @@
 use super::*;
 use crate::model::{ClaimRecord, IntentInput, WorkRequest};
 use smallclaims::store::ReplicatedClaimAdmission;
-use crate::store::{checkpoint, checkpoint_rules, classify_replicated_claim_with_registry, rules_digest};
-use sha2::{Digest as _, Sha256};
+use crate::store::{checkpoint_rules, classify_replicated_claim_with_registry};
 use crate::store::fleet_admission_tests_shared_seats::{admit, key, node, sync};
 use crate::store::{SloCheck as Check, SloObservation as Observation};
 use fractal_schema::slo_breaches::{DEFAULT_OWNER, Event, KIND};
@@ -318,31 +317,6 @@ fn an_ordinary_mission_step_named_fix_keeps_normal_claim_admission() {
     let fix = source.work(Some(DEFAULT_OWNER), true).unwrap().into_iter().find(|step| step.step == "fix").unwrap();
     assert_eq!(fix.status, "ready");
     source.work_action(&fix.subject, "claim", &request("ordinary-positive-claim")).unwrap();
-}
-
-
-#[test]
-fn different_checkpoint_rules_cannot_form_one_complete_verification_certificate() {
-    use smallclaims::store::checkpoint_agreement::{CheckpointClaim, certificates};
-    let source = source();
-    let cut = 86_400_000u128;
-    let checkpoint = checkpoint::checkpoint_name(cut);
-    // The source compatibility change has a different identity from the prior rule
-    // engine. This control exercises the real certificate reducer for that mismatch.
-    let mut legacy = Sha256::new(); legacy.update(b"st3-checkpoint-rules-v1\0");
-    legacy.update((crate::store::RULES_VERSION - 1).to_be_bytes());
-    let prior_description = checkpoint_rules::rules_description().lines().filter(|line| !line.starts_with(KIND)).collect::<Vec<_>>().join("\n");
-    legacy.update(prior_description.as_bytes());
-    let legacy = hex::encode(legacy.finalize()); assert_ne!(legacy, rules_digest());
-    let verification = |writer: &str, rules: &str| CheckpointClaim { id: format!("verified/{writer}"),
-        kind: "checkpoint.verified".into(), subject: checkpoint.clone(), writer: writer.into(), actor: Some("daemon/runtime".into()),
-        fields: serde_json::from_value(json!({"cut_unix_ms":cut,"participants":["alder","birch"],
-            "sealed_digest":"same-seal","rules_digest":rules,"drop_digest":"same-drop","retained_digest":"same-retained",
-            "graph_digest":"same-graph","reader_digest":"same-reader"})).unwrap() };
-    let current = rules_digest();
-    assert!(certificates(&[verification("alder", &current), verification("birch", &legacy)], &checkpoint).is_empty());
-    assert_eq!(certificates(&[verification("alder", &current), verification("birch", &current)], &checkpoint).len(), 1);
-    assert!(source.work(None, true).unwrap().is_empty(), "no checkpoint control starts work");
 }
 
 

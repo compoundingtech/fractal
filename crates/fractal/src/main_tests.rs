@@ -1,4 +1,16 @@
 #[test]
+fn subject_activity_summary_is_explicit_and_conflicts_with_other_views() {
+    assert!(Cli::try_parse_from([
+        "fractal", "subject", "show", "agent/example", "--activity-summary", "--json", "--daemon-wait", "0",
+    ]).is_ok());
+    for flag in ["--kdl", "--references", "--source"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "subject", "show", "agent/example", "--activity-summary", flag,
+        ]).is_err());
+    }
+}
+
+#[test]
 fn series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets() {
     let cli = Cli::try_parse_from([
         "fractal", "series", "--objective", "factory/work-throughput", "--from", "1000", "--to", "4000",
@@ -481,46 +493,6 @@ fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
 }
 
 #[test]
-fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
-    let mut status = fractal_daemon::store::CheckpointStatusView {
-        node: "alder".into(),
-        newest_stable: None,
-        trimmed: None,
-        halted: false,
-        pending: None,
-        participants: ["alder".into(), "birch".into()].into(),
-        excused: Default::default(),
-        left: Default::default(),
-        machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
-        verification_attempt: None,
-        worker: None,
-    };
-    let output = render_checkpoint_status(&status);
-    assert!(output.contains("last daemon start (advertised build)"));
-    assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
-    assert!(output.contains("machine_version  birch: not advertised"));
-    status.pending = Some(serde_json::from_value(serde_json::json!({
-        "checkpoint": "checkpoint/test", "cut_unix_ms": 0, "due_at_unix_ms": 0,
-        "local_digest_state": "unavailable", "sealed": [], "disagreeing": {},
-        "unsealed": ["alder", "birch"], "verified": [], "verifications_agree": true,
-        "builds": {}
-    })).unwrap());
-    assert!(status.pending.as_ref().unwrap().terms.is_none());
-    assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
-    let output = render_checkpoint_status(&status);
-    assert!(output.contains("alder phase=seal (no seal)"));
-    assert!(output.contains("birch phase=seal (no seal)"));
-    status.pending = None;
-    status.worker = Some(serde_json::from_value(serde_json::json!({
-        "phase": "apply_stable", "updated_at_unix_ms": 0, "error": "trim commit failed"
-    })).unwrap());
-    assert!(render_checkpoint_status(&status).contains("phase=ApplyStable failed: trim commit failed"));
-    status.worker = None;
-    status.halted = true;
-    assert!(render_checkpoint_status(&status).contains("phase=trim (halted"));
-}
-
-#[test]
 fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
     let seats: Vec<String> = (0..120).map(|n| format!("agent/example/seat-{n}")).collect();
     let mut renewals_per_second = [0usize; 60];
@@ -656,6 +628,97 @@ fn native_input_acceptance_uses_source_clock_and_replays_durable_first_timestamp
     let resumed: PiChannelResume =
         serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(resumed.pending.input_acceptances, recovered);
+}
+
+#[test]
+fn omp_admission_fallback_is_content_free_fenced_and_once_per_batch_across_reexec() {
+    for reason in ["content-mismatch", "no-message-start", "timeout"] {
+        let mut state = PiChannelResume {
+            incarnation: "runtime-a".into(),
+            ..Default::default()
+        };
+        let mut observer = None;
+        let mut frame = json!({
+            "type": "admission_fallback", "reason": reason, "content": "PRIVATE PROMPT",
+            "meta": {"messageId": "message/first", "identity": "example",
+                "inputIncarnation": "runtime-a", "extra": "PRIVATE METADATA"},
+        });
+        assert!(accept_managed_channel_frame(
+            &mut state, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        assert_eq!(state.pending.admission_fallbacks.len(), 1);
+        assert_eq!(state.pending.admission_fallbacks["message/first"], reason);
+        let input = omp_channel_admission_fallback_claim(
+            "agent/example", &state.incarnation, "message/first", reason,
+        );
+        assert_eq!(input.subject, "agent/example");
+        assert_eq!(input.fields["incarnation_id"], "runtime-a");
+        assert_eq!(input.fields["message_id"], "message/first");
+        assert_eq!(input.fields["reason"], reason);
+        let saved = serde_json::to_string(&state).unwrap();
+        let claim = serde_json::to_string(&input).unwrap();
+        for serialized in [&saved, &claim] {
+            assert!(!serialized.contains("PRIVATE"));
+            assert!(!serialized.contains("\"content\""));
+        }
+        let mut restored: PiChannelResume = serde_json::from_str(&saved).unwrap();
+        assert!(!accept_managed_channel_frame(
+            &mut restored, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        // Publication removes only pending work, not the first-observation deduplication.
+        restored.pending.admission_fallbacks.clear();
+        frame["reason"] = json!("timeout");
+        assert!(!accept_managed_channel_frame(
+            &mut restored, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        assert!(restored.pending.admission_fallbacks.is_empty());
+        assert!(restored.pending.acknowledgements.is_empty());
+        assert!(!restored.first_idle_seen);
+    }
+}
+
+#[test]
+fn omp_admission_fallback_rejects_unknown_reason_and_foreign_or_missing_binding() {
+    let valid = json!({
+        "type": "admission_fallback", "reason": "timeout",
+        "meta": {"messageId": "message/first", "identity": "example",
+            "inputIncarnation": "runtime-a"},
+    });
+    for (path, invalid) in [
+        ("/reason", json!("private-unbounded-reason")),
+        ("/reason", Value::Null),
+        ("/meta/inputIncarnation", json!("runtime-b")),
+        ("/meta/inputIncarnation", Value::Null),
+        ("/meta/identity", json!("another-seat")),
+        ("/meta/identity", Value::Null),
+        ("/meta/messageId", json!("")),
+        ("/meta/messageId", Value::Null),
+    ] {
+        let mut state = PiChannelResume { incarnation: "runtime-a".into(), ..Default::default() };
+        let mut frame = valid.clone();
+        *frame.pointer_mut(path).unwrap() = invalid;
+        assert!(!accept_managed_channel_frame(
+            &mut state, &mut None, &frame.to_string(), "agent/example",
+        ).unwrap(), "{frame}");
+        assert!(state.pending.admission_fallbacks.is_empty());
+        assert!(state.admission_fallbacks_seen.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn omp_admission_fallback_outage_retains_pending_observation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume { incarnation: "runtime-a".into(), ..Default::default() };
+    let frame = json!({"type":"admission_fallback","reason":"timeout",
+        "meta":{"messageId":"message/first","identity":"example","inputIncarnation":"runtime-a"}});
+    assert!(accept_managed_channel_frame(
+        &mut state, &mut None, &frame.to_string(), "agent/example",
+    ).unwrap());
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(state.pending.publish(
+        &client, "agent/example", "omp", "runtime-a", "native",
+    ).await.is_err());
+    assert_eq!(state.pending.admission_fallbacks["message/first"], "timeout");
 }
 
 #[tokio::test]
@@ -2741,6 +2804,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
         },
         loop_state: NativeLoopState {
             paths: None,
+            provider_started_at_ms: 10,
             mailbox_fence: None,
             ready: true,
             harness_record_started: true,
@@ -8393,6 +8457,22 @@ fn predecessor_layout_survives_resume_without_rewriting_catalogs() {
 }
 
 #[test]
+fn native_provider_launch_boundary_survives_driver_reexec() {
+    let state = NativeLoopState {
+        provider_started_at_ms: 10,
+        ..NativeLoopState::default()
+    };
+    let mut encoded = serde_json::to_value(&state).unwrap();
+    let back: NativeLoopState = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(back.provider_started_at_ms, 10);
+    // Older re-exec state already has an adopted ledger for the same incarnation. A missing
+    // launch boundary must not replace it with a later clock reading and expire live children.
+    encoded.as_object_mut().unwrap().remove("provider_started_at_ms");
+    let back: NativeLoopState = serde_json::from_value(encoded).unwrap();
+    assert_eq!(back.provider_started_at_ms, 0);
+}
+
+#[test]
 fn native_timeline_fences_provider_session_but_claims_runtime_session() {
     let record = fractal_drivers::harness_timeline::Record {
         schema: "st2.harness-timeline.v1".into(),
@@ -9741,6 +9821,84 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
 }
 
 #[tokio::test]
+async fn mission_show_joins_only_the_run_revisions_source_provenance() {
+    use fractal_daemon::SeatsStoreCore as _;
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("publisher").unwrap());
+    let source = r#"version 2
+mission "source-bound" state="ready" {
+  provenance {
+    reason "Republished after reviewed merge."
+    source {
+      repository "https://github.com/example/factory"
+      commit "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      path "graph/demo/mission.ts"
+      renderer "graph-v1"
+    }
+    decision "https://github.com/example/factory/pull/42"
+  }
+  goal "Keep a source-bound schedule."
+  step "hold" { agentless }
+}"#;
+    let intent = fractal_daemon::parse_intent(source, store.origin()).unwrap();
+    store.apply_internal(&intent, "source-bound-publication").unwrap();
+    let mut run = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "source-bound".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("agent/original-owner".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "source-bound-run".into(),
+    }).unwrap();
+    let created = store.latest_claim(&run.subject, Some("mission-run.created")).unwrap().unwrap();
+    let admitted = created.body["fields"]["admission_publication"].as_str().unwrap().to_owned();
+    let newer = source.replace("Keep a source-bound schedule.", "Newer schedule.")
+        .replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .replace("/pull/42", "/pull/43");
+    let intent = fractal_daemon::parse_intent(&newer, store.origin()).unwrap();
+    store.apply_internal(&intent, "newer-publication").unwrap();
+    let (client, server) = serve_test_store(store, root.path(), "publisher").await;
+    let publication = load_run_publication(&client, &run).await.unwrap().unwrap();
+    assert_eq!(publication.claim_id, admitted);
+    assert_eq!(publication.revision, run.revision);
+    run.provenance = None; // An older daemon omitted the existing sidecar.
+    load_run_source_provenance(&client, &mut run).await.unwrap();
+    let provenance = run.provenance.take().unwrap();
+    assert_eq!(provenance.source.commit, "a".repeat(40));
+    assert_eq!(provenance.decision, vec!["https://github.com/example/factory/pull/42"]);
+    assert_eq!(run.requester, "agent/original-owner");
+    run.revision = "0".repeat(64);
+    load_run_source_provenance(&client, &mut run).await.unwrap();
+    assert!(run.provenance.is_none());
+    assert!(load_run_publication(&client, &run).await.unwrap().is_none());
+    server.abort();
+}
+
+#[test]
+fn mission_run_attribution_uses_indexed_receipts_and_follow_caches_the_result() {
+    let root = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("src");
+    let source = fs::read_to_string(root.join("main.rs")).unwrap();
+    let lookup = source.split_once("async fn load_run_publication(").unwrap().1
+        .split_once("async fn load_run_source_provenance(").unwrap().0;
+    assert!(lookup.contains("kind=mission-run.created&order=asc&limit=1"));
+    assert!(lookup.contains("admission_publication"));
+    assert!(lookup.contains("/v1/claims/by-id/"));
+    assert!(!lookup.contains("mission_publications("));
+    assert!(!lookup.contains("before_index"));
+    let follow = source.split_once("async fn follow_mission_run_to(").unwrap().1
+        .split_once("client.follow_recovered()").unwrap().0;
+    assert!(follow.contains("if !attribution.contains_key(&run.revision)"));
+    assert!(follow.contains("let (provenance, publication_note) = &attribution[&run.revision]"));
+    assert!(!follow.contains("mission_publications("));
+    let show_source = fs::read_to_string(root.join("launch_cli.rs")).unwrap();
+    let show = show_source.split_once("MissionViewCommand::Show(").unwrap().1
+        .split_once("print_mission_tree_continuation").unwrap().0;
+    assert!(show.contains("load_run_publication(client, &run)"));
+    assert!(!show.contains("mission_publications("));
+}
+
+#[tokio::test]
 async fn missions_start_names_a_replaced_or_missing_revision() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("single").unwrap());
@@ -9797,6 +9955,11 @@ async fn missions_start_names_a_replaced_or_missing_revision() {
 
     let publications = mission_publications(&client, "arrival").await.unwrap();
     assert_eq!(publications.len(), 2);
+    assert_eq!(publications[0].actor.as_deref(), Some("person/test"));
+    let publication_note = mission_publication_note(publications.first());
+    assert!(publication_note.starts_with("PUBLISHER person/test · single · "));
+    assert!(publication_note.contains(&format!("\nPUBLICATION {}\n", publications[0].claim_id)));
+    assert!(!publication_note.contains("REQUESTER"));
     assert!(
         started_revision_note("arrival", &second, &publications)
             .ends_with("on single. 1 older revision shares this mission name.")
@@ -10889,6 +11052,19 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
 }
 
 #[test]
+fn replication_status_names_stream_fallbacks_since_start_by_code() {
+    assert_eq!(render_stream_fallbacks(&BTreeMap::new()), "none since start");
+    let counts = BTreeMap::from([("internal".to_owned(), 1), ("graph-closed".to_owned(), 2)]);
+    assert_eq!(render_stream_fallbacks(&counts), "graph-closed=2 internal=1 since start");
+    // A daemon from before the count sends no field, which reads as unknown, not as none.
+    let earlier: ReplicationStatus = serde_json::from_value(serde_json::to_value(ReplicationStatus::default()).unwrap()).unwrap();
+    assert_eq!(earlier.stream_fallbacks, None);
+    let current = ReplicationStatus { stream_fallbacks: Some(BTreeMap::new()), ..ReplicationStatus::default() };
+    let value = serde_json::to_value(&current).unwrap();
+    assert_eq!(value["stream_fallbacks"], serde_json::json!({}));
+}
+
+#[test]
 fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
     for family in ["agents", "missions"] {
         let cli = Cli::try_parse_from([
@@ -10922,4 +11098,305 @@ fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
         }
         assert!(Cli::try_parse_from(["st", family, "rename-proof", "agent/example-old"]).is_err());
     }
+}
+
+/// A start after the last page of valid records' bytes was emptied, but before the pages they
+/// held went back, still gives them back.
+#[tokio::test]
+async fn a_start_between_emptying_and_giving_pages_back_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(false, false).await;
+}
+
+#[tokio::test]
+async fn a_start_during_giving_record_pages_back_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(true, false).await;
+}
+
+#[tokio::test]
+async fn a_start_after_a_record_page_reclamation_error_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(false, true).await;
+}
+
+async fn assert_record_pages_resume_after_restart(reclaim_a_chunk: bool, fail_reclamation: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    {
+        let store = std::sync::Arc::new(Store::open(&path, "alder").unwrap());
+        // Records an older build kept with their bytes, emptied by this build's pass before a
+        // restart.
+        {
+            let connection = store.connection.write();
+            for n in 0..200 {
+                connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-hbac708a02bc1 owner=fractal::main_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw, state, updated_at_unix_ms)
+                     VALUES (?1, 'birch', ?2, 'envelope', 0, randomblob(9000), 'valid', '0')",
+                    rusqlite::params![format!("record/sample-{n}"), n],
+                ).unwrap();
+            }
+        }
+        while !store.release_valid_record_bytes().unwrap().done {}
+        if reclaim_a_chunk {
+            let released = store
+                .release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE)
+                .unwrap();
+            assert!(released > 0);
+            assert!(released <= smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE);
+        }
+        if fail_reclamation {
+            // A real SQLite write error, not a replacement reclamation implementation.
+            store.connection.write().execute_batch("PRAGMA query_only=ON").unwrap();
+            assert!(store
+                .release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE)
+                .is_err());
+            store.connection.write().execute_batch("PRAGMA query_only=OFF").unwrap();
+        }
+    }
+    let free = |path: &std::path::Path| -> u64 {
+        rusqlite::Connection::open(path).unwrap().query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap()
+    };
+    assert!(free(&path) > 0, "the emptied bytes left free pages");
+    let store = std::sync::Arc::new(Store::open(&path, "alder").unwrap());
+    let page = store.release_valid_record_bytes().unwrap();
+    assert!(page.done);
+    assert_eq!(page.emptied, 0, "a restart must reclaim even without newly emptied records");
+    super::release_valid_record_bytes(store.clone(), 0).await;
+    drop(store);
+    assert_eq!(free(&path), 0, "the next start gave them back");
+}
+
+#[tokio::test]
+async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use fractal_drivers::{harness_events, harness_state};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("amber").unwrap());
+    let lose_ack = Arc::new(AtomicBool::new(true));
+    let app = Router::new().route("/v1/claims", post({
+        let store = store.clone();
+        move |Json(claim): Json<ClaimInput>| {
+            let store = store.clone();
+            let lose_ack = lose_ack.clone();
+            async move {
+                let record = store.append_claim(&claim).unwrap();
+                if claim.kind == "harness.diagnostic" && lose_ack.swap(false, Ordering::SeqCst) {
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"acknowledgement lost"}))).into_response()
+                } else {
+                    Json(json!({"api_version":"st3.v1","value":record})).into_response()
+                }
+            }
+        }
+    })).route("/v1/harness-events", post({
+        let store = store.clone();
+        move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
+            let store = store.clone();
+            async move {
+                let record = store.append_claim(&request.claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
+    let subject = "agent/example/seat";
+    let diagnostic_count = || store.claims_for(subject, Some("harness.diagnostic")).unwrap().len();
+    let mut reason = 0;
+    for (runtime, owner, incarnation, states, expected) in [
+        ("runtime-a", "provider-a", "incarnation-a", vec![true; 32], 1),
+        ("runtime-a", "provider-a", "incarnation-a", vec![false, false], 2),
+        ("runtime-a", "provider-a", "incarnation-a", vec![true, true], 3),
+        ("runtime-a", "provider-a", "incarnation-b", vec![true, true], 4),
+        ("runtime-b", "provider-b", "incarnation-c", vec![true, true], 5),
+    ] {
+        harness_events::enable(root.path(), runtime).unwrap();
+        for ready in states {
+            reason += 1;
+            harness_events::write_snapshot(root.path(), "harness-state",
+                &serde_json::to_vec(&json!({"incarnation":owner,"reason":reason})).unwrap()).unwrap();
+            let event = harness_events::pending(root.path(), 1).unwrap().remove(0);
+            let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
+            observed.channel_ready = Some(ready);
+            // Vary activity independently of channel readiness, as ordinary native frames do.
+            observed.state = if reason % 2 == 0 { harness_state::Activity::Active } else { harness_state::Activity::Idle };
+            let publisher = ObservationClient {
+                client: &client,
+                source_runtime: Some(runtime),
+                event: Some((runtime, event.sequence, root.path(), None)),
+            };
+            if reason == 1 {
+                assert!(publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+                    Some(incarnation), &observed, &mut None).await.is_err());
+                assert_eq!(diagnostic_count(), 1, "the lost acknowledgement followed a committed edge");
+            }
+            publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+                Some(incarnation), &observed, &mut None).await.unwrap();
+            harness_events::acknowledge(root.path(), event.sequence).unwrap();
+        }
+        assert_eq!(diagnostic_count(), expected);
+    }
+    // Legacy/non-durable callers still publish both readiness and activity, and retries
+    // keep the original episode/fingerprint idempotency rather than requiring a spool.
+    let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
+    observed.channel_ready = Some(true);
+    observed.state = harness_state::Activity::Idle;
+    // The preceding durable fixture already published Idle for incarnation-c. Change
+    // activity evidence so this checks a new publication, not valid fingerprint deduplication.
+    observed.reason = Some("legacy non-durable activity".into());
+    let publisher = ObservationClient { client: &client, event: None, source_runtime: None };
+    let activity_count = store.claims_for(subject, Some("harness.observed")).unwrap().len();
+    let mut last_fingerprint = None;
+    for _ in 0..2 {
+        publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+            Some("incarnation-c"), &observed, &mut last_fingerprint).await.unwrap();
+    }
+    assert_eq!(diagnostic_count(), 6);
+    assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().len(), activity_count + 1);
+    assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().iter()
+        .filter(|claim| claim.body["fields"]["reason"] == "legacy non-durable activity"
+            && claim.body["fields"]["incarnation_id"] == "incarnation-c")
+        .count(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn omp_successor_drains_predecessor_readiness_and_preparation_failure() {
+    use axum::{Json, Router, routing::post};
+    use std::sync::Arc;
+    use fractal_drivers::{harness_events, harness_state};
+
+    let root = tempfile::tempdir().unwrap();
+    for (runtime, provider) in [("runtime-a", "provider-a"), ("runtime-b", "provider-b")] {
+        harness_events::enable(root.path(), runtime).unwrap();
+        let ownership = harness_state::claim(root.path(), "example/seat", "omp", provider).unwrap();
+        let mut writer = harness_state::Writer::new(root.path(), "example/seat", "omp", Some("omp-channel".into()))
+            .with_ownership(provider, ownership);
+        let mut observation = harness_state::Observation::new(
+            harness_state::Activity::Idle, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+        );
+        observation.channel_ready = Some(true);
+        writer.observe(observation).unwrap();
+    }
+    let store = Arc::new(Store::open_memory("amber").unwrap());
+    let app = Router::new().route("/v1/claims", post({
+        let store = store.clone();
+        move |Json(claim): Json<ClaimInput>| {
+            let store = store.clone();
+            async move {
+                let record = store.append_claim(&claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    })).route("/v1/harness-events", post({
+        let store = store.clone();
+        move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
+            let store = store.clone();
+            async move {
+                // The successor owns the publication envelope, even for predecessor events.
+                assert_eq!(request.runtime_incarnation, "runtime-b");
+                let record = store.append_claim(&request.claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
+    let subject = "agent/example/seat";
+    let mut observations = NativeObservations::start(root.path(), "runtime-b").unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    for runtime in ["runtime-a", "runtime-b"] {
+        assert!(diagnostics.iter().any(|claim|
+            claim.body["fields"]["incarnation_id"] == runtime && claim.body["fields"]["code"] == "omp-channel-ready"
+        ));
+        assert!(store.claims_for(subject, Some("harness.observed")).unwrap().iter()
+            .any(|claim| claim.body["fields"]["incarnation_id"] == runtime));
+    }
+    let connection = rusqlite::Connection::open(harness_events::database_path(root.path())).unwrap();
+    // Fail-open could otherwise mask incorrect provenance: both fences must be prepared.
+    assert_eq!(connection.query_row(
+        "SELECT count(*) FROM metadata WHERE key IN ('omp-channel-readiness:runtime-a','omp-channel-readiness:runtime-b')",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap(), 2);
+    // A real local preparation write failure must fail open, not park the outbox head.
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h2b538cb9a6cc owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER refuse_readiness BEFORE INSERT ON prepared
+         WHEN NEW.slot='omp-channel-readiness' BEGIN SELECT RAISE(ABORT,'readiness preparation refused'); END;",
+    ).unwrap();
+    let ownership = harness_state::claim(root.path(), "example/seat", "omp", "provider-next").unwrap();
+    let mut writer = harness_state::Writer::new(root.path(), "example/seat", "omp", Some("omp-channel".into()))
+        .with_ownership("provider-next", ownership);
+    let mut observation = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    observation.channel_ready = Some(false);
+    writer.observe(observation).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    assert!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().iter().any(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b" && claim.body["fields"]["code"] == "omp-channel-unready"
+    ));
+    assert!(store.claims_for(subject, Some("harness.observed")).unwrap().iter().any(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b" && claim.body["fields"]["state"] == "working"
+    ));
+    assert_eq!(connection.query_row(
+        "SELECT count(*) FROM metadata WHERE key='omp-channel-readiness:runtime-b'",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap(), 0, "fallback invalidates the stale ready fence");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4c38471e37f8 owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER refuse_readiness;").unwrap();
+    let mut recovered = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    recovered.channel_ready = Some(true);
+    writer.observe(recovered).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    let latest = diagnostics.iter().rev().find(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b"
+            && matches!(claim.body["fields"]["code"].as_str(), Some("omp-channel-ready" | "omp-channel-unready"))
+    ).unwrap();
+    assert_eq!(latest.body["fields"]["code"], "omp-channel-ready",
+        "preparation recovery must publish ready after the fallback unready edge");
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-ha9a8015b2338 owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER refuse_readiness BEFORE INSERT ON prepared
+         WHEN NEW.slot='omp-channel-readiness' BEGIN SELECT RAISE(ABORT,'readiness preparation refused'); END;
+         CREATE TRIGGER refuse_invalidation BEFORE DELETE ON metadata
+         WHEN OLD.key LIKE 'omp-channel-readiness:%' BEGIN SELECT RAISE(ABORT,'readiness invalidation refused'); END;",
+    ).unwrap();
+    let mut unready = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    unready.channel_ready = Some(false);
+    writer.observe(unready).unwrap();
+    let before = store.claims_for(subject, Some("harness.diagnostic")).unwrap().len();
+    assert!(observations.drain(&client, subject, "omp", &mut false).await.is_err());
+    assert!(!harness_events::pending(root.path(), 100).unwrap().is_empty(),
+        "failure to invalidate must retain the event for retry");
+    assert_eq!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().len(), before,
+        "no fallback edge may publish while the old fence remains");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5f558c3b9bbd owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER refuse_readiness; DROP TRIGGER refuse_invalidation;").unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    assert_eq!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().len(), before + 1);
+    let mut ready = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    ready.channel_ready = Some(true);
+    writer.observe(ready).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    assert_eq!(diagnostics.len(), before + 2, "the reverse edge must not be suppressed");
+    let latest = diagnostics.iter().rev().find(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b"
+            && matches!(claim.body["fields"]["code"].as_str(), Some("omp-channel-ready" | "omp-channel-unready"))
+    ).unwrap();
+    assert_eq!(latest.body["fields"]["code"], "omp-channel-ready");
+    server.abort();
 }

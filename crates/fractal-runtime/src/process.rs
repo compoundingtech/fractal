@@ -119,6 +119,7 @@ pub struct FiniteLane {
     /// Frozen per-generation envelope; absent historical callers inherit the aggregate cap.
     pub member_capacity: Option<crate::lane::Capacity>,
     pub memory_high_bytes: Option<u64>,
+    pub class: crate::lane::RequestClass,
     pub require_enforced: bool,
 }
 
@@ -177,6 +178,7 @@ pub struct ExecRuntime {
     finite_lane: Option<FiniteLane>,
     resource_membership: Option<ResourceExecutionBinding>,
     launch_operation: Option<crate::LaunchOperation>,
+    darwin_slot: Option<crate::darwin_slot::Slot>,
 }
 
 /// A child this runtime started, until its exit is in its record.
@@ -268,6 +270,7 @@ impl ExecRuntime {
             finite_lane: None,
             resource_membership: None,
             launch_operation: None,
+            darwin_slot: None,
         }
     }
 
@@ -351,6 +354,26 @@ impl ExecRuntime {
         runtime.spawn_guarded(id, launch, cwd, env, ExecutionGuards {
             check: Some(authorization.guard), release: Some(authorization.authorize),
         })
+    }
+
+    /// Explicit host-authorized finite custody. Ambient execs and PTYs remain detached.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_in_darwin_slot_authorized(
+        &self, id: &str, launch: &crate::Launch, cwd: &Path,
+        env: &BTreeMap<String, String>, authorization: FiniteExecutionAuthorization<'_>,
+        slot: crate::darwin_slot::Slot,
+    ) -> Result<ExecGeneration> {
+        (|| -> Result<()> {
+            anyhow::ensure!(cfg!(target_os = "macos"), "Darwin slots require macOS");
+            crate::darwin_slot::Helper::detect_in(env)
+                .context("helperUnavailable: requested Darwin slot has no authorized helper")?;
+            Ok(())
+        })().map_err(|error| error.context(StartRejected {
+            operation: env.get("ST3_START_OPERATION").cloned(),
+        }))?;
+        let mut runtime = self.clone();
+        runtime.darwin_slot = Some(slot);
+        runtime.spawn_in_lane_authorized(id, launch, cwd, env, authorization)
     }
 
     fn spawn_guarded(
@@ -450,6 +473,9 @@ impl ExecRuntime {
             None => (program, arguments),
         };
         let unit = crate::scope_unit("st3", id);
+        let unit = if let Some(slot) = self.darwin_slot {
+            format!("st3-darwin-{}-{:x}.scope", slot.name(), Sha256::digest(unit.as_bytes()))
+        } else { unit };
         // Finite placement is host-supplied, never selected by payload environment.
         let mut env = env.clone();
         let capacity = crate::lane::Capacity::take(&mut env);
@@ -479,14 +505,17 @@ impl ExecRuntime {
             (program, arguments)
         };
         let argument_refs = arguments.iter().map(OsString::as_os_str).collect::<Vec<_>>();
-        let mut command = crate::isolate::wrap_in(
-            &unit,
-            program.as_os_str(),
-            &argument_refs,
-            Some(&env),
-            lane.as_ref(),
-            self.unlaned_seat.as_ref(),
-        );
+        let mut command = if self.darwin_slot.is_some() {
+            crate::darwin_slot::launch(
+                crate::darwin_slot::current_helper()?, &unit, program.as_os_str(),
+                &argument_refs, cwd, Some(&env),
+            )?
+        } else {
+            crate::isolate::wrap_in(
+                &unit, program.as_os_str(), &argument_refs, Some(&env),
+                lane.as_ref(), self.unlaned_seat.as_ref(),
+            )
+        };
         command
             .current_dir(cwd)
             .stdin(if self.finite_lane.is_some() { Stdio::piped() } else { Stdio::null() })
@@ -551,8 +580,9 @@ impl ExecRuntime {
             exit_code: None,
             exit_signal: None,
             group_exited: false,
-            isolation_mode: isolation_name(crate::isolation_mode()).into(),
-            scope_unit: (crate::isolation_mode() == crate::Isolation::Scope).then_some(unit),
+            isolation_mode: isolation_name(self.darwin_slot.map_or_else(crate::isolation_mode,
+                |slot| crate::Isolation::DarwinSlot { slot: slot.name() })).into(),
+            scope_unit: (self.darwin_slot.is_some() || crate::isolation_mode() == crate::Isolation::Scope).then_some(unit),
             start_operation: self.launch_operation.as_ref().map(|operation| operation.0.clone()),
             payload_released_at_unix_ms: None,
             resource_membership: self.resource_membership.clone(),
@@ -570,7 +600,9 @@ impl ExecRuntime {
         // `systemd-run` joins its scope only when the user manager starts it, and runs the task
         // after. Until then it is in this process's cgroup and ends with it, so the exec outlives
         // this process only once it has joined.
-        if let Some(unit) = generation.scope_unit.as_deref() {
+        if let Some(unit) = generation.scope_unit.as_deref()
+            && self.darwin_slot.is_none()
+        {
             let join = crate::isolate::await_join(unit, pid, self.scope_join_limit, || {
                 process_generation_alive(pid, start_token)
             });
@@ -813,6 +845,18 @@ impl ExecRuntime {
         // owner. Concurrent observers can persist it too, but only for this exact receipt.
         self.persist_owned_exit(key, status)?;
         self.owned_children.lock().expect("exec child mutex poisoned").remove(key);
+        if let Some(generation) = self.read_generation_path(&self.record_path(&key.id))?
+            && key.matches(&generation)
+            && let Some(unit) = generation.scope_unit.as_deref()
+            && crate::darwin_slot::slot_for_unit(unit).is_some()
+        {
+            crate::isolate::end_scope_with_proof(unit, &|| {
+                let current = self.read_generation_path(&self.record_path(&key.id))?
+                    .context("Darwin execution disappeared during retirement")?;
+                anyhow::ensure!(key.matches(&current), "Darwin execution changed during retirement");
+                Ok(())
+            })?;
+        }
         Ok(true)
     }
 
@@ -846,6 +890,26 @@ impl ExecRuntime {
             && self.reap_owned(id, &mut generation)?
         {
             return Ok(ExecObservation::Running(generation));
+        }
+        if let Some(unit) = generation.scope_unit.as_deref()
+            && crate::darwin_slot::slot_for_unit(unit).is_some()
+        {
+            let retire = crate::isolate::end_scope_with_proof(unit, &|| {
+                let current = self.read_generation_path(&self.record_path(id))?
+                    .context("Darwin execution disappeared during retirement")?;
+                anyhow::ensure!(current.generation_id == generation.generation_id,
+                    "Darwin execution changed during retirement");
+                Ok(())
+            });
+            return match retire {
+                Ok(Some(_)) => {
+                    generation.group_exited = true;
+                    self.update_generation(id, &generation)?;
+                    Ok(ExecObservation::Exited(generation))
+                }
+                Ok(None) => Ok(ExecObservation::Indeterminate("Darwin retirement is unproven".into())),
+                Err(error) => Ok(ExecObservation::Indeterminate(format!("Darwin retirementUnknown: {error:#}"))),
+            };
         }
         if generation.group_exited {
             return Ok(ExecObservation::Exited(generation));
@@ -906,6 +970,18 @@ impl ExecRuntime {
         if expected_generation.is_some_and(|expected| expected != generation.generation_id) {
             tracing::debug!(signal, guard_decision = "skip", reason = "incarnation_mismatch", "exec teardown rejected");
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
+        }
+        if let Some(unit) = generation.scope_unit.as_deref()
+            && crate::darwin_slot::slot_for_unit(unit).is_some()
+        {
+            crate::isolate::end_scope_with_proof(unit, &|| {
+                let current = self.read_generation_path(&self.record_path(id))?
+                    .context("Darwin execution disappeared during cancellation")?;
+                anyhow::ensure!(current.generation_id == generation.generation_id,
+                    "Darwin execution changed during cancellation");
+                Ok(())
+            })?.context("Darwin cancellation did not prove retirement")?;
+            return Ok(());
         }
         if let Some(unit) = &generation.scope_unit {
             // Read before the signal: a leader that has not joined its scope yet is systemd-run,
@@ -1040,6 +1116,11 @@ impl ExecRuntime {
         // This exact launcher has exited, so it cannot still join a scope in the future.
         // Removing a pending join invalidates once, never on subsequent reconciliation reads.
         crate::isolate::finish_scope_join(unit);
+        if generation.group_exited && crate::darwin_slot::slot_for_unit(unit).is_some() {
+            // Darwin writes this durable marker only after an operation-bound root receipt.
+            crate::isolate::mark_ended(unit);
+            return Ok(true);
+        }
         if generation.group_exited && crate::isolate::has_ended(unit) {
             return Ok(true);
         }
@@ -1400,6 +1481,7 @@ fn rotate_file(current: &Path, previous: &Path) -> Result<()> {
 fn isolation_name(mode: crate::Isolation) -> &'static str {
     match mode {
         crate::Isolation::Scope => "scope",
+        crate::Isolation::DarwinSlot { .. } => "darwin-slot",
         crate::Isolation::Detached => "detached",
         crate::Isolation::DegradedDetached => "degraded-detached",
     }
@@ -1468,7 +1550,13 @@ fn process_identity(pid: u32) -> Result<(char, u64)> {
     if result == 0 {
         Ok(('R', pid as u64))
     } else {
-        Err(std::io::Error::last_os_error().into())
+        let error = std::io::Error::last_os_error();
+        // A sudo supervisor or slot-owned process exists even when this caller cannot signal it.
+        if error.raw_os_error() == Some(libc::EPERM) {
+            Ok(('R', pid as u64))
+        } else {
+            Err(error.into())
+        }
     }
 }
 
@@ -1725,12 +1813,80 @@ mod tests {
     }
 
     #[test]
+    fn requested_darwin_slot_never_falls_back_when_helper_is_unset() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let policy = FiniteLane {
+            name: "darwin_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
+        };
+        let result = runtime.spawn_in_darwin_slot_authorized(
+            "requested-slot", &crate::Launch::Shell("touch must-not-run".into()),
+            root.path(), &BTreeMap::new(), FiniteExecutionAuthorization {
+                lane: &policy, binding: &fixture_resource_binding(), guard: &|| Ok(()),
+                authorize: &|_, _| anyhow::bail!("unavailable custody must never authorize payload"),
+            }, crate::darwin_slot::Slot::Heavy1,
+        );
+        let error = result.unwrap_err();
+        assert!(error.downcast_ref::<StartRejected>().is_some());
+        let error = format!("{error:#}");
+        assert!(error.contains("helperUnavailable") || error.contains("require macOS"), "{error}");
+        assert!(!runtime.record_path("requested-slot").exists());
+        assert!(!root.path().join("must-not-run").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_darwin_helper_rejects_start_operation_before_release() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let policy = FiniteLane {
+            name: "darwin_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
+        };
+        let environment = BTreeMap::from([("ST3_START_OPERATION".into(), "prepared-operation".into())]);
+        let authorized = std::cell::Cell::new(false);
+        let error = runtime.spawn_in_darwin_slot_authorized(
+            "missing-helper", &crate::Launch::Shell("touch must-not-run".into()),
+            root.path(), &environment, FiniteExecutionAuthorization {
+                lane: &policy, binding: &fixture_resource_binding(), guard: &|| Ok(()),
+                authorize: &|_, _| {
+                    authorized.set(true);
+                    anyhow::bail!("missing helper must not authorize a payload")
+                },
+            }, crate::darwin_slot::Slot::Gate1,
+        ).unwrap_err();
+        let rejected = error.downcast_ref::<StartRejected>().expect("pre-spawn rejection");
+        assert_eq!(rejected.operation.as_deref(), Some("prepared-operation"));
+        assert!(format!("{error:#}").contains("helperUnavailable"));
+        assert!(!authorized.get());
+        assert!(!runtime.record_path("missing-helper").exists());
+        assert!(!root.path().join("must-not-run").exists());
+    }
+
+    #[test]
+    fn persisted_darwin_retirement_survives_runtime_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        std::fs::create_dir_all(&runtime.state_dir).unwrap();
+        let unit = format!("st3-darwin-heavy1-{}.scope", "c".repeat(64));
+        let generation: ExecGeneration = serde_json::from_value(serde_json::json!({
+            "schema": SCHEMA, "pid": std::process::id(), "createdAtUnixMs": 1,
+            "startToken": 1, "generationId": "retired-darwin-job",
+            "isolationMode": "darwin-slot", "scopeUnit": unit, "groupExited": true,
+            "exitCode": 0
+        })).unwrap();
+        runtime.write_generation("retired", &generation).unwrap();
+        assert!(runtime.retired_if("retired", "retired-darwin-job").unwrap());
+    }
+
+    #[test]
     fn finite_authorization_wraps_actual_release_and_observes_durable_receipt() {
         let root = tempfile::tempdir().unwrap();
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "authorization_fixture".into(), capacity: None, require_enforced: false,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let authorized = std::cell::Cell::new(false);
         let generation = runtime.spawn_in_lane_authorized(
@@ -1764,7 +1920,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "omitted_release_fixture".into(), capacity: None, require_enforced: false,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let error = runtime.spawn_in_lane_authorized(
             "omitted", &crate::Launch::Shell("touch unauthorized-payload".into()),
@@ -1802,6 +1958,7 @@ mod tests {
             version: 1, unit: generation.scope_unit.clone().unwrap(),
             load_state: "not-found".into(), active_state: "inactive".into(),
             control_group: String::new(), cgroup: None,
+            darwin: None,
         };
         let mut wrong = proof.clone();
         wrong.unit = "st3-other.scope".into();
@@ -1826,7 +1983,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "output_fixture".into(), capacity: None, require_enforced: false,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let generation = runtime.spawn_in_lane_checked(
             "output", &crate::Launch::Shell("printf stdout-value; printf stderr-value >&2; exit 7".into()),
@@ -1858,7 +2015,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "wait_fixture".into(), capacity: None, require_enforced: false,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let generation = runtime.spawn_in_lane_checked(
             "wait", &crate::Launch::Argv(vec!["sleep".into(), "60".into()]),
@@ -1899,7 +2056,7 @@ mod tests {
             name: format!("fixture_{}", std::process::id()),
             capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
             member_capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
-            memory_high_bytes: None,
+            memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: true,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -1960,7 +2117,7 @@ mod tests {
             name,
             capacity: Some(aggregate),
             member_capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
-            memory_high_bytes: Some(128 * 1024 * 1024),
+            memory_high_bytes: Some(128 * 1024 * 1024), class: crate::lane::RequestClass::default(),
             require_enforced: true,
         };
         let spawn = |id: &str, policy: &FiniteLane, binding: &ResourceExecutionBinding| {
@@ -2037,7 +2194,7 @@ mod tests {
         let policy = FiniteLane {
             name: "fixture".into(),
             capacity: None,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
         let error = runtime.spawn_in_lane_checked(
@@ -2062,7 +2219,7 @@ mod tests {
         let policy = FiniteLane {
             name: "fixture".into(),
             capacity: None,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -2089,7 +2246,7 @@ mod tests {
         let mut policy = FiniteLane {
             name: "fixture".into(),
             capacity: Some(crate::lane::Capacity::DEFAULT),
-            member_capacity: Some(crate::lane::Capacity::DEFAULT), memory_high_bytes: None,
+            member_capacity: Some(crate::lane::Capacity::DEFAULT), memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
         assert_eq!(policy.coverage().unwrap(), ResourceCoverage::LogicalOnly);
@@ -2110,13 +2267,15 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "fixture".into(), capacity: None,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
         let generation = runtime.spawn_in_lane_checked(
             "logical", &crate::Launch::Shell("exit 0".into()),
             root.path(), &std::env::vars().collect(), &policy, &|| Ok(()),
         ).unwrap();
+        // Retirement is judged on the exited generation; a still-running launcher is plain `Ok(false)`.
+        runtime.wait_for_exit("logical", &generation.generation_id).unwrap();
         assert!(runtime.retired_if("logical", &generation.generation_id).is_err());
         assert!(runtime.spawn_in_lane_checked(
             "logical", &crate::Launch::Shell("touch replacement".into()),
@@ -2365,8 +2524,12 @@ mod tests {
             runtime.observe("work").unwrap(),
             Some(ExecObservation::Indeterminate(_))
         ));
-        assert!(runtime.stop_if("work", Some("expected-generation")).is_err());
-        assert!(runtime.kill_if("work", Some("expected-generation")).is_err());
+        for error in [
+            runtime.stop_if("work", Some("expected-generation")).unwrap_err(),
+            runtime.kill_if("work", Some("expected-generation")).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("generation is indeterminate"), "{error:#}");
+        }
     }
 
     #[test]

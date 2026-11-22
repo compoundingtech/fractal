@@ -538,6 +538,10 @@ type MaintenanceIds = std::collections::BTreeSet<String>;
 struct MailboxOrder {
     keys: std::collections::BTreeMap<String, smallclaims::store::canonical::ClaimKey>,
     remaining: usize,
+    #[cfg(test)]
+    cache_subjects: usize,
+    #[cfg(test)]
+    full_sorts: usize,
 }
 
 impl MailboxOrder {
@@ -549,6 +553,18 @@ impl MailboxOrder {
     }
     fn remove(&mut self, subject: &str) {
         self.keys.remove(subject);
+    }
+    fn cache(&mut self, store: &Store, messages: &[MessageView]) -> anyhow::Result<()> {
+        #[cfg(test)]
+        { self.cache_subjects += messages.len(); }
+        store.cache_mailbox_order_keys(messages, &mut self.keys)
+    }
+    fn sort(&mut self, store: &Store, messages: &mut [MessageView]) -> anyhow::Result<()> {
+        self.cache(store, messages)?;
+        #[cfg(test)]
+        { self.full_sorts += 1; }
+        messages.sort_by(|left, right| self.keys[&left.subject].cmp(&self.keys[&right.subject]));
+        Ok(())
     }
     fn bound_held(&mut self, messages: &mut Vec<MessageView>, refreshed: bool) {
         if refreshed {
@@ -578,7 +594,11 @@ impl MailboxOrder {
             .take(crate::silent::BATCH_LIMIT)
             .map(|(_, subject)| subject)
             .collect::<std::collections::BTreeSet<_>>();
-        messages.retain(|m| !crate::silent::waits_for_turn(m) || selected.contains(&m.subject));
+        messages.retain(|m| {
+            let keep = !crate::silent::waits_for_turn(m) || selected.contains(&m.subject);
+            if !keep { self.keys.remove(&m.subject); }
+            keep
+        });
         for m in messages.iter_mut() {
             m.tags
                 .retain(|tag| !tag.starts_with(crate::silent::REMAINING_PREFIX));
@@ -790,15 +810,16 @@ where
                         .next();
                 }
                 // A key belongs to the subject's own claims; a policy recheck keeps its key.
-                for subject in &changes.messages {
+                let changed_subjects = changes.messages.into_iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                for subject in &changed_subjects {
                     order.remove(subject);
                 }
-                let subjects = changes
-                    .messages
-                    .into_iter()
+                let subjects = changed_subjects
+                    .iter()
+                    .cloned()
                     .chain(policy_rechecks.iter().cloned())
                     .collect::<std::collections::BTreeSet<_>>();
-                let mut reorder = false;
                 let mut waking_added = false;
                 let mut candidates = Vec::new();
                 for subject in &subjects {
@@ -822,21 +843,39 @@ where
                     candidates.extend(changed);
                 }
                 retain_live_mail(store, &mut candidates, since, Some(through), admitted, true)?;
+                order.cache(store, &candidates)?;
                 let mut candidates = candidates.into_iter()
                     .map(|message| (message.subject.clone(), message))
                     .collect::<std::collections::BTreeMap<_, _>>();
                 for subject in subjects {
-                    let old = messages.iter().find(|message| message.subject == subject);
-                    let changed = candidates.remove(&subject);
+                    let position = messages.iter().position(|message| message.subject == subject);
+                    let old = position.map(|position| &messages[position]);
+                    let changed = candidates.get(&subject);
                     waking_added |= old.is_none()
-                        && changed.as_ref()
+                        && changed
                             .is_some_and(|m| m.status == "sent" && !crate::silent::is_held(m));
-                    if serde_json::to_value(old)? != serde_json::to_value(changed.as_ref())? {
-                        messages.retain(|message| message.subject != subject);
-                        messages.extend(changed);
-                        reorder = true;
+                    if changed_subjects.contains(&subject)
+                        || serde_json::to_value(old)? != serde_json::to_value(changed)?
+                    {
+                        if let Some(position) = position {
+                            messages.remove(position);
+                        }
+                        if changed.is_none() {
+                            order.remove(&subject);
+                        }
                         updated = true;
+                    } else {
+                        candidates.remove(&subject);
                     }
+                }
+                // Remove every changed old position before searching with refreshed keys:
+                // an imported earlier send can change a key without changing its view.
+                // Retained messages and their cached keys stay sorted and allocated in place.
+                for changed in candidates.into_values() {
+                    let position = messages.binary_search_by(|retained| {
+                        order.keys[&retained.subject].cmp(&order.keys[&changed.subject])
+                    }).unwrap_or_else(|position| position);
+                    messages.insert(position, changed);
                 }
                 // A waking change refills the bounded held batch from durable metadata.
                 // This is one bulk read per real turn, never an extra seek per delivery.
@@ -854,11 +893,9 @@ where
                     retain_live_mail(store, &mut messages, since, Some(through), admitted, true)?;
                     order.clear();
                     order.bound_held(&mut messages, true);
+                    order.sort(store, &mut messages)?;
                 }
                 order.bound_held(&mut messages, false);
-                if reorder {
-                    store.order_mailbox_messages(&mut messages, &mut order.keys)?;
-                }
                 return Ok((changes.mark, (seat, messages), updated));
             }
         } else {
@@ -894,6 +931,7 @@ where
         policy_rechecks.retain(|subject| eligible.contains(subject));
         retain_live_mail(store, &mut messages, since, Some(through), admitted, true)?;
         order.bound_held(&mut messages, true);
+        order.sort(store, &mut messages)?;
         Ok((mark, (seat, messages), true))
     });
     // Reading never commits a closure or builds persistent derived state. The background
@@ -1690,6 +1728,114 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn mailbox_orders_graph_and_high_index_stream_mail_by_send_time() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        crate::store::mailbox_tests::ready(&store, "ordered");
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "ordered", "delivery")).unwrap();
+        let send_at = |target: &smallclaims::store::Store, id: &str, at: u128| {
+            let claim = target.append_claim(&ClaimInput {
+                subject: format!("message/{id}"),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("agent/sender")),
+                    ("to".into(), json!(fence.subject)),
+                    ("content".into(), json!("Synthetic ordering fixture")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            target.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![at.to_string(), claim.id],
+            ).unwrap();
+        };
+        // Shard admission order differs from send order, and its index namespace is
+        // above every graph index. Neither fact may move an older send behind new mail.
+        send_at(&shard, "0000000000000030", 30);
+        send_at(&shard, "0000000000000010", 10);
+        send_at(&store.graph, "0000000000000020", 20);
+        let mut recovery = MailRecovery::default();
+        let mut policies = std::collections::BTreeSet::new();
+        let mut order = MailboxOrder::new();
+        let (mark, initial, _, _) = update_snapshot(
+            &store, &fence, raw_snapshot, None, (0, 0),
+            &mut recovery, &mut policies, &mut order,
+        ).unwrap();
+        let subjects = |messages: &[MessageView]| messages.iter()
+            .map(|message| message.subject.clone()).collect::<Vec<_>>();
+        let expected = [
+            "message/0000000000000010",
+            "message/0000000000000020",
+            "message/0000000000000030",
+        ];
+        assert_eq!(subjects(&initial.1), expected);
+        assert!(initial.1[0].created_index >= crate::store::messages_shard::STREAM_INDEX_BASE);
+        assert!(initial.1[0].created_index > initial.1[1].created_index);
+        assert_eq!(order.cache_subjects, 3);
+        assert_eq!(order.full_sorts, 1);
+        let cached_subject_allocations = expected.map(|subject| {
+            (subject, order.keys.get_key_value(subject).unwrap().0.as_ptr())
+        });
+        // The delta reuses cached graph AND shard keys, and inserts a backdated
+        // shard import before later sends rather than at the end of the namespace.
+        send_at(&shard, "0000000000000015", 15);
+        let (mark, delta, _, _) = update_snapshot(
+            &store, &fence, raw_snapshot, Some((mark, initial)), (0, 0),
+            &mut recovery, &mut policies, &mut order,
+        ).unwrap();
+        assert_eq!(subjects(&delta.1), [
+            "message/0000000000000010",
+            "message/0000000000000015",
+            "message/0000000000000020",
+            "message/0000000000000030",
+        ]);
+        assert_eq!(order.keys.len(), 4, "every admitted message keeps its canonical key");
+        assert_eq!(order.cache_subjects, 4, "a one-message delta must visit only one cache subject");
+        assert_eq!(order.full_sorts, 1, "a delta must not fully sort the retained mailbox");
+        for (subject, allocation) in cached_subject_allocations {
+            assert_eq!(order.keys.get_key_value(subject).unwrap().0.as_ptr(), allocation,
+                "a delta rebuilt an unchanged subject's cached allocation");
+        }
+        let mut oracle = delta.1.clone();
+        oracle.reverse();
+        MailboxOrder::new().sort(&store, &mut oracle).unwrap();
+        assert_eq!(subjects(&delta.1), subjects(&oracle));
+        // Refreshing an existing subject's key must also move it, even when its
+        // message view is otherwise unchanged by an imported earlier send.
+        // Each writer admits message.sent only once; the earlier send arrives
+        // from an independent writer rather than violating local cardinality.
+        const FLEET: &str = "18ba3167-11fb-472c-8ff8-e46e0fefb1e4";
+        let source = Store::open(&root.path().join("source.db"), "source").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        send_at(&source.graph, "0000000000000020", 5);
+        let exchange = source.export_replication_exchange(
+            FLEET, &store.replication_inventory().unwrap(),
+        ).unwrap();
+        store.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+        store.validate_replication_backlog().unwrap();
+        store.project_replication_backlog().unwrap();
+        assert!(store.graph.claims_for("message/0000000000000020", Some("message.sent"))
+            .unwrap().iter().any(|claim| claim.origin == "source" && claim.accepted_at_unix_ms == 5));
+        let (_, moved, _, _) = update_snapshot(
+            &store, &fence, raw_snapshot, Some((mark, delta)), (0, 0),
+            &mut recovery, &mut policies, &mut order,
+        ).unwrap();
+        assert_eq!(order.cache_subjects, 5);
+        assert_eq!(order.full_sorts, 1);
+        assert_eq!(moved.1[0].subject, "message/0000000000000020");
+        let mut oracle = moved.1.clone();
+        oracle.reverse();
+        MailboxOrder::new().sort(&store, &mut oracle).unwrap();
+        assert_eq!(subjects(&moved.1), subjects(&oracle));
+    }
 
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]

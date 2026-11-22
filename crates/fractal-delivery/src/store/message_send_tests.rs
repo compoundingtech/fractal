@@ -443,7 +443,7 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
     for principal in ["assistant/chatgpt", "assistant/mcp"] {
     let store = Store::open_memory("node").unwrap();
     store.apply(&crate::graph::parse_test_intent(
-        "version 2\nagent \"example-recipient.local\" { workspace \"/tmp/st-test\"; command \"true\"; restart always; }", "node").unwrap(),
+        "version 2\nagent \"example-recipient.local\" { workspace \"/tmp/fractal-test\"; command \"true\"; restart always; }", "node").unwrap(),
         &BTreeMap::from([("agent/example-recipient.local".to_string(), Vec::new())]), "assistant-recipient").unwrap();
     let grant_subject = "custom/client/assistant-v1-native-fixture";
     let grant_id = "assistant-grant/native-fixture";

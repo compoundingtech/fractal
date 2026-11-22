@@ -20,13 +20,15 @@ const FILTERS: &[&str] = &[
     "fractal*.scope", "smalltalk*.scope", "st3*.scope", "st2-*.scope",
     "fractal*.slice", "smalltalk*.slice", "st3*.slice", "app-lanes*.slice",
 ];
-const PROPERTIES: &str = "--property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup";
+const PROPERTIES: &str = "--property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup";
 
 #[derive(Debug, Clone)]
 pub struct Unit {
     pub load: String,
     pub active: String,
     pub sub: String,
+    /// Empty when unavailable (for example an unloaded unit or transient scope).
+    pub unit_file_state: String,
     /// Zero when unavailable, including unloaded rows preserved from enumeration.
     pub main_pid: u32,
     /// Absolute cgroup filesystem path, not systemd's manager-relative path.
@@ -352,7 +354,7 @@ fn listed_units(bytes: &[u8]) -> Result<BTreeMap<String, Unit>> {
         // Loaded rows must receive complete properties before publication.
         ensure!(units.insert(row.unit, Unit {
             load: row.load, active: row.active, sub: row.sub,
-            main_pid: 0, control_group: None,
+            unit_file_state: String::new(), main_pid: 0, control_group: None,
         }).is_none(), "duplicate systemd enumeration entry");
     }
     Ok(units)
@@ -395,7 +397,8 @@ fn parse_properties(bytes: &[u8], expected: &[String]) -> Result<BTreeMap<String
             Some(Path::new("/sys/fs/cgroup").join(path.strip_prefix("/")?))
         };
         ensure!(units.insert(id.to_owned(), Unit { load: load.to_owned(), active: active.to_owned(),
-            sub: sub.to_owned(), main_pid, control_group }).is_none(), "duplicate systemd unit {id}");
+            sub: sub.to_owned(), unit_file_state: fields.get("UnitFileState").copied().unwrap_or("").to_owned(),
+            main_pid, control_group }).is_none(), "duplicate systemd unit {id}");
     }
     ensure!(units.len() == expected.len(), "incomplete systemd properties batch");
     Ok(units)
@@ -580,6 +583,17 @@ mod tests {
     }
     fn properties(name: &str) -> String {
         format!("Id={name}\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nControlGroup=/user.slice/{name}\n")
+    }
+    #[test]
+    fn lookup_preserves_unit_file_state_without_inventing_enablement() {
+        let expected = vec!["fractal.service".to_owned()];
+        for state in ["linked", "linked-runtime", "enabled", "enabled-runtime", ""] {
+            let text = format!("{}UnitFileState={state}\n", properties("fractal.service"));
+            let units = parse_properties(text.as_bytes(), &expected).unwrap();
+            assert_eq!(units["fractal.service"].unit_file_state, state);
+        }
+        let units = parse_properties(properties("fractal.service").as_bytes(), &expected).unwrap();
+        assert!(units["fractal.service"].unit_file_state.is_empty());
     }
     struct FakeRunner {
         calls: Mutex<Vec<Vec<String>>>,

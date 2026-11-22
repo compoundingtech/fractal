@@ -28,7 +28,7 @@ pub fn verify_rename_proof(
     let history = verify_sealed_history(&bundle.envelopes, &bundle.fleet_id, fleet_anchor)?;
     let records = &history.records;
     let membership = &history.membership;
-    let authentication = Authentication { records, membership };
+    let authentication = Authentication::new(records, membership);
     let head = records.get(&bundle.naming_revision).ok_or_else(|| chain_error("missing naming head"))?;
     let storage_id = &head.claim.subject;
     if !storage_id.starts_with(prefix) { return Err(chain_error("head has the wrong identity kind")); }

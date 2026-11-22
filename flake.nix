@@ -205,6 +205,8 @@
         ptyPackage = pty.packages.${system}.default.overrideAttrs (_: {
           doCheck = false;
         });
+        # Activation admission is a production dependency, not an ambient host tool.
+        megarepoPackage = effect-utils.packages.${system}.megarepo;
         libghosttyVT =
           let
             bindings = (builtins.fromTOML (builtins.readFile ./crates/fractal/Cargo.toml)).dependencies;
@@ -432,6 +434,7 @@
           src = self;
           dontCargoUseSystemLibs = true;
           LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
+          FRACTAL_MR_BIN = "${megarepoPackage}/bin/mr";
           # Embedded hooks are published into immutable runtime hook sets. The
           # sandbox has no /usr/bin/env; patch before compilation for package/check.
           postPatch = ''
@@ -616,6 +619,7 @@
             # Program steps run on a Bun host; the engine tests start a real one.
             pkgs.bun
             ptyPackage
+            megarepoPackage
             effect-utils.packages.${system}.otelite
             messagingCompat
           ]
@@ -703,6 +707,21 @@
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "fractal-chatgpt";
+          };
+        };
+
+        fractalMacCustody = pkgs.rustPlatform.buildRustPackage {
+          pname = "fractal-mac-custody";
+          inherit version cargoDeps;
+          src = self;
+          cargoBuildFlags = [ "-p" "fractal-mac-custody" "--bin" "fractal-mac-custody" ];
+          cargoTestFlags = [ "-p" "fractal-mac-custody" ];
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          meta = {
+            description = "Short-lived Darwin slot process custody helper";
+            homepage = "https://github.com/compoundingtech/fractal";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "fractal-mac-custody";
           };
         };
 
@@ -940,6 +959,7 @@
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;
         packages.fractal-chatgpt = fractalChatgpt;
+        packages.fractal-mac-custody = fractalMacCustody;
         # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         packages.st-chatgpt = fractalChatgpt;
         # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
@@ -2242,6 +2262,7 @@
             # not bundle rust-lld the way the rustup toolchain does.
             pkgs.lld
             ptyPackage
+            megarepoPackage
             libghosttyVT
             # Local Fractal OTLP export tests use the same collector as Nix checks.
             effect-utils.packages.${system}.otelite
@@ -2258,6 +2279,7 @@
           # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
+          FRACTAL_MR_BIN = "${megarepoPackage}/bin/mr";
           shellHook = sccacheShellHook + cargoDebugShellHook + ''
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               source ${./scripts/ci-cargo-tools-env} || exit $?

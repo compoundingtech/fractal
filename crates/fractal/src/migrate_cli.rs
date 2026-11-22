@@ -72,7 +72,6 @@ struct Receipt {
     manager: &'static str,
     launchd_domain: Option<String>,
     local_api: &'static str,
-    checkpoint_gate: &'static str,
     effective: Protection,
     gap_ms: u128,
 }
@@ -276,7 +275,6 @@ struct Journal {
 trait Manager {
     fn kind(&self) -> &'static str;
     fn domain(&self) -> Option<&str> { None }
-    fn checkpoint_gate(&self) -> &'static str { "pending-null" }
     fn bind_domain(&mut self, _recorded: Option<&str>, _recovery: bool) -> Result<()> { Ok(()) }
     fn inspect(&mut self) -> Result<Services>;
     fn stop(&mut self, unit: &Unit) -> Result<()>;
@@ -331,7 +329,7 @@ pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Resu
     layout.configure_store(&config);
     config.apply_fleet_file()?;
     fractal_daemon::node_identity::resolve(&mut config)?;
-    let mut manager = native::Native::new(endpoint.clone(), config.node.clone(), &config);
+    let mut manager = native::Native::new(endpoint.clone(), config.node.clone());
     let receipt = cutover(&layout, &mut manager, &config.node, &args).await?;
     if json {
         super::print_value(&receipt, true)
@@ -341,7 +339,6 @@ pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Resu
             receipt.effective.memory_swap_max.as_deref().unwrap_or("not-applicable (launchd)"),
             receipt.effective.memory_low.as_deref().unwrap_or("not-applicable (launchd)"), receipt.gap_ms, receipt.manager);
         if let Some(domain) = &receipt.launchd_domain { fractal_daemon::cli_println!("launchd_domain={domain}"); }
-        fractal_daemon::cli_println!("checkpoint_gate={}", receipt.checkpoint_gate);
         Ok(())
     }
 }
@@ -519,7 +516,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     ensure!(!services.legacy.is_empty() && !services.target.is_empty(), "legacy and pre-staged Fractal daemon definitions are required");
     ensure!(services.legacy[0].installed, "legacy daemon unit is not installed");
     ensure!(!services.legacy.iter().any(|unit| unit.running) || !services.target.iter().any(|unit| unit.running), "legacy and Fractal services both run; stop and investigate before cutover");
-    ensure!(services.legacy[0].running, "legacy daemon must be running so checkpoint/sync quiescence can be checked");
+    ensure!(services.legacy[0].running, "legacy daemon must be running so sync quiescence can be checked");
     ensure!(services.legacy.iter().all(|unit| unit.file.is_file()),
         "legacy definitions must be present in the user's service directory; global or orphaned loaded units need operator repair before cutover");
     for unit in &services.target {
@@ -572,7 +569,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
 }
 
 fn receipt(manager: &impl Manager, host: &str, status: &'static str, local_api: &'static str, effective: Protection, gap_ms: u128) -> Receipt {
-    Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), launchd_domain: manager.domain().map(str::to_owned), local_api, checkpoint_gate: manager.checkpoint_gate(), effective, gap_ms }
+    Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), launchd_domain: manager.domain().map(str::to_owned), local_api, effective, gap_ms }
 }
 
 fn stop_legacy(manager: &mut impl Manager, journal: &Journal) -> Result<()> {

@@ -85,12 +85,72 @@ for workflow in sorted((root / '.github/workflows').glob('*.yml')):
             assert 'git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main' in block
             assert 'git merge-base --is-ancestor "$PUBLISH_SHA" origin/main' in block
             assert '[[ "$(git rev-parse HEAD)" == "$PUBLISH_SHA" ]]' in block
-            proof = next((line for line in block.splitlines() if 'path-info' in line and 'fractal-native-closure.json' in line), '')
-            assert all(part in proof for part in (
-                'nix ', 'path-info', '--store "https://$CACHE_NAME.cachix.org"',
-                '--recursive', '--json', '"$output"',
-            )), 'publication needs a remote full-closure proof'
-            assert '--option netrc-file "$cache_netrc"' in proof, 'the private-cache proof must authenticate'
+            private_query = 'nix --option netrc-file "$cache_netrc" path-info --store "https://$CACHE_NAME.cachix.org"'
+            output_proof = private_query + ' "$output" > /dev/null'
+            upstream_proof = 'nix-store --store https://cache.nixos.org --check-validity --print-invalid "${closure[@]}" > "$RUNNER_TEMP/fractal-native-upstream-missing.paths"'
+            closure_proof = 'nix-store --option netrc-file "$cache_netrc" --store "https://$CACHE_NAME.cachix.org" --check-validity --print-invalid "${remainder[@]}" > "$RUNNER_TEMP/fractal-native-missing.paths"'
+            assert output_proof in block, 'the exact output must exist in the authenticated private cache'
+            assert 'nix path-info --recursive "$output" > "$RUNNER_TEMP/fractal-native-closure.paths"' in block
+            assert 'mapfile -t closure < "$RUNNER_TEMP/fractal-native-closure.paths"' in block
+            assert 'nix path-info --json "${closure[@]}" > "$RUNNER_TEMP/fractal-native-closure.json"' in block
+            assert 'mapfile -t remainder < "$RUNNER_TEMP/fractal-native-upstream-missing.paths"' in block
+            assert 'if (( ${#remainder[@]} )); then' in block
+            assert upstream_proof in block and closure_proof in block
+            assert block.index(output_proof) < block.index(upstream_proof) < block.index(closure_proof)
+            refusal = '[[ ! -s "$RUNNER_TEMP/fractal-native-missing.paths" ]] || { echo "::error::Closure paths missing from both caches"; cat "$RUNNER_TEMP/fractal-native-missing.paths" >&2; exit 1; }'
+            assert refusal in block and block.index(closure_proof) < block.index(refusal), 'a path absent from both caches must fail the step'
+            assert block.count('nix-store ') == 2 and 'for path in ' not in block, 'remote closure queries must be batched'
+            assert private_query + ' --recursive' not in block, 'upstream paths need not be duplicated in the private cache'
+            # Exercise the generated batch proof, including empty-output transport failures.
+            proof_lines = block.splitlines()
+            start = next(i for i, line in enumerate(proof_lines) if line.strip() == upstream_proof)
+            end = next(i for i, line in enumerate(proof_lines) if line.strip() == refusal)
+            batch_script = '\n'.join(line[10:] for line in proof_lines[start:end + 1])
+            fixture = r'''
+closure=(/nix/store/fixture-output /nix/store/fixture-upstream /nix/store/fixture-dependency)
+cache_netrc=/unused
+nix-store() {
+  local store arg
+  for arg in "$@"; do
+    if [[ "$arg" == https://* ]]; then store=$arg; fi
+  done
+  if [[ "$store" == https://cache.nixos.org ]]; then
+    if (( UPSTREAM_STATUS )); then echo "injected upstream failure" >&2; return "$UPSTREAM_STATUS"; fi
+  else
+    if (( PRIVATE_STATUS )); then echo "injected private failure" >&2; return "$PRIVATE_STATUS"; fi
+  fi
+  for arg in "$@"; do
+    [[ "$arg" == /nix/store/* ]] || continue
+    if [[ "$store" == https://cache.nixos.org && "$arg" == /nix/store/fixture-upstream ]]; then continue; fi
+    if [[ "$store" != https://cache.nixos.org ]]; then
+      [[ "$arg" == /nix/store/fixture-output ]] && continue
+      if [[ "$arg" == /nix/store/fixture-dependency && "$INCLUDE_PRIVATE_DEP" == 1 ]]; then continue; fi
+    fi
+    printf '%s\n' "$arg"
+  done
+  return 0
+}
+'''
+            for upstream_status, private_status, include_dependency, succeeds in (
+                (0, 0, 1, True),
+                (0, 0, 0, False),  # Missing from both caches, despite existing locally.
+                (0, 42, 1, False),  # Private error with an empty invalid list.
+                (42, 0, 1, False),  # Upstream error must not silently drop any paths.
+            ):
+                with tempfile.TemporaryDirectory() as tmp:
+                    result = subprocess.run(
+                        ['bash', '-e', '-o', 'pipefail', '-c', fixture + batch_script],
+                        env={**os.environ, 'RUNNER_TEMP': tmp, 'CACHE_NAME': 'fixture',
+                             'UPSTREAM_STATUS': str(upstream_status), 'PRIVATE_STATUS': str(private_status),
+                             'INCLUDE_PRIVATE_DEP': str(include_dependency)},
+                        capture_output=True, text=True,
+                    )
+                assert (result.returncode == 0) == succeeds, result.stderr
+                if not include_dependency:
+                    assert 'Closure paths missing from both caches' in result.stdout
+                    assert '/nix/store/fixture-dependency' in result.stderr
+                if private_status:
+                    assert 'injected private failure' in result.stderr, 'private diagnostics must remain visible'
             assert 'name: fractal-native-publication' in block and 'fractal-native-closure.json' in block
         elif workflow.name == 'nix.yml':
             assert 'scripts/ci-nix-release build' in block and 'scripts/ci-nix-release verify-cache' in block

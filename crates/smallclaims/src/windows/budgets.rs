@@ -147,6 +147,7 @@ fn open(path: &Path, node: &str) -> Result<Connection> {
     ensure!(!node.is_empty() && node.len() <= 256,
         "native SLO node identity must contain 1..=256 bytes");
     let mut db = Connection::open(path)?;
+    crate::sqlite::census_files::register(&db);
     db.execute_batch(/* sqlite-large-value: allow-for-now lv-h7d555c9c34a2 owner=smallclaims::windows::budgets TODO=chunk-or-reference-variable-columns */ "PRAGMA synchronous = FULL;
         CREATE TABLE IF NOT EXISTS native_slo_owner_v1 (
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
