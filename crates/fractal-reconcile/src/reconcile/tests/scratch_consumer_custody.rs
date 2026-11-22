@@ -69,16 +69,20 @@ exec "consumer" {{ command "/bin/sleep 60"; workspace "{}"; }}"#, self.root.path
             &self.handle.owner, &self.handle.owner_generation)).unwrap()
     }
 
-    fn retire(&self, request: &LaneRequest) {
-        assert!(self.runtime.retire_resource_lane(&self.store, request).unwrap());
+    fn stop_processes(&self) -> Result<()> {
+        for member in self.store.resource_memberships_for_host("node")? {
+            for root in member.roots {
+                self.runtime.kill(&root.runtime_id, false,
+                    root.execution.as_ref().map(|execution| execution.generation_id.as_str()))?;
+            }
+        }
+        Ok(())
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if let Ok(members) = self.store.resource_memberships_for_host("node") {
-            for member in members { let _ = self.runtime.retire_resource_lane(&self.store, &member.request); }
-        }
+        let _ = self.stop_processes();
     }
 }
 
@@ -90,7 +94,7 @@ fn native_cwd(different_disk_path: bool) {
     let outside_member = outside.member(&outside_request, outside.root.path().to_str().unwrap());
     outside.runtime.start_resource_guarded(&outside.store, &outside_member, None, &|| Ok(())).unwrap();
     let outside_released = outside.release();
-    outside.retire(&outside_request);
+    outside.stop_processes().unwrap();
     assert!(outside_released, "known outside native cwd is not a scratch consumer");
     let fixture = Fixture::new();
     let request = fixture.request(different_disk_path.then(|| fixture.root.path().display().to_string()));
@@ -101,8 +105,8 @@ fn native_cwd(different_disk_path: bool) {
     assert!(Path::new(&fixture.handle.path).is_dir());
     fixture.store.end_resource_execution(&grant, &member.runtime_id, u64::try_from(now_ms()).unwrap()).unwrap();
     assert!(!fixture.release(), "payload exit alone is not whole-tree retirement");
-    fixture.retire(&request);
-    assert!(fixture.release(), "proven retirement must release cwd custody");
+    fixture.stop_processes().unwrap();
+    assert!(!fixture.release(), "logical-only process cleanup is not whole-tree retirement");
 }
 
 #[test]
