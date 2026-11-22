@@ -118,13 +118,11 @@ async fn response_expiry_retries_a_busy_writer_and_recovers_after_release() {
         assert!(maintenance_contention(&error));
     }
     let (_observer, changes) = notices(&store);
-    let mut attempted = changes.clone();
+    let attempted = store.extension::<ResponseExpiryAttempts>();
     let task = spawn_response_expiry(store.clone());
-    tokio::time::timeout(Duration::from_secs(5), attempted.changed())
+    tokio::time::timeout(Duration::from_secs(5), attempted.0.notified())
         .await
-        .expect("the maintenance writer loan returned after a busy BEGIN")
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+        .expect("cleanup reports its busy attempt without publishing a no-op commit");
     assert!(
         !task.is_finished(),
         "transient contention must not stop cleanup"

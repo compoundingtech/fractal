@@ -23131,6 +23131,10 @@ fn maintenance_contention(error: &anyhow::Error) -> bool {
     })
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct ResponseExpiryAttempts(tokio::sync::Notify);
+
 /// Register before the first rowid deadline read. The callback performs no SQL and never
 /// takes the writer: it only coalesces committed receipt/cursor mutations. Deadline reads
 /// run on a pooled reader, while the existing expiry deadline remains authoritative.
@@ -23233,15 +23237,17 @@ async fn expire_completed_responses(
         }
         clock_deferred = false;
         let clean_store = store.clone();
-        match clean_store.connection.write_workers().spawn_blocking(move || {
+        let cleaned = clean_store.connection.write_workers().spawn_blocking(move || {
             fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry", || {
                 // Two short writer transactions, never one long one.
                 clean_store.cleanup_idempotency(now)?;
                 clean_store.cleanup_replay_safe_idempotency(now, replay_safe_window_ms)
             })
         })
-        .await
-        {
+        .await;
+        #[cfg(test)]
+        store.extension::<ResponseExpiryAttempts>().0.notify_one();
+        match cleaned {
             Ok(Ok(_)) => {
                 retry = Duration::from_millis(200);
                 tokio::time::sleep(Duration::from_millis(20)).await;

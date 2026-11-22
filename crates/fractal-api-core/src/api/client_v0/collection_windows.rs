@@ -149,6 +149,8 @@ impl Windows {
             "arrangements", "arrangement_registers", "ivm_heads", "ivm_contributions",
             "local_agent_harness_rows", "projection_digest_repaired_claims",
             "operations", "card_actual_revisions", "projection_health", "documents", "blobs",
+            "custom_sources", "local_host_holds", "local_latest_slots", "local_stop_deferral_backfill",
+            "mission_run_after", "mission_run_deadlines", "ordered_reassignments", "stop_deferral_claims",
         ], move |_| {
             if let Some(windows) = weak.upgrade() {
                 let mut observed = windows

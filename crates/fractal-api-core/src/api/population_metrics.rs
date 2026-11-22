@@ -20,6 +20,8 @@ const INPUT_TABLES: &[&str] = &[
     "planning_sessions", "revision_proposals",
     "operations", "card_actual_revisions", "projection_health",
     "projection_digest_repaired_claims", "documents", "blobs",
+    "custom_sources", "local_host_holds", "local_latest_slots", "local_stop_deferral_backfill",
+    "mission_run_after", "mission_run_deadlines", "ordered_reassignments", "stop_deferral_claims",
 ];
 type Attention = super::population_attention::Counts;
 
