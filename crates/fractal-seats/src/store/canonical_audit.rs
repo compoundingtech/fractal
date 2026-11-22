@@ -238,6 +238,8 @@ fn every_persistent_table_has_a_projection_scope() {
         // Host-local retirement-qualified learner samples and permanent replay dedupe.
         "resource_profile_samples_v1",
         "shell_resources_v1",
+        // Durable host-local scratch custody and tombstones, not replicated claim projections.
+        "scratch_resources_v1",
         // Owner-scoped cancellation tombstones govern only this host's runtime requests.
         "shell_resource_request_cancellations_v1",
         // Host-local physical-erasure completion, not replicated or rebuildable from claims.

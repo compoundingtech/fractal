@@ -204,6 +204,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "requires a real native invocation/attempt or local operator and connected-host resource authority, absent from generated cost stores; queues one host-local command without granting membership or releasing a payload; api::resources submission and nested-custody tests cover ownership and admission boundaries; command bytes, native owner validation and queue-write cost are not measured here",
     ),
     (
+        "GET /v1/internal/resources/scratch/inventory",
+        "requires host-local scratch custody and exact mission-owner observations, absent from generated cost stores; scratch_inventory_is_bounded_read_only_and_local_operator_only covers operator isolation and the 1..500 page bound; native_deadline_skips_scratch_final_work_and_reports_terminal_owner covers retained custody after skipped final work; scratch row decoding and owner lookup cost are not measured here",
+    ),
+    (
         "GET /v1/internal/resources/{id}",
         "requires a durable host-local shell execution, absent from generated cost stores; reads the execution by primary key, then scans its host's memberships and operator holds for inspection; api::resources ownership tests cover disclosure, but host-local membership/hold history and command-body growth are not measured here",
     ),
