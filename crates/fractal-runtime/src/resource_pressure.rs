@@ -2,6 +2,8 @@
 //! elapsed time alone never constitutes a healthy observation or admission grant.
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -22,11 +24,6 @@ pub enum Window {
     Avg300,
 }
 
-impl Window {
-    fn duration_ms(self) -> u64 {
-        match self { Self::Avg10 => 10000, Self::Avg60 => 60000, Self::Avg300 => 300000 }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,6 +44,14 @@ pub struct Policy {
     pub freshness_ms: u64,
     /// Absolute host MemAvailable floor; a shortage counts as memory pressure.
     pub memory_available_floor_bytes: u64,
+    /// Empty selects the service, system.slice and interactive app.slice automatically.
+    pub protected_cgroups: Vec<PathBuf>,
+    /// Job-containing subtrees, excluded whole from observation. Basenames are
+    /// canonical systemd slice names resolved beneath the discovered
+    /// user-manager root; absolute paths are exact and mount-relative.
+    pub job_parent_cgroups: Vec<PathBuf>,
+    /// Additional excluded subtrees, resolved exactly like job parents.
+    pub excluded_cgroups: Vec<PathBuf>,
 }
 
 impl Default for Policy {
@@ -62,6 +67,11 @@ impl Default for Policy {
             resume_ms: 120000,
             freshness_ms: 10000,
             memory_available_floor_bytes: 2 << 30,
+            protected_cgroups: Vec::new(),
+            job_parent_cgroups: vec!["gate.slice".into(), "app-lanes.slice".into(),
+                "app-capped.slice".into(), "app-capped-heavy.slice".into(),
+                "app-batch.slice".into(), "app-batch-heavy.slice".into()],
+            excluded_cgroups: vec!["app-lanes.slice".into(), "gate.slice".into()],
         }
     }
 }
@@ -77,6 +87,40 @@ impl Policy {
             "PSI brake requires one to twelve signal/window rules");
         ensure!(self.sustained_ms != 0 && self.resume_ms != 0 && self.freshness_ms != 0,
             "PSI brake durations must be positive");
+        for path in self.protected_cgroups.iter()
+            .chain(&self.excluded_cgroups)
+            .chain(&self.job_parent_cgroups) {
+            ensure!(!path.as_os_str().is_empty() && path.components().all(|part|
+                matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))),
+                "cgroup paths must stay within the cgroup mount");
+        }
+        ensure!(self.excluded_cgroups.iter().all(|path|
+            path.is_absolute() || path.file_name() == Some(path.as_os_str())),
+            "relative cgroup exclusions must be basenames");
+        ensure!(self.job_parent_cgroups.iter().all(|path|
+            path.is_absolute() || path.file_name() == Some(path.as_os_str())),
+            "relative job parent cgroups must be basenames");
+        for path in self.job_parent_cgroups.iter().chain(&self.excluded_cgroups)
+            .filter(|path| !path.is_absolute()) {
+            ensure!(path.to_str().is_some_and(|name| slice_segments(name)
+                .is_some_and(|segments| segments.len() <= MAX_CGROUPS as usize)),
+                "job parent and excluded cgroup basenames must be canonical systemd slice names");
+        }
+        ensure!(self.job_parent_cgroups.len() + self.excluded_cgroups.len() <= MAX_CGROUPS as usize,
+            "too many configured job parent and excluded cgroups");
+        for path in self.job_parent_cgroups.iter().chain(&self.excluded_cgroups)
+            .filter(|path| path.is_absolute()) {
+            ensure!(path.components().count() <= MAX_CGROUPS as usize,
+                "configured cgroup paths must stay within the enumeration bound");
+        }
+        if !self.protected_cgroups.is_empty()
+            && self.job_parent_cgroups.iter().chain(&self.excluded_cgroups)
+                .any(|path| !path.is_absolute())
+        {
+            ensure!(self.protected_cgroups.iter().all(|path|
+                !user_manager_roots(std::slice::from_ref(path)).is_empty()),
+                "relative job-parent and exclusion names require manager-qualified protected roots; use explicit user-manager/app.slice roots or absolute job-parent and exclusion paths for ancestor roots");
+        }
         for (index, rule) in self.rules.iter().enumerate() {
             ensure!(rule.signal != Signal::MemoryAvailable,
                 "memory-available uses memoryAvailableFloorBytes, not a PSI rule");
@@ -91,7 +135,7 @@ impl Policy {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Reading {
     pub signal: Signal,
     pub window: Window,
@@ -101,42 +145,57 @@ pub struct Reading {
     /// Fresh host MemAvailable is below the independent configured floor.
     pub memory_shortage: bool,
     pub memory_available_bytes: Option<u64>,
+    pub cgroup: Option<Arc<str>>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ObservationCause {
     MissingOrInvalid,
     ObservationGap,
     StaleDecision,
     NotYetSampled,
-    Io { os_error: Option<i32> },
+    Io {
+        os_error: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<Arc<str>>,
+    },
+    TooManyCgroups { path: Arc<str>, limit: u32 },
+    TooManyCgroupEntries { path: Arc<str>, limit: u32 },
+    InvalidPressure { path: Arc<str> },
     InvalidMemoryFloor,
 }
 
 impl ObservationCause {
     fn from_error(error: &anyhow::Error) -> Self {
+        if let Some(error) = error.downcast_ref::<ObservationError>() {
+            return error.cause.clone();
+        }
         if error.is::<InvalidMemoryFloor>() {
             Self::InvalidMemoryFloor
         } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
-            Self::Io { os_error: error.raw_os_error() }
+            Self::Io { os_error: error.raw_os_error(), path: None }
         } else {
             Self::MissingOrInvalid
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Reason {
     /// PSI values use milli-percent; MemoryAvailable values use bytes.
-    Pressure { signal: Signal, value: u64, threshold: u64 },
+    Pressure {
+        signal: Signal, value: u64, threshold: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cgroup: Option<Arc<str>>,
+    },
     /// Remaining healthy observation time, in milliseconds.
     Recovering { remaining: u64 },
     UnknownObservation { cause: ObservationCause },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Decision {
     pub blocked: bool,
     pub reason: Option<Reason>,
@@ -196,6 +255,7 @@ impl Brake {
                     value: readings.iter().find_map(|reading| reading.memory_available_bytes)
                         .expect("validated memory shortage has an available-byte observation"),
                     threshold: self.policy.memory_available_floor_bytes,
+                    cgroup: None,
                 });
             }
         } else {
@@ -216,6 +276,7 @@ impl Brake {
                     self.trip_pressure = Some(Reason::Pressure {
                         signal: rule.signal, value: u64::from(reading.millipercent),
                         threshold: u64::from(rule.threshold_millipercent),
+                        cgroup: reading.cgroup.clone(),
                     });
                 }
             } else {
@@ -244,7 +305,7 @@ impl Brake {
         Decision { blocked: true, reason: Some(if all_below_resume {
             recovering
         } else {
-            self.trip_pressure.unwrap_or(recovering)
+            self.trip_pressure.clone().unwrap_or(recovering)
         }) }
     }
 
@@ -307,24 +368,6 @@ fn validate_memory_floor(policy: &Policy, meminfo: &str) -> Result<()> {
 }
 
 
-fn allocstall_total(source: &str) -> Result<u64> {
-    ensure!(source.ends_with('\n'), "truncated vmstat");
-    let mut total = 0u64;
-    let mut found = false;
-    for (index, line) in source.lines().enumerate() {
-        let mut fields = line.split_ascii_whitespace();
-        let Some(key) = fields.next().filter(|key| key.starts_with("allocstall_")) else { continue; };
-        ensure!(key.len() > "allocstall_".len(), "missing allocstall zone");
-        ensure!(!source.lines().take(index).any(|previous|
-            previous.split_ascii_whitespace().next() == Some(key)), "duplicate allocstall counter");
-        let count: u64 = fields.next().ok_or_else(|| anyhow::anyhow!("missing allocstall value"))?.parse()?;
-        ensure!(fields.next().is_none(), "invalid allocstall counter");
-        total = total.checked_add(count).ok_or_else(|| anyhow::anyhow!("allocstall overflow"))?;
-        found = true;
-    }
-    ensure!(found, "missing allocstall counters");
-    Ok(total)
-}
 
 fn signal_pressure(source: &str, name: &str, window: Window) -> Result<u32> {
     let mut matches = source.lines().filter(|line|
@@ -334,156 +377,249 @@ fn signal_pressure(source: &str, name: &str, window: Window) -> Result<u32> {
     parse_millipercent(line, window)
 }
 
-#[derive(Clone, Copy)]
-struct KernelPaths<'a> {
-    /// None means lane placement is not applicable in this cgroup layout.
-    memory_path: Option<&'a std::path::Path>,
-    io_path: &'a std::path::Path,
-    meminfo_path: &'a std::path::Path,
-    root_memory_path: &'a std::path::Path,
-    vmstat_path: &'a std::path::Path,
+const MAX_CGROUPS: u32 = 256;
+const MAX_CGROUP_ENTRIES: u32 = 4096;
+
+/// Shared enumeration bounds across one observation's whole frontier walk.
+#[derive(Default)]
+struct Enumeration { directories: u32, entries: u32 }
+
+#[derive(Debug)]
+struct ObservationError {
+    cause: ObservationCause,
 }
 
-/// Reuse the small kernel-file and parsed-reading buffers across host observations.
+impl std::fmt::Display for ObservationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "protected cgroup observation failed: {:?}", self.cause)
+    }
+}
+impl std::error::Error for ObservationError {}
+
+fn io_error(path: &Path, error: std::io::Error) -> anyhow::Error {
+    ObservationError { cause: ObservationCause::Io {
+        os_error: error.raw_os_error(), path: Some(path.to_string_lossy().into()),
+    } }.into()
+}
+
+fn read_file(path: &Path, buffer: &mut String) -> Result<()> {
+    use std::io::Read as _;
+    buffer.clear();
+    std::fs::File::open(path).and_then(|mut file| file.read_to_string(buffer))
+        .map_err(|error| io_error(path, error))?;
+    Ok(())
+}
+
+fn rooted(root: &Path, path: &Path) -> PathBuf {
+    root.join(path.strip_prefix("/").unwrap_or(path))
+}
+
+/// Canonical systemd slice hierarchy: `app-capped-heavy.slice` nests inside
+/// `app-capped.slice`, which nests inside `app.slice`. Segment names are
+/// non-empty runs of ASCII letters, digits and underscores joined by '-'.
+fn slice_segments(name: &str) -> Option<Vec<String>> {
+    let stem = name.strip_suffix(".slice")?;
+    let segments = stem.split('-').map(str::to_owned).collect::<Vec<_>>();
+    (segments.iter().all(|segment| !segment.is_empty()
+        && segment.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')))
+        .then_some(segments)
+}
+
+/// One configured job-parent or exclusion entry resolves to a cgroup path:
+/// basenames name canonical slices beneath the user-manager root, absolute
+/// paths are exact and mount-relative.
+fn configured_path(entry: &Path, manager: Option<&Path>, root: &Path) -> Option<PathBuf> {
+    if entry.is_absolute() {
+        return Some(rooted(root, entry));
+    }
+    let mut path = manager?.to_path_buf();
+    let mut nested = String::new();
+    for segment in slice_segments(entry.to_str()?)? {
+        if !nested.is_empty() { nested.push('-'); }
+        nested.push_str(&segment);
+        path.push(format!("{nested}.slice"));
+    }
+    Some(path)
+}
+
+/// Resolve each discovered manager independently; multiple logged-in users may
+/// have identically named job slices in different cgroup subtrees.
+fn user_manager_roots(protected: &[PathBuf]) -> Vec<PathBuf> {
+    let mut managers = Vec::new();
+    for path in protected {
+        let mut prefix = PathBuf::new();
+        let mut found = false;
+        for part in path.components() {
+            prefix.push(part.as_os_str());
+            let Some(name) = part.as_os_str().to_str() else { continue; };
+            if name.strip_prefix("user@").and_then(|name| name.strip_suffix(".service"))
+                .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                managers.push(prefix);
+                found = true;
+                break;
+            }
+        }
+        if !found && path.file_name().is_some_and(|name| name == "app.slice")
+            && let Some(parent) = path.parent()
+        {
+            managers.push(parent.to_path_buf());
+        }
+    }
+    managers.sort();
+    managers.dedup();
+    managers
+}
+
+/// A discovered optional slice is skipped when absent and rediscovered each
+/// sample; an explicit protected root absent fails closed instead.
+fn push_if_present(protected: &mut Vec<PathBuf>, path: PathBuf) -> Result<()> {
+    match std::fs::metadata(&path) {
+        Ok(_) => protected.push(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(io_error(&path, error)),
+    }
+    Ok(())
+}
+
+/// Buffers are reused; each observation rediscovers the current cgroup children.
 #[derive(Default, Debug)]
 pub struct Reader {
     memory: String,
     io: String,
     meminfo: String,
-    root_memory: String,
-    vmstat: String,
-    own_cgroup: String,
-    warned_lane_layout: bool,
-    lane_layout_not_applicable: bool,
-    previous_allocstall: Option<u64>,
-    last_allocstall_at_ms: Option<u64>,
+    placement: String,
     readings: Vec<Reading>,
 }
 
 impl Reader {
-    fn new(policy: &Policy, meminfo_path: &std::path::Path) -> Result<Self> {
+    fn new(policy: &Policy, meminfo_path: &Path) -> Result<Self> {
         let mut reader = Self::default();
         if policy.memory_available_floor_bytes > 0 {
-            use std::io::Read as _;
-            std::fs::File::open(meminfo_path)?.read_to_string(&mut reader.meminfo)?;
+            read_file(meminfo_path, &mut reader.meminfo)?;
             validate_memory_floor(policy, &reader.meminfo)?;
         }
         Ok(reader)
     }
 
     pub fn read(&mut self, policy: &Policy, now_ms: u64) -> Result<&[Reading]> {
-        self.read_layout(policy, now_ms, std::path::Path::new("/proc/self/cgroup"),
-            std::path::Path::new("/sys/fs/cgroup"), KernelPaths {
-            memory_path: None,
-            io_path: std::path::Path::new("/proc/pressure/io"),
-            meminfo_path: std::path::Path::new("/proc/meminfo"),
-            root_memory_path: std::path::Path::new("/proc/pressure/memory"),
-            vmstat_path: std::path::Path::new("/proc/vmstat"),
-        })
+        self.read_layout(policy, now_ms, Path::new("/proc/self/cgroup"),
+            Path::new("/sys/fs/cgroup"), Path::new("/proc/meminfo"))
     }
 
-    fn read_layout(
-        &mut self,
-        policy: &Policy,
-        now_ms: u64,
-        placement_path: &std::path::Path,
-        cgroup_root: &std::path::Path,
-        paths: KernelPaths<'_>,
-    ) -> Result<&[Reading]> {
-        use std::io::Read as _;
-        self.lane_layout_not_applicable = false;
-        let mut lane = None;
-        if policy.rules.iter().any(|rule| matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull)) {
-            self.own_cgroup.clear();
-            std::fs::File::open(placement_path)?.read_to_string(&mut self.own_cgroup)?;
-            ensure!(!self.own_cgroup.trim().is_empty(), "empty cgroup placement");
-            let mut unified = self.own_cgroup.lines().filter_map(|line| line.strip_prefix("0::"));
-            let placement = unified.next().ok_or_else(|| anyhow::anyhow!("missing unified cgroup placement"))?;
-            ensure!(unified.next().is_none(), "duplicate unified cgroup placement");
-            let path = std::path::Path::new(placement);
-            ensure!(path.is_absolute() && path.components().all(|part|
-                matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))),
-                "malformed unified cgroup placement");
-            lane = crate::lane::user_manager_cgroup_in(placement, cgroup_root)
-                .map(|manager| manager.join("app.slice").join(crate::lane::LANES_SLICE).join("memory.pressure"));
-            self.lane_layout_not_applicable = lane.is_none();
-            if lane.is_none() && !self.warned_lane_layout {
-                self.warned_lane_layout = true;
-                tracing::warn!(cgroup = %self.own_cgroup.trim(),
-                    "finite lane PSI is not applicable to this cgroup layout; using qualified root PSI and the memory floor");
+    fn protected(&mut self, policy: &Policy, placement_path: &Path, root: &Path) -> Result<Vec<PathBuf>> {
+        if !policy.protected_cgroups.is_empty() {
+            return Ok(policy.protected_cgroups.iter().map(|path| rooted(root, path)).collect());
+        }
+        read_file(placement_path, &mut self.placement)?;
+        let mut placements = self.placement.lines().filter_map(|line| line.strip_prefix("0::"));
+        let own = placements.next().ok_or_else(|| anyhow::anyhow!("missing unified cgroup placement"))?;
+        ensure!(placements.next().is_none(), "duplicate unified cgroup placement");
+        let path = Path::new(own);
+        ensure!(path.is_absolute() && path.components().all(|part|
+            matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))),
+            "malformed unified cgroup placement");
+        // A delegated service may contain the process in a child cgroup.
+        let service_depth = path.components().enumerate()
+            .filter(|(_, part)| part.as_os_str().to_string_lossy().ends_with(".service"))
+            .map(|(index, _)| index + 1).next_back();
+        let service: PathBuf = path.components().take(service_depth.unwrap_or(usize::MAX)).collect();
+        let mut protected = vec![rooted(root, &service), root.join("system.slice")];
+        if let Some(manager) = crate::lane::user_manager_cgroup_in(own, root) {
+            protected.push(manager.join("app.slice"));
+            push_if_present(&mut protected, manager.join("interactive.slice"))?;
+        } else {
+            // A system service has no user-manager ancestor. Discover user
+            // slices at depth one, then probe their conventional manager paths.
+            let users = root.join("user.slice");
+            match std::fs::metadata(&users) {
+                Ok(_) => {
+                    for user in Self::children(&users, &mut Enumeration::default())? {
+                        let Some(name) = user.file_name().and_then(|name| name.to_str()) else { continue; };
+                        let Some(uid) = name.strip_prefix("user-").and_then(|name| name.strip_suffix(".slice"))
+                            .filter(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())) else { continue; };
+                        for slice in ["app.slice", "interactive.slice"] {
+                            push_if_present(&mut protected,
+                                user.join(format!("user@{uid}.service/{slice}")))?;
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(io_error(&users, error)),
+            }
+            if protected.len() == 2 {
+                // Top-level app.slice and interactive.slice also support
+                // non-user-manager layouts. app.slice fails closed when
+                // absent; the optional interactive.slice is rediscovered
+                // each sample.
+                protected.push(root.join("app.slice"));
+                push_if_present(&mut protected, root.join("interactive.slice"))?;
             }
         }
-        self.read_paths(policy, now_ms, KernelPaths { memory_path: lane.as_deref(), ..paths })
+        protected.sort();
+        protected.dedup();
+        Ok(protected)
     }
 
-    fn read_paths(
-        &mut self,
-        policy: &Policy,
-        now_ms: u64,
-        paths: KernelPaths<'_>,
-    ) -> Result<&[Reading]> {
-        use std::io::Read as _;
-        let KernelPaths { memory_path, io_path, meminfo_path, root_memory_path, vmstat_path } = paths;
-        self.readings.clear();
+    fn children(path: &Path, bounds: &mut Enumeration) -> Result<Vec<PathBuf>> {
+        let entries = std::fs::read_dir(path).map_err(|error| io_error(path, error))?;
+        let mut children = Vec::new();
+        for entry in entries {
+            // Bound raw snapshot entries as well as retained cgroup
+            // directories; control files count only toward the raw limit.
+            bounds.entries += 1;
+            if bounds.entries > MAX_CGROUP_ENTRIES {
+                return Err(ObservationError { cause: ObservationCause::TooManyCgroupEntries {
+                    path: path.to_string_lossy().into(), limit: MAX_CGROUP_ENTRIES,
+                } }.into());
+            }
+            let entry = entry.map_err(|error| io_error(path, error))?;
+            let child = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => {
+                    bounds.directories += 1;
+                    if bounds.directories > MAX_CGROUPS {
+                        return Err(ObservationError { cause: ObservationCause::TooManyCgroups {
+                            path: path.to_string_lossy().into(), limit: MAX_CGROUPS,
+                        } }.into());
+                    }
+                    children.push(child);
+                }
+                Ok(_) => {},
+                Err(error) => {
+                    if matches!(std::fs::metadata(&child),
+                        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound) {
+                        continue;
+                    }
+                    return Err(io_error(&child, error));
+                }
+            }
+        }
+        children.sort();
+        Ok(children)
+    }
+
+    // A child from an enumeration snapshot may disappear before either PSI read.
+    // Only absence of the cgroup itself permits skipping it, never absence of PSI.
+    fn sample_cgroup(&mut self, policy: &Policy, root: &Path, path: &Path, vanished_ok: bool) -> Result<()> {
         let needs_memory = policy.rules.iter().any(|rule|
             matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull));
         let needs_io = policy.rules.iter().any(|rule|
             matches!(rule.signal, Signal::IoSome | Signal::IoFull));
-        let mut shortage = false;
-        let mut available = None;
-        let mut lane_absent = memory_path.is_none();
-        if policy.memory_available_floor_bytes > 0 {
-            self.meminfo.clear();
-            std::fs::File::open(meminfo_path)?.read_to_string(&mut self.meminfo)?;
-            validate_memory_floor(policy, &self.meminfo)?;
-            available = Some(meminfo_bytes(&self.meminfo, "MemAvailable:")?);
-            shortage = available.is_some_and(|bytes| bytes < policy.memory_available_floor_bytes);
-        }
-        if needs_memory {
-            self.memory.clear();
-            if let Some(memory_path) = memory_path {
-                match std::fs::File::open(memory_path) {
-                    Ok(mut file) => { file.read_to_string(&mut self.memory)?; }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        let cgroup = memory_path.parent().ok_or_else(|| anyhow::anyhow!("missing lane path"))?;
-                        match std::fs::metadata(cgroup) {
-                            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
-                                // Only the lane itself may be absent, not its containing hierarchy.
-                                let parent = cgroup.parent().ok_or_else(|| anyhow::anyhow!("missing lane parent"))?;
-                                ensure!(std::fs::metadata(parent)?.is_dir(), "missing lane hierarchy");
-                                lane_absent = true;
-                            }
-                            _ => return Err(error.into()),
-                        }
-                    }
-                    Err(error) => return Err(error.into()),
-                }
+        let result = (|| {
+            if needs_memory { read_file(&path.join("memory.pressure"), &mut self.memory)?; }
+            if needs_io { read_file(&path.join("io.pressure"), &mut self.io)?; }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if vanished_ok && matches!(std::fs::metadata(path),
+                Err(missing) if missing.kind() == std::io::ErrorKind::NotFound) {
+                return Ok(());
             }
-            self.root_memory.clear();
-            std::fs::File::open(root_memory_path)?.read_to_string(&mut self.root_memory)?;
-            self.vmstat.clear();
-            std::fs::File::open(vmstat_path)?.read_to_string(&mut self.vmstat)?;
-            let current = allocstall_total(&self.vmstat)?;
-            // memory.high uses try_to_free_mem_cgroup_pages. ALLOCSTALL is accounted
-            // in do_try_to_free_pages only when !cgroup_reclaim(sc) (Linux v6.18
-            // mm/vmscan.c), so it distinguishes global reclaim from that memcg path.
-            // pgscan_direct includes memcg reclaim; kswapd also runs for routine
-            // cache/ARC churn. Neither scan counter alone proves host distress.
-            // ALLOCSTALL counts reclaim entry, not each sample spent stalled. Keep
-            // evidence for the PSI window plus the brake's sustained interval so
-            // pressure starting within that window can trip on a later sample.
-            match self.previous_allocstall {
-                Some(previous) if current > previous => self.last_allocstall_at_ms = Some(now_ms),
-                Some(previous) if current == previous => {},
-                _ => self.last_allocstall_at_ms = None, // First sample/reset is lane-only.
-            }
-            self.previous_allocstall = Some(current);
+            return Err(error);
         }
-        if needs_io {
-            self.io.clear();
-            std::fs::File::open(io_path)?.read_to_string(&mut self.io)?;
-        }
-        for rule in &policy.rules {
+        let mut identity = None;
+        for (rule, reading) in policy.rules.iter().zip(&mut self.readings) {
             let (source, name) = match rule.signal {
                 Signal::MemoryFull => (&self.memory, "full"),
                 Signal::MemorySome => (&self.memory, "some"),
@@ -491,24 +627,106 @@ impl Reader {
                 Signal::IoSome => (&self.io, "some"),
                 Signal::MemoryAvailable => unreachable!("memory floor is not a PSI rule"),
             };
-            let memory_rule = matches!(rule.signal, Signal::MemoryFull | Signal::MemorySome);
-            let pressure = if lane_absent && memory_rule {
-                0
-            } else { signal_pressure(source, name, rule.window)? };
-            // Always parse root PSI, even without a recent qualifying event.
-            let pressure = if memory_rule {
-                let root = signal_pressure(&self.root_memory, "full", rule.window)?;
-                let qualified = self.last_allocstall_at_ms.and_then(|at| now_ms.checked_sub(at))
-                    .is_some_and(|age| age <= rule.window.duration_ms().saturating_add(policy.sustained_ms));
-                if qualified { pressure.max(root) } else { pressure }
-            } else { pressure };
-            self.readings.push(Reading {
-                signal: rule.signal, window: rule.window,
-                millipercent: pressure,
-                observed_at_ms: now_ms,
-                memory_shortage: shortage,
-                memory_available_bytes: available,
-            });
+            let file = path.join(if matches!(rule.signal, Signal::MemoryFull | Signal::MemorySome) {
+                "memory.pressure"
+            } else { "io.pressure" });
+            let value = signal_pressure(source, name, rule.window).map_err(|_| ObservationError {
+                cause: ObservationCause::InvalidPressure { path: file.to_string_lossy().into() },
+            })?;
+            if reading.cgroup.is_none() || value > reading.millipercent {
+                let identity = identity.get_or_insert_with(|| Arc::<str>::from(
+                    format!("/{}", path.strip_prefix(root).unwrap_or(path).display())));
+                reading.millipercent = value;
+                reading.cgroup = Some(identity.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// One level of the split frontier. Configured job-parent and excluded
+    /// endpoints are skipped whole; descent continues only along configured
+    /// paths; every other child is sampled directly.
+    fn sample_frontier(&mut self, policy: &Policy, root: &Path, children: &[PathBuf],
+        protected: &[PathBuf], excluded: &[PathBuf], bounds: &mut Enumeration,
+    ) -> Result<()> {
+        for child in children {
+            if excluded.iter().any(|job| child.starts_with(job)) { continue; }
+            if protected.iter().any(|path| path == child) {
+                // An independently protected child is observed by its own plan.
+                continue;
+            }
+            if excluded.iter().any(|job| job.starts_with(child)) {
+                let descendants = match Self::children(child, bounds) {
+                    Ok(descendants) => descendants,
+                    Err(_) if matches!(std::fs::metadata(child),
+                        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound) => continue,
+                    Err(error) => return Err(error),
+                };
+                self.sample_frontier(policy, root, &descendants, protected, excluded, bounds)?;
+                continue;
+            }
+            self.sample_cgroup(policy, root, child, true)?;
+        }
+        Ok(())
+    }
+
+    fn read_layout(&mut self, policy: &Policy, now_ms: u64, placement_path: &Path,
+        cgroup_root: &Path, meminfo_path: &Path) -> Result<&[Reading]>
+    {
+        let mut available = None;
+        if policy.memory_available_floor_bytes > 0 {
+            read_file(meminfo_path, &mut self.meminfo)?;
+            validate_memory_floor(policy, &self.meminfo)?;
+            available = Some(meminfo_bytes(&self.meminfo, "MemAvailable:")?);
+        }
+        self.readings.clear();
+        self.readings.extend(policy.rules.iter().map(|rule| Reading {
+            signal: rule.signal, window: rule.window, millipercent: 0, observed_at_ms: now_ms,
+            memory_shortage: available.is_some_and(|bytes| bytes < policy.memory_available_floor_bytes),
+            memory_available_bytes: available, cgroup: None,
+        }));
+        let protected = self.protected(policy, placement_path, cgroup_root)?;
+        // Job parents and excluded subtrees resolve lexically from the
+        // configured names: a missing endpoint still splits its protected
+        // ancestors, so a removed job can never resurface through a
+        // contaminated ancestor aggregate.
+        let managers = user_manager_roots(&protected);
+        ensure!(!managers.is_empty()
+            || policy.job_parent_cgroups.iter().chain(&policy.excluded_cgroups)
+                .all(|path| path.is_absolute()),
+            "relative job-parent and exclusion names cannot be resolved without a user manager");
+        let mut excluded = Vec::new();
+        for entry in policy.job_parent_cgroups.iter().chain(&policy.excluded_cgroups) {
+            if entry.is_absolute() {
+                excluded.push(rooted(cgroup_root, entry));
+            } else {
+                for manager in &managers {
+                    if let Some(path) = configured_path(entry, Some(manager), cgroup_root) {
+                        excluded.push(path);
+                    }
+                }
+            }
+        }
+        excluded.sort();
+        excluded.dedup();
+        let mut bounds = Enumeration::default();
+        let mut groups = Vec::with_capacity(protected.len());
+        for path in protected {
+            // A configured job parent or excluded subtree is never observed,
+            // even when it is itself protected.
+            if excluded.iter().any(|job| path.starts_with(job)) { continue; }
+            groups.push(path);
+        }
+        for path in &groups {
+            if excluded.iter().any(|job| job.starts_with(path)) {
+                // Split along the configured paths: observe the remaining
+                // immediate children, never this contaminated ancestor.
+                let children = Self::children(path, &mut bounds)?;
+                self.sample_frontier(policy, cgroup_root, &children, &groups, &excluded, &mut bounds)?;
+            } else {
+                // No configured path lives inside; observe it directly.
+                self.sample_cgroup(policy, cgroup_root, path, false)?;
+            }
         }
         Ok(&self.readings)
     }
@@ -522,15 +740,10 @@ pub struct Observer {
     origin: tokio::time::Instant,
     sampled_at: Option<u64>,
     cached: Decision,
-    paths: Option<[std::path::PathBuf; 5]>,
+    paths: Option<[PathBuf; 3]>,
 }
 
 impl Observer {
-    /// Placement for a well-formed layout where finite-lane PSI is not applicable.
-    pub fn lane_psi_not_applicable_placement(&self) -> Option<&str> {
-        self.reader.lane_layout_not_applicable.then(|| self.reader.own_cgroup.trim())
-    }
-
     pub fn new(policy: Policy) -> Result<Self> {
         let reader = Reader::new(&policy, std::path::Path::new("/proc/meminfo"))?;
         Ok(Self {
@@ -542,9 +755,12 @@ impl Observer {
         })
     }
 
-    /// Inject lane PSI, root IO, meminfo, root memory PSI and vmstat locations, in order.
-    pub fn with_paths(policy: Policy, paths: [std::path::PathBuf; 5]) -> Result<Self> {
-        let reader = Reader::new(&policy, &paths[2])?;
+    /// Inject unified placement, cgroup-v2 mount and meminfo locations.
+    pub fn with_paths(policy: Policy, placement_path: PathBuf, cgroup_root: PathBuf,
+        meminfo_path: PathBuf) -> Result<Self>
+    {
+        let reader = Reader::new(&policy, &meminfo_path)?;
+        let paths = [placement_path, cgroup_root, meminfo_path];
         Ok(Self {
             brake: Brake::new(policy.clone())?, policy, reader,
             origin: tokio::time::Instant::now(), sampled_at: None, paths: Some(paths),
@@ -563,7 +779,7 @@ impl Observer {
                 cause: ObservationCause::StaleDecision,
             }) }
         } else {
-            self.cached
+            self.cached.clone()
         }
     }
 
@@ -576,19 +792,14 @@ impl Observer {
             self.cached = Decision { blocked: true, reason: Some(Reason::UnknownObservation {
                 cause: ObservationCause::NotYetSampled,
             }) };
-            self.reader.previous_allocstall = None;
-            self.reader.last_allocstall_at_ms = None;
         }
         let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
         // The daemon interval owns cadence. A second throttle here would discard a
         // slightly early tick and turn scheduling jitter into a freshness gap.
         self.sampled_at = Some(now);
         let readings = match &self.paths {
-            Some([memory, io, meminfo, root_memory, vmstat]) =>
-                self.reader.read_paths(&self.policy, now, KernelPaths {
-                    memory_path: Some(memory), io_path: io, meminfo_path: meminfo,
-                    root_memory_path: root_memory, vmstat_path: vmstat,
-                }),
+            Some([placement, root, meminfo]) =>
+                self.reader.read_layout(&self.policy, now, placement, root, meminfo),
             None => self.reader.read(&self.policy, now),
         };
         self.cached = match readings {
