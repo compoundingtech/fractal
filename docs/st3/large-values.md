@@ -1119,17 +1119,24 @@ reference or physically bound the complete execution values and keys, preserving
 request identity and cleanup semantics.
 
 The same maintainer owns cancellation schema `lv-h68c595b5ab84`, insertion
-`lv-hc433437e984c` and expiry `lv-h3ecd1f97c431`. These retain a derived
-UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp,
-so cancellation-before-submission is atomic with request lookup. The 36-character
-check and seven-day retention are not general encoded-size or statement-cost
-proofs: an expiry can delete an unbounded number of rows inside submission.
-Values remain inline to retain the existing cancellation authority transition.
+`lv-hd7eb21c24865` and expiry `lv-h77ddc7013964`. These retain a derived
+UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp.
+Immediate transactions serialize acceptance with cancellation; cancellation
+always records evidence for every resolved owner key, including when an execution
+already exists. Acceptance also checks sibling executions and cancellation state.
+Expiry reclaims at most 128 tombstones per submission; timestamp checks prevent
+unreclaimed expired rows from blocking acceptance. The 36-character check and
+seven-day retention are not general encoded-size or statement-cost proofs.
+Refreshing owners under the writer lock scans the indexed invocation-receipt
+interval since this incarnation's start: O(R), without a cap or truncation.
+Long-lived incarnations can therefore increase writer-lock time. The durable
+owner projection and canonical incarnation/request row are deferred to #7012:
+legacy cancel-only rows contain opaque owner hashes and require a versioned
+contract transition. Values remain inline to preserve cancellation authority.
 The schema's `chunk-or-reference-variable-columns` task covers the identifier
-and index representation; the insertion/expiry
-`bound-or-reference-values-and-reclamation` tasks must bound physical storage
-and incremental reclamation without weakening cancellation tombstones or replay.
-This review records transitional debt, not a permanent exemption or size proof.
+and index representation; insertion/expiry retain the
+`bound-or-reference-values-and-reclamation` obligation. This records transitional
+debt, not a permanent exemption or size proof.
 
 ### Durable phone service minutes
 
