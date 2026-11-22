@@ -3,8 +3,8 @@
   "summary": "Bound suspension companion content before archiving and remove failed payload staging files",
   "replay": {"status": "none", "detail": "No claim or projection changes."},
   "schema": {"status": "none", "detail": "Snapshot manifests and archive formats are unchanged."},
-  "rules": {"status": "changed", "detail": "Sealing counts transcript, workspace bundle and companion-directory regular-file content together against the existing 256 MiB cap before packing. The final archive-size check still includes archive overhead."},
-  "compatibility": {"status": "none", "detail": "Existing complete snapshots remain readable. Companion symlinks are not followed during size accounting or archiving."},
+  "rules": {"status": "changed", "detail": "Sealing counts transcript, workspace bundle and companion-directory regular-file content together against the existing 256 MiB cap before packing. Transcript and bundle sizes follow symlinks. Companion traversal uses an explicit stack with one directory iterator open at a time, at most 128 levels below its root and 100,000 entries including its root; violations report snapshot-depth-limit or snapshot-entry-limit. The final archive-size check still includes archive overhead."},
+  "compatibility": {"status": "changed", "detail": "Existing complete snapshots remain readable. Companion symlinks are not followed during size accounting or archiving. New captures exceeding the companion traversal limits fail before archive creation."},
   "downtime": {"status": "none", "detail": "The fix applies to subsequent sealing attempts after binary replacement."},
   "manual": {"status": "none", "detail": "No new commands or configuration. Existing staging debris is not swept by this change."},
   "recovery": {"status": "changed", "detail": "A failed sealing attempt removes its payload.tmp staging file, including when archive publication or the final size check fails. Workspace capture and native-session files are retained for retry."}
