@@ -343,12 +343,114 @@ fn sigkill_between_intent_create_and_receipt_resumes_exact_object() {
 
 thread_local! {
     static BEFORE_REMOVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_HANDOFF: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static INTERRUPT_QUARANTINE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 pub(super) fn before_remove() {
     BEFORE_REMOVE.with(|hook| {
         if let Some(hook) = hook.take() { hook(); }
     });
+}
+
+pub(super) fn quarantine_boundary(boundary: &str) {
+    if boundary == "handoff" {
+        BEFORE_HANDOFF.with(|hook| {
+            if let Some(hook) = hook.take() { hook(); }
+        });
+    }
+    INTERRUPT_QUARANTINE.with(|interrupt| {
+        if interrupt.get() == Some(boundary) {
+            interrupt.set(None);
+            panic!("interrupted quarantine at {boundary}");
+        }
+    });
+}
+
+#[test]
+fn empty_replacement_at_atomic_handoff_is_restored_and_never_adopted() {
+    let (store, directory, request) = fixture();
+    let handle = store.acquire_scratch(&request).unwrap();
+    fs::write(Path::new(&handle.path).join("payload"), b"original").unwrap();
+    let original = directory.path().join("original");
+    let moved = original.clone();
+    let allocation = handle.path.clone();
+    BEFORE_HANDOFF.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        fs::rename(&allocation, &moved).unwrap();
+        fs::create_dir(&allocation).unwrap();
+    })));
+    assert!(release(&store, &handle).is_err());
+    assert!(Path::new(&handle.path).is_dir());
+    assert_eq!(fs::read(original.join("payload")).unwrap(), b"original");
+    assert_eq!(fs::read_dir(&handle.path).unwrap().count(), 0);
+    assert_eq!(record(&store, &request.id).state, "releasing");
+    assert_eq!(record(&store, &request.id).quarantine.unwrap().phase, "failed");
+    assert!(release(&store, &handle).is_err());
+    assert!(Path::new(&handle.path).is_dir());
+    assert_eq!(fs::read(original.join("payload")).unwrap(), b"original");
+}
+
+#[test]
+fn quarantine_handoff_and_removal_interruptions_resume_after_reopen() {
+    for boundary in ["handoff", "moved", "deleting", "removed"] {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = fs::canonicalize(directory.path()).unwrap();
+        let database = canonical.join("store.sqlite");
+        let request = ScratchRequest { id: "scratch/quarantine-reopen".into(), host: "host-a".into(),
+            owner: "mission-run/owner".into(), owner_generation: "run-generation/generation-a".into(),
+            root: canonical.join("dedicated").to_string_lossy().into_owned() };
+        let store = Store::open(&database, "host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch-a").unwrap();
+        owner(&store, "running", "normal", "generation-a");
+        let handle = store.acquire_scratch(&request).unwrap();
+        fs::write(Path::new(&handle.path).join("payload"), b"owned").unwrap();
+        INTERRUPT_QUARANTINE.with(|interrupt| interrupt.set(Some(boundary)));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| release(&store, &handle))).is_err());
+        let custody = record(&store, &request.id);
+        assert_eq!(custody.state, "releasing");
+        assert!(custody.quarantine.unwrap().identity.is_some());
+        drop(store);
+        let store = Store::open(&database, "host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch-b").unwrap();
+        let handle = store.scratch_handle(&request.id).unwrap().unwrap();
+        assert!(release(&store, &handle).unwrap(), "{boundary}");
+        assert!(!Path::new(&handle.path).exists());
+        assert_eq!(record(&store, &request.id).state, "released");
+    }
+}
+
+#[test]
+fn interrupted_wrong_object_handoff_restores_without_adoption_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let canonical = fs::canonicalize(directory.path()).unwrap();
+    let database = canonical.join("store.sqlite");
+    let request = ScratchRequest { id: "scratch/quarantine-mismatch".into(), host: "host-a".into(),
+        owner: "mission-run/owner".into(), owner_generation: "run-generation/generation-a".into(),
+        root: canonical.join("dedicated").to_string_lossy().into_owned() };
+    let store = Store::open(&database, "host-a").unwrap();
+    store.start_resource_authority("host-a", "epoch-a").unwrap();
+    owner(&store, "running", "normal", "generation-a");
+    let handle = store.acquire_scratch(&request).unwrap();
+    fs::write(Path::new(&handle.path).join("payload"), b"original").unwrap();
+    let original = canonical.join("original");
+    let moved = original.clone();
+    let allocation = handle.path.clone();
+    BEFORE_HANDOFF.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        fs::rename(&allocation, &moved).unwrap();
+        fs::create_dir(&allocation).unwrap();
+    })));
+    INTERRUPT_QUARANTINE.with(|interrupt| interrupt.set(Some("moved")));
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| release(&store, &handle))).is_err());
+    drop(store);
+    let store = Store::open(&database, "host-a").unwrap();
+    store.start_resource_authority("host-a", "epoch-b").unwrap();
+    let handle = store.scratch_handle(&request.id).unwrap().unwrap();
+    assert!(release(&store, &handle).is_err());
+    assert!(Path::new(&handle.path).is_dir());
+    assert_eq!(fs::read_dir(&handle.path).unwrap().count(), 0);
+    assert_eq!(fs::read(original.join("payload")).unwrap(), b"original");
+    assert_ne!(record(&store, &request.id).state, "released");
+    assert!(release(&store, &handle).is_err());
 }
 
 #[test]

@@ -449,11 +449,14 @@ returning the handle. A repeated identical request resumes the same allocation; 
 specification is refused. A released identity cannot be resurrected. Interrupted intent,
 creation, receipt publication and release retain their original record and object identity.
 
-Release holds verified directory descriptors for the private root and allocation across the
-durable release-intent boundary. It opens each root component without following symlinks and
-removes descendants relative to those descriptors, with device/inode checks at each directory
-handoff. It never reopens the absolute allocation pathname to delete or synchronize it; renaming
-an ancestor or swapping in a symlink cannot redirect removal into another directory.
+Linux release captures the allocation with a no-replace rename into a private quarantine directory
+held by a verified descriptor, then checks its device and inode before recursive removal. A
+replacement occupying the allocation basename is restored rather than adopted. The empty private
+quarantine inode remains after release because removing it through the exposed root would recreate
+that namespace race. Interrupted quarantine creation, identity mismatch or restoration failure
+retains custody and cannot publish a release receipt. Non-Linux hosts do not perform physical
+retirement; release retains custody instead of claiming a weaker deletion. Renaming an ancestor or
+swapping in a symlink cannot redirect removal into another directory.
 
 Mission lifetime is not an Effect scope: completing the acquiring activity or closing a local
 JavaScript scope does not destroy the directory. Native final-release work runs on normal
@@ -465,10 +468,11 @@ retains custody and raises an inspectable `final-scratch-release` fault without 
 normal-work outcome.
 
 Consumer checks include native execution `cwd` independently of the lane's `diskPath`, as well
-as shell execution `cwd`. Consumer acceptance/preparation records resolved directory identities
-before payload launch, so removing or retargeting a launch-time symlink does not erase custody.
-Unavailable identity observations, including live records written without identity evidence,
-are `unknown` and retain scratch until the consumer is positively retired.
+as shell execution `cwd`. Historical directory identities provide positive retention only. Linux
+release observes each exact native process's current kernel cwd through a held descriptor and
+checks its PID start token before and after the walk. A directory renamed into the allocation
+after launch therefore remains a consumer. Missing, mismatched, unreadable, legacy or non-Linux
+observations are `unknown` and retain scratch until retirement is positively proven.
 
 ### Dry-run orphan inventory
 

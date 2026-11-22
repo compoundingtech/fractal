@@ -1223,6 +1223,11 @@ and retention exceptions remain unproven. Descriptor-relative deletion and the
 consumer identity checks establish custody safety, not physical SQLite size or
 host-history scan cost bounds.
 
+The optional quarantine handoff state is part of the same bounded custody record and
+does not add a table or index. Native execution records may additionally persist a
+PID and start token in their existing generation identity. Those additive fields do
+not establish physical row, transition or host-history scan bounds.
+
 The `fractal_store::store::scratch_resources::tests` maintainer owns
 `lv-he0bc37451fe9`, `lv-h40d4f40c9604`, `lv-hedc321694261`,
 `lv-hb652bf2a21a3`, `lv-ha2b4809b35ad`, `lv-h1bbc5325cd30` and

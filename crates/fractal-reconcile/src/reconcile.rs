@@ -1763,6 +1763,7 @@ pub struct Reconciler<R = NativeRuntime> {
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
+    file_changes: Arc<FileChanges>,
     launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
     program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
@@ -1842,6 +1843,29 @@ struct FileWatch {
     dirty: Arc<AtomicBool>,
 }
 
+#[derive(Default)]
+struct FileChanges {
+    runs: Mutex<BTreeSet<String>>,
+    notify: Notify,
+}
+impl FileChanges {
+    fn invalidate(&self, incremental: &crate::incremental::Incremental, subject: &str,
+        rescan: bool, global_notify: &Notify) {
+        let readers = incremental.touch_readers(subject);
+        // Launch admission and other global readers still require the common loop.
+        // File-gate readers have an existing, independently driven mission evaluator.
+        if rescan || readers.iter().any(|item| !item.starts_with("mission-run/")) {
+            crate::incremental::file_watch_work::notification(true);
+            crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::FileWatch, None);
+            global_notify.notify_one();
+        } else if !readers.is_empty() {
+            self.runs.lock().unwrap_or_else(PoisonError::into_inner).extend(readers);
+            crate::incremental::file_watch_work::notification(false);
+            self.notify.notify_one();
+        }
+    }
+}
+
 impl FileWatch {
     fn relevant(event: &notify::Event, target: &Path, directory: &Path, referent: Option<&Path>) -> bool {
         // Overflow/rescan means paths may have been lost; every subscription must reread.
@@ -1855,8 +1879,9 @@ impl FileWatch {
                 || event.paths.iter().any(|path| {
                     path.starts_with(target)
                         || referent.is_some_and(|referent| path.starts_with(referent))
-                        || ((path == directory
-                            || referent.and_then(Path::parent) == Some(path.as_path()))
+                        || ((target.starts_with(path)
+                            || directory.starts_with(path)
+                            || referent.is_some_and(|referent| referent.starts_with(path)))
                             && matches!(
                                 event.kind,
                                 notify::EventKind::Remove(_)
@@ -2002,6 +2027,7 @@ impl Reconciler<NativeRuntime> {
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
+            file_changes: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
@@ -2241,6 +2267,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
+            file_changes: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
@@ -12174,6 +12201,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let crate::incremental::FeedReaders { cursor: next, readers: mut changed_runs, unseen } =
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
+        changed_runs.extend(std::mem::take(
+            &mut *self.file_changes.runs.lock().unwrap_or_else(PoisonError::into_inner)));
+        changed_runs.sort_unstable();
+        changed_runs.dedup();
         if !unseen.is_empty() {
             // Terminal runs with pending escalation discovery belong to this host too.
             let mut eligible = self.store.active_mission_run_ids_for_origin(&self.host)?;
@@ -12218,8 +12249,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         changes.mark_changed();
         let mut continuations = 0;
         loop {
-            if continuations == 0 && changes.changed().await.is_err() {
-                return;
+            if continuations == 0 {
+                tokio::select! {
+                    changed = changes.changed() => if changed.is_err() { return; },
+                    () = self.file_changes.notify.notified() => {},
+                }
             }
             changes.borrow_and_update();
             let changed = self
@@ -21787,11 +21821,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .context("file watch has no target component")?;
         // Backends report canonical directories (notably /private/tmp on macOS).
         // Keep the lexical target as identity, but compare events in their namespace.
-        let directory = directory.canonicalize()?;
+        let directory = file_subscriptions::canonicalize(directory)?;
         let relevant = directory.join(next_component);
         // A file symlink can point outside the lexical parent. Observe its referent's
         // parent too, so both writes and inode replacements preserve file-gate behavior.
-        let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        let referent = file_subscriptions::canonicalize(&target).ok().filter(|path| *path != relevant);
         let recursive = target.is_dir();
         if watchers.get(subject).is_some_and(|watch| {
             watch.target == target
@@ -21805,6 +21839,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let watched_directory = directory.clone();
         let watched_referent = referent.clone();
         let notify = self.notify.clone();
+        let file_changes = self.file_changes.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
         let revision = self.file_watch_revision.clone();
@@ -21820,14 +21855,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let dirty = Arc::new(AtomicBool::new(false));
         let changed_watch = dirty.clone();
-        let subscription = pool.subscribe(paths, Arc::new(move |event| {
-                // Reads (including this observer's own reads) must never self-wake.
-                if FileWatch::relevant(
-                    &event,
-                    &relevant,
-                    &watched_directory,
-                    watched_referent.as_deref(),
-                ) {
+        let subscription = pool.subscribe_input(paths, Arc::new(move |event| {
+            FileWatch::relevant(event, &relevant, &watched_directory, watched_referent.as_deref())
+        }), Arc::new(move |notification| {
+                    let event = notification.event;
                     revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
                         | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
@@ -21838,10 +21869,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&watched_subject);
                     // A file change is not a claim: mark what read the file.
-                    incremental.touch(&watched_subject);
-                    crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::FileWatch, None);
-                    notify.notify_one();
-                }
+                    file_changes.invalidate(&incremental, &watched_subject,
+                        event.need_rescan() && !notification.coverage_changed, &notify);
             }))?;
         watchers.insert(subject.into(), FileWatch {
             _subscription: subscription, target, directory, referent, recursive, dirty,

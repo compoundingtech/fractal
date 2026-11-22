@@ -263,11 +263,18 @@ pub struct ExecutionRoot {
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionIdentity {
     pub generation_id: String,
+    /// Kernel process generation captured while the payload is still gated.
+    /// Legacy roots without either field cannot prove current cwd exclusion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_token: Option<u64>,
 }
 
 impl From<&ExecGeneration> for ExecutionIdentity {
     fn from(execution: &ExecGeneration) -> Self {
-        Self { generation_id: execution.generation_id.clone() }
+        Self { generation_id: execution.generation_id.clone(),
+            pid: Some(execution.pid), start_token: Some(execution.start_token) }
     }
 }
 
@@ -351,12 +358,12 @@ fn admission(member: Membership) -> Admission {
 /// An aged head reserves by fencing new admissions, not by adding another held footprint.
 pub const BACKFILL_AGING_MS: u64 = 15 * 60 * 1000;
 
-fn pressure_description(reason: fractal_runtime::resource_pressure::Reason) -> String {
+fn pressure_description(reason: &fractal_runtime::resource_pressure::Reason) -> String {
     use fractal_runtime::resource_pressure::{ObservationCause, Reason, Signal};
     match reason {
-        Reason::Pressure { signal: Signal::MemoryAvailable, value, threshold } =>
+        Reason::Pressure { signal: Signal::MemoryAvailable, value, threshold, .. } =>
             format!("host PSI brake: memory available {value} bytes below {threshold} bytes"),
-        Reason::Pressure { signal, value, threshold } => {
+        Reason::Pressure { signal, value, threshold, cgroup } => {
             let signal = match signal {
                 Signal::MemoryFull => "memory full",
                 Signal::MemorySome => "memory some",
@@ -364,8 +371,12 @@ fn pressure_description(reason: fractal_runtime::resource_pressure::Reason) -> S
                 Signal::IoSome => "IO some",
                 Signal::MemoryAvailable => unreachable!(),
             };
-            format!("host PSI brake: {signal} {}.{:03}% >= {}.{:03}% threshold",
-                value / 1000, value % 1000, threshold / 1000, threshold % 1000)
+            match cgroup {
+                Some(path) => format!("host PSI brake: {signal} at {path} {}.{:03}% >= {}.{:03}% threshold",
+                    value / 1000, value % 1000, threshold / 1000, threshold % 1000),
+                None => format!("host PSI brake: {signal} {}.{:03}% >= {}.{:03}% threshold",
+                    value / 1000, value % 1000, threshold / 1000, threshold % 1000),
+            }
         }
         Reason::Recovering { remaining } =>
             format!("host PSI brake: recovering; {remaining} ms healthy observation required"),
@@ -375,10 +386,20 @@ fn pressure_description(reason: fractal_runtime::resource_pressure::Reason) -> S
                 ObservationCause::ObservationGap => "observation gap".into(),
                 ObservationCause::StaleDecision => "stale sampler decision".into(),
                 ObservationCause::NotYetSampled => "not yet sampled".into(),
-                ObservationCause::Io { os_error } => match os_error {
-                    Some(code) => format!("observation IO error (OS error {code})"),
-                    None => "observation IO error".into(),
-                },
+                ObservationCause::Io { os_error, path } => {
+                    match (os_error, path) {
+                        (Some(code), Some(path)) => format!("observation IO error at {path} (OS error {code})"),
+                        (Some(code), None) => format!("observation IO error (OS error {code})"),
+                        (None, Some(path)) => format!("observation IO error at {path}"),
+                        (None, None) => "observation IO error".into(),
+                    }
+                }
+                ObservationCause::TooManyCgroups { path, limit } =>
+                    format!("protected cgroup directory enumeration at {path} exceeds directory limit {limit}"),
+                ObservationCause::TooManyCgroupEntries { path, limit } =>
+                    format!("protected cgroup entry enumeration at {path} exceeds entry limit {limit}"),
+                ObservationCause::InvalidPressure { path } =>
+                    format!("invalid pressure data at {path}"),
                 ObservationCause::InvalidMemoryFloor => "invalid memory floor".into(),
             };
             format!("host PSI brake: observation unavailable: {detail}")
@@ -388,7 +409,7 @@ fn pressure_description(reason: fractal_runtime::resource_pressure::Reason) -> S
 
 fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, disk_fit: Option<DiskFit>) -> Result<Option<(BlockedBy, String)>> {
     if fit.pressure_blocked {
-        let reason = fit.pressure_reason.map(pressure_description)
+        let reason = fit.pressure_reason.as_ref().map(pressure_description)
             .unwrap_or_else(|| "host PSI brake: sustained pressure, recovery hysteresis, or unavailable observation".into());
         return Ok(Some((BlockedBy::Psi, reason)));
     }
@@ -1117,14 +1138,22 @@ mod tests {
     fn pressure_reasons_survive_reopen_and_are_recorded_in_the_journal() {
         use fractal_runtime::resource_pressure::{ObservationCause, Reason, Signal};
         let cases = [
-            (Reason::Pressure { signal: Signal::MemoryFull, value: 1234, threshold: 1000 }, "memory full 1.234% >= 1.000% threshold"),
-            (Reason::Pressure { signal: Signal::MemoryAvailable, value: 1024, threshold: 2048 }, "memory available 1024 bytes below 2048 bytes"),
+            (Reason::Pressure { signal: Signal::MemoryFull, value: 1234, threshold: 1000, cgroup: None }, "memory full 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::MemoryFull, value: 1234, threshold: 1000, cgroup: Some("/system.slice/database.service".into()) }, "memory full at /system.slice/database.service 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::MemorySome, value: 1234, threshold: 1000, cgroup: Some("/app.slice/editor.scope".into()) }, "memory some at /app.slice/editor.scope 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::IoFull, value: 1234, threshold: 1000, cgroup: Some("/system.slice/database.service".into()) }, "IO full at /system.slice/database.service 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::IoSome, value: 1234, threshold: 1000, cgroup: Some("/app.slice/editor.scope".into()) }, "IO some at /app.slice/editor.scope 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::MemoryAvailable, value: 1024, threshold: 2048, cgroup: None }, "memory available 1024 bytes below 2048 bytes"),
             (Reason::Recovering { remaining: 4567 }, "recovering; 4567 ms"),
             (Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }, "missing or invalid observation"),
             (Reason::UnknownObservation { cause: ObservationCause::ObservationGap }, "observation gap"),
             (Reason::UnknownObservation { cause: ObservationCause::StaleDecision }, "stale sampler decision"),
             (Reason::UnknownObservation { cause: ObservationCause::NotYetSampled }, "not yet sampled"),
-            (Reason::UnknownObservation { cause: ObservationCause::Io { os_error: Some(13) } }, "IO error (OS error 13)"),
+            (Reason::UnknownObservation { cause: ObservationCause::Io { os_error: Some(13), path: None } }, "IO error (OS error 13)"),
+            (Reason::UnknownObservation { cause: ObservationCause::Io { os_error: Some(13), path: Some("/app.slice/editor.scope/memory.pressure".into()) } }, "IO error at /app.slice/editor.scope/memory.pressure (OS error 13)"),
+            (Reason::UnknownObservation { cause: ObservationCause::TooManyCgroups { path: "/app.slice".into(), limit: 256 } }, "directory enumeration at /app.slice exceeds directory limit 256"),
+            (Reason::UnknownObservation { cause: ObservationCause::TooManyCgroupEntries { path: "/app.slice".into(), limit: 4096 } }, "entry enumeration at /app.slice exceeds entry limit 4096"),
+            (Reason::UnknownObservation { cause: ObservationCause::InvalidPressure { path: "/system.slice/database.service/io.pressure".into() } }, "invalid pressure data at /system.slice/database.service/io.pressure"),
             (Reason::UnknownObservation { cause: ObservationCause::InvalidMemoryFloor }, "invalid memory floor"),
         ];
         for (reason, expected) in cases {
@@ -1134,14 +1163,14 @@ mod tests {
             {
                 let store = Store::open(&path, "host-a").unwrap();
                 store.start_resource_authority("host-a", "epoch-a").unwrap();
-                let fit = Fit { pressure_blocked: true, pressure_reason: Some(reason), ..test_fit() };
+                let fit = Fit { pressure_blocked: true, pressure_reason: Some(reason.clone()), ..test_fit() };
                 let Admission::Queued { reason: description } = store.request_resource_membership(&request, fit, 1).unwrap()
                     else { panic!("pressure must queue membership") };
                 assert!(description.contains(expected), "{description}");
             }
             let store = Store::open(&path, "host-a").unwrap();
             let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
-            assert_eq!(member.pressure_reason, Some(reason));
+            assert_eq!(member.pressure_reason.as_ref(), Some(&reason));
             assert_eq!(member.blocked_by, Some(BlockedBy::Psi));
             assert!(member.reason.contains(expected));
             // Membership invalidations are transactionally durable local observations,
@@ -1149,7 +1178,11 @@ mod tests {
             let observations = store.observations_for(&dependency(&request.host, &request.name),
                 "resource-membership.changed").unwrap();
             let fields = &observations.last().unwrap().body["fields"];
-            assert_eq!(fields["pressureReason"], serde_json::to_value(reason).unwrap());
+            assert_eq!(fields["pressureReason"], serde_json::to_value(&reason).unwrap());
+            if let Reason::Pressure { cgroup: Some(path), .. } = &reason {
+                assert_eq!(fields["pressureReason"]["cgroup"], path.as_ref());
+                assert!(fields["reason"].as_str().unwrap().contains(path.as_ref()));
+            }
             assert_eq!(fields["reason"], member.reason);
             store.start_resource_authority("host-a", "epoch-a").unwrap();
             let fit = Fit { fifo_predecessor: Some("other-work".into()), ..test_fit() };

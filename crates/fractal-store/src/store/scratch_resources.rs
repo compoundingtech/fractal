@@ -134,6 +134,145 @@ struct Record {
     root_device: u64,
     root_inode: u64,
     object: Option<(u64, u64)>,
+    #[serde(default)]
+    quarantine: Option<Quarantine>,
+}
+
+/// Names and inode receipts live in the allocation's existing custody row.
+/// The random, mode-0700 directory is not published to consumers. Keep its empty
+/// inode after retirement: unlinking it through the exposed root would recreate
+/// the very namespace race this capability boundary removes.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Quarantine {
+    name: String,
+    entry: String,
+    identity: Option<(u64, u64)>,
+    phase: String,
+    #[serde(default)]
+    rejected: Option<(u64, u64)>,
+}
+
+#[cfg(target_os = "linux")]
+fn retire_quarantined(
+    connection: &Connection,
+    record: &mut Record,
+    root: &OwnedFd,
+    name: &std::ffi::OsStr,
+    object: Option<OwnedFd>,
+) -> Result<bool> {
+    use rustix::fs::{renameat_with, RenameFlags};
+    if record.quarantine.is_none() {
+        // Legacy interrupted removals and never-created intents have no object
+        // left to hand off. The caller has already checked their allowed state.
+        let Some(object) = object.as_ref() else { rustix::fs::fsync(root)?; return Ok(true); };
+        record.quarantine = Some(Quarantine {
+            name: format!(".retire-{}", uuid::Uuid::new_v4()),
+            entry: uuid::Uuid::new_v4().to_string(),
+            identity: None,
+            phase: "planned".into(), rejected: None,
+        });
+        write(connection, record)?;
+        let quarantine = record.quarantine.as_ref().expect("reserved quarantine");
+        rustix::fs::mkdirat(root, quarantine.name.as_str(), Mode::RUSR | Mode::WUSR | Mode::XUSR)?;
+        let directory = rustix::fs::openat(root, quarantine.name.as_str(), DIRECTORY_FLAGS, Mode::empty())?;
+        rustix::fs::fsync(&directory)?;
+        rustix::fs::fsync(root)?;
+        let quarantine = record.quarantine.as_mut().expect("reserved quarantine");
+        quarantine.identity = Some(fd_identity(&directory)?);
+        quarantine.phase = "prepared".into();
+        // Both identities precede the first rename, including on interruption.
+        anyhow::ensure!(record.object == Some(fd_identity(&object)?), "allocation receipt changed");
+        write(connection, record)?;
+    }
+    let quarantine = record.quarantine.as_ref().expect("reserved quarantine").clone();
+    let expected_directory = quarantine.identity
+        .ok_or_else(|| anyhow::anyhow!("interrupted quarantine creation; custody unknown"))?;
+    let directory = rustix::fs::openat(root, quarantine.name.as_str(), DIRECTORY_FLAGS, Mode::empty())?;
+    anyhow::ensure!(fd_identity(&directory)? == expected_directory, "scratch quarantine identity changed");
+    anyhow::ensure!(rustix::fs::fstat(&directory)?.st_mode & 0o077 == 0, "scratch quarantine is not private");
+    let expected = record.object.ok_or_else(|| anyhow::anyhow!("missing allocation identity"))?;
+    let present = match rustix::fs::statat(&directory, quarantine.entry.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => Some(stat_identity(&stat)?),
+        Err(rustix::io::Errno::NOENT) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if quarantine.phase == "failed" {
+        if present.is_some() && present == quarantine.rejected {
+            let restored = renameat_with(&directory, quarantine.entry.as_str(), root, name, RenameFlags::NOREPLACE);
+            rustix::fs::fsync(&directory)?;
+            rustix::fs::fsync(root)?;
+            restored?;
+        }
+        anyhow::bail!("scratch quarantine custody unknown");
+    }
+    if present.is_none() && quarantine.phase == "prepared" {
+        let source = rustix::fs::openat(root, name, DIRECTORY_FLAGS, Mode::empty())?;
+        anyhow::ensure!(fd_identity(&source)? == expected, "scratch allocation identity changed");
+        let name_c = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(name))?;
+        verify_entry(root, &name_c, expected)?;
+        #[cfg(test)]
+        tests::quarantine_boundary("handoff");
+        // Capture whichever inode occupies the basename atomically, then check
+        // it *inside* the private directory, before touching its contents.
+        renameat_with(root, name, &directory, quarantine.entry.as_str(), RenameFlags::NOREPLACE)?;
+        rustix::fs::fsync(root)?;
+        rustix::fs::fsync(&directory)?;
+        #[cfg(test)]
+        tests::quarantine_boundary("moved");
+    }
+    let candidate = match rustix::fs::statat(&directory, quarantine.entry.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => {
+            let observed = stat_identity(&stat)?;
+            if observed != expected {
+                let receipt = record.quarantine.as_mut().expect("reserved quarantine");
+                receipt.phase = "failed".into();
+                receipt.rejected = Some(observed);
+                write(connection, record)?;
+                let restored = renameat_with(&directory, quarantine.entry.as_str(), root, name, RenameFlags::NOREPLACE);
+                rustix::fs::fsync(&directory)?;
+                rustix::fs::fsync(root)?;
+                restored?;
+                anyhow::bail!("scratch allocation changed during quarantine handoff");
+            }
+            Some(rustix::fs::openat(&directory, quarantine.entry.as_str(), DIRECTORY_FLAGS, Mode::empty())?)
+        }
+        Err(rustix::io::Errno::NOENT) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(candidate) = candidate {
+        anyhow::ensure!(fd_identity(&candidate)? == expected, "quarantined allocation identity changed");
+        // Observe current cwd ancestry again after the namespace handoff. A
+        // live cwd moved into the allocation during handoff must retain it.
+        if consumers(connection, record)? != OwnerObservation::Terminal {
+            let restored = renameat_with(&directory, quarantine.entry.as_str(), root, name, RenameFlags::NOREPLACE);
+            rustix::fs::fsync(&directory)?;
+            rustix::fs::fsync(root)?;
+            if restored.is_ok() {
+                record.quarantine.as_mut().expect("reserved quarantine").phase = "prepared".into();
+                write(connection, record)?;
+            }
+            return Ok(false);
+        }
+        record.quarantine.as_mut().expect("reserved quarantine").phase = "deleting".into();
+        write(connection, record)?;
+        #[cfg(test)]
+        tests::quarantine_boundary("deleting");
+        remove_contents(&candidate)?;
+        rustix::fs::fsync(&candidate)?;
+        let entry = std::ffi::CString::new(quarantine.entry.as_str())?;
+        verify_entry(&directory, &entry, expected)?;
+        rustix::fs::unlinkat(&directory, &entry, AtFlags::REMOVEDIR)?;
+    } else {
+        anyhow::ensure!(quarantine.phase == "deleting" || quarantine.phase == "removed",
+            "quarantined allocation disappeared before deletion intent");
+    }
+    rustix::fs::fsync(&directory)?;
+    rustix::fs::fsync(root)?;
+    record.quarantine.as_mut().expect("reserved quarantine").phase = "removed".into();
+    write(connection, record)?;
+    #[cfg(test)]
+    tests::quarantine_boundary("removed");
+    Ok(true)
 }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
@@ -272,17 +411,17 @@ impl Store {
                 owner_generation: request.owner_generation.clone(),
                 path: Path::new(&request.root).join(format!("scratch-{generation}")).to_string_lossy().into_owned(),
                 generation, authority_epoch: authority.clone(),
-            }, state: "intent".into(), root_device, root_inode, object: None };
+            }, state: "intent".into(), root_device, root_inode, object: None, quarantine: None };
             let transaction = connection.transaction()?;
             write(&transaction, &record)?;
             transaction.commit()?;
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux"))]
             tests::interrupt_acquire("intent");
             record
         };
         record.handle.authority_epoch = authority;
         ensure_object(&mut record)?;
-        #[cfg(test)]
+        #[cfg(all(test, target_os = "linux"))]
         tests::interrupt_acquire("created");
         record.state = "held".into();
         write(&connection, &record)?;
@@ -310,10 +449,13 @@ impl Store {
             && proof.owner_generation == record.request.owner_generation, "scratch finalization proof owner mismatch");
         if owner_observation(&connection, &record)? == OwnerObservation::Unknown { return Ok(false); }
         if consumers(&connection, &record)? != OwnerObservation::Terminal { return Ok(false); }
+        // Only Linux supplies the required atomic no-replace namespace handoff.
+        // Other platforms retain custody rather than claiming physical retirement.
+        if !cfg!(target_os = "linux") { return Ok(false); }
         let root = open_custody_root(&record)?;
         let name = Path::new(&record.handle.path).file_name()
-            .ok_or_else(|| anyhow::anyhow!("scratch object has no basename"))?;
-        let object = match rustix::fs::openat(&root, name, DIRECTORY_FLAGS, Mode::empty()) {
+            .ok_or_else(|| anyhow::anyhow!("scratch object has no basename"))?.to_os_string();
+        let object = if record.quarantine.is_some() { None } else { match rustix::fs::openat(&root, &name, DIRECTORY_FLAGS, Mode::empty()) {
             Ok(directory) => {
                 let observed = fd_identity(&directory)?;
                 if let Some(expected) = record.object {
@@ -326,7 +468,7 @@ impl Store {
                 None
             }
             Err(error) => return Err(error.into()),
-        };
+        }};
         record.handle.authority_epoch = handle.authority_epoch.clone();
         record.state = "releasing".into();
         let transaction = connection.transaction()?;
@@ -334,16 +476,10 @@ impl Store {
         transaction.commit()?;
         // The verified allocation fd, not its absolute pathname, crosses the
         // durable releasing boundary and the final custody/mutation handoff.
-        #[cfg(test)]
+        #[cfg(all(test, target_os = "linux"))]
         tests::before_remove();
-        if let Some(object) = object {
-            let name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(name))?;
-            verify_entry(&root, &name, fd_identity(&object)?)?;
-            remove_contents(&object)?;
-            verify_entry(&root, &name, fd_identity(&object)?)?;
-            rustix::fs::unlinkat(&root, &name, AtFlags::REMOVEDIR)?;
-        }
-        rustix::fs::fsync(&root)?;
+        #[cfg(target_os = "linux")]
+        if !retire_quarantined(&connection, &mut record, &root, &name, object)? { return Ok(false); }
         record.state = "released".into();
         write(&connection, &record)?;
         Ok(true)
@@ -392,5 +528,25 @@ impl Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
+
+#[cfg(all(test, not(target_os = "linux")))]
+#[test]
+fn unsupported_physical_retirement_retains_custody() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(directory.path()).unwrap().join("dedicated");
+    let store = Store::open_memory("host-a").unwrap();
+    store.start_resource_authority("host-a", "epoch-a").unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h40d4f40c9604 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
+        (id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
+        VALUES('owner','mission/test','revision','generation-a','revision','owner','workspace/test','person/test','{}','once','running','normal','1','1')", []).unwrap();
+    let request = ScratchRequest { id: "scratch/platform".into(), host: "host-a".into(),
+        owner: "mission-run/owner".into(), owner_generation: "run-generation/generation-a".into(),
+        root: root.to_string_lossy().into_owned() };
+    let handle = store.acquire_scratch(&request).unwrap();
+    let proof = ScratchReleaseProof::after_quiescence(&handle.owner, &handle.owner_generation);
+    assert!(!store.release_scratch(&handle, &proof).unwrap());
+    assert!(Path::new(&handle.path).is_dir());
+    assert_eq!(read(&store.connection.write(), &handle.id).unwrap().unwrap().state, "held");
+}
