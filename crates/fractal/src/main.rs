@@ -2772,11 +2772,14 @@ enum ClaudeChannelCommand {
 
 #[derive(Subcommand)]
 enum BackupCommand {
-    /// Save one live snapshot to a new file. --database exports an offline copy instead.
+    /// Save a snapshot to a new file, or stream to stdout with `-`.
     Create {
         file: PathBuf,
         #[arg(long)]
         database: Option<PathBuf>,
+        /// Abort a live stdout export above this many bytes of WAL growth.
+        #[arg(long, default_value_t = fractal_daemon::backup::DEFAULT_MAX_WAL_GROWTH)]
+        max_wal_growth: u64,
     },
     /// Restore offline into an empty database, using a fresh writer identity.
     Restore {
@@ -6608,7 +6611,13 @@ async fn run(cli: Cli) -> Result<()> {
             BackupCommand::Create {
                 file,
                 database: None,
+                max_wal_growth,
             } => {
+                if file == Path::new("-") {
+                    let receipt = fractal_daemon::backup::create_stdout(&endpoint, max_wal_growth).await?;
+                    eprintln!("{}", serde_json::to_string(&receipt)?);
+                    return Ok(());
+                }
                 fractal_daemon::backup::create(&endpoint, &file).await?;
                 if cli.json {
                     println!("{}", json!({"file":file}));
@@ -6620,8 +6629,14 @@ async fn run(cli: Cli) -> Result<()> {
             BackupCommand::Create {
                 file,
                 database: Some(database),
+                max_wal_growth: _,
             } => {
                 let state_root = backup_state_root(&config, &database)?;
+                if file == Path::new("-") {
+                    let receipt = fractal_daemon::backup::create_stdout_from_database(&database, &state_root)?;
+                    eprintln!("{}", serde_json::to_string(&receipt)?);
+                    return Ok(());
+                }
                 let header = fractal_daemon::backup::create_from_database(&database, &state_root, &file)?;
                 if cli.json {
                     println!("{}", serde_json::to_string(&header)?);
