@@ -5785,8 +5785,9 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        current.claims.get_mut("runtime.observed").unwrap()
-            .fields.remove("exit_evidence").unwrap();
+        for field in ["exit_evidence", "workspace"] {
+            current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
+        }
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }

@@ -13523,11 +13523,6 @@ pub enum IncarnationRuntime {
     Unknown,
 }
 
-/// Runtime statuses that prove an incarnation ended, not administrative lifecycle states.
-pub fn is_incarnation_end_status(status: &str) -> bool {
-    matches!(status, "exited" | "vanished" | "stopped" | "absent" | "failed")
-}
-
 /// What `subject`'s `runtime.observed` records say about `incarnation`, newest first. A `running`
 /// record decides: this incarnation runs, or another replaced it. An end that names this
 /// incarnation ends it, whichever host recorded it. An end of another incarnation counts only
@@ -13566,7 +13561,7 @@ pub fn runtime_incarnation_state(
                     });
                 }
             }
-            Some(status) if is_incarnation_end_status(status) => match observed {
+            Some(status) if matches!(status, "exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
                 Some(ended) if ended == incarnation => return Ok(IncarnationRuntime::Ended),
                 Some(_) => other_ended = true,
                 None => {
