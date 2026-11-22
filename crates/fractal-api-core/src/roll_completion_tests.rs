@@ -1025,3 +1025,72 @@ fn version_one_receipt_corpus_round_trips_every_existing_resource_fact_variant()
     assert_eq!(kinds,BTreeSet::from(["roll-declared","host-target-resolved","host-observed",
         "intent-observed","source-enabled","source-frontier"].map(str::to_owned)));
 }
+
+#[test]
+fn key_authority_reads_once_until_a_grant_or_revocation_commits() {
+    let reader = Connection::open_in_memory().unwrap();
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-h6fc130464ca3 owner=fractal_api_core::roll_completion_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims (store_index INTEGER PRIMARY KEY, id TEXT, kind TEXT);
+        CREATE INDEX claims_kind_index ON claims(kind, store_index);
+        WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4096)
+        INSERT INTO claims SELECT x, printf('grant-%05d',x), 'principal.key-granted' FROM n;").unwrap();
+    let mut cache = KeyAuthority::default();
+    let initial = cache.ids(&reader).unwrap().to_vec();
+    assert_eq!(initial.len(), 4096);
+    for _ in 0..128 {
+        assert_eq!(cache.ids(&reader).unwrap(), initial);
+        assert!(cache.head_steps < 100, "kind heads must be two bounded index seeks");
+    }
+    assert_eq!((cache.reads, cache.rows), (1, 4096),
+        "129 calls must read the grant/revocation population only once");
+
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-h923480a6704a owner=fractal_api_core::roll_completion_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES (4097,'unrelated','runtime.observed');").unwrap();
+    assert_eq!(cache.ids(&reader).unwrap(), initial);
+    assert_eq!((cache.reads, cache.rows), (1, 4096));
+
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-hb607465744ee owner=fractal_api_core::roll_completion_tests TODO=prepare-body-and-predecessor-values */ "BEGIN;
+        INSERT INTO claims VALUES (4098,'rolled-back','principal.key-granted');
+        ROLLBACK;").unwrap();
+    assert_eq!(cache.ids(&reader).unwrap(), initial);
+    assert_eq!(cache.reads, 1);
+
+    // IDs need not increase with local arrival order (replication can arrive late).
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3db749ac4e0 owner=fractal_api_core::roll_completion_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES (4098,'aaa-new-grant','principal.key-granted');").unwrap();
+    let granted = cache.ids(&reader).unwrap().to_vec();
+    assert_eq!(granted.first().unwrap(), "aaa-new-grant");
+    assert_eq!(granted.len(), initial.len() + 1);
+    assert_eq!(cache.reads, 2);
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-hc9b4fd01a231 owner=fractal_api_core::roll_completion_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES (4099,'aaa-new-revocation','principal.key-revoked');").unwrap();
+    let revoked = cache.ids(&reader).unwrap().to_vec();
+    assert_eq!(revoked[1], "aaa-new-revocation");
+    assert_eq!(revoked.len(), initial.len() + 2);
+    assert_eq!(cache.reads, 3);
+    let expected = reader.prepare("SELECT id FROM claims
+        WHERE kind IN ('principal.key-granted','principal.key-revoked') ORDER BY id").unwrap()
+        .query_map([], |row| row.get::<_, String>(0)).unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(revoked, expected, "preserve the exact original authority cut, including revoked keys");
+    assert_eq!(cache.ids(&reader).unwrap(), revoked);
+    assert_eq!(cache.reads, 3);
+}
+
+#[test]
+fn authority_cut_observes_committed_grants_and_revocations_on_next_call() {
+    let store = Store::open_memory("host-a").unwrap();
+    let initial = authority_cut(&store).unwrap();
+    for _ in 0..16 { assert_eq!(authority_cut(&store).unwrap(), initial); }
+    let source = store.fractal.extensions.get::<Source>();
+    assert_eq!(source.key_authority.lock().unwrap().reads, 1);
+    setup_signer(&store);
+    let id = publish_fixture(&store, declaration("key-cache", &["host-a"]),
+        Some("agent/example/roll-authority"));
+    let granted = authority_cut(&store).unwrap();
+    assert_ne!(granted, initial);
+    assert_eq!(source.key_authority.lock().unwrap().reads, 2);
+    let key = store.claim_authorization(&id).unwrap().signature.unwrap().key;
+    store.revoke_device_key("agent/example/roll-authority", &key, "key rotation").unwrap();
+    let revoked = authority_cut(&store).unwrap();
+    assert_ne!(revoked, granted);
+    assert_eq!(source.key_authority.lock().unwrap().reads, 3);
+    assert_eq!(authority_cut(&store).unwrap(), revoked);
+    assert_eq!(source.key_authority.lock().unwrap().reads, 3);
+}

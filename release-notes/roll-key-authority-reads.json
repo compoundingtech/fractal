@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reuse the roll-completion key authority set until a grant or revocation arrives",
+  "replay": {"status": "none", "detail": "The sorted grant and revocation claim IDs remain identical. Ordinary unrelated commits no longer reload their full history."},
+  "schema": {"status": "none", "detail": "Two bounded seeks use the existing claims_kind_index. No index preparation, migration or store version change is needed."},
+  "rules": {"status": "none", "detail": "The next authority read sees committed grants and revocations in its pinned snapshot; revoked claims remain part of the authority token."},
+  "compatibility": {"status": "none", "detail": "No API, wire format or client changes."},
+  "downtime": {"status": "none", "detail": "The in-memory set is initialized on first use after process start."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Reopening the store rebuilds the in-memory set; binary rollback needs no migration."}
+}
