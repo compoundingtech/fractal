@@ -453,6 +453,7 @@ job-parent or excluded subtree is excluded too; matching uses path components, n
 Explicit protected roots must identify their managers when using relative slice names.
 Ancestor-only roots such as `/` or `/user.slice` require absolute job-parent and exclusion
 paths (or empty lists); unresolved relative names are rejected at policy load, never ignored.
+Both plain and fleet-aware configuration loaders validate the PSI policy before daemon startup.
 
 PSI aggregates descendants and retains averages after a job exits. A protected ancestor
 containing a configured job path is therefore never sampled, even when that job subtree is
