@@ -1,6 +1,30 @@
 use crate::DeliveryStore;
 use super::*;
 
+/// A store-scoped revision wait; no pinned read transaction survives the await.
+pub async fn replication_revision(
+    State(state): State<AppState>,
+    Json(request): Json<smallclaims::sync::revision::RevisionRequest>,
+) -> Result<Json<smallclaims::sync::revision::StoreRevision>, ApiError> {
+    let kind = request.kind;
+    state.store.wait_replication_revision(request).await
+        .map_err(|error| ApiError::bad(FractalError::new("internal", error.to_string())))?;
+    let store = state.store.clone();
+    blocking_store(move || store.replication_revision_snapshot(kind)).await.map(Json)
+}
+
+pub async fn shard_replication_revision(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(request): Json<smallclaims::sync::revision::RevisionRequest>,
+) -> Result<Json<smallclaims::sync::revision::StoreRevision>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    let kind = request.kind;
+    store.wait_replication_revision(request).await
+        .map_err(|error| ApiError::bad(FractalError::new("internal", error.to_string())))?;
+    blocking_store(move || store.replication_revision_snapshot(kind)).await.map(Json)
+}
+
 #[cfg(test)]
 #[path = "replication_receive_tests.rs"]
 mod receive_tests;
@@ -138,6 +162,8 @@ pub async fn replication_export(
             record_replication_summary(request.authority_guard, || {
                 if request.authority_guard && request.authority_digest_only {
                     store.export_replication_authority_guard(&request.fleet_id)
+                } else if request.inventory.can(smallclaims::replication::ROOT_SUMMARY) {
+                    store.export_replication_root_summary(&request.fleet_id)
                 } else {
                     store.export_replication_summary(&request.fleet_id)
                 }
@@ -556,6 +582,18 @@ fn replication_shard(state: &AppState, shard: &str) -> Result<Arc<smallclaims::s
         .ok_or_else(|| ApiError::not_found(format!("this daemon holds no shard `{shard}`")))
 }
 
+/// Follow admitted advertisement/membership changes, independently of envelope receipt.
+pub async fn shard_replication_peers_revision(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(after): Json<Option<smallclaims::sync::revision::StoreRevision>>,
+) -> Result<Json<smallclaims::sync::revision::StoreRevision>, ApiError> {
+    replication_shard(&state, &shard)?;
+    crate::store::messages_shard::wait_advertising_revision(&state.store, after)
+        .await.map(Json)
+        .map_err(|error| ApiError::bad(FractalError::new("internal", error.to_string())))
+}
+
 /// The members to dial for a shard: those whose current daemon advertises holding it.
 pub async fn shard_replication_peers(
     State(state): State<AppState>,
@@ -579,7 +617,11 @@ pub async fn shard_replication_export(
     let store = replication_shard(&state, &shard)?;
     blocking_store(move || {
         let exchange = if request.summary_only {
-            store.export_replication_summary(&request.fleet_id)?
+            if request.inventory.can(smallclaims::replication::ROOT_SUMMARY) {
+                store.export_replication_root_summary(&request.fleet_id)?
+            } else {
+                store.export_replication_summary(&request.fleet_id)?
+            }
         } else {
             store.export_replication_exchange_answering(
                 &request.fleet_id,
