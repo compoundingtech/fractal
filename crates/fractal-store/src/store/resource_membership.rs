@@ -1144,8 +1144,11 @@ mod tests {
             assert_eq!(member.pressure_reason.as_ref(), Some(&reason));
             assert_eq!(member.blocked_by, Some(BlockedBy::Psi));
             assert!(member.reason.contains(expected));
-            let claims = store.claims_by_kinds_after(&["resource-membership.changed"], None, 0, 100).unwrap();
-            let fields = &claims.claims.last().unwrap().body["fields"];
+            // Membership invalidations are transactionally durable local observations,
+            // not replicated claims. Read the same journal surface that owns them.
+            let observations = store.observations_for(&dependency(&request.host, &request.name),
+                "resource-membership.changed").unwrap();
+            let fields = &observations.last().unwrap().body["fields"];
             assert_eq!(fields["pressureReason"], serde_json::to_value(&reason).unwrap());
             if let Reason::Pressure { cgroup: Some(path), .. } = &reason {
                 assert_eq!(fields["pressureReason"]["cgroup"], path.as_ref());
