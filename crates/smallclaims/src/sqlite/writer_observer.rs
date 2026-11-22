@@ -147,7 +147,7 @@ impl MutationState {
 
     pub(crate) fn take_committed(&self, connection: &Connection) -> super::commit_scope::Changes {
         let mut changes = self.ledger.lock().unwrap().take(
-            connection.is_autocommit(),
+            connection,
             self.unknown_commit.swap(false, Ordering::Relaxed),
         );
         if changes.schema {
