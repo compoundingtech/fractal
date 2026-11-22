@@ -148,7 +148,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             .is_some_and(|seed| seed.recovery_capable);
         if cfg!(target_os = "linux") {
             smallclaims::touched::note_read(|| "host-lane-pressure".into());
-            fit.pressure_blocked = self.seat_admission.pressure_decision()?.blocked;
+            let decision = self.seat_admission.pressure_decision();
+            fit.pressure_blocked = decision.blocked;
+            fit.pressure_reason = decision.reason;
         }
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
@@ -316,8 +318,27 @@ mod tests {
             Some(fractal_runtime::resource_pressure::Observer::with_paths(
                 reconciler.seat_admission.finite_policy.psi_brake.clone(),
                 [memory, io, meminfo, root_memory, vmstat]).unwrap());
-        assert!(!reconciler.seat_admission.pressure_decision().unwrap().blocked);
+        assert!(!reconciler.seat_admission.sample_pressure().unwrap().blocked);
         directory
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn admission_reads_cached_pressure_and_stopped_sampler_fails_closed() {
+        use fractal_runtime::resource_pressure::{ObservationCause, Reason};
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(crate::reconcile::tests::FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let fixtures = quiet_pressure(&reconciler);
+        fixtures.close().unwrap();
+        // Even with all kernel fixtures gone, admission must not sample.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(!reconciler.seat_admission.pressure_decision().blocked);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(reconciler.seat_admission.pressure_decision().reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::StaleDecision }));
+        assert!(reconciler.seat_admission.pressure_decision().blocked);
     }
 
     fn test_fit() -> Fit {
