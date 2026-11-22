@@ -437,8 +437,8 @@ fn a_peers_retirement_deletes_a_held_observation() {
 
 /// Retirements that wait do not hold back the rest. One another cut already recorded is that
 /// cut's to delete, and one that waits for its subject's newer claim is read past: a page that met
-/// only such claims stopped the deletion for good (measured on a copy of dev3, 2026-11-22: 32,191
-/// of 99,999 went, then none).
+/// only such claims stopped the deletion for good (measured on a copy of a real member,
+/// 2026-11-22: 32,191 of 99,999 went, then none).
 #[test]
 fn retirements_that_wait_do_not_hold_back_the_rest() {
     let scratch = tempfile::tempdir().unwrap();
