@@ -17,6 +17,7 @@ macro_rules! message_desired_recipient_match {
 pub mod attention;
 pub mod delivery;
 pub mod effects;
+pub mod native_attach;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
@@ -12215,7 +12216,12 @@ pub fn append_claim_tx_with_assistant_answer(
     authorization: Option<&assistant_write::AssistantWriteAuthorization>,
 ) -> Result<ClaimRecord> {
     append_claim_tx_admitted(transaction, origin, subject, kind, actor, body, predecessors, forced_batch,
-        authorization, false)
+        authorization.map(ClaimAppendAuthorization::AssistantAnswer), false)
+}
+
+enum ClaimAppendAuthorization<'a> {
+    AssistantAnswer(&'a assistant_write::AssistantWriteAuthorization),
+    NativeAttach(native_attach::WriteAuthorization),
 }
 
 /// `source_forced`: the subject's owning set already admitted this declaration as a forced
@@ -12230,9 +12236,21 @@ fn append_claim_tx_admitted(
     body: &Value,
     predecessors: &[String],
     forced_batch: Option<&str>,
-    authorization: Option<&assistant_write::AssistantWriteAuthorization>,
+    authorization: Option<ClaimAppendAuthorization<'_>>,
     source_forced: bool,
 ) -> Result<ClaimRecord> {
+    let authorization = match authorization {
+        Some(ClaimAppendAuthorization::NativeAttach(_))
+            if native_attach::protected(kind) && actor == Some(native_attach::REQUESTER) => None,
+        Some(ClaimAppendAuthorization::NativeAttach(_)) => {
+            return Err(native_attach::writer_required().into());
+        }
+        _ if native_attach::protected(kind) => {
+            return Err(native_attach::writer_required().into());
+        }
+        Some(ClaimAppendAuthorization::AssistantAnswer(authorization)) => Some(authorization),
+        None => None,
+    };
     let mut assistant_body;
     let body = if let Some(authorization) = authorization {
         if kind != "message.sent" || actor != Some(authorization.principal())
@@ -24913,6 +24931,9 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        if native_attach::protected(&input.kind) {
+            return Err(native_attach::writer_required());
+        }
         if input.kind == observation_minutes::KIND {
             return Err(FractalError::new("claim-write-forbidden", "phone minutes require authenticated observation admission"));
         }
