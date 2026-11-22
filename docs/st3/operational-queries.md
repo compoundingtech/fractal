@@ -129,13 +129,24 @@ from `workspace.observed`, a cross-origin merged fold, or a declaration. It is a
 absolute filesystem path on that host, exactly as observed: not a URI, a local
 checkout path, or a reconstructed desired path.
 
-The optional runtime workspace field is emitted only after every active fleet
-reader advertises `runtime_workspace=1` through its signed `daemon.started` feature
-advertisement. Unknown, ambiguous or unsupported membership prevents emission.
-The route becomes useful once this fleet floor is satisfied and running producers
-have observed authoritative launch paths. Before then, legacy or un-emitted
-observations remain safely incomplete; temporal proximity to a desired checkout
+This release is reader-first phase 1: the registry accepts the optional nullable
+runtime workspace field, and the daemon advertises reader capability
+`runtime_workspace=1`, but **no runtime producer emits the field**. Healthy legacy
+agents therefore remain safely incomplete. Temporal proximity to a desired checkout
 observation never fills the gap.
+
+Phase 2 is tracked in [fractal#7013](https://github.com/compoundingtech/fractal/issues/7013).
+It may enable emission only when both the signed fleet capability barrier confirms
+every active reader advertises `runtime_workspace=1` and the roll templates' rollback
+target is at or after the phase-1 build. Rolling back below phase 1 after emission is
+unsupported: older readers retain new-field observations as unknown rather than
+projecting their critical runtime state.
+
+Phase-2 producers must resolve the physical workspace directory **before launch**
+and launch in exactly that resolved directory, then publish that same path for the
+proven incarnation. Canonicalizing an authored alias after launch is not evidence:
+the alias may already point elsewhere while the original directory remains in use.
+The route becomes useful after phase 2 records these authoritative physical paths.
 
 Incomplete reasons are `no-actual`, `indeterminate-authority`, `missing-workspace`,
 `missing-host`, `missing-incarnation`, and `unresolved-liveness`. Incomplete entries

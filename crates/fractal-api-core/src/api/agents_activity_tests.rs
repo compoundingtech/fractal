@@ -565,7 +565,7 @@ async fn same_identifier_resurrection_restores_all_previously_witnessed_paths() 
 }
 
 #[tokio::test]
-async fn real_runtime_producer_obeys_the_signed_reader_floor() {
+async fn real_runtime_producer_remains_incomplete_until_phase_two() {
     use fractal_reconcile::reconcile::{Reconciler, tests::FakeRuntime};
     for supported in [true, false] {
         let root = tempfile::tempdir().unwrap();
@@ -578,7 +578,6 @@ async fn real_runtime_producer_obeys_the_signed_reader_floor() {
         state_claim(&state, "daemon/node", "daemon.started",
             json!({"status":"running", "features":{"runtime_workspace":u8::from(supported)}}));
         state.store.replication_snapshot().unwrap();
-        assert_eq!(state.store.runtime_workspace_publication_ready().unwrap(), supported);
 
         let source = format!(
             "version 2\nagent \"activity/producer\" {{ workspace {:?}; command \"true\"; restart \"never\"; }}\n",
@@ -592,19 +591,23 @@ async fn real_runtime_producer_obeys_the_signed_reader_floor() {
         let observed = state.store.latest_observation("agent/activity/producer", "runtime.observed").unwrap().unwrap();
         assert_eq!(observed.body["fields"]["status"], "running");
         let body = activity(&state, "").await;
-        if supported {
-            assert_eq!(observed.body["fields"]["workspace"], root.path().to_str().unwrap());
-            assert_eq!(body["agents"].as_array().unwrap().len(), 1, "{body}");
-            assert_eq!(body["agents"][0]["workspace"], root.path().to_str().unwrap());
-            assert_eq!(body["incomplete"], json!([]));
-            assert_eq!(body["complete"], true);
-            println!("ACTIVITY_PRODUCER_SAMPLE={body}");
-        } else {
-            assert!(observed.body["fields"].get("workspace").is_none());
-            assert_eq!(body["agents"], json!([]));
-            assert!(body["incomplete"].as_array().unwrap().iter()
-                .any(|row| row["reason"] == "missing-workspace"), "{body}");
-            assert_eq!(body["complete"], false);
-        }
+        assert!(observed.body["fields"].get("workspace").is_none());
+        assert_eq!(body["agents"], json!([]));
+        assert!(body["incomplete"].as_array().unwrap().iter()
+            .any(|row| row["reason"] == "missing-workspace"), "{body}");
+        assert_eq!(body["complete"], false);
     }
+}
+
+#[tokio::test]
+async fn null_runtime_workspace_remains_explicitly_incomplete() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    declare(&state, "null-workspace");
+    observe(&state.store, "null-workspace",
+        json!({"status":"running", "incarnation_id":"one", "workspace":null}));
+    let body = activity(&state, "").await;
+    assert_eq!(body["agents"], json!([]));
+    assert_eq!(body["incomplete"][0]["reason"], "missing-workspace");
+    assert_eq!(body["complete"], false);
 }

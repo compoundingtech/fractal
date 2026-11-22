@@ -3135,22 +3135,6 @@ impl Store {
         self.fractal.usage_limits_writers.lock().unwrap().clone()
     }
 
-    /// Whether every active signed fleet incarnation can read runtime launch workspaces.
-    /// Missing, ambiguous, unsigned, or unsupported membership evidence fails closed.
-    pub fn runtime_workspace_publication_ready(&self) -> Result<bool, FractalError> {
-        let connection = self.readers.get();
-        let transaction = connection.unchecked_transaction().map_err(internal)?;
-        match declared_admission::validate_fleet(
-            &transaction,
-            &self.origin,
-            &declared_admission::RUNTIME_WORKSPACE,
-        ) {
-            Ok(()) => Ok(true),
-            Err(error) if error.code == declared_admission::RUNTIME_WORKSPACE.code => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub fn append_latest_observation(
         &self,
