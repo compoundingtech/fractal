@@ -203,17 +203,18 @@ const RETIRED_OWNED_INTAKE_SUBJECTS: &str = "SELECT desired.subject
 /// The local rows a roster card can read: agent timeline entries date activity and managed
 /// sessions, and held main-loop usage supplies the live model and its observation timestamp.
 /// A same-model usage refresh can stay local while changing model-drift freshness. Heartbeats
-/// and response spend do not change these folded inputs. Each indexed seek returns the newest
-/// relevant row at or before the cut; ids and graph cuts need not rise together after repair.
+/// and response spend do not change these folded inputs. The timeline seek uses its existing
+/// partial index; usage checks only current held slots and primary-key observation lookups,
+/// never historical usage. Ids and graph cuts need not rise together after repair.
 const ROSTER_LOCAL_FRONTIER: &str = "SELECT MAX(
  COALESCE((SELECT id FROM local_observations
-  WHERE kind='harness.timeline' AND subject LIKE 'agent/%' AND after_store_index<=?1
+  WHERE kind='harness.timeline' AND subject LIKE 'agent/%' AND id>0 AND after_store_index<=?1
   ORDER BY id DESC LIMIT 1), 0),
- COALESCE((SELECT id FROM local_observations
-  WHERE kind='harness.usage' AND subject LIKE 'agent/%'
-    AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')
-    AND after_store_index<=?1
-  ORDER BY id DESC LIMIT 1), 0))";
+ COALESCE((SELECT MAX(s.pending_local_id) FROM local_latest_slots s
+  CROSS JOIN local_observations o ON o.id=s.pending_local_id
+  WHERE s.subject>='agent/' AND s.subject<'agent0' AND s.kind='harness.usage'
+    AND s.pending_local_id IS NOT NULL AND o.after_store_index<=?1
+    AND json_extract(o.body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')), 0))";
 
 /// One frontier read, inside the caller's SQLite snapshot when it holds one: the reader pool
 /// lends pinned reads the same connection. The partial frontier index keeps an old cut from
@@ -221,6 +222,18 @@ const ROSTER_LOCAL_FRONTIER: &str = "SELECT MAX(
 pub fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64> {
     Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h6ec3fa9174f4 owner=fractal_seats::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [index], |row| row.get::<_, u64>(0))?)
 }
+
+/// Timeline deltas use the existing partial index; held usage visits current slots only.
+const ROSTER_LOCAL_CHANGED_SUBJECTS: &str =
+    "SELECT subject FROM local_observations INDEXED BY local_observations_roster_frontier_index
+     WHERE id>?1 AND id<=?2 AND after_store_index<=?3
+       AND kind='harness.timeline' AND subject LIKE 'agent/%'
+     UNION ALL
+     SELECT s.subject FROM local_latest_slots s
+     CROSS JOIN local_observations o ON o.id=s.pending_local_id
+     WHERE s.subject>='agent/' AND s.subject<'agent0' AND s.kind='harness.usage'
+       AND s.pending_local_id>?1 AND s.pending_local_id<=?2 AND o.after_store_index<=?3
+       AND json_extract(o.body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')";
 
 /// The subjects whose claims an agent card reads: its agent, the runs, generations and steps that
 /// own or queue agents, messages (activity and delivery blockers), and the exec and pty children
