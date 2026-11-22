@@ -1366,7 +1366,15 @@ async fn select_leave_confirmer<B: Backend>(
     backend: &B,
     fleet: &FleetContext,
     peer: &str,
+    exchange: &ReplicationExchange,
 ) -> Result<()> {
+    // Shards carry no fleet claims. An empty graph response cannot carry a leave
+    // either, so neither needs a fresh membership fold to select a confirmer.
+    if exchange.shard_id.is_some()
+        || (exchange.envelopes.is_empty() && exchange.signatures.is_empty())
+    {
+        return Ok(());
+    }
     let Some(own) = &fleet.own_key else {
         return Ok(());
     };
@@ -1434,6 +1442,16 @@ async fn receive_from_peer<B: Backend>(
     exchange: &ReplicationExchange,
     options: ReceiveOptions<'_>,
 ) -> Result<crate::replication::ReplicationReceiveResponse> {
+    // Match the inbound shard path: admission remains authoritative in the daemon,
+    // but graph membership and leave bookkeeping do not apply to shard payloads.
+    if exchange.shard_id.is_some() {
+        crate::replication::check_receive_deadline(options.deadline_unix_ms)?;
+        let received = backend.receive(peer, fleet_id, exchange, options).await?;
+        if received.changed {
+            backend.changed().await;
+        }
+        return Ok(received);
+    }
     let _refresh = fleet.view_refresh.lock().await;
     crate::replication::check_receive_deadline(options.deadline_unix_ms)?;
     let before = backend.fleet_view().await?;
@@ -3055,7 +3073,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                                 &request.signature_requests,
                             )
                             .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))?;
-                        select_leave_confirmer(&state.backend, &state.fleet, &relay)
+                        select_leave_confirmer(&state.backend, &state.fleet, &relay, &response.exchange)
                             .await
                             .map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))?;
 
@@ -3944,9 +3962,7 @@ async fn post_signed<B: Backend>(
     exchange: &ReplicationExchange,
     compress: bool,
 ) -> Result<(ReplicationExchange, bool, Option<String>)> {
-    if !exchange.envelopes.is_empty() || !exchange.signatures.is_empty() {
-        select_leave_confirmer(backend, fleet, &peer.name).await?;
-    }
+    select_leave_confirmer(backend, fleet, &peer.name, exchange).await?;
     let deadline = tokio::time::Instant::now() + EXCHANGE_POLL_BUDGET;
     let attempted = crate::store::now_ms();
     let started = std::time::Instant::now();
