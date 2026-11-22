@@ -4,7 +4,7 @@
 //! and one hit map for all of them. A click target is stored against its line, so it still
 //! works after the pane scrolls.
 
-use super::text::{self, run};
+use super::text;
 use super::theme;
 use ratatui::style::{Color, Modifier, Style};
 use fractal_conversation_ui::text::{Line, Span};
@@ -271,6 +271,7 @@ pub fn meter(done: usize, total: usize, cells: usize, color: Color) -> Vec<Span<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::text::run;
 
     #[test]
     fn buttons_separate_keycaps_and_labels_and_include_the_gap_in_targets() {

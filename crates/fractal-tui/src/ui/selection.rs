@@ -102,7 +102,7 @@ mod tests {
                 Line::from("second body"),
                 Line::from("frame").decoration(),
             ]),
-            copy_blocks: vec![1..3], entries: Vec::new(), images: Vec::new(), layer: 0,
+            copy_blocks: std::iter::once(1..3).collect(), entries: Vec::new(), images: Vec::new(), layer: 0,
         });
         drop(frame);
         ui
@@ -132,13 +132,26 @@ mod tests {
 
     #[test]
     fn y_keeps_active_request_commands_even_without_rendered_keycaps() {
-        let mut ui = Ui::new(demo::test_world());
+        let mut ui = fixture();
+        let view::Load::Ready(items) = &mut ui.world.attention else {
+            panic!("ready attention fixture");
+        };
+        let item = &mut items[0];
+        item.kind = view::AttentionKind::Request {
+            from: "Asker".into(),
+            from_id: "agent/example/asker".into(),
+            question: "Approve the change?".into(),
+            structured: None,
+            images: Vec::new(),
+        };
+        item.actions = vec!["work.done".into()];
+        let id = item.id.clone();
         ui.open_home();
-        let id = ui.world.attention.items().iter()
-            .find(|item| matches!(item.kind, view::AttentionKind::Request { .. }))
-            .expect("demo request").id.clone();
         let index = ui.listing(60).ids.iter().position(|item| item == &id).unwrap();
         ui.select(index);
+        let key = ui.main_pane().key();
+        ui.frame.borrow_mut().panes[0].key = key;
+        assert_eq!(ui.focused_body_text().as_deref(), Some("first body\nsecond body"));
         ui.frame.borrow_mut().hits.clear();
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert_eq!(ui.confirm, Some('y'));
