@@ -9976,7 +9976,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(RequestedRestart::Continue);
         };
         if self.cancel_stale_model_return(subject, &request, observation)? {
-            return Ok(false);
+            return Ok(RequestedRestart::Continue);
         }
         if self.retire_obsolete_failed_restart(subject, now_ms())? {
             return Ok(RequestedRestart::Handled);
