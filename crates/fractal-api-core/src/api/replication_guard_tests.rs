@@ -337,6 +337,7 @@ async fn main_backend_subscribes_to_revisions_without_guard_or_membership_reques
     calls.recv().await.unwrap();
     for _ in 0..100 {
         state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h8f252aa568a5 owner=fractal_api_core::api::replication_guard_tests TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO meta(key,value) VALUES('revision_test_progress','1')
              ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", [],
         ).unwrap();

@@ -272,9 +272,18 @@ snapshot work, and `replication/membership-read` fleet-view work. Discovery expo
 Peers advertise `root-first-v1` in inventory capabilities. A root-only probe also
 carries `root-summary-v1`, distinguishing a deliberately omitted bucket list from
 an ordinary inventory. Matching peers exchange roots and control metadata without
-constructing or serializing the full bucket summary. A differing root requests
-the existing full bucket summary and follows the normal bounded reconciliation
-path; it does not request the whole identity inventory.
+constructing or serializing the full bucket summary. A differing root answers with
+bucket proofs and a bounded listing of complete ranges, prioritizing ranges with
+live payloads over checkpoint-only ranges. Omitted probe proofs mean unknown
+ranges, not empty ones: the responder does not send speculative payloads.
+
+The initiator uses those listings to push the reverse difference in its second
+request, alongside its own bounded range listings; the second answer pulls the
+remaining envelopes. Thus gaps within already-shared live ranges converge in one
+compact round (two requests when they fit the existing bounds), even with
+unsettled checkpoint lineages. Larger differences rotate listings across rounds.
+Modern peers, including empty stores with no buckets, never request a whole
+identity inventory.
 
 An older peer that does not advertise `root-first-v1` receives a full-summary
 exchange before reconciliation continues. An older peer's ordinary request also

@@ -5415,9 +5415,9 @@ pub fn replication_bucket_start(sequence: u64) -> u64 {
 }
 
 /// Compare a local inventory with a peer's compact inventory. Returns the local envelopes the
-/// peer provably lacks, bounded per exchange, and the local identities of the ranges both
-/// sides hold with different digests, so the peer can compute the reverse difference. Whole
-/// ranges are listed in order while they fit `listing_limit`, from the first differing range.
+/// peer provably lacks, bounded per exchange, and complete local range listings so the peer can
+/// compute the reverse difference. A root probe proves no ranges absent: it receives bounded
+/// listings without payloads. Whole ranges fit `listing_limit`, except the first is always whole.
 pub fn compact_replication_difference(
     inventory: &CompactReplicationInventory,
     buckets: &[ReplicationInventoryBucket],
@@ -5457,6 +5457,10 @@ pub fn compact_replication_difference_turn(
             .push(identity);
     }
     let page_limit = replication_page_limit(remote);
+    // A root probe omits proofs; absent ranges are unknown, not proven empty.
+    let omitted_buckets = remote.buckets.is_empty()
+        && remote.can(crate::replication::ROOT_FIRST)
+        && remote.can(crate::replication::ROOT_SUMMARY);
     let mut missing = Vec::new();
     // Differing ranges with an envelope to send, then those holding only checkpoint identities.
     let (mut live, mut payloadless) = (Vec::new(), Vec::new());
@@ -5465,6 +5469,14 @@ pub fn compact_replication_difference_turn(
         let local = inventory.range(&bucket.writer, bucket.start);
         let room = page_limit.saturating_sub(missing.len());
         let Some(theirs) = remote_buckets.get(&key) else {
+            if omitted_buckets {
+                if local.iter().any(|envelope| inventory.has_payload(envelope)) {
+                    live.push(bucket);
+                } else {
+                    payloadless.push(bucket);
+                }
+                continue;
+            }
             // The peer holds nothing in this range.
             missing.extend(
                 local
@@ -8083,26 +8095,24 @@ impl Store {
     ) -> Result<ReplicationExchange> {
         let _timing = time_stage(&self.replication_timers.export);
         let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
-        if remote.can(crate::replication::ROOT_FIRST)
+        if same
+            && remote.can(crate::replication::ROOT_FIRST)
             && remote.can(crate::replication::ROOT_SUMMARY)
             && remote.claim_range_query.is_none()
         {
-            // A different root requests proofs, not a bucketless full-inventory answer.
-            // On equality the response remains scalar, including claim roots and signatures.
-            return if same {
-                self.export_replication_root_summary(fleet_id)
-            } else {
-                self.export_replication_summary(fleet_id)
-            };
+            // Only equality can be answered without proofs. A mismatch must also list
+            // bounded complete ranges so the next request can push the reverse difference.
+            return self.export_replication_root_summary(fleet_id);
         }
         let digests = {
             let _span = crate::profile::span("replication.digests");
             self.exported_digests(snapshot)?
         };
         note_full_summary_construction(self);
-        if !same && !remote.buckets.is_empty() {
-            // The peer sent range digests, so only differing ranges need identities. Each
-            // answer lists from the next differing range, so every one is listed in turn.
+        if !same && (remote.can(crate::replication::ROOT_FIRST) || !remote.buckets.is_empty()) {
+            // Modern peers always reconcile compactly, even an empty store or a root
+            // probe with deliberately omitted proofs. List bounded live ranges first;
+            // the peer can then push and pull within the same compact round.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
                 compact_replication_difference_turn(

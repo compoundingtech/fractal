@@ -3596,11 +3596,11 @@ async fn exchange_inner<B: Backend>(
     telemetry: &mut super::telemetry::Round,
     carrier: crate::replication::ReplicationCarrier,
 ) -> Result<bool> {
-    // One compact round. Each side lists the ranges that differ a few at a time, from a different
-    // range on each answer, so successive rounds compare every range without either side ever
-    // sending its whole inventory (a million identities, 228 MB, on a busy fleet). Ranges that
-    // differ only by payloadless checkpoint identities never settle this way; checkpoint-lineage
-    // reconciliation, not more envelope requests, settles those.
+    // One compact round: first compare scalar roots. A mismatch answers with range
+    // proofs and bounded complete live-range listings, so the second request can push
+    // the reverse difference and its answer can pull the remaining envelopes. Later
+    // rounds rotate listings, never sending a whole inventory. Payloadless checkpoint
+    // differences remain the separate checkpoint-lineage reconciliation's responsibility.
     let attempt = std::time::Instant::now();
     let first = backend
         .export(auth.fleet_id(), &ReplicationInventory {
