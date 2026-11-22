@@ -1737,6 +1737,39 @@ fn unchanged_running_workspaces_with_retained_render_failures_spawn_no_leases() 
 }
 
 #[test]
+fn unchanged_full_render_passes_spawn_no_leases_but_disk_drift_is_repaired() {
+    let _clock = Clock::at(START);
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+        repository.to_str().unwrap(),
+    ), "unchanged-full-render");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ).skipping_unneeded(true);
+    reconciler.reconcile_once().unwrap();
+    let before = crate::checkout::test_support::lease_count(&repository);
+    let starts = runtime.started_members.lock().unwrap().len();
+    smallclaims::store::set_thread_clock(Some(START + crate::incremental::FULL_PASS_INTERVAL_MS));
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before,
+        "even a full safety render must not lease unchanged output");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+    assert_eq!(std::fs::read_to_string(repository.join("output")).unwrap(), "ready");
+
+    std::fs::write(repository.join("output"), "drift").unwrap();
+    smallclaims::store::set_thread_clock(Some(START + 2 * crate::incremental::FULL_PASS_INTERVAL_MS));
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before + 1,
+        "a full pass repairing changed output must acquire admission");
+    assert_eq!(std::fs::read_to_string(repository.join("output")).unwrap(), "ready");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+}
+
+#[test]
 fn an_existing_workspace_renders_and_publishes_with_exactly_one_lease() {
     let root = crate::test_support::canonical_tempdir();
     let repository = crate::checkout::test_support::repository(root.path());
