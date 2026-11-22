@@ -3044,13 +3044,15 @@ enum AgentsCommand {
     Ls(AgentsArgs),
     /// Group operational agents beneath the mission runs that own them.
     Tree(AgentsArgs),
-    /// Print one raw internal agent activity page as a JSON envelope.
+    /// Print one raw internal agent-incarnation activity page as a JSON envelope.
     ///
     /// Accumulate the entire page chain, then evaluate complete on the last response.
     /// Cursors are opaque and unsigned: a final complete page does not prove earlier
     /// pages were consumed. With --host, unknown-host agents remain incomplete.
+    /// Rows retain older live incarnations with an advisory superseded_by field;
+    /// absence means no known live owner, not proof of filesystem/runtime absence.
     Activity {
-        /// Maximum total number of agents and incomplete entries in this page (1-200).
+        /// Maximum total number of incarnation rows and incomplete entries (1-200).
         #[arg(long)]
         limit: Option<usize>,
         /// Continue with the opaque cursor from the previous page.

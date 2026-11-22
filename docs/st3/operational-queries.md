@@ -97,25 +97,39 @@ The native page cache retains the same snapshot cut across those pages.
 `min_cut` guarantees only that this answering store has reached that local index;
 it does not establish replication freshness or that remote observations are current.
 
-Membership includes every current-layer agent and historical-layer agents whose
-runtime is non-terminal or unresolved. An owner's terminal run or superseded
-generation does not prove its agent stopped. Both complete and incomplete rows
-carry `layer: current|historical`. A historical agent is omitted only when its
-resolved actual status is `stopped`, `retired`, or `failed` and the selected runtime
-claim proves that incarnation ended (or records an unnamed runtime end).
-Terminal folded state without matching runtime-end evidence remains listed.
+There is one row per known live incarnation, not one row per agent. The `id` remains
+the agent ID and may repeat; use `(id, incarnation_id)` as the row identity.
+An incarnation remains live once it has `running` evidence, until a matching named
+end or an unnamed end from the same observing host. A newer different incarnation
+does not implicitly end it. Instead, an older retained row has the advisory
+`superseded_by: <newer incarnation ID>` field, explaining likely stale/crashed ownership.
+Both complete and incomplete rows carry `layer: current|historical`; presentation
+history, terminal owning runs and superseded generations do not prove runtime death.
+An agent is omitted only when all its known incarnations are proven ended and no
+unattributed evidence remains.
+Runtime end evidence is `stopped`, `failed`, `exited`, `vanished`, or `absent`,
+matching the runtime-incarnation reader. Administrative or unfamiliar statuses
+alone are not end evidence.
 
-Activity status reads actual `status` using the existing `AgentState` values:
+The first page reads with `history=true` and is proportional to every retained
+agent subject and its runtime/workspace observations. This work is cooperatively
+cancellable under the request's read deadline and budget.
+
+Activity status reads that incarnation's own runtime `status` using the existing `AgentState` values:
 `desired`, `starting`, `running`, `waiting`, `down`, `stopped`, `failed`,
 `suspended`, and `retired`. Unrecognized values become `unknown` with the original
 value in `status_raw`; missing status becomes `unknown` without `status_raw`.
 These are not the harness's ready/idle/working states.
-The workspace is the actual absolute filesystem path on the owning host,
-exactly as observed: it is not a URI, a local checkout path, or a reconstructed
-path from the desired declaration.
+The host is the observing claim's origin. Its workspace comes only from observations
+attributed to the same incarnation and origin, never from a cross-origin merged fold
+or a declaration. It is an absolute filesystem path on that host, exactly as observed:
+not a URI, a local checkout path, or a reconstructed desired path. An unscoped workspace
+observation cannot be assigned to an incarnation and is incomplete.
 
 Incomplete reasons are `no-actual`, `indeterminate-authority`, `missing-workspace`,
-and `missing-host`. Missing or ambiguous evidence is not proof of inactivity.
+`missing-host`, `missing-incarnation`, and `unresolved-liveness`. Incomplete entries
+have nullable `incarnation_id` and `host`; unknown-host gaps remain under every host
+filter. Missing or ambiguous evidence is not proof of inactivity.
 Page through `next_cursor` until it is null, then evaluate `complete` on that last
 page. It is true only there, when the entire cut-bound fold has no incomplete
 evidence; it certifies the whole selection at that cut, not merely the last page.
@@ -127,6 +141,10 @@ not each list separately. There is no separate response-byte ceiling for this
 internal envelope: exact workspace paths and identifiers make encoded row sizes variable.
 Host-filtered completeness covers that host plus unknown-host evidence, not the
 whole fleet. This is an internal read, not a client-v0 operation.
+`complete: true` covers retained claim evidence only. It does not cover subjects
+without retained claims or workspaces that exist only on the filesystem. After
+accumulating the whole chain, absence means **no known live owner**, not proof that
+a workspace or an unobserved runtime does not exist.
 
 ## Single-subject status reads
 

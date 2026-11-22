@@ -2,6 +2,9 @@
 //! immutable fold, including incomplete rows, so later pages cannot forget a gap.
 use super::*;
 
+#[path = "agents_activity_runtime.rs"]
+mod runtime_inventory;
+
 #[derive(Default, Deserialize)]
 pub(super) struct ActivityQuery {
     limit: Option<usize>,
@@ -17,6 +20,8 @@ enum IncompleteReason {
     IndeterminateAuthority,
     MissingWorkspace,
     MissingHost,
+    MissingIncarnation,
+    UnresolvedLiveness,
 }
 
 #[derive(Serialize)]
@@ -48,130 +53,6 @@ impl ActivityStatus {
 enum ActivityLayer {
     Current,
     Historical,
-}
-
-fn terminal_status(actual: &Value) -> bool {
-    matches!(actual.get("status").and_then(Value::as_str), Some("stopped" | "retired" | "failed"))
-}
-
-/// Only selected runtime end claims prove that a terminal folded status has no live
-/// incarnation. Read those claims by primary key, in the roster's bounded chunks;
-/// do not walk each historical agent's runtime history.
-fn selected_runtime_ends(
-    store: &Store,
-    subjects: &[crate::model::SubjectStatus],
-    cut: u64,
-) -> anyhow::Result<BTreeMap<String, Option<String>>> {
-    let claims = subjects.iter()
-        .filter(|subject| subject.projection.layer != "current"
-            && subject.actual.as_ref().is_some_and(terminal_status))
-        .filter_map(|subject| subject.actual_claim.as_deref())
-        .collect::<Vec<_>>();
-    if claims.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let connection = store.readers.get();
-    let mut query = connection.prepare_cached(
-        "SELECT id, json_extract(body, '$.fields.incarnation_id') FROM claims
-         WHERE id IN (SELECT value FROM json_each(?1)) AND store_index<=?2
-           AND kind='runtime.observed'
-           AND json_extract(body, '$.fields.status') IN ('stopped','retired','failed')"
-    )?;
-    let mut ends = BTreeMap::new();
-    for chunk in claims.chunks(crate::store::card_fold::CHUNK) {
-        smallclaims::read_budget::check()?;
-        for row in query.query_map(rusqlite::params![serde_json::to_string(chunk)?, cut], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })? {
-            let (claim, incarnation) = row?;
-            ends.insert(claim, incarnation);
-        }
-    }
-    Ok(ends)
-}
-
-enum ActivityClassification<'a> {
-    Complete {
-        origin: &'a str,
-        workspace: &'a str,
-        actual: &'a Value,
-        claim: &'a str,
-    },
-    Incomplete(IncompleteReason),
-}
-
-fn classify_activity(subject: &crate::model::SubjectStatus) -> ActivityClassification<'_> {
-    let (Some(actual), Some(claim)) = (subject.actual.as_ref(), subject.actual_claim.as_deref()) else {
-        return ActivityClassification::Incomplete(IncompleteReason::NoActual);
-    };
-    if subject.reason.as_deref() == Some(crate::store::INDETERMINATE_ACTUAL_AUTHORITY) {
-        return ActivityClassification::Incomplete(IncompleteReason::IndeterminateAuthority);
-    }
-    let Some(origin) = subject.actual_origin.as_deref().filter(|origin| !origin.is_empty()) else {
-        return ActivityClassification::Incomplete(IncompleteReason::MissingHost);
-    };
-    let Some(workspace) = actual.get("workspace").and_then(Value::as_str)
-        .filter(|workspace| Path::new(workspace).is_absolute()) else {
-        return ActivityClassification::Incomplete(IncompleteReason::MissingWorkspace);
-    };
-    ActivityClassification::Complete { origin, workspace, actual, claim }
-}
-
-fn activity_row(
-    subject: &crate::model::SubjectStatus,
-    host: Option<&str>,
-    runtime_ends: &BTreeMap<String, Option<String>>,
-) -> Option<Value> {
-    let classification = classify_activity(subject);
-    let layer = if subject.projection.layer == "current" {
-        ActivityLayer::Current
-    } else {
-        // Presentation history is not runtime death: owners and generations can end
-        // before their child runtime. Omit only resolved, terminal runtime evidence.
-        if let ActivityClassification::Complete { actual, claim, .. } = &classification
-            && terminal_status(actual)
-            && runtime_ends.get(*claim).is_some_and(|ended| ended.as_deref().is_none_or(
-                |incarnation| actual.get("incarnation_id").and_then(Value::as_str) == Some(incarnation)
-            ))
-        {
-            return None;
-        }
-        ActivityLayer::Historical
-    };
-    // Missing workspace still has an authoritative origin. Every other incomplete
-    // classification has an unknown host and must remain visible under any host filter.
-    let known_origin = match &classification {
-        ActivityClassification::Complete { origin, .. } => Some(*origin),
-        ActivityClassification::Incomplete(IncompleteReason::MissingWorkspace) =>
-            subject.actual_origin.as_deref(),
-        ActivityClassification::Incomplete(_) => None,
-    };
-    if let (Some(host), Some(origin)) = (host, known_origin)
-        && client_host_id(origin) != host
-    {
-        return None;
-    }
-    Some(match classification {
-        ActivityClassification::Incomplete(reason) =>
-            json!({"id": subject.subject, "layer": layer, "reason": reason}),
-        ActivityClassification::Complete { origin, workspace, actual, claim } => {
-            let (status, status_raw) = ActivityStatus::from_actual(actual.get("status").and_then(Value::as_str));
-            let mut row = json!({
-                "id": subject.subject,
-                "layer": layer,
-                "status": status,
-                "host": client_host_id(origin),
-                "workspace": workspace,
-                "incarnation_id": actual.get("incarnation_id"),
-                "actual_claim": claim,
-                "actual_origin": origin,
-            });
-            if let Some(raw) = status_raw {
-                row["status_raw"] = json!(raw);
-            }
-            row
-        }
-    })
 }
 
 pub(super) async fn list(
@@ -211,13 +92,10 @@ pub(super) async fn list(
         }
         let (snapshot, items) = read_deadline::spawn_blocking(move || {
             reader.store.read_snapshot(|cut| {
-                // Read both presentation layers with the roster's chunked desired/actual
-                // fold. Runtime evidence, not owner lifecycle, decides activity membership.
+                // Retain all known agent subjects and their presentation layer, but never
+                // use the presentation fold's actual fields for liveness or attribution.
                 let status = reader.store.agent_card_status_for_generic_reads_at(None, cut, true)?;
-                let runtime_ends = selected_runtime_ends(&reader.store, &status.subjects, cut)?;
-                let items = status.subjects.iter()
-                    .filter_map(|subject| activity_row(subject, host.as_deref(), &runtime_ends))
-                    .collect::<Vec<_>>();
+                let items = runtime_inventory::read(&reader.store, &status.subjects, cut, host.as_deref())?;
                 Ok((client_snapshot_at(&reader, cut), items))
             })
         }).await.map_err(ApiError::internal)?.map_err(ApiError::internal)?;
