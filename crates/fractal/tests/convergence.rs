@@ -67,7 +67,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v44.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v45.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -85,7 +85,7 @@ fn keyed_only(kind: &str) -> bool {
 #[test]
 fn the_current_corpus_matches_the_registry() {
     assert_eq!(
-        include_str!("../../../fixtures/convergence/claims-v44.json"),
+        include_str!("../../../fixtures/convergence/claims-v45.json"),
         serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
         "regenerate the active corpus with the owning fractal-schema claim_corpus example"
     );
@@ -199,6 +199,18 @@ fn the_corpus_generates_valid_deployment_inputs() {
         fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         world.nodes[0].store.append_claim(&input).unwrap();
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_native_model_fallback_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(&corpus()["harness.model-fallback.observed"], 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
 }
 
 #[test]
@@ -1109,6 +1121,26 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == "harness.model-fallback.observed" {
+            let subject = self.subject_of("agent", index)?;
+            let event = self.fresh("model-fallback");
+            return Some(ClaimInput {
+                actor: Some(subject.clone()), subject, kind: spec.kind.clone(),
+                fields: BTreeMap::from([
+                    ("observation".into(), json!("applied")),
+                    ("cause".into(), json!("transient")),
+                    ("from".into(), json!("openai/gpt-5")),
+                    ("to".into(), json!("anthropic/claude-sonnet-4-5")),
+                    ("native_session".into(), json!("convergence-session")),
+                    ("source_event".into(), json!(event)),
+                    ("episode_id".into(), json!(event)),
+                    ("incarnation_id".into(), json!("convergence-incarnation")),
+                    ("observed_at_unix_ms".into(), json!(self.clock(index))),
+                    ("reason".into(), json!("native-retry-fallback")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(event),
+            });
+        }
         if spec.kind == "work.rebound" {
             let id = self.fresh("rebound");
             return Some(ClaimInput {
@@ -2489,7 +2521,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v44.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v45.json"
         }))
         .unwrap(),
     )

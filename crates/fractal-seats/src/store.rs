@@ -200,16 +200,20 @@ const RETIRED_OWNED_INTAKE_SUBJECTS: &str = "SELECT desired.subject
        )
      ORDER BY desired.subject";
 
-/// The local rows a roster card can read: timeline entries an agent subject made, which date its
-/// activity and its managed session. Heartbeat and telemetry observations never change a card —
-/// the harness fold, working episodes, usage summaries and todos all read replicated claims —
-/// and neither do `Latest` observations, which reach cards only through the claims written when
-/// their state changes. So the frontier is the newest agent timeline row at or before the cut,
-/// an exact `MAX(id)`: it never assumes observation ids and graph cuts rise together, which
-/// repair and trim can break.
-const ROSTER_LOCAL_FRONTIER: &str = "SELECT COALESCE((SELECT id FROM local_observations
- WHERE kind='harness.timeline' AND subject LIKE 'agent/%' AND after_store_index<=?1
- ORDER BY id DESC LIMIT 1), 0)";
+/// The local rows a roster card can read: agent timeline entries date activity and managed
+/// sessions, and held main-loop usage supplies the live model and its observation timestamp.
+/// A same-model usage refresh can stay local while changing model-drift freshness. Heartbeats
+/// and response spend do not change these folded inputs. Each indexed seek returns the newest
+/// relevant row at or before the cut; ids and graph cuts need not rise together after repair.
+const ROSTER_LOCAL_FRONTIER: &str = "SELECT MAX(
+ COALESCE((SELECT id FROM local_observations
+  WHERE kind='harness.timeline' AND subject LIKE 'agent/%' AND after_store_index<=?1
+  ORDER BY id DESC LIMIT 1), 0),
+ COALESCE((SELECT id FROM local_observations
+  WHERE kind='harness.usage' AND subject LIKE 'agent/%'
+    AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')
+    AND after_store_index<=?1
+  ORDER BY id DESC LIMIT 1), 0))";
 
 /// One frontier read, inside the caller's SQLite snapshot when it holds one: the reader pool
 /// lends pinned reads the same connection. The partial frontier index keeps an old cut from
