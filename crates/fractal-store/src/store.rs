@@ -38,6 +38,7 @@ pub mod missions;
 pub mod continuity;
 pub mod mission_run_query;
 pub mod step_executions;
+mod native_step_clock;
 mod mission_supersession;
 pub mod seats;
 pub mod helper_launchers;
@@ -126,8 +127,6 @@ pub mod owned_sets;
 pub mod owned_sets_tests;
 #[cfg(test)]
 pub mod usage_fold_tests;
-pub mod usage_credits;
-pub use usage_credits::{UsageCreditReading, UsageCreditSnapshot};
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
@@ -2471,7 +2470,6 @@ pub struct Store {
     _resource_backfill: Option<resource_references::BackfillWorker>,
     resource_observations: std::sync::OnceLock<std::sync::Mutex<resource_membership::Observations>>,
     resource_clocks: std::sync::OnceLock<std::sync::Mutex<resource_membership::Clocks>>,
-    usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     launch_admission: Arc<launch_freeze::Admission>,
@@ -3017,8 +3015,7 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             storage_census: Default::default(),
             shell_environments: Default::default(),
@@ -3054,8 +3051,7 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             storage_census: Default::default(),
             shell_environments: Default::default(),
@@ -3092,8 +3088,7 @@ impl Store {
         storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             storage_census: Default::default(),
             shell_environments: Default::default(),
@@ -3124,10 +3119,6 @@ impl Store {
             }
         }
         *self.fractal.usage_limits_writers.lock().unwrap() = writers.into_iter().collect();
-        if !self.usage_limits_writers().is_empty() {
-            self.start_usage_credit_backfill()
-                .map_err(|error| FractalError::new("usage-credit-backfill", error.to_string()))?;
-        }
         Ok(())
     }
 
@@ -8051,6 +8042,7 @@ impl Store {
         matches!(
             kind,
             "slo.breach-transition"
+                | "step.execution-phase"
                 | "lane.approved"
                 | "arrangement.edited"
                 | "ordered-membership.edited"
@@ -8110,6 +8102,7 @@ impl Store {
                 | "work.released"
                 | "work.handoff-returned"
                 | "work.extended"
+                | "work.rebound"
                 | "subagent.appeared"
                 | "subagent.renewed"
                 | "subagent.ended"
@@ -19755,7 +19748,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-override','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.rebound','work.person-asked','work.person-reassigned','work.person-done','work.person-override','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -20240,6 +20233,35 @@ pub fn project_mission_run_update(
                         not_before_unix_ms=?4, activated_at_unix_ms=NULL, updated_at_unix_ms=?5,
                         goals=COALESCE(?6, goals) WHERE subject=?1").map_err(internal)?.execute(
                 /* sqlite-large-value: allow-for-now lv-h9f9fbaefd206 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![claim.subject, attempt, fields.get("reason").and_then(Value::as_str), not_before, claim.accepted_at_unix_ms.to_string(), goals],
+            )
+            .map_err(internal)?;
+        return Ok(());
+    }
+    if claim.kind == "work.rebound" {
+        // A seat that resumed the same native session under a new incarnation keeps the leases
+        // that incarnation's predecessor held. The guards make replay idempotent: only the
+        // exact lease the fact names moves, once, whatever else has happened since.
+        let (Some(attempt), Some(claimant), Some(from), Some(to)) = (
+            fields.get("attempt").and_then(Value::as_u64),
+            fields.get("claimant").and_then(Value::as_str),
+            fields.get("from_incarnation").and_then(Value::as_str),
+            fields.get("to_incarnation").and_then(Value::as_str),
+        ) else {
+            return Ok(());
+        };
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h1c9bf15e6dc5 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_incarnation=?2, updated_at_unix_ms=?3
+                 WHERE subject=?1 AND attempt=?4 AND lease_owner=?5 AND lease_incarnation=?6
+                   AND status IN ('claimed','working','verifying','blocked','waiting-person')",
+                params![
+                    claim.subject,
+                    to,
+                    claim.accepted_at_unix_ms.to_string(),
+                    attempt,
+                    claimant,
+                    from
+                ],
             )
             .map_err(internal)?;
         return Ok(());
@@ -22726,7 +22748,7 @@ pub fn step_execution_clock_at(
 /// The claim kinds a step's execution timing folds. The cache key and the fold read the same set.
 const STEP_TIMING_KINDS: &str = "'step-run.state','step-run.carried','work.claimed','work.renewed',\
     'work.progress','work.submitted','work.failed','work.released','work.extended',\
-    'work.person-asked','work.person-done','work.person-cancelled'";
+    'work.person-asked','work.person-done','work.person-cancelled','step.execution-phase'";
 
 /// A step's step and work events in canonical order, as its execution timing folds them.
 pub fn step_timing_events(
@@ -22890,6 +22912,9 @@ pub fn fold_step_clock(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> StepTiming {
+    if let Some(timing) = native_step_clock::fold(events, attempt, snapshot_unix_ms, currently_active) {
+        return timing;
+    }
     let ClockFold {
         mut started,
         mut elapsed,
