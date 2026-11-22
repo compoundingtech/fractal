@@ -20,6 +20,19 @@ impl Changes {
     }
 }
 
+enum SavepointAction {
+    Begin { name: String, transaction: bool },
+    RollbackTo(usize),
+    Release { index: usize, transaction: bool },
+}
+
+struct SuspendedStatement {
+    key: usize,
+    rows: Changes,
+    changes_at_start: i64,
+    action: Option<SavepointAction>,
+}
+
 #[derive(Default)]
 pub(super) struct Ledger {
     pending: Changes,
@@ -29,6 +42,9 @@ pub(super) struct Ledger {
     statement: Option<usize>,
     statement_rows: Changes,
     changes_at_start: i64,
+    savepoint_action: Option<SavepointAction>,
+    transaction_savepoint: bool,
+    suspended: Vec<SuspendedStatement>,
 }
 impl Ledger {
     pub(super) fn row(&mut self, database: &str, table: &str) {
@@ -57,6 +73,12 @@ impl Ledger {
         self.tentative = None;
         self.savepoints.clear();
         self.statement_rows = Changes::default();
+        self.savepoint_action = None;
+        self.transaction_savepoint = false;
+        for statement in &mut self.suspended {
+            statement.rows = Changes::default();
+            statement.action = None;
+        }
         ROLLBACKS.fetch_add(1, Ordering::Relaxed);
     }
     fn confirm(&mut self, autocommit: bool) {
@@ -67,6 +89,7 @@ impl Ledger {
                     changes.merge(parent);
                 }
                 self.committed.merge(changes);
+                self.transaction_savepoint = false;
             } else {
                 // A busy/failed COMMIT left the transaction alive.
                 self.pending.merge(changes);
@@ -83,16 +106,40 @@ impl Ledger {
         changes.unknown |= unknown;
         changes
     }
-    fn started(&mut self, key: usize, sql: &str, autocommit: bool, readonly: bool, total_changes: i64) {
+    fn suspend(&mut self) -> Option<SuspendedStatement> {
+        self.statement.take().map(|key| SuspendedStatement {
+            key,
+            rows: std::mem::take(&mut self.statement_rows),
+            changes_at_start: self.changes_at_start,
+            action: self.savepoint_action.take(),
+        })
+    }
+
+    fn restore(&mut self, statement: SuspendedStatement) {
+        self.statement = Some(statement.key);
+        self.statement_rows = statement.rows;
+        self.changes_at_start = statement.changes_at_start;
+        self.savepoint_action = statement.action;
+    }
+
+    fn started(&mut self, key: usize, sql: &str, autocommit: bool, readonly: bool, total_changes: i64, active_write: bool) {
         self.confirm(autocommit);
         if self.statement == Some(key) { return; }
+        // A live RETURNING statement or a reentrant SQL function can run other SQL
+        // before PROFILE. Preserve its row hints while tracking the intervening command.
+        if let Some(statement) = self.suspend() {
+            self.suspended.push(statement);
+        }
         self.statement = Some(key);
         self.changes_at_start = total_changes;
         self.statement_rows = Changes::default();
+        self.savepoint_action = None;
         let mut words = Tokens(sql);
         let Some(first) = words.next() else { return; };
         if first.eq_ignore_ascii_case("SAVEPOINT") {
-            if let Some(name) = words.next() { self.savepoints.push((name.into_owned(), std::mem::take(&mut self.pending))); }
+            if !active_write && let Some(name) = words.next() {
+                self.savepoint_action = Some(SavepointAction::Begin { name: name.into_owned(), transaction: autocommit });
+            }
         } else if first.eq_ignore_ascii_case("ROLLBACK") {
             let mut next = words.next();
             if next.as_deref().is_some_and(|word| word.eq_ignore_ascii_case("TRANSACTION")) { next = words.next(); }
@@ -100,17 +147,14 @@ impl Ledger {
                 let mut name = words.next();
                 if name.as_deref().is_some_and(|word| word.eq_ignore_ascii_case("SAVEPOINT")) { name = words.next(); }
                 if let Some(name) = name && let Some(index) = self.savepoints.iter().rposition(|(saved, _)| saved.eq_ignore_ascii_case(&name)) {
-                    self.pending = Changes::default();
-                    self.savepoints.truncate(index + 1);
+                    self.savepoint_action = Some(SavepointAction::RollbackTo(index));
                 }
             }
         } else if first.eq_ignore_ascii_case("RELEASE") {
             let mut name = words.next();
             if name.as_deref().is_some_and(|word| word.eq_ignore_ascii_case("SAVEPOINT")) { name = words.next(); }
-            if let Some(name) = name && let Some(index) = self.savepoints.iter().rposition(|(saved, _)| saved.eq_ignore_ascii_case(&name)) {
-                for (_, parent) in self.savepoints.drain(index..) {
-                    self.pending.merge(parent);
-                }
+            if !active_write && let Some(name) = name && let Some(index) = self.savepoints.iter().rposition(|(saved, _)| saved.eq_ignore_ascii_case(&name)) {
+                self.savepoint_action = Some(SavepointAction::Release { index, transaction: index == 0 && self.transaction_savepoint });
             }
         } else if readonly {
             // Transaction-control statements are readonly too, so process them first.
@@ -121,7 +165,40 @@ impl Ledger {
         }
     }
 
-    fn finished(&mut self, total_changes: i64, autocommit: bool) {
+    fn finished(&mut self, key: usize, total_changes: i64, autocommit: bool) {
+        if self.statement != Some(key) {
+            let Some(index) = self.suspended.iter().position(|statement| statement.key == key) else { return; };
+            let statement = self.suspended.remove(index);
+            if let Some(current) = self.suspend() {
+                self.suspended.push(current);
+            }
+            self.restore(statement);
+        }
+        // Savepoint SQL may fail without rolling back its transaction. In particular,
+        // deferred foreign keys can reject RELEASE of a transaction savepoint. Keep that
+        // frame until the native commit is confirmed; autocommit=false means it survived.
+        match self.savepoint_action.take() {
+            Some(SavepointAction::Begin { name, transaction }) if !autocommit => {
+                self.savepoints.push((name, std::mem::take(&mut self.pending)));
+                self.transaction_savepoint |= transaction;
+            }
+            Some(SavepointAction::RollbackTo(index)) if !autocommit => {
+                self.pending = Changes::default();
+                self.savepoints.truncate(index + 1);
+            }
+            Some(SavepointAction::Release { index, transaction: false }) if !autocommit => {
+                for (_, parent) in self.savepoints.drain(index..) {
+                    self.pending.merge(parent);
+                }
+            }
+            Some(SavepointAction::Release { transaction: true, .. }) if autocommit && self.tentative.is_none() => {
+                // An empty transaction savepoint may close without a native commit hook.
+                self.savepoints.clear();
+                self.pending = Changes::default();
+                self.transaction_savepoint = false;
+            }
+            _ => {}
+        }
         // total_changes excludes ordinary statement-ABORT writes, unlike preupdate hints.
         // A failing trigger can advance it before its outer statement rolls back: in that
         // case retaining a hint is deliberately conservative, never an authorization.
@@ -135,6 +212,9 @@ impl Ledger {
         }
         self.statement = None;
         self.confirm(autocommit);
+        if let Some(statement) = self.suspended.pop() {
+            self.restore(statement);
+        }
     }
 }
 
@@ -170,7 +250,11 @@ impl<'a> Iterator for Tokens<'a> {
             self.0 = "";
             Some(Cow::Owned(output))
         } else {
-            let end = self.0.find(|ch: char| ch.is_whitespace() || ch == ';').unwrap_or(self.0.len());
+            let end = self.0.char_indices().find_map(|(index, ch)| {
+                (ch.is_whitespace() || matches!(ch, ';' | '\'' | '"' | '`' | '[')
+                    || self.0[index..].starts_with("/*") || self.0[index..].starts_with("--"))
+                    .then_some(index)
+            }).unwrap_or(self.0.len());
             if end == 0 { self.0 = &self.0[1..]; return self.next(); }
             let word = Cow::Borrowed(&self.0[..end]);
             self.0 = &self.0[end..];
@@ -258,13 +342,25 @@ unsafe extern "C" fn traced(event: c_uint, context: *mut c_void, statement: *mut
         let mut ledger = ledger.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let database = ffi::sqlite3_db_handle(statement);
         if event == ffi::SQLITE_TRACE_STMT as c_uint {
-            ledger.started(statement as usize, &sql, ffi::sqlite3_get_autocommit(database) != 0, ffi::sqlite3_stmt_readonly(statement) != 0, ffi::sqlite3_total_changes64(database));
+            let control = Tokens(&sql).next().is_some_and(|word| word.eq_ignore_ascii_case("SAVEPOINT") || word.eq_ignore_ascii_case("RELEASE"));
+            let mut active_write = false;
+            if control {
+                let mut other = ffi::sqlite3_next_stmt(database, std::ptr::null_mut());
+                while !other.is_null() {
+                    if other != statement && ffi::sqlite3_stmt_readonly(other) == 0 && ffi::sqlite3_stmt_busy(other) != 0 {
+                        active_write = true;
+                        break;
+                    }
+                    other = ffi::sqlite3_next_stmt(database, other);
+                }
+            }
+            ledger.started(statement as usize, &sql, ffi::sqlite3_get_autocommit(database) != 0, ffi::sqlite3_stmt_readonly(statement) != 0, ffi::sqlite3_total_changes64(database), active_write);
         } else {
             // SQLite does not expose the current VDBE result code until after PROFILE.
             // Never inspect sqlite3_errcode here: it can still belong to an earlier SQL
             // error. Transaction and savepoint rollback are resolved by native hooks and
             // executed control statements, respectively.
-            ledger.finished(ffi::sqlite3_total_changes64(database), ffi::sqlite3_get_autocommit(database) != 0);
+            ledger.finished(statement as usize, ffi::sqlite3_total_changes64(database), ffi::sqlite3_get_autocommit(database) != 0);
             drop(ledger);
             let nanos = *detail.cast::<u64>();
             super::record_sqlite_time(&sql, std::time::Duration::from_nanos(nanos));
@@ -445,5 +541,123 @@ mod statement_failure_tests {
             connection.execute_batch("COMMIT").unwrap();
         }
         assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod savepoint_resolution_tests {
+    use super::*;
+    use crate::sqlite::{WriterConnection, work::SqliteWorkScope};
+    use std::sync::Arc;
+
+    fn writer() -> WriterConnection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+             CREATE TABLE parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE child(parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TABLE alpha(id INTEGER PRIMARY KEY);"
+        ).unwrap();
+        WriterConnection::new(connection, Arc::new(AtomicU64::new(0)))
+    }
+
+    #[test]
+    fn failed_transaction_savepoint_release_preserves_rollback_target() {
+        let writer = writer();
+        let globals = Arc::new(AtomicU64::new(0));
+        let observed = globals.clone();
+        let _global = writer.observe_commits(move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let dependents = Arc::new(AtomicU64::new(0));
+        let observed = dependents.clone();
+        let _dependent = writer.observe_tables(&["child"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let connection = writer.write();
+        connection.execute_batch("SAVEPOINT s; INSERT INTO child VALUES(1)").unwrap();
+        assert!(connection.execute_batch("RELEASE s").is_err());
+        assert!(!connection.is_autocommit());
+        connection.execute_batch("ROLLBACK TO s; RELEASE s").unwrap();
+        assert!(connection.is_autocommit());
+        assert_eq!(connection.query_row("SELECT count(*) FROM child", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
+        let work = SqliteWorkScope::start();
+        drop(connection);
+        assert_eq!(work.finish().statements, 0);
+        assert_eq!(globals.load(Ordering::Relaxed), 0);
+        assert_eq!(dependents.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn adjacent_comments_are_sql_token_boundaries_for_savepoint_controls() {
+        let writer = writer();
+        let globals = Arc::new(AtomicU64::new(0));
+        let observed = globals.clone();
+        let _global = writer.observe_commits(move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let dependents = Arc::new(AtomicU64::new(0));
+        let observed = dependents.clone();
+        let _dependent = writer.observe_tables(&["alpha"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        for sql in [
+            "SAVEPOINT s; INSERT INTO alpha VALUES(1); ROLLBACK/**/TO s; RELEASE s",
+            "SAVEPOINT/**/s; INSERT INTO alpha VALUES(1); ROLLBACK/**/TO/**/s; RELEASE/**/s",
+            "SAVEPOINT-- begin\ns; INSERT INTO alpha VALUES(1); ROLLBACK-- undo\nTO s; RELEASE-- finish\ns",
+        ] {
+            let connection = writer.write();
+            connection.execute_batch(sql).unwrap();
+            let work = SqliteWorkScope::start();
+            drop(connection);
+            assert_eq!(work.finish().statements, 0, "{sql}");
+            assert_eq!(globals.load(Ordering::Relaxed), 0, "{sql}");
+            assert_eq!(dependents.load(Ordering::Relaxed), 0, "{sql}");
+        }
+        // A commented RELEASE must also merge a retained nested level, not discard it.
+        writer.write().execute_batch(
+            "SAVEPOINT/**/outer; SAVEPOINT/**/inner;
+             INSERT INTO alpha VALUES(1); RELEASE/**/inner; RELEASE/**/outer"
+        ).unwrap();
+        assert_eq!(globals.load(Ordering::Relaxed), 1);
+        assert_eq!(dependents.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod busy_savepoint_tests {
+    use super::*;
+    use crate::sqlite::{WriterConnection, work::SqliteWorkScope};
+    use std::sync::Arc;
+
+    #[test]
+    fn busy_nested_release_keeps_frames_and_preserves_the_active_statement_hints() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+             CREATE TABLE alpha(id INTEGER PRIMARY KEY);"
+        ).unwrap();
+        let writer = WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+        let count = Arc::new(AtomicU64::new(0));
+        let observed = count.clone();
+        let _observer = writer.observe_tables(&["alpha"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        for rollback in [true, false] {
+            let connection = writer.write();
+            connection.execute_batch("SAVEPOINT outer; SAVEPOINT inner").unwrap();
+            {
+                let mut statement = connection.prepare("INSERT INTO alpha VALUES(1) RETURNING id").unwrap();
+                let mut rows = statement.query([]).unwrap();
+                assert!(rows.next().unwrap().is_some());
+                assert!(connection.execute_batch("RELEASE inner").is_err());
+                // Also keep the frame stack unchanged when opening a savepoint is busy.
+                assert!(connection.execute_batch("SAVEPOINT rejected").is_err());
+            }
+            if rollback {
+                connection.execute_batch("ROLLBACK TO inner").unwrap();
+            }
+            connection.execute_batch("RELEASE inner; RELEASE outer").unwrap();
+            if rollback {
+                let work = SqliteWorkScope::start();
+                drop(connection);
+                assert_eq!(work.finish().statements, 0);
+                assert_eq!(count.load(Ordering::Relaxed), 0);
+            } else {
+                drop(connection);
+                assert_eq!(count.load(Ordering::Relaxed), 1);
+            }
+        }
     }
 }
