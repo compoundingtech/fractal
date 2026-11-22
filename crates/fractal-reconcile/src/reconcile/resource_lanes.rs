@@ -148,7 +148,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             .is_some_and(|seed| seed.recovery_capable);
         if cfg!(target_os = "linux") {
             smallclaims::touched::note_read(|| "host-lane-pressure".into());
-            fit.pressure_blocked = self.seat_admission.pressure_decision()?.blocked;
+            let decision = self.seat_admission.pressure_decision();
+            fit.pressure_blocked = decision.blocked;
+            fit.pressure_reason = decision.reason;
         }
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
@@ -303,21 +305,45 @@ mod tests {
     /// Keep the directory alive for the test so sampling never reaches the actual host.
     fn quiet_pressure<R: RuntimeControl>(reconciler: &Reconciler<R>) -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
-        let memory = directory.path().join("memory.pressure");
-        let io = directory.path().join("io");
+        let cgroups = directory.path().join("cgroups");
+        let protected = cgroups.join("system.slice/fractal.service");
+        std::fs::create_dir_all(&protected).unwrap();
+        std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+        std::fs::create_dir_all(cgroups.join("interactive.slice")).unwrap();
+        let placement = directory.path().join("cgroup");
         let meminfo = directory.path().join("meminfo");
-        let root_memory = directory.path().join("root-memory");
-        let vmstat = directory.path().join("vmstat");
         let quiet = "some avg10=0.00 avg60=0.00 avg300=0.00\nfull avg10=0.00 avg60=0.00 avg300=0.00\n";
-        for path in [&memory, &io, &root_memory] { std::fs::write(path, quiet).unwrap(); }
+        for group in [protected, cgroups.join("system.slice"), cgroups.join("app.slice"),
+            cgroups.join("interactive.slice")] {
+            for name in ["memory.pressure", "io.pressure"] { std::fs::write(group.join(name), quiet).unwrap(); }
+        }
+        std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
         std::fs::write(&meminfo, "MemTotal: 134217728 kB\nMemAvailable: 125829120 kB\n").unwrap();
-        std::fs::write(&vmstat, "allocstall_normal 0\n").unwrap();
+        let policy = reconciler.seat_admission.finite_policy.psi_brake.clone();
         *reconciler.seat_admission.pressure.lock().unwrap() =
             Some(fractal_runtime::resource_pressure::Observer::with_paths(
-                reconciler.seat_admission.finite_policy.psi_brake.clone(),
-                [memory, io, meminfo, root_memory, vmstat]).unwrap());
-        assert!(!reconciler.seat_admission.pressure_decision().unwrap().blocked);
+                policy, placement, cgroups, meminfo).unwrap());
+        assert!(!reconciler.seat_admission.sample_pressure().unwrap().blocked);
         directory
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn admission_reads_cached_pressure_and_stopped_sampler_fails_closed() {
+        use fractal_runtime::resource_pressure::{ObservationCause, Reason};
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(crate::reconcile::tests::FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let fixtures = quiet_pressure(&reconciler);
+        fixtures.close().unwrap();
+        // Even with all kernel fixtures gone, admission must not sample.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(!reconciler.seat_admission.pressure_decision().blocked);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(reconciler.seat_admission.pressure_decision().reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::StaleDecision }));
+        assert!(reconciler.seat_admission.pressure_decision().blocked);
     }
 
     fn test_fit() -> Fit {
