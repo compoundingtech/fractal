@@ -30,6 +30,14 @@ pub fn init(enabled: bool) {
 fn instruments(meter: &opentelemetry::metrics::Meter) -> Instruments {
     #[cfg(test)]
     RECORDER_ENTRIES.fetch_add(1, Ordering::Relaxed);
+    meter.f64_observable_counter("st.process.cpu_time")
+        .with_description("Total process CPU, including work outside task scopes")
+        .with_unit("s")
+        .with_callback(|observer| {
+            if let Some(cpu) = clock_cpu(libc::CLOCK_PROCESS_CPUTIME_ID) {
+                observer.observe(cpu.as_secs_f64(), &[]);
+            }
+        }).build();
     Instruments {
         cpu: meter.f64_counter("st.task.cpu_time")
             .with_description("Thread CPU consumed while polling a daemon task or running its blocking work")
@@ -40,10 +48,15 @@ fn instruments(meter: &opentelemetry::metrics::Meter) -> Instruments {
     }
 }
 
-fn thread_cpu() -> Option<Duration> {
+/// A synchronous sample only; never subtract samples taken on different threads.
+pub fn thread_cpu() -> Option<Duration> {
+    clock_cpu(libc::CLOCK_THREAD_CPUTIME_ID)
+}
+
+fn clock_cpu(clock: libc::clockid_t) -> Option<Duration> {
     let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    // SAFETY: time is writable and the clock measures only the calling thread.
-    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } != 0 {
+    // SAFETY: time is writable and clock is a supported CPU clock identifier.
+    if unsafe { libc::clock_gettime(clock, &mut time) } != 0 {
         return None;
     }
     Some(Duration::new(time.tv_sec.try_into().ok()?, time.tv_nsec.try_into().ok()?))
@@ -51,6 +64,46 @@ fn thread_cpu() -> Option<Duration> {
 
 thread_local! {
     static MEASURING: Cell<bool> = const { Cell::new(false) };
+    static TASK: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Capture before queueing blocking work; enter only while the callback runs.
+/// No TLS guard or thread-clock sample crosses a thread or await boundary.
+pub struct BlockingContext {
+    task: Option<&'static str>,
+    origin: Option<crate::sqlite::telemetry::Origin>,
+}
+
+pub fn capture() -> BlockingContext {
+    BlockingContext {
+        task: TASK.with(Cell::get),
+        origin: crate::sqlite::telemetry::scoped_origin(),
+    }
+}
+
+impl BlockingContext {
+    pub fn run<T>(self, work: impl FnOnce() -> T) -> T {
+        let _origin = crate::sqlite::telemetry::enter_origin(self.origin);
+        let _task = TaskLabel(TASK.with(|task| task.replace(self.task)));
+        match self.task {
+            Some(task) => blocking(task, work),
+            None => work(),
+        }
+    }
+}
+
+struct TaskLabel(Option<&'static str>);
+
+impl TaskLabel {
+    fn enter(name: &'static str) -> Self {
+        Self(TASK.with(|task| task.replace(Some(name))))
+    }
+}
+
+impl Drop for TaskLabel {
+    fn drop(&mut self) {
+        TASK.with(|task| task.set(self.0));
+    }
 }
 
 /// One accumulator travels with its future, even if Tokio changes worker threads.
@@ -148,6 +201,7 @@ async fn measured<F: Future>(name: &'static str, future: F, metrics: &Instrument
     let mut future = pin!(future);
     poll_fn(|cx| {
         let _sample = Sample::start(&mut accumulator);
+        let _task = TaskLabel::enter(name);
         let _origin = crate::sqlite::telemetry::enter_task_origin(name);
         crate::profile::profiled_task(name, || future.as_mut().poll(cx))
     }).await
@@ -186,6 +240,7 @@ pub(crate) struct BlockingScope {
     profile: Option<crate::profile::TaskScope>,
     sampling: Option<Sampling>,
     accumulator: Option<Accumulator<'static>>,
+    _task: Option<TaskLabel>,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
@@ -195,6 +250,7 @@ pub(crate) fn blocking_scope(name: &'static str) -> BlockingScope {
             profile: None,
             sampling: None,
             accumulator: None,
+            _task: None,
             _thread: std::marker::PhantomData,
         };
     }
@@ -208,6 +264,7 @@ fn enabled_blocking_scope(name: &'static str) -> BlockingScope {
         profile: None,
         sampling: Some(sampling),
         accumulator: Some(accumulator),
+        _task: Some(TaskLabel::enter(name)),
         _thread: std::marker::PhantomData,
     };
     // Install the sampling guard before profile entry, including its unwind path.
@@ -234,6 +291,52 @@ mod tests {
     use opentelemetry::metrics::MeterProvider as _;
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+    #[test]
+    fn blocking_context_survives_migration_and_pool_reuse() {
+        let metrics = instruments(&opentelemetry::global::meter("context-test"));
+        for name in ["reconcile", "published_list.agents", "replication.receive"] {
+            let future = measured(name, async {
+                let first = capture();
+                tokio::task::yield_now().await;
+                (first, capture())
+            }, &metrics);
+            let mut future = Box::pin(future);
+            std::thread::scope(|scope| {
+                let mut future = scope.spawn(move || {
+                    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    assert!(future.as_mut().poll(&mut cx).is_pending());
+                    assert!(TASK.with(Cell::get).is_none());
+                    assert!(crate::sqlite::telemetry::scoped_origin().is_none());
+                    future
+                }).join().unwrap();
+                let contexts = scope.spawn(move || {
+                    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    let std::task::Poll::Ready(contexts) = future.as_mut().poll(&mut cx) else {
+                        panic!("second poll must finish");
+                    };
+                    contexts
+                }).join().unwrap();
+                scope.spawn(move || {
+                    for context in [contexts.0, contexts.1] {
+                        assert_eq!(context.task, Some(name));
+                        context.run(|| {
+                            assert_eq!(TASK.with(Cell::get), Some(name));
+                            assert_eq!(
+                                crate::sqlite::telemetry::current_origin().unwrap().attribute("origin").value,
+                                opentelemetry::Value::from(name),
+                            );
+                        });
+                        assert!(TASK.with(Cell::get).is_none());
+                        assert_eq!(
+                            crate::sqlite::telemetry::current_origin().unwrap().attribute("origin").value,
+                            opentelemetry::Value::from("other"),
+                        );
+                    }
+                }).join().unwrap();
+            });
+        }
+    }
 
     #[tokio::test]
     async fn disabled_task_metrics_do_not_enter_recorder() {

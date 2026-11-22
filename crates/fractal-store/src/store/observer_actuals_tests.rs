@@ -14,15 +14,21 @@ fn append(store: &Store, subject: &str, at: u128, fields: Value) -> String {
     claim.id
 }
 
-/// Let the writer finish the preparation a delivery deferred. Its paced turns run between
-/// writer loans (#6859), so one landing between the fence's seed and its check moves the cut,
-/// which the fence rightly refuses; on a loaded host that happens often enough to fail.
+/// Finish the preparation a delivery deferred before a fenced read. The writer runs it in paced
+/// turns between loans (#6859), and one landing between the fence's seed and its check moves the
+/// cut, which the fence rightly refuses. Waiting for those turns timed out on a loaded host, so
+/// the test drains the work itself, on the writer, until none is left.
 fn settle(store: &Store) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while store.runtime.deferred_pending(&store.readers.get()).unwrap() {
-        assert!(std::time::Instant::now() < deadline, "deferred preparation must finish");
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    for _ in 0..10_000 {
+        if !store.runtime.deferred_pending(&store.readers.get()).unwrap() {
+            return;
+        }
+        let runtime = store.runtime.clone();
+        store.connection.batched(move |transaction| {
+            runtime.rebuild_deferred(transaction, std::time::Duration::from_millis(50))
+        }).unwrap().unwrap();
     }
+    panic!("deferred preparation must finish");
 }
 
 fn read(store: &Store) -> (Option<Value>, u64) {

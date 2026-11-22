@@ -28,7 +28,7 @@ export type PtyFrame = typeof PtyFrame.Type
 /** A malformed or oversized binary frame. */
 export class PtyProtocolError extends Schema.TaggedError<PtyProtocolError>()('PtyProtocolError', { message: Schema.String }) {}
 const maxFrameSize = 16 * 1024 * 1024
-/** Largest DATA payload per WebSocket message; st3 caps inbound messages at 64 KiB. */
+/** Largest DATA payload per WebSocket message; Fractal caps inbound messages at 64 KiB. */
 export const ptyDataChunkBytes = 16 * 1024
 
 /** Encode one complete frame with its network-order header. */

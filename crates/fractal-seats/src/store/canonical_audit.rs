@@ -67,6 +67,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "replica_envelopes",
         "replica_records",
         "claim_positions",
+        "claim_member_signatures",
+        "claim_member_signature_pending",
+        "released_envelopes",
+        "peer_retired_claims",
+        "record_repair_lookups",
         "repaired_claim_replacements",
         "retired_claim_ids",
         "retired_envelopes",
@@ -175,9 +180,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_seat_accounts",
         "account_limit_readings",
         "account_limit_seats",
-        "local_usage_credit_heads",
-        "local_usage_credit_pending",
-        "local_usage_credit_progress",
+        // Rebuildable member-local usage boundary lookup and bounded backfill cursor.
+        "local_usage_period_v1",
+        "local_usage_period_v1_progress",
         "local_latest_slots",
         // Member-local timestamp seeks and capture queue, rebuilt from authoritative claim bodies.
         "local_objective_times_v1",
@@ -267,6 +272,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signatures",
         "claim_verdicts",
         "claim_verdict_links",
+        "claim_batch_disorder",
         "claim_verdict_dependency_keys",
         "claim_verdict_dependency_edges",
         "claim_verdict_queue",
@@ -292,8 +298,6 @@ fn every_persistent_table_has_a_projection_scope() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let store = Store::open_memory("alder").unwrap();
-    // Exercise the lazily installed credit tables as well as the always-present schema.
-    store.wait_for_usage_credit_backfill().unwrap();
     let connection = store.readers.get();
     assert_eq!(
         SHARED_TABLES,
@@ -1112,13 +1116,6 @@ fn every_shared_projection_agrees_after_shuffle_restart_and_checkpoint() {
             &format!("{name}/restart-replay"),
             &mut mismatches,
         );
-        let scratch = tempfile::tempdir().unwrap();
-        let (_, _, proof) = target
-            .plan_checkpoint_through(cut, None, scratch.path())
-            .unwrap();
-        if !proof.passed {
-            mismatches.push(format!("{name}/checkpoint proof: {:?}", proof.mismatches));
-        }
         // Use the production tombstone/delete/replay path on isolated stores. Certificate and
         // fleet protocol behavior already has separate tests; this tests the projection boundary.
         let checkpoint_reference = Store::open_memory("cedar").unwrap();

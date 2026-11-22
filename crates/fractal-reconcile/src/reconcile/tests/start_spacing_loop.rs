@@ -248,13 +248,17 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
             }
         }
     }));
-    let task = tokio::spawn(reconciler.clone().run());
+    // Count only broad-pass continuation. `run()` also starts result adoption and the host
+    // pressure sampler: adoption can race the counted pass, and the sampler can dirty admission
+    // and make that pass publish a host-layout diagnostic. Neither is fixture traffic.
+    // Concurrent result adoption is covered separately in start_preemption.rs.
+    let task = tokio::spawn(reconciler.clone().run_passes());
     let first = receive(&mut wake_rx).await;
     let mut counts = vec![first];
     if traffic == QuiescenceTraffic::StartCompletion {
         // Admission wakes the loop before launch completion. Hold the next dispatch until the
-        // helper has both finished the worker and applied its result: leaving `live` alone does
-        // not order the independent completion consumer's writes against the measured passes.
+        // helper has both finished the worker and applied its result, so every completion write
+        // precedes the measured passes rather than racing their before/after readings.
         let (dispatched, helper_done) = std::sync::mpsc::channel();
         *reconciler.background_dispatch_hook.lock().unwrap() = Some(Box::new({
             move || helper_done.recv_timeout(Duration::from_secs(30)).unwrap()
@@ -264,15 +268,41 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
             let subject = reconciler.store.desired_subjects().unwrap().into_iter()
                 .find(|subject| subject.subject == "exec/quiet-0").unwrap();
             let before = smallclaims::touched::writes();
-            // Use the existing single-start fixture barrier, not just the worker's `live` set.
-            // This also serializes with a completion consumer that already took the result.
+            let prior_succeeded = reconciler.store.observations_for(
+                &subject.subject, "runtime.action.succeeded",
+            ).unwrap();
+            // Use the single-start fixture barrier to await the worker and apply its result
+            // before releasing the broad-pass dispatch.
             reconciler.wait_for_test_starts.store(true, Ordering::Release);
             // Complete only after the initial pass rests. This real start path's
             // signal_changed must supply the next wake; the test never calls notify.
             reconciler.perform_start(
                 &subject, subject.member.as_ref().unwrap(), "helper completed start",
             ).unwrap();
-            assert!(reconciler.store.runtime_start_for(&subject.subject).unwrap().unwrap().applied);
+            // runtime_start_for returns pending work only: a successfully applied start is
+            // no longer visible there. Prove adoption through its durable observations before
+            // releasing dispatch, rather than assuming the completed operation stays pending.
+            assert!(reconciler.store.runtime_start_for(&subject.subject).unwrap().is_none());
+            let succeeded = reconciler.store.observations_for(
+                &subject.subject, "runtime.action.succeeded",
+            ).unwrap().into_iter().filter(|claim| {
+                !prior_succeeded.iter().any(|prior| prior.id == claim.id)
+            }).collect::<Vec<_>>();
+            let [succeeded] = succeeded.as_slice() else {
+                panic!("expected exactly one completed helper start: {succeeded:?}");
+            };
+            assert!(succeeded.body["fields"]["operation"].is_string());
+            // Completion publishes a native claim. The mixed latest_observation accessor
+            // also considers legacy local observations from the settled fixture.
+            let observed = reconciler.store.latest_claim(
+                &subject.subject, Some("runtime.observed"),
+            ).unwrap().unwrap();
+            assert_eq!(observed.body["fields"]["adopted"], true);
+            assert!(observed.body["fields"]["incarnation_id"].is_string());
+            assert_eq!(
+                observed.body["fields"]["incarnation_id"],
+                succeeded.body["fields"]["incarnation_id"],
+            );
             assert!(smallclaims::touched::writes() > before);
             dispatched.send(()).unwrap();
         }).await.unwrap();

@@ -32,10 +32,10 @@ Use the installed `fractal` and a pinned **fabric 0.2.41+84c3208** binary, even 
 node apps/ios/modules/fractal-fabric/proof-member.mjs /path/to/fractal /path/to/fabric
 ```
 
-It starts a test member and fabric daemon under a fresh `/tmp/st-fabric-proof-*` directory, exposes only `client.sock` as `demo-client/0`, and prints a descriptor path. Open its `identity-link.txt` in the Debug app to read the public phone NodeID. You can also set `EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK` when starting a local Metro server for a headless simulator launch. Then grant only that service, inbound-only, and create a test pairing challenge:
+It starts a test member and fabric daemon under a fresh `/tmp/fractal-fabric-proof-*` directory, exposes only `client.sock` as `demo-client/0`, and prints a descriptor path. Open its `identity-link.txt` in the Debug app to read the public phone NodeID. You can also set `EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK` when starting a local Metro server for a headless simulator launch. Then grant only that service, inbound-only, and create a test pairing challenge:
 
 ```sh
-node apps/ios/modules/fractal-fabric/proof-member.mjs grant /tmp/st-fabric-proof-example/member.json PHONE_NODE_ID
+node apps/ios/modules/fractal-fabric/proof-member.mjs grant /tmp/fractal-fabric-proof-example/member.json PHONE_NODE_ID
 ```
 
 The grant is `fabric add PHONE_NODE_ID demo-phone --inbound-only --allow demo-client/0`: the member serves the phone when it connects and never dials, probes or announces to it, and `fabric status` shows it as `inbound-only`. Start the helper with `FABRIC_PROOF_APP=separate` to write links for the separate offline Debug app.

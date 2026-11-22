@@ -70,7 +70,7 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 #[test]
 fn signature_reference_reader_precedes_the_default_writer_format() {
     assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
-    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 26);
+    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 27);
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     assert_eq!(verdict(&store, &claim), Verdict::Verified);
     {
         let connection = store.connection.write();
-        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 20);
+        assert_default_writer_version(&connection);
         for table in ["claim_signatures", "claim_signature_sources"] {
             let types: i64 = connection.query_row(&format!("SELECT count(*) FROM {table} WHERE typeof(signature)!='text'"), [], |row| row.get(0)).unwrap();
             assert_eq!(types, 0, "{table} must stay readable by the previous release");
@@ -143,6 +143,22 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     rusqlite::Connection::open(&path).unwrap()
         .pragma_update(None, "user_version", fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION + 1).unwrap();
     assert!(Store::open(&path, "studio", Arc::new(Plain)).is_err());
+}
+
+/// The default writer leaves a store at version 20, or at 26 once the signature compaction writer
+/// (its own flag) has compacted a claim; no other writer format is switched on.
+fn assert_default_writer_version(connection: &rusqlite::Connection) {
+    assert_writer_version(connection, 20);
+}
+
+/// The store is at `version`, or at 26 if the signature compaction writer has fenced it since.
+fn assert_writer_version(connection: &rusqlite::Connection, version: u32) {
+    use smallclaims::store::principals::compaction::{COMPACTION_STORAGE_VERSION, COMPACTION_WRITER_FLAG};
+    let found: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+    let compacting: bool = connection
+        .query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value='1')", [COMPACTION_WRITER_FLAG], |row| row.get(0))
+        .unwrap();
+    assert!(found == version || (found == COMPACTION_STORAGE_VERSION && compacting), "user_version {found}, expected {version}");
 }
 
 fn key() -> Arc<MemberKey> {
@@ -1978,7 +1994,7 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
     }
     {
         let connection = store.connection.write();
-        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), 20);
+        assert_default_writer_version(&connection);
         for table in ["claim_verdict_dependency_keys", "claim_verdict_dependency_edges"] {
             assert_eq!(connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_, u64>(0)).unwrap(), 0, "the default writer must not activate integer dependencies");
         }
@@ -2017,7 +2033,13 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
                 after.len(), saved as f64 / after.len() as f64,
                 saved as f64 * synthetic_completions_per_day as f64 / after.len() as f64,
             );
-            assert!(compact_bytes < old_bytes, "include dictionary UNIQUE and reverse-index btrees in the comparison");
+            // The links have had no index by claim since #6952 (a deletion leaves them for the sweep),
+            // while the edges keep their reverse index for forget. Compare like with like: the
+            // integer-keyed tables, dictionary UNIQUE included, against the links table.
+            let reverse: u64 = connection.query_row(
+                "SELECT coalesce(sum(pgsize),0) FROM dbstat WHERE name='claim_verdict_dependency_edges_claim'",
+                [], |row| row.get(0)).unwrap();
+            assert!(compact_bytes - reverse < old_bytes, "include the dictionary UNIQUE btree in the comparison");
             if mixed {
                 connection.execute_batch(
                     "INSERT INTO claim_verdict_links(link,claim_id)
@@ -2092,7 +2114,7 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
     assert_eq!(verdict(&store, &later), Verdict::Verified);
     assert!(store.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claim_verdict_links WHERE claim_id=?1)", [&later.id], |row| row.get::<_, bool>(0)).unwrap());
     assert_eq!(store.readers.get().query_row("SELECT count(*) FROM claim_verdict_dependency_edges", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
-    assert_eq!(store.readers.get().pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), if compact { 22 } else { 20 });
+    assert_writer_version(&store.readers.get(), if compact { 22 } else { 20 });
 }
 
 /// `dbstat.pgsize` counts occupied SQLite pages, not file size, freelist bytes, or
@@ -2772,8 +2794,8 @@ fn remove_candidate_schema(connection: &rusqlite::Connection) {
     inline_signature_facade_for_old_fixture(connection);
     connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
     connection.execute_batch("DROP VIEW claim_verdict_dependency_links; DROP TABLE claim_verdict_dependency_edges; DROP TABLE claim_verdict_dependency_keys;").unwrap();
-    connection.execute_batch("DROP TRIGGER claim_verdict_queue_marks_pruned; DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
-        DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
+    connection.execute_batch("DROP TRIGGER claim_verdict_queue_marks_pruned; DROP TRIGGER claim_verdict_batch_arrived; DROP TRIGGER claim_verdict_claim_arrived; DROP TABLE claim_batch_disorder; DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
+        DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX IF EXISTS claim_candidate_verdict_links_claim_index;
         CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);
         CREATE INDEX claim_verdict_links_claim_index ON claim_verdict_links(claim_id);
         CREATE INDEX claim_signatures_nonce_index ON claim_signatures(key,nonce); PRAGMA user_version=19;").unwrap();

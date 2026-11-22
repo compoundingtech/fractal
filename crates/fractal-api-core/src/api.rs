@@ -522,7 +522,7 @@ impl ApiError {
             "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
-            | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
+            | "backup-busy" | "replication-overloaded" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
@@ -977,9 +977,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/replication/records/{*record}", get(replication::replication_record))
         .route("/v1/replication/repair", post(replication::repair_replication_record))
         .route("/v1/replication/replay", post(replication_replay::replay).layer(Extension(transport)))
-        .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
-        .route("/v1/checkpoint/status", get(replication::checkpoint_status))
-        .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
         .route("/v1/signatures/resume", post(replication::signature_resume))
         .route("/v1/faults/dismiss", post(records::dismiss_fault))
@@ -1000,14 +997,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication_worker_status),
         )
         .route(
-            "/v1/internal/replication/checkpoint",
-            post(replication::replication_checkpoint_manifest),
-        )
-        .route(
-            "/v1/internal/replication/checkpoint-need",
-            post(replication::replication_checkpoint_need),
-        )
-        .route(
             "/v1/internal/replication/answers",
             post(replication::replication_answers),
         )
@@ -1018,11 +1007,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
-        )
-        .route(
-            "/v1/internal/replication/checkpoint-adopt",
-            post(replication::replication_checkpoint_adopt)
-                .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
@@ -3673,6 +3657,18 @@ fn overlay_agent_resources_at(
             };
             let reported = item["harness_state"].as_str().map(str::to_owned);
             item["observation"] = json!(observation);
+            if let Some(drift) = item.get_mut("model_drift") {
+                let observed_at = drift["observed_at"].as_str().map(snapshot_time_ms);
+                if drift["state"] != "unknown"
+                    && observed_at.is_none_or(|at| at > now || now - at > HARNESS_OBSERVATION_FRESHNESS.as_millis())
+                {
+                    drift["state"] = json!("stale");
+                }
+                drift["drift_age_seconds"] = if drift["state"] == "drifted" {
+                    json!(drift["drift_since"].as_str().map(snapshot_time_ms)
+                        .map(|since| now.saturating_sub(since) / 1000))
+                } else { Value::Null };
+            }
             // A turn can run for hours without a new harness claim, so only a claim that says the
             // seat is waiting for input lapses; a `working` one stays until the harness says otherwise.
             if observation == "stale" && matches!(item["harness_state"].as_str(), Some("ready" | "idle")) {
@@ -4375,10 +4371,35 @@ fn client_agent_cards_presented(
             // card's incarnation (never response spend, which includes subagents), or null when it reported none. Hoisted out of the card
             // literal: the literal already nests at the macro recursion limit. A step script
             // reads what a one-shot reviewer actually ran on even after it exits.
-            let live_model: Option<String> = match incarnation_id.as_deref() {
-                Some(incarnation) => store.latest_usage_model(&subject.subject, incarnation)?,
+            let model_observation = match incarnation_id.as_deref() {
+                Some(incarnation) => store.latest_usage_model_observation(&subject.subject, incarnation)?,
                 None => None,
             };
+            let declared_model = subject.desired.as_ref()
+                .and_then(crate::store::model_drift::declared_harness_model);
+            let model_state = crate::store::model_drift::model_drift_state(
+                declared_model, model_observation.as_ref(), client_now_ms(),
+                HARNESS_OBSERVATION_FRESHNESS.as_millis(),
+            );
+            let drift_since = match (incarnation_id.as_deref(), declared_model, model_observation.as_ref()) {
+                (Some(incarnation), Some(declared), Some(observation))
+                    if model_state == crate::store::model_drift::ModelDriftState::Drifted => {
+                    store.model_drift_since(&subject.subject, incarnation, declared, &observation.model)?
+                }
+                _ => None,
+            };
+            let fallback = match (incarnation_id.as_deref(), model_observation.as_ref()) {
+                (Some(incarnation), Some(observation))
+                    if model_state == crate::store::model_drift::ModelDriftState::Drifted =>
+                {
+                    store.latest_model_fallback(&subject.subject, incarnation)?.filter(|fallback|
+                        observation.observed_at_ms.is_some_and(|at| at >= fallback.observed_at_ms)
+                        && crate::pricing::declared_model_matches(&fallback.to, &observation.model) == Some(true))
+                }
+                _ => None,
+            };
+            let return_attempts = incarnation_id.as_deref().map(|incarnation|
+                store.model_return_attempt_count(&subject.subject, incarnation)).transpose()?;
             let mut value = json!({
                 "id": subject.subject,
                 "kind": "agent",
@@ -4447,7 +4468,16 @@ fn client_agent_cards_presented(
                 "due_at": residency.due_at_unix_ms.map(client_timestamp),
                 "refusal_reason": residency.refusal_reason,
             });
-            value["live_model"] = live_model.map_or(Value::Null, Value::String);
+            value["live_model"] = json!(model_observation.as_ref().map(|observation| &observation.model));
+            value["declared_model"] = json!(declared_model);
+            value["model_drift"] = json!({
+                "state": model_state,
+                "drift_since": drift_since.map(client_timestamp),
+                "drift_age_seconds": drift_since.map(|since| client_now_ms().saturating_sub(since) / 1000),
+                "observed_at": model_observation.as_ref().and_then(|observation| observation.observed_at_ms).map(client_timestamp),
+                "fallback_reason": fallback.as_ref().map(|fallback| &fallback.cause),
+                "return_attempts": return_attempts,
+            });
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
                 value["declared_admission"] = serde_json::to_value(admission)?;
             }
@@ -5739,6 +5769,11 @@ fn message_delivery_for(
         return Ok(delivery);
     };
     let runtime = runtime.body.get("fields").unwrap_or(&runtime.body);
+    if matches!(runtime.get("status").and_then(Value::as_str), Some("stopped" | "exited" | "absent")) {
+        delivery["state"] = json!("waiting");
+        delivery["reason"] = json!("recipient stopped; queued message will be delivered when it starts");
+        return Ok(delivery);
+    }
     if runtime.get("status").and_then(Value::as_str) != Some("running") { return Ok(delivery); }
     let Some(incarnation) = runtime.get("incarnation_id").and_then(Value::as_str) else {
         return Ok(delivery);
@@ -7150,10 +7185,11 @@ where
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let context = crate::task_cpu::capture();
     tokio::task::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     }).await.map_err(ApiError::internal)
 }
 
@@ -7166,6 +7202,7 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     #[cfg(any(test, feature = "test-support"))]
     let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
@@ -7174,7 +7211,7 @@ where
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
@@ -7190,11 +7227,12 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     crate::api::read_deadline::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
@@ -7212,11 +7250,12 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     crate::api::read_deadline::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
@@ -8335,7 +8374,40 @@ fn record_legacy_poll(
 }
 
 /// Generation authority supplied by the replication worker's supervisor.
-pub type WorkerAuthority = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
+#[derive(Clone)]
+pub struct WorkerAuthority {
+    observe: Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>,
+    supervisor: Arc<str>,
+}
+
+impl WorkerAuthority {
+    pub fn new(supervisor: impl Into<Arc<str>>, observe: impl Fn() -> anyhow::Result<u32> + Send + Sync + 'static) -> Self {
+        Self { observe: Arc::new(observe), supervisor: supervisor.into() }
+    }
+}
+
+impl std::ops::Deref for WorkerAuthority {
+    type Target = dyn Fn() -> anyhow::Result<u32> + Send + Sync;
+    fn deref(&self) -> &Self::Target { &*self.observe }
+}
+
+// One process-wide warning per minute, independent of connector PID or error text.
+// A changing caller must not bypass the limit.
+fn worker_warning_due(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    if last.is_some_and(|last| now.duration_since(last) < std::time::Duration::from_secs(60)) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+fn warn_worker_authorization(connector_pid: Option<u32>, supervisor: &str, error: &dyn std::fmt::Display) {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if worker_warning_due(&mut last, std::time::Instant::now()) {
+        tracing::warn!(connector_pid, supervisor, error = %error, "replication worker authorization failed");
+    }
+}
 
 pub fn worker_route(path: &str) -> bool {
     path.starts_with("/v1/internal/replication/")
@@ -8417,11 +8489,17 @@ async fn guard_bound_actor(
         && let Some(worker) = worker
     {
         let peer = request.extensions().get::<LocalPeer>().cloned();
-        if matches!(tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await, Ok(Ok(()))) {
-            // The supervised worker runs in no harness. Its live generation is stronger
-            // evidence than an unreadable service-manager environment.
-            request.extensions_mut().insert(HarnessAncestry::Person);
-            request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
+        let connector_pid = peer.as_ref().map(|peer| peer.pid);
+        let supervisor = worker.supervisor.clone();
+        match tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await {
+            Ok(Ok(())) => {
+                // The supervised worker runs in no harness. Its live generation is stronger
+                // evidence than an unreadable service-manager environment.
+                request.extensions_mut().insert(HarnessAncestry::Person);
+                request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
+            }
+            Ok(Err(error)) => warn_worker_authorization(connector_pid, &supervisor, &format_args!("{error:#}")),
+            Err(error) => warn_worker_authorization(connector_pid, &supervisor, &error),
         }
     }
     let verified_worker = request.extensions().get::<ancestry_diagnostics::VerifiedWorkerFallback>().is_some();
@@ -8616,8 +8694,12 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
         "foreign-agent-actor", "local caller ancestry could not be verified; run person commands from a local terminal on this host (SSH sessions are not supported)",
     ));
     let path = request.uri().path();
+    // This read-only snapshot is also consumed by same-UID daemon companions with no
+    // agent identity. Unavailable ancestry must not turn it into an attributed operation.
+    let companion_read = matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && path == "/v1/internal/fleet/leave-state";
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
-        || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || (path.starts_with(INTERNAL_ROUTE_PREFIX) && !companion_read)
         || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
         || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
     {
@@ -8724,6 +8806,7 @@ fn apply_systemd_health(health: &mut Value, supervisor: fractal_runtime::systemd
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
     match mode {
         fractal_runtime::Isolation::Scope => "scope",
+        fractal_runtime::Isolation::DarwinSlot { .. } => "darwin-slot",
         fractal_runtime::Isolation::Detached => "detached",
         fractal_runtime::Isolation::DegradedDetached => "degraded-detached",
     }
@@ -9762,12 +9845,16 @@ pub(crate) fn doctor_workers(read_limit: usize) -> usize {
 
 type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
 
-fn checkpoint_doctor_check(status: &crate::store::CheckpointStatusView) -> DoctorCheck {
+fn trim_doctor_check(status: &crate::store::TrimStatusView) -> DoctorCheck {
     let blocking = status.blocking_summary();
     DoctorCheck {
-        name: "checkpoint".into(),
+        name: "trim".into(),
         status: if blocking.is_some() { "warn" } else { "pass" }.into(),
-        message: blocking.unwrap_or_else(|| "no checkpoint is pending".into()),
+        message: blocking.unwrap_or_else(|| match (&status.trimmed, status.trims) {
+            (_, false) => "trimming is off ([trim] local = false)".into(),
+            (Some(cut), true) => format!("trimming on its own; newest trimmed cut {cut}"),
+            (None, true) => "trimming on its own; no cut trimmed yet".into(),
+        }),
     }
 }
 
@@ -10185,9 +10272,13 @@ fn doctor_report_within(
             }),
         }
         let isolation = fractal_runtime::isolation_mode();
+        let custody_available =
+            !cfg!(target_os = "macos") || fractal_runtime::darwin_slot::available();
         checks.push(DoctorCheck {
             name: "process-isolation".into(),
-            status: if isolation == fractal_runtime::Isolation::DegradedDetached {
+            status: if isolation == fractal_runtime::Isolation::DegradedDetached
+                || !custody_available
+            {
                 "warn"
             } else {
                 "pass"
@@ -10195,8 +10286,17 @@ fn doctor_report_within(
             .into(),
             message: match isolation {
                 fractal_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
+                fractal_runtime::Isolation::DarwinSlot { slot } => {
+                    format!("explicit finite executions use Darwin slot {slot}")
+                }
                 fractal_runtime::Isolation::Detached => {
-                    "tasks use detached process groups on this platform".into()
+                    if !custody_available {
+                        "helperUnavailable: Darwin custody helper is unavailable; ordinary tasks remain detached".into()
+                    } else if cfg!(target_os = "macos") {
+                        "ordinary tasks use detached process groups; explicit finite launches can request Darwin slot custody".into()
+                    } else {
+                        "tasks use detached process groups on this platform".into()
+                    }
                 }
                 fractal_runtime::Isolation::DegradedDetached => {
                     "systemd user scopes are unavailable; a daemon restart can stop tasks".into()
@@ -10635,13 +10735,10 @@ fn doctor_report_within(
         }
         Ok(checks)
     });
-    if state.fleet_id.is_some() {
-        checks.check("checkpoint", || {
-            let status = state.store.checkpoint_status(client_now_ms(), &replication_peer_names(state))
-                .map_err(ApiError::internal)?;
-            Ok(vec![checkpoint_doctor_check(&status)])
-        });
-    }
+    checks.check("trim", || {
+        let status = state.store.trim_status().map_err(ApiError::internal)?;
+        Ok(vec![trim_doctor_check(&status)])
+    });
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
     });
@@ -10824,9 +10921,6 @@ fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T
 #[path = "api/replication_guard_tests.rs"]
 mod replication_guard_tests;
 
-#[cfg(test)]
-#[path = "api/checkpoint_plan_tests.rs"]
-mod checkpoint_plan_tests;
 
 #[cfg(test)]
 #[path = "api/storage_census_tests.rs"]
@@ -11008,7 +11102,6 @@ async fn refuse_while_leaving(
                 | "/v1/internal/replication/receive"
                 | "/v1/internal/replication/peer-failure"
                 | "/v1/internal/replication/worker-status"
-                | "/v1/internal/replication/checkpoint"
                 | "/v1/internal/replication-wake"
         );
     if mutating && !allowed && state.store.fleet_leaving().unwrap_or(false) {

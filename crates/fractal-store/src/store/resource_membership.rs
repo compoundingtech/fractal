@@ -50,7 +50,7 @@ pub struct LaneRequest {
     pub disk_path: Option<String>,
 }
 
-/// Historical tuple policies remain authoritative. Keyed policy identity deliberately excludes
+/// Historical tuple policies remain readable. Keyed policy identity deliberately excludes
 /// the immutable estimate carried by each membership.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(untagged)]
@@ -72,6 +72,36 @@ impl InstalledPolicy {
                 profile: profile.clone(), coverage: request.coverage },
             None => Self::Declared((request.max_members, request.capacity, request.coverage)),
         }
+    }
+
+    fn differences(&self, requested: &Self) -> String {
+        fn fields(policy: &InstalledPolicy) -> (Option<u32>, u32, Option<&str>, Option<Capacity>, Coverage) {
+            match policy {
+                InstalledPolicy::Keyed { version, max_members, profile, coverage } =>
+                    (Some(*version), *max_members, Some(profile.as_str()), None, *coverage),
+                InstalledPolicy::Declared((max_members, capacity, coverage)) =>
+                    (None, *max_members, None, *capacity, *coverage),
+            }
+        }
+        let (version, max_members, profile, capacity, coverage) = fields(self);
+        let (next_version, next_max_members, next_profile, next_capacity, next_coverage) = fields(requested);
+        let mut differences = Vec::new();
+        macro_rules! difference {
+            ($name:literal, $previous:expr, $next:expr) => {
+                if $previous != $next {
+                    differences.push(format!("{} {:?} -> {:?}", $name, $previous, $next));
+                }
+            };
+        }
+        difference!("version", version, next_version);
+        difference!("maxMembers", max_members, next_max_members);
+        difference!("profile", profile, next_profile);
+        difference!("capacity", capacity, next_capacity);
+        if coverage != next_coverage {
+            let name = |coverage| match coverage { Coverage::Logical => "logical", Coverage::Enforced => "enforced" };
+            differences.push(format!("coverage {} -> {}", name(coverage), name(next_coverage)));
+        }
+        differences.join(", ")
     }
 }
 
@@ -160,6 +190,8 @@ pub struct Fit {
     pub disk_mounts: BTreeMap<String, DiskFit>,
     pub heavy_io_slots: Option<u32>,
     pub pressure_blocked: bool,
+    /// Pressure values are milli-percent (MemoryAvailable uses bytes); recovery remaining is ms.
+    pub pressure_reason: Option<fractal_runtime::resource_pressure::Reason>,
     pub recovery_capable: bool,
 }
 
@@ -198,6 +230,8 @@ pub struct Membership {
     pub refusal_code: Option<RefusalCode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_by: Option<BlockedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure_reason: Option<fractal_runtime::resource_pressure::Reason>,
     #[serde(default)]
     pub admission_decision: Option<AdmissionDecision>,
 }
@@ -270,14 +304,16 @@ fn write(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
     insert_local_observation_tx(connection, &member.request.host, &ClaimInput {
         subject: dependency(&member.request.host, &member.request.name),
         kind: "resource-membership.changed".into(), actor: None,
-        fields: BTreeMap::from([("membership".into(), json!(member.request.id)), ("state".into(), json!(member.state))]),
+        fields: BTreeMap::from([("membership".into(), json!(member.request.id)), ("state".into(), json!(member.state)),
+            ("reason".into(), json!(member.reason)), ("pressureReason".into(), json!(member.pressure_reason))]),
         evidence: Vec::new(), idempotency_key: None,
         expected_subject: None,
     }, now_ms())?;
     insert_local_observation_tx(connection, &member.request.host, &ClaimInput {
         subject: format!("resource-membership/{}", member.request.host),
         kind: "resource-membership.changed".into(), actor: None,
-        fields: BTreeMap::from([("membership".into(), json!(member.request.id)), ("state".into(), json!(member.state))]),
+        fields: BTreeMap::from([("membership".into(), json!(member.request.id)), ("state".into(), json!(member.state)),
+            ("reason".into(), json!(member.reason)), ("pressureReason".into(), json!(member.pressure_reason))]),
         evidence: Vec::new(), idempotency_key: None, expected_subject: None,
     }, now_ms())?;
     Ok(())
@@ -311,9 +347,60 @@ fn admission(member: Membership) -> Admission {
 /// An aged head reserves by fencing new admissions, not by adding another held footprint.
 pub const BACKFILL_AGING_MS: u64 = 15 * 60 * 1000;
 
+fn pressure_description(reason: &fractal_runtime::resource_pressure::Reason) -> String {
+    use fractal_runtime::resource_pressure::{ObservationCause, Reason, Signal};
+    match reason {
+        Reason::Pressure { signal: Signal::MemoryAvailable, value, threshold, .. } =>
+            format!("host PSI brake: memory available {value} bytes below {threshold} bytes"),
+        Reason::Pressure { signal, value, threshold, cgroup } => {
+            let signal = match signal {
+                Signal::MemoryFull => "memory full",
+                Signal::MemorySome => "memory some",
+                Signal::IoFull => "IO full",
+                Signal::IoSome => "IO some",
+                Signal::MemoryAvailable => unreachable!(),
+            };
+            match cgroup {
+                Some(path) => format!("host PSI brake: {signal} at {path} {}.{:03}% >= {}.{:03}% threshold",
+                    value / 1000, value % 1000, threshold / 1000, threshold % 1000),
+                None => format!("host PSI brake: {signal} {}.{:03}% >= {}.{:03}% threshold",
+                    value / 1000, value % 1000, threshold / 1000, threshold % 1000),
+            }
+        }
+        Reason::Recovering { remaining } =>
+            format!("host PSI brake: recovering; {remaining} ms healthy observation required"),
+        Reason::UnknownObservation { cause } => {
+            let detail = match cause {
+                ObservationCause::MissingOrInvalid => "missing or invalid observation".into(),
+                ObservationCause::ObservationGap => "observation gap".into(),
+                ObservationCause::StaleDecision => "stale sampler decision".into(),
+                ObservationCause::NotYetSampled => "not yet sampled".into(),
+                ObservationCause::Io { os_error, path } => {
+                    match (os_error, path) {
+                        (Some(code), Some(path)) => format!("observation IO error at {path} (OS error {code})"),
+                        (Some(code), None) => format!("observation IO error (OS error {code})"),
+                        (None, Some(path)) => format!("observation IO error at {path}"),
+                        (None, None) => "observation IO error".into(),
+                    }
+                }
+                ObservationCause::TooManyCgroups { path, limit } =>
+                    format!("protected cgroup directory enumeration at {path} exceeds directory limit {limit}"),
+                ObservationCause::TooManyCgroupEntries { path, limit } =>
+                    format!("protected cgroup entry enumeration at {path} exceeds entry limit {limit}"),
+                ObservationCause::InvalidPressure { path } =>
+                    format!("invalid pressure data at {path}"),
+                ObservationCause::InvalidMemoryFloor => "invalid memory floor".into(),
+            };
+            format!("host PSI brake: observation unavailable: {detail}")
+        }
+    }
+}
+
 fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, disk_fit: Option<DiskFit>) -> Result<Option<(BlockedBy, String)>> {
     if fit.pressure_blocked {
-        return Ok(Some((BlockedBy::Psi, "host PSI brake: sustained pressure, recovery hysteresis, or unavailable observation".into())));
+        let reason = fit.pressure_reason.as_ref().map(pressure_description)
+            .unwrap_or_else(|| "host PSI brake: sustained pressure, recovery hysteresis, or unavailable observation".into());
+        return Ok(Some((BlockedBy::Psi, reason)));
     }
     if request.class == RequestClass::Recovery {
         let held: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1
@@ -438,15 +525,6 @@ impl Store {
         Ok(aggregate)
     }
 
-
-    /// PSI sampling is demand-driven by supported finite custody, not an idle host timer.
-    pub fn has_live_finite_resource_memberships(&self, host: &str) -> Result<bool> {
-        Ok(self.readers.get().query_row(
-            "SELECT EXISTS(SELECT 1 FROM resource_memberships_v1 WHERE host=?1
-             AND state IN ('queued','admitted','launched','retiring','uncertain') AND memory>0
-             AND coalesce(json_extract(body,'$.request.class'),'agent') IN ('agent','check','landing','recovery'))",
-            [host], |row| row.get(0))?)
-    }
 
     pub fn resource_memberships_for_host(&self, host: &str) -> Result<Vec<Membership>> {
         let connection = self.readers.get();
@@ -617,11 +695,15 @@ impl Store {
             if let Some(installed) = installed {
                 let previous: InstalledPolicy = serde_json::from_str(&installed)?;
                 if previous != expected {
-                    anyhow::ensure!(previous == InstalledPolicy::Declared((request.max_members, None, request.coverage)),
-                        "resource lane policy differs from host-installed policy");
-                    // Only the historical profile-less policy may acquire its first footprint.
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-h156314ba7532 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
-                    rusqlite::params![request.host,request.name])?;
+                    let legacy_upgrade = previous == InstalledPolicy::Declared((request.max_members, None, request.coverage));
+                    let live: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1
+                        WHERE host=?1 AND lane=?2 AND state IN ('queued','admitted','launched','retiring','uncertain'))",
+                        rusqlite::params![request.host,request.name], |row| row.get(0))?;
+                    anyhow::ensure!(legacy_upgrade || !live,
+                        "resource lane policy differs from host-installed policy: {}", previous.differences(&expected));
+                    // An idle lane can be redeclared atomically; live custody only permits the historical footprint upgrade.
+                    transaction.execute(/* sqlite-large-value: allow-for-now lv-h156314ba7532 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+                        rusqlite::params![request.host,request.name])?;
                 }
             }
             transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
@@ -637,7 +719,7 @@ impl Store {
                 queued_at: now_ms, admitted_at: None, payload_released_at: None, execution_ended_at: None,
                 retirement_requested_at: None, retired_at: None, disk_filesystem: None,
                 roots: Vec::new(), child_runs: Vec::new(), clock_uncertain: false, clock_epoch: epoch.clone(),
-                refusal_code: None, blocked_by: None, admission_decision: None }
+                refusal_code: None, blocked_by: None, pressure_reason: None, admission_decision: None }
         };
         let previous = exists.then(|| member.state.clone());
         if member.state != "queued" {
@@ -670,6 +752,7 @@ impl Store {
             }
         } else { None };
         member.blocked_by = None;
+        member.pressure_reason = None;
         if let Some((code, reason)) = refused {
             member.state = "refused".into(); member.reason = reason; member.refusal_code = Some(code);
         } else {
@@ -711,6 +794,9 @@ impl Store {
             };
             member.reason = if let Some((blocked_by, reason)) = blocking {
                 member.blocked_by = Some(blocked_by);
+                if blocked_by == BlockedBy::Psi && fit.pressure_blocked {
+                    member.pressure_reason = fit.pressure_reason;
+                }
                 reason
             } else { String::new() };
             if member.reason.is_empty() {
@@ -756,6 +842,7 @@ impl Store {
             member.state = "retired".into(); member.reason = "cancelled before admission".into(); member.retired_at = Some(now_ms);
             member.refusal_code = Some(RefusalCode::Cancelled);
             member.blocked_by = None;
+            member.pressure_reason = None;
         } else if matches!(member.state.as_str(), "admitted" | "launched") {
             member.state = "retiring".into(); member.reason = "cancellation requested".into();
             member.retirement_requested_at.get_or_insert(now_ms);
@@ -1016,6 +1103,80 @@ mod tests {
     }
     fn runtime(root: &Path) -> ExecRuntime {
         ExecRuntime::new(root.join("runtime"), root.join("logs"))
+    }
+
+    #[test]
+    fn pressure_reasons_survive_reopen_and_are_recorded_in_the_journal() {
+        use fractal_runtime::resource_pressure::{ObservationCause, Reason, Signal};
+        let cases = [
+            (Reason::Pressure { signal: Signal::MemoryFull, value: 1234, threshold: 1000, cgroup: None }, "memory full 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::MemoryFull, value: 1234, threshold: 1000, cgroup: Some("/system.slice/database.service".into()) }, "memory full at /system.slice/database.service 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::MemorySome, value: 1234, threshold: 1000, cgroup: Some("/app.slice/editor.scope".into()) }, "memory some at /app.slice/editor.scope 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::IoFull, value: 1234, threshold: 1000, cgroup: Some("/system.slice/database.service".into()) }, "IO full at /system.slice/database.service 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::IoSome, value: 1234, threshold: 1000, cgroup: Some("/app.slice/editor.scope".into()) }, "IO some at /app.slice/editor.scope 1.234% >= 1.000% threshold"),
+            (Reason::Pressure { signal: Signal::MemoryAvailable, value: 1024, threshold: 2048, cgroup: None }, "memory available 1024 bytes below 2048 bytes"),
+            (Reason::Recovering { remaining: 4567 }, "recovering; 4567 ms"),
+            (Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }, "missing or invalid observation"),
+            (Reason::UnknownObservation { cause: ObservationCause::ObservationGap }, "observation gap"),
+            (Reason::UnknownObservation { cause: ObservationCause::StaleDecision }, "stale sampler decision"),
+            (Reason::UnknownObservation { cause: ObservationCause::NotYetSampled }, "not yet sampled"),
+            (Reason::UnknownObservation { cause: ObservationCause::Io { os_error: Some(13), path: None } }, "IO error (OS error 13)"),
+            (Reason::UnknownObservation { cause: ObservationCause::Io { os_error: Some(13), path: Some("/app.slice/editor.scope/memory.pressure".into()) } }, "IO error at /app.slice/editor.scope/memory.pressure (OS error 13)"),
+            (Reason::UnknownObservation { cause: ObservationCause::TooManyCgroups { path: "/app.slice".into(), limit: 256 } }, "directory enumeration at /app.slice exceeds directory limit 256"),
+            (Reason::UnknownObservation { cause: ObservationCause::TooManyCgroupEntries { path: "/app.slice".into(), limit: 4096 } }, "entry enumeration at /app.slice exceeds entry limit 4096"),
+            (Reason::UnknownObservation { cause: ObservationCause::InvalidPressure { path: "/system.slice/database.service/io.pressure".into() } }, "invalid pressure data at /system.slice/database.service/io.pressure"),
+            (Reason::UnknownObservation { cause: ObservationCause::InvalidMemoryFloor }, "invalid memory floor"),
+        ];
+        for (reason, expected) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("graph.db");
+            let request = request("pressure-diagnostics");
+            {
+                let store = Store::open(&path, "host-a").unwrap();
+                store.start_resource_authority("host-a", "epoch-a").unwrap();
+                let fit = Fit { pressure_blocked: true, pressure_reason: Some(reason.clone()), ..test_fit() };
+                let Admission::Queued { reason: description } = store.request_resource_membership(&request, fit, 1).unwrap()
+                    else { panic!("pressure must queue membership") };
+                assert!(description.contains(expected), "{description}");
+            }
+            let store = Store::open(&path, "host-a").unwrap();
+            let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+            assert_eq!(member.pressure_reason.as_ref(), Some(&reason));
+            assert_eq!(member.blocked_by, Some(BlockedBy::Psi));
+            assert!(member.reason.contains(expected));
+            // Membership invalidations are transactionally durable local observations,
+            // not replicated claims. Read the same journal surface that owns them.
+            let observations = store.observations_for(&dependency(&request.host, &request.name),
+                "resource-membership.changed").unwrap();
+            let fields = &observations.last().unwrap().body["fields"];
+            assert_eq!(fields["pressureReason"], serde_json::to_value(&reason).unwrap());
+            if let Reason::Pressure { cgroup: Some(path), .. } = &reason {
+                assert_eq!(fields["pressureReason"]["cgroup"], path.as_ref());
+                assert!(fields["reason"].as_str().unwrap().contains(path.as_ref()));
+            }
+            assert_eq!(fields["reason"], member.reason);
+            store.start_resource_authority("host-a", "epoch-a").unwrap();
+            let fit = Fit { fifo_predecessor: Some("other-work".into()), ..test_fit() };
+            assert!(matches!(store.request_resource_membership(&request, fit, 2).unwrap(), Admission::Queued { .. }));
+            assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().pressure_reason, None);
+            assert!(matches!(store.request_resource_membership(&request, test_fit(), 3).unwrap(), Admission::Admitted(_)));
+            let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+            assert_eq!(member.pressure_reason, None);
+            assert!(serde_json::to_value(member).unwrap().get("pressureReason").is_none());
+        }
+    }
+
+    #[test]
+    fn cancelling_a_pressure_queued_membership_clears_its_reason() {
+        use fractal_runtime::resource_pressure::Reason;
+        let store = fixture();
+        let request = request("cancel-pressure");
+        let fit = Fit { pressure_blocked: true, pressure_reason: Some(Reason::Recovering { remaining: 100 }), ..test_fit() };
+        store.request_resource_membership(&request, fit, 1).unwrap();
+        store.withdraw_resource_membership(&request.id, &request.owner, 2).unwrap();
+        let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(member.pressure_reason, None);
+        assert_eq!(member.blocked_by, None);
     }
 
     #[test]
@@ -1282,6 +1443,41 @@ mod tests {
             assert!(matches!(store.request_resource_membership(&head, fit.clone(), 2).unwrap(), Admission::Queued { .. }));
             fit.disk = None;
             assert!(matches!(store.request_resource_membership(&sized_request("later", 1), fit, 3).unwrap(), Admission::Admitted(_)));
+        }
+    }
+
+    #[test]
+    fn idle_lane_policy_can_change_coverage_after_a_refused_request() {
+        let store = fixture();
+        let mut enforced = request("enforced");
+        enforced.coverage = Coverage::Enforced;
+        assert!(matches!(store.request_resource_membership(&enforced, Fit { room: None, ..test_fit() }, 1).unwrap(),
+            Admission::Refused { code: RefusalCode::UnsupportedCoverage, .. }));
+        let logical = request("logical");
+        assert!(matches!(store.request_resource_membership(&logical, test_fit(), 2).unwrap(), Admission::Admitted(_)));
+        let policy: String = store.connection.write().query_row(
+            "SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+            rusqlite::params![logical.host,logical.name], |row| row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<InstalledPolicy>(&policy).unwrap(), InstalledPolicy::for_request(&logical));
+    }
+
+    #[test]
+    fn live_lane_policy_refuses_coverage_change_and_names_the_difference() {
+        for state in ["queued", "admitted", "launched", "retiring", "uncertain"] {
+            let store = fixture();
+            let mut enforced = request("enforced");
+            enforced.coverage = Coverage::Enforced;
+            // Queue on every platform, then exercise each state that retains a policy fence.
+            assert!(matches!(store.request_resource_membership(&enforced,
+                Fit { outside_bytes: 128 << 30, ..test_fit() }, 1).unwrap(), Admission::Queued { .. } | Admission::Refused { .. }));
+            store.connection.write().execute("UPDATE resource_memberships_v1 SET state=?1 WHERE id=?2",
+                rusqlite::params![state,enforced.id]).unwrap();
+            let error = store.request_resource_membership(&request("logical"), test_fit(), 2).unwrap_err();
+            assert!(error.to_string().contains("coverage enforced -> logical"), "{state}: {error}");
+            let policy: String = store.connection.write().query_row(
+                "SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+                rusqlite::params![enforced.host,enforced.name], |row| row.get(0)).unwrap();
+            assert_eq!(serde_json::from_str::<InstalledPolicy>(&policy).unwrap(), InstalledPolicy::for_request(&enforced));
         }
     }
 

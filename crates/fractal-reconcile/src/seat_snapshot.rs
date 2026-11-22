@@ -301,6 +301,49 @@ pub fn workspace(state: &Path, subject: &str, operation: &str, member: &MemberSp
     Ok(())
 }
 
+const MAX_COMPANION_DEPTH: usize = 128;
+const MAX_COMPANION_ENTRIES: usize = 100_000;
+
+/// Bound companion content and traversal without following symlinks.
+fn account_companion_bytes(path: &Path, remaining: &mut u64) -> Result<()> {
+    let mut pending = vec![(path.to_path_buf(), 0usize)];
+    let mut entries = 1usize;
+    while let Some((directory, depth)) = pending.pop() {
+        if !fs::symlink_metadata(&directory)?.is_dir() {
+            continue;
+        }
+        // Finish this iterator before opening any descendant directory.
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entries == MAX_COMPANION_ENTRIES {
+                return Err(refusal("snapshot-entry-limit", "snapshot companion entry limit exceeded"));
+            }
+            entries += 1;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                if depth == MAX_COMPANION_DEPTH {
+                    return Err(refusal("snapshot-depth-limit", "snapshot companion depth limit exceeded"));
+                }
+                pending.push((entry.path(), depth + 1));
+            } else if kind.is_file() {
+                *remaining = remaining.checked_sub(entry.metadata()?.len()).ok_or_else(|| {
+                    refusal("snapshot-too-large", "snapshot content exceeds 256 MiB")
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Failed archive construction must not retain its staging file.
+struct PendingPayload<'a>(&'a Path);
+
+impl Drop for PendingPayload<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+    }
+}
+
 /// Freeze the native file after the stop fence. pi and omp have portable per-seat transcripts.
 pub fn seal(
     state: &Path,
@@ -350,13 +393,19 @@ pub fn seal(
             )
         })?;
     let in_place = suspension.mode() == "in-place";
-    if fs::metadata(&transcript)?.len() > MAX_BYTES
-        || (!in_place && fs::metadata(dir.join("workspace.bundle"))?.len() > MAX_BYTES)
-    {
-        return Err(refusal(
-            "snapshot-too-large",
-            "snapshot content exceeds 256 MiB",
-        ));
+    // Imported transcripts can be symlinks: bound their followed file, as before.
+    let transcript_bytes = fs::metadata(&transcript)?.len();
+    let bundle_bytes = if in_place {
+        0
+    } else {
+        fs::metadata(dir.join("workspace.bundle"))?.len()
+    };
+    let mut remaining = MAX_BYTES.checked_sub(transcript_bytes)
+        .and_then(|remaining| remaining.checked_sub(bundle_bytes))
+        .ok_or_else(|| refusal("snapshot-too-large", "snapshot content exceeds 256 MiB"))?;
+    let companion = transcript.with_extension("");
+    if companion.is_dir() {
+        account_companion_bytes(&companion, &mut remaining)?;
     }
     let filename = transcript
         .file_name()
@@ -385,7 +434,9 @@ pub fn seal(
         transcript_path: in_place.then(|| transcript.clone()),
         transcript_sha256: hex::encode(Sha256::digest(fs::read(&transcript)?)),
     };
-    let mut archive = tar::Builder::new(fs::File::create(dir.join("payload.tmp"))?);
+    let pending = dir.join("payload.tmp");
+    let _cleanup = PendingPayload(&pending);
+    let mut archive = tar::Builder::new(fs::File::create(&pending)?);
     archive.follow_symlinks(false);
     if !in_place {
         archive.append_path_with_name(dir.join("workspace.bundle"), "workspace.bundle")?;
@@ -397,7 +448,6 @@ pub fn seal(
     header.set_cksum();
     archive.append_data(&mut header, "manifest.json", &bytes[..])?;
     archive.append_path_with_name(&transcript, Path::new("native").join(&filename))?;
-    let companion = transcript.with_extension("");
     if companion.is_dir() {
         archive.append_dir_all(
             Path::new("native").join(companion.file_name().unwrap()),
@@ -410,9 +460,9 @@ pub fn seal(
     if file.metadata()?.len() > MAX_BYTES {
         return Err(refusal("snapshot-too-large", "snapshot exceeds 256 MiB"));
     }
-    let digest = hex::encode(Sha256::digest(fs::read(dir.join("payload.tmp"))?));
+    let digest = hex::encode(Sha256::digest(fs::read(&pending)?));
     fs::write(dir.join("payload.sha256"), digest)?;
-    fs::rename(dir.join("payload.tmp"), dir.join("payload.tar"))?;
+    fs::rename(&pending, dir.join("payload.tar"))?;
     Ok(Some(manifest))
 }
 
@@ -945,6 +995,87 @@ mod tests {
     }
 
     #[test]
+    fn oversized_companion_refuses_before_creating_a_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let companion = sessions(&state.join("drivers"), "agent/sample", "omp")
+            .join("time_native/nested");
+        fs::create_dir_all(&companion).unwrap();
+        for name in ["first", "second"] {
+            fs::File::create(companion.join(name)).unwrap()
+                .set_len(MAX_BYTES / 2).unwrap();
+        }
+        let error = seal(&state, &store, "agent/sample", &member, &suspension).unwrap_err();
+        assert_eq!(code(&error), "snapshot-too-large");
+        let dir = directory(&state, "snapshot");
+        assert!(!dir.join("payload.tmp").exists());
+        assert!(!dir.join("payload.tar").exists());
+        assert!(!dir.join("payload.sha256").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_symlinked_transcript_refuses_before_creating_a_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let transcript = sessions(&state.join("drivers"), "agent/sample", "omp")
+            .join("time_native.jsonl");
+        let imported = root.path().join("imported.jsonl");
+        fs::rename(&transcript, &imported).unwrap();
+        fs::OpenOptions::new().write(true).open(&imported).unwrap()
+            .set_len(MAX_BYTES + 1).unwrap();
+        std::os::unix::fs::symlink(&imported, &transcript).unwrap();
+        let error = seal(&state, &store, "agent/sample", &member, &suspension).unwrap_err();
+        assert_eq!(code(&error), "snapshot-too-large");
+        let dir = directory(&state, "snapshot");
+        assert!(!dir.join("payload.tmp").exists());
+        assert!(!dir.join("payload.tar").exists());
+    }
+
+    #[test]
+    fn deep_companion_is_accounted_iteratively_and_refuses_beyond_the_depth_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let companion = sessions(&state.join("drivers"), "agent/sample", "omp")
+            .join("time_native");
+        fs::create_dir(&companion).unwrap();
+        let mut leaf = companion.clone();
+        for _ in 0..MAX_COMPANION_DEPTH {
+            leaf.push("d");
+            fs::create_dir(&leaf).unwrap();
+        }
+        fs::write(leaf.join("content"), b"bounded").unwrap();
+        let mut remaining = MAX_BYTES;
+        account_companion_bytes(&companion, &mut remaining).unwrap();
+        assert_eq!(remaining, MAX_BYTES - 7);
+        fs::create_dir(leaf.join("too-deep")).unwrap();
+        let error = seal(&state, &store, "agent/sample", &member, &suspension).unwrap_err();
+        assert_eq!(code(&error), "snapshot-depth-limit");
+        let dir = directory(&state, "snapshot");
+        assert!(!dir.join("payload.tmp").exists());
+        assert!(!dir.join("payload.tar").exists());
+    }
+
+    #[test]
+    fn seal_removes_staging_when_digest_publication_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let dir = directory(&state, "snapshot");
+        fs::create_dir(dir.join("payload.sha256")).unwrap();
+        assert!(seal(&state, &store, "agent/sample", &member, &suspension).is_err());
+        assert!(!dir.join("payload.tmp").exists());
+        assert!(!dir.join("payload.tar").exists());
+    }
+
+    #[test]
     fn a_snapshot_preserves_the_source_index_and_restores_dirty_files_and_conversation() {
         let root = tempfile::tempdir().unwrap();
         let (member, suspension, store) = fixture(root.path());
@@ -967,6 +1098,10 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let payload_dir = directory(&root.path().join("state"), "snapshot");
+        assert!(payload_dir.join("payload.tar").is_file());
+        assert!(payload_dir.join("payload.sha256").is_file());
+        assert!(!payload_dir.join("payload.tmp").exists());
         assert_eq!(fs::read(source.join(".git/index")).unwrap(), index);
         assert_eq!(
             git(source, &["rev-parse", "HEAD"], None, None).unwrap(),

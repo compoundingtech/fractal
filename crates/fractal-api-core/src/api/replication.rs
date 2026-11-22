@@ -80,105 +80,15 @@ pub async fn replication_record(
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }
 
-/// How long a dry-run plan waits for another checkpoint proof, such as the one a daemon runs as
-/// soon as it starts. Half the route's BULK deadline (120 s) leaves the other half for this
-/// plan's own capture and proof; a proof still running then is refused as retryable.
-const PLAN_PROOF_WAIT: Duration = Duration::from_secs(60);
-const PLAN_PROOF_POLL: Duration = Duration::from_millis(250);
-
-pub async fn checkpoint_plan(
-    State(state): State<AppState>,
-    Json(request): Json<crate::store::CheckpointPlanRequest>,
-) -> Result<Json<crate::store::CheckpointPlanView>, ApiError> {
-    let cut = match request.day.as_deref() {
-        Some(day) => crate::store::checkpoint_cut(day).map_err(ApiError::bad)?,
-        None => crate::store::newest_due_cut(client_now_ms()),
-    };
-    plan_waiting_for_proof(&state, cut, PLAN_PROOF_WAIT, || {}).await.map(Json)
-}
-
-/// Plan, and plan again while another proof owns the scratch lock, until `wait` has passed. The
-/// wait is here, on the plan route alone, so the daemon's scheduled proof never waits on a plan.
-/// `busy` runs at each refusal that is followed by another attempt.
-pub(super) async fn plan_waiting_for_proof(
-    state: &AppState,
-    cut: u128,
-    wait: Duration,
-    mut busy: impl FnMut(),
-) -> Result<crate::store::CheckpointPlanView, ApiError> {
-    // Use the timer's clock for the deadline too, so paused-time tests control the whole wait.
-    let deadline = tokio::time::Instant::now() + wait;
-    loop {
-        let error = match plan_once(state, cut).await? {
-            Ok(plan) => return Ok(plan),
-            Err(error) => error,
-        };
-        if error.downcast_ref::<smallclaims::store::checkpoint::CheckpointProofBusy>().is_none() {
-            return Err(ApiError::internal(error));
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(ApiError::bad(FractalError::new(
-                "checkpoint-proof-in-progress",
-                "a checkpoint proof is running; retry shortly",
-            )));
-        }
-        busy();
-        tokio::time::sleep(PLAN_PROOF_POLL.min(remaining)).await;
-    }
-}
-
-async fn plan_once(
-    state: &AppState,
-    cut: u128,
-) -> Result<anyhow::Result<crate::store::CheckpointPlanView>, ApiError> {
-    let scratch = state.state_dir.join("checkpoint");
-    let capture_dir = scratch.join("plan");
-    let capture = state.store.clone();
-    let staged = match blocking_store(move || Ok(capture.checkpoint_staged_set(cut, None, &capture_dir))).await? {
-        Ok(staged) => staged,
-        Err(error) => return Ok(Err(error)),
-    };
-    let store = state.store.clone();
-    // The capture may seal/register the live writer. Planning and proof on the
-    // scratch copy do not borrow it and must not occupy its worker capacity.
-    blocking_external(move || store.checkpoint_plan_view_from_staged(cut, staged, &scratch)).await
-}
-
-pub async fn checkpoint_status(
-    State(state): State<AppState>,
-) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
-    let store = state.store.clone();
-    let peers = state.configured_peers.clone();
-    blocking_store(move || store.checkpoint_status(client_now_ms(), &peers))
-        .await
-        .map(Json)
-}
-
-pub async fn checkpoint_excuse(
-    State(state): State<AppState>,
-    Json(request): Json<crate::store::CheckpointExcuseRequest>,
-) -> Result<Json<ClaimRecord>, ApiError> {
-    let claim = state
-        .store
-        .excuse_checkpoint_writer(&request)
-        .map_err(ApiError::bad)?;
-    signal_changed(&state);
-    Ok(Json(claim))
-}
-
 pub async fn checkpoint_resume(
     State(state): State<AppState>,
     Json(request): Json<crate::store::CheckpointResumeRequest>,
-) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
+) -> Result<Json<crate::store::TrimStatusView>, ApiError> {
     let store = state.store.clone();
     blocking_action(move || store.resume_stopped_trims(&request.actor, &request.reason)).await?;
     signal_changed(&state);
     let store = state.store.clone();
-    let peers = state.configured_peers.clone();
-    blocking_store(move || store.checkpoint_status(client_now_ms(), &peers))
-        .await
-        .map(Json)
+    blocking_store(move || store.trim_status()).await.map(Json)
 }
 
 /// A bound harness reaches this only as itself (`guard_bound_request`); the store allows a person
@@ -247,17 +157,6 @@ pub async fn replication_export(
     .await
 }
 
-/// One page of a checkpoint's manifest, for the replication worker to answer a peer with.
-pub async fn replication_checkpoint_manifest(
-    State(state): State<AppState>,
-    Json(request): Json<crate::store::CheckpointManifestRequest>,
-) -> Result<Json<crate::store::CheckpointManifestPage>, ApiError> {
-    let store = state.store.clone();
-    blocking_store(move || store.checkpoint_manifest_page(&request))
-        .await
-        .map(Json)
-}
-
 /// This node's answers per claim kind, for its replication worker and the peers it serves. They
 /// are computed off the request path and kept, so a request answers at once, `pending` until
 /// they exist.
@@ -280,34 +179,22 @@ pub async fn replication_answers_check(
         .map(|()| Json(serde_json::json!({})))
 }
 
-/// The newest stable checkpoint this node needs a peer's manifest for, if any.
-pub async fn replication_checkpoint_need(
-    State(state): State<AppState>,
-) -> Result<Json<Option<crate::store::CheckpointManifestNeed>>, ApiError> {
-    let store = state.store.clone();
-    blocking_store(move || store.checkpoint_manifest_need())
-        .await
-        .map(Json)
-}
-
-/// Adopt a checkpoint from the manifest the replication worker fetched from a peer.
-pub async fn replication_checkpoint_adopt(
-    State(state): State<AppState>,
-    Json(manifest): Json<crate::store::CheckpointManifest>,
-) -> Result<Json<Vec<crate::store::CheckpointAction>>, ApiError> {
-    let store = state.store.clone();
-    let actions = blocking_action(move || store.adopt_checkpoint(&manifest)).await?;
-    if !actions.is_empty() {
-        signal_changed(&state);
-    }
-    Ok(Json(actions))
-}
-
 pub(super) fn receive_correlation(headers: &axum::http::HeaderMap) -> uuid::Uuid {
     headers.get("x-fractal-exchange-id")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .unwrap_or_else(uuid::Uuid::new_v4)
+}
+
+/// Local connector budget only; it is not part of the peer exchange.
+fn receive_deadline(headers: &axum::http::HeaderMap) -> Result<Option<u128>, ApiError> {
+    headers.get("x-fractal-receive-deadline-unix-ms").map(|value| {
+        value.to_str().ok().filter(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        }).and_then(|value| value.parse().ok()).ok_or_else(|| ApiError::bad(
+            FractalError::new("invalid-receive-deadline", "receive deadline must be absolute Unix milliseconds"),
+        ))
+    }).transpose()
 }
 
 /// One INFO event describes all work charged to this receive, including failed requests.
@@ -325,8 +212,19 @@ pub async fn replication_receive(
     let correlation_id = correlation.to_string();
     let peer = request.peer.clone();
     let envelopes_offered = request.exchange.envelopes.len();
+    use smallclaims::receive_metrics::{ExchangeClass, Outcome};
+    let exchange_class = if request.exchange.envelopes.is_empty()
+        && request.exchange.signatures.is_empty()
+        && request.exchange.claim_member_signatures.is_empty()
+        && request.exchange.signed_envelopes.is_empty()
+    { ExchangeClass::Empty } else { ExchangeClass::Nonempty };
     let metrics = smallclaims::receive_metrics::RequestMetrics::new(correlation_id.clone());
-    let result = replication_receive_inner(state, request, metrics.clone(), correlation).await;
+    let result = match receive_deadline(&headers) {
+        Ok(deadline_unix_ms) => replication_receive_inner(
+            state, request, metrics.clone(), correlation, deadline_unix_ms,
+        ).await,
+        Err(error) => Err(error),
+    };
     let counters = metrics.snapshot();
     use smallclaims::receive_metrics::Finalizer;
     let outcome = match &result {
@@ -335,10 +233,19 @@ pub async fn replication_receive(
         Ok(_) if counters.contended => "contended",
         Ok(_) => counters.projection_error.unwrap_or(if counters.deferred { "deferred" } else { "ok" }),
     };
+    let metric_outcome = match outcome {
+        "ok" => Outcome::Ok,
+        "deferred" => Outcome::Deferred,
+        "contended" => Outcome::Contended,
+        _ => Outcome::Error,
+    };
+    smallclaims::receive_metrics::record_summary(exchange_class, metric_outcome, &counters);
     tracing::info!(
         correlation_id = %correlation_id,
         peer = %peer,
         envelopes_offered,
+        exchange_class = exchange_class.as_str(),
+        metric_outcome = metric_outcome.as_str(),
         envelopes_admitted = counters.envelopes_admitted,
         envelopes_prepared = counters.envelopes_prepared,
         envelope_claims = counters.envelope_claims,
@@ -375,16 +282,16 @@ pub async fn replication_receive(
     result
 }
 
-async fn replication_receive_inner(
-    state: AppState,
-    request: ReplicationReceiveRequest,
+// Only receipt admission is cancellable. Once it commits, finish all follow-up work.
+fn replication_receive_phases(
+    store: &Store,
+    request: &ReplicationReceiveRequest,
     metrics: smallclaims::receive_metrics::RequestMetrics,
-    correlation: uuid::Uuid,
-) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
-    let store = state.store.clone();
-    let response_metrics = metrics.clone();
-    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+    deadline_unix_ms: Option<u128>,
+    after_receipt: impl FnOnce(),
+) -> Result<(ReplicationReceiveResponse, bool, bool), FractalError> {
         let _metrics = metrics.enter();
+        smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         let receipt_timer = smallclaims::receive_metrics::Timer::start(
             smallclaims::receive_metrics::Stage::ReceiptIngest,
         );
@@ -399,14 +306,19 @@ async fn replication_receive_inner(
         }
         let notice_was_visible = store.replication_peer_in_sync_notice(&request.peer);
         // Only the worker's own requests carry a round trip, and only they prove its route out.
-        let receipt = store.receive_replication_exchange_via(
+        let receipt = store.receive_replication_exchange_before(
             &request.peer,
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
-            request.carrier,
-            request.authenticated_member_key.as_deref(),
+            smallclaims::replication::ReceiveOptions {
+                carrier: request.carrier,
+                authenticated_member_key: request.authenticated_member_key.as_deref(),
+                deadline_unix_ms,
+                ..Default::default()
+            },
         )?;
+        after_receipt();
         if store
             .observes_transport_to(&request.peer)
             .map_err(|error| FractalError::new("internal", error.to_string()))?
@@ -504,6 +416,19 @@ async fn replication_receive_inner(
             changed && !quiet_only && projected,
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
+}
+
+async fn replication_receive_inner(
+    state: AppState,
+    request: ReplicationReceiveRequest,
+    metrics: smallclaims::receive_metrics::RequestMetrics,
+    correlation: uuid::Uuid,
+    deadline_unix_ms: Option<u128>,
+) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let store = state.store.clone();
+    let response_metrics = metrics.clone();
+    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+        replication_receive_phases(&store, &request, metrics, deadline_unix_ms, || {})
     })
     .await.inspect_err(|error| {
         smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
@@ -697,19 +622,26 @@ pub(crate) async fn stream_admitted(state: &AppState) {
 pub async fn shard_replication_receive(
     State(state): State<AppState>,
     AxumPath(shard): AxumPath<String>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let deadline_unix_ms = receive_deadline(&headers)?;
     let store = replication_shard(&state, &shard)?;
     let response = blocking_action(move || {
         let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
+        smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         let before_index = store.index().map_err(internal)?;
-        let receipt = store.receive_replication_exchange_via(
+        let receipt = store.receive_replication_exchange_before(
             &request.peer,
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
-            request.carrier,
-            request.authenticated_member_key.as_deref(),
+            smallclaims::replication::ReceiveOptions {
+                carrier: request.carrier,
+                authenticated_member_key: request.authenticated_member_key.as_deref(),
+                deadline_unix_ms,
+                ..Default::default()
+            },
         )?;
         // Held envelopes get another pass when the graph's membership moved since the last one.
         if replication_receive_has_new_data(receipt.received + receipt.signatures)

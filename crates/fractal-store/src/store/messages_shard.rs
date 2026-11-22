@@ -39,7 +39,7 @@ pub const STREAM_INDEX_BASE: u64 = 1 << 48;
 /// row, such as those a rolled-back build admitted without the trigger, and an existing shard
 /// gains an index it lacks. `stream_lifecycle` is this member's record of a stream item's delivery: it is
 /// local, never replicated and outside every digest, as a lifecycle claim would not be.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3a9e73d4f2c3 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h4616bacbf03a owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS stream_lifecycle (
     recorded_at_unix_ms INTEGER NOT NULL,
     PRIMARY KEY (subject, kind, actor)
 );
+-- A native Claude read's proof, found by its reader, session and native message, as the graph
+-- finds one beside its claim (conversation delivery links).
+CREATE INDEX IF NOT EXISTS stream_lifecycle_native_read ON stream_lifecycle(
+    actor,
+    json_extract(fields, '$.native_receipt.session_id'),
+    json_extract(fields, '$.native_receipt.message_id')
+) WHERE kind='message.read';
 INSERT OR IGNORE INTO stream_messages(subject, recipient, sender, store_index)
     SELECT subject, COALESCE(json_extract(body, '$.fields.to'), ''),
            COALESCE(json_extract(body, '$.fields.from'), ''), store_index
@@ -504,7 +511,8 @@ pub fn advertising_hosts(
 /// read as [`advertising_hosts`] reads the shard's feature: a member that lists, counts and
 /// dedupes stream mail as it does graph mail, so a sender may route its seats' mail to the
 /// stream. A host that rolls back to a build without it stops counting once its new start
-/// replicates. Nothing routes on it in this build; the writers move to it in 4c-2b.
+/// replicates. Senders route on it through `message_routing::legacy_reason`, which keeps a
+/// graph claim for any recipient whose host does not advertise it.
 pub fn inbox_hosts(graph: &super::Store, configured_peers: &[String]) -> anyhow::Result<BTreeSet<String>> {
     hosts_advertising(graph, configured_peers, "messages_stream_inbox")
 }
@@ -640,6 +648,7 @@ pub fn open(graph: &Arc<super::Store>, root: &Path) -> anyhow::Result<Arc<GraphS
         .0
         .set(shard.clone())
         .map_err(|_| anyhow::anyhow!("the graph already has a messages shard"))?;
+    graph.fractal.mail_objective_inputs.invalidate();
     Ok(shard)
 }
 
@@ -744,6 +753,13 @@ fn append_item(store: &GraphStore, input: &ClaimInput) -> Result<(ClaimRecord, b
 }
 
 impl Runtime for MessagesRuntime {
+    fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
+        Some(Arc::new(super::observer_mail_inputs::ShardObserver {
+            graph: self.0.clone(),
+            dirty: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
     fn migrate_schema(&self, _connection: &Connection) -> anyhow::Result<()> {
         Ok(())
     }
@@ -876,14 +892,6 @@ impl Runtime for MessagesRuntime {
 
     fn plan_checkpoint_drops(&self, _sealed: &SealedSet) -> DropPlan {
         unreachable!("the messages shard is never checkpointed")
-    }
-
-    fn clear_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn replay_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> anyhow::Result<()> {
-        Ok(())
     }
 
     fn checkpoint_subject_answers(

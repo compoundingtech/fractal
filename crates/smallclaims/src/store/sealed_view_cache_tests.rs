@@ -357,7 +357,6 @@ fn sealed_view_cache_invalidates_after_actual_checkpoint_trim() {
             &digest,
             &[],
             &[tombstone],
-            false,
             &mut actions,
         )
         .unwrap();

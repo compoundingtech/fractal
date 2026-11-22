@@ -23,6 +23,7 @@ pub struct Rebuild {
 
 impl Drop for Rebuild {
     fn drop(&mut self) {
+        crate::otel::copy_roster_attributes(&self.context);
         if !self.admitted {
             self.context.span().end();
         }
@@ -226,17 +227,19 @@ impl RosterAdmissionStore for Store {
         crate::otel::roster_attribute("st.roster.invalidation", reason);
         let span = crate::otel::stage_root("st.roster.rebuild", "cold", None)?;
         let scope = crate::otel::ensure_roster_scope();
-        let context = opentelemetry::Context::new().with_span(span);
-        crate::otel::copy_roster_attributes(&context);
-        context.span().set_attributes([
-            opentelemetry::KeyValue::new("st.roster.mode", "cold"),
-            opentelemetry::KeyValue::new("st.roster.invalidation", reason),
-            opentelemetry::KeyValue::new("st.roster.path", "exact_cold"),
-            opentelemetry::KeyValue::new("st.roster.fresh_requested", false),
-            opentelemetry::KeyValue::new("st.roster.requested_cut", index as i64),
-        ]);
+        let context = opentelemetry::Context::new().with_span(span)
+            .with_value(crate::otel::DeferredRosterAttributes);
         let admitted = self.bind_roster_rebuild(&context);
         let entered = context.clone().attach();
+        for (key, value) in [
+            ("st.roster.mode", opentelemetry::Value::from("cold")),
+            ("st.roster.invalidation", reason.into()),
+            ("st.roster.path", "exact_cold".into()),
+            ("st.roster.fresh_requested", false.into()),
+            ("st.roster.requested_cut", (index as i64).into()),
+        ] {
+            crate::otel::roster_attribute(key, value);
+        }
         Some(Rebuild { context, _entered: entered, admitted, _scope: scope })
     }
 }

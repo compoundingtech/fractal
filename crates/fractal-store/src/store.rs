@@ -17,6 +17,7 @@ macro_rules! message_desired_recipient_match {
 pub mod attention;
 pub mod delivery;
 pub mod effects;
+pub mod native_attach;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
@@ -37,6 +38,7 @@ pub mod missions;
 pub mod continuity;
 pub mod mission_run_query;
 pub mod step_executions;
+mod native_step_clock;
 mod mission_supersession;
 pub mod seats;
 pub mod helper_launchers;
@@ -47,6 +49,9 @@ pub mod observer_refresh;
 pub mod accountable_tests;
 pub mod custom;
 pub mod model_drift;
+pub mod model_fallback;
+pub use model_fallback::{ModelFallbackCause, ModelFallbackObservation};
+pub mod model_return;
 mod notice_authority;
 pub mod ask_digest;
 pub mod auto_resolved;
@@ -80,6 +85,8 @@ mod observation_trim_tests;
 pub mod availability;
 pub mod directive_notes;
 mod declared_admission;
+#[cfg(test)]
+mod runtime_workspace_tests;
 mod agent_charter;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
@@ -123,11 +130,10 @@ pub mod owned_sets;
 pub mod owned_sets_tests;
 #[cfg(test)]
 pub mod usage_fold_tests;
-pub mod usage_credits;
-pub use usage_credits::{UsageCreditReading, UsageCreditSnapshot};
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
+mod observer_mail_inputs;
 pub mod completion_state;
 #[cfg(test)]
 pub mod resource_preparation_fence_tests;
@@ -149,6 +155,7 @@ pub mod stop_deferral;
 pub mod stopping_seat;
 pub mod card_fold;
 mod card_actual;
+mod activity_summary;
 #[cfg(test)]
 pub mod card_fold_tests;
 #[cfg(test)]
@@ -196,8 +203,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::ops::Deref;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result};
@@ -245,18 +250,14 @@ use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
 pub use smallclaims::store::{
-    CHECKPOINT_SPACE_GATE_VERSION, CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
-    CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction,
-    CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest,
-    CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView, CheckpointProof,
-    CheckpointResumeRequest, CheckpointStatusView, ClaimTombstone, CreatedFleetInvite, DropCount,
-    DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue, FleetInviteView,
-    FleetRedemption, FleetRemoval, PendingCheckpointView, ReplicationAdmission, SealTerms,
-    SealedSet, TRIM_CHUNK_ENVELOPES, TrimFault, VerifiedTerms, certificates, checkpoint_build,
-    checkpoint_cut, checkpoint_name, checkpoint_participants, chosen_certificate,
-    configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
-    newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
+    CHECKPOINT_SPACE_GATE_VERSION, CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointAction,
+    CheckpointContext, CheckpointManifest, CheckpointManifestCursor, CheckpointManifestPage,
+    CheckpointManifestRequest, CheckpointResumeRequest, TrimStatusView, ClaimTombstone,
+    CreatedFleetInvite, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue,
+    FleetInviteView, FleetRedemption, FleetRemoval, ReplicationAdmission, SealedSet,
+    TRIM_CHUNK_ENVELOPES, TrimFault, checkpoint_build, checkpoint_cut, checkpoint_name,
+    configure_projection_writer, drop_digest, newest_due_cut, valid_fleet_node_name,
+    check_checkpoint_manifest,
 };
 use smallclaims::windows::holds;
 
@@ -291,7 +292,6 @@ pub mod backup_ledgers;
 pub mod backup_shards;
 pub mod checkpoint_rules;
 pub mod harness_questions;
-pub mod checkpoint_status;
 pub mod human_review_reassignment;
 pub mod mission_eligibility;
 pub use mission_eligibility::MISSING_AGENT_CONDITION;
@@ -360,19 +360,13 @@ pub use limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
-pub mod checkpoint_agreement_tests;
-#[cfg(test)]
 mod local_trim_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]
 pub mod checkpoint_tests;
 #[cfg(test)]
-pub mod checkpoint_identity_reuse_tests;
-#[cfg(test)]
 mod newest_claim_index_tests;
-#[cfg(test)]
-mod checkpoint_proof_span_tests;
 #[cfg(test)]
 pub mod provenance_tests;
 #[cfg(test)]
@@ -399,6 +393,8 @@ pub mod wake_lookup;
 mod gate_runners_tests;
 #[cfg(test)]
 mod wake_lookup_tests;
+#[cfg(test)]
+mod mail_delivery_source_tests;
 #[cfg(test)]
 mod status_summary_tests;
 #[cfg(test)]
@@ -442,21 +438,6 @@ pub use smallclaims::sqlite::STATEMENTS_RUN;
 pub mod checkpoint {
     pub use super::checkpoint_rules::*;
     pub use smallclaims::store::checkpoint::*;
-
-    /// Prove a drop plan on a copy of the store with Fractal's projections and readers.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn prove_on_copy(
-        copy: &std::path::Path,
-        sealed: &SealedSet,
-        plan: &DropPlan,
-    ) -> anyhow::Result<CheckpointProof> {
-        smallclaims::store::checkpoint::prove_on_copy(
-            &super::FractalRuntime::default(),
-            copy,
-            sealed,
-            plan,
-        )
-    }
 }
 
 /// The graph's projection digests over Fractal's shared tables.
@@ -863,7 +844,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc9d1b1deb0cb owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h25bdee44f9bb owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -904,6 +885,10 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
+-- Bridge requests carry the durable admitted count; roster reads seek one current-incarnation row.
+CREATE INDEX IF NOT EXISTS claims_model_return_attempt_index
+ON claims(subject, json_extract(body,'$.fields.incarnation_id'), json_extract(body,'$.fields.model_return_attempt') DESC)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.operation')='model-return-v1';
 CREATE INDEX IF NOT EXISTS claims_idle_action_index
 ON claims(subject, store_index)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle';
@@ -1519,13 +1504,17 @@ ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id
 WHERE kind='harness.timeline'
   AND json_extract(body, '$.fields.entry_type') IN ('message','content')
   AND json_extract(body, '$.fields.role')='assistant';
--- The roster cache's local frontier: the newest agent timeline row a graph cut can see. Only
--- an agent's timeline rows can change a roster card, so this partial covering index bounds the
--- frontier lookup by newer agent timeline rows alone; heartbeats, telemetry and every other
--- subject's observations never enter it, and the scan reads no table row.
+-- The timeline component of the roster cache's local frontier. This partial covering index
+-- excludes heartbeats and other subjects and bounds old-cut seeks by agent timeline rows.
 CREATE INDEX IF NOT EXISTS local_observations_roster_frontier_index
 ON local_observations(id, after_store_index)
 WHERE kind='harness.timeline' AND subject LIKE 'agent/%';
+-- Held main-loop usage can refresh model-drift evidence without publishing a new claim.
+-- Keep its frontier separate from timeline rows so both seeks remain partial-index bounded.
+CREATE INDEX IF NOT EXISTS local_observations_roster_model_frontier_index
+ON local_observations(id, after_store_index)
+WHERE kind='harness.usage' AND subject LIKE 'agent/%'
+  AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative');
 -- Retry receipts survive local observation trimming. Device event IDs are unique
 -- across payload kinds; the device queue expires after seven days.
 CREATE TABLE IF NOT EXISTS client_diagnostic_receipts (
@@ -2492,7 +2481,6 @@ pub struct Store {
     _resource_backfill: Option<resource_references::BackfillWorker>,
     resource_observations: std::sync::OnceLock<std::sync::Mutex<resource_membership::Observations>>,
     resource_clocks: std::sync::OnceLock<std::sync::Mutex<resource_membership::Clocks>>,
-    usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     launch_admission: Arc<launch_freeze::Admission>,
@@ -2669,7 +2657,9 @@ pub fn stale_pull_request_request_tx(
 
 pub fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0 || (13..=fractal_schema::STORAGE_VERSION).contains(&version)
+    // Versions above the default writer format are reached by passes that run after open,
+    // such as the deletion of valid records (`record_bytes`); none needs a migration here.
+    if version == 0 || (13..=smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION).contains(&version)
     {
         return Ok(());
     }
@@ -3036,8 +3026,7 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             storage_census: Default::default(),
             shell_environments: Default::default(),
@@ -3073,8 +3062,7 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             storage_census: Default::default(),
             shell_environments: Default::default(),
@@ -3111,8 +3099,7 @@ impl Store {
         storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             storage_census: Default::default(),
             shell_environments: Default::default(),
@@ -3143,10 +3130,6 @@ impl Store {
             }
         }
         *self.fractal.usage_limits_writers.lock().unwrap() = writers.into_iter().collect();
-        if !self.usage_limits_writers().is_empty() {
-            self.start_usage_credit_backfill()
-                .map_err(|error| FractalError::new("usage-credit-backfill", error.to_string()))?;
-        }
         Ok(())
     }
 
@@ -7045,12 +7028,12 @@ impl Store {
     /// replicated readings newest-first through `claims_subject_kind_accepted_index`. Never a
     /// usage fold or a scan of the seat's usage history: a new incarnation that has not
     /// reported yet reads `None` after one bounded window, however long the seat's history.
-    pub fn latest_usage_model(&self, subject: &str, incarnation: &str) -> Result<Option<String>> {
+    pub fn latest_usage_model_observation(&self, subject: &str, incarnation: &str) -> Result<Option<model_drift::ModelObservation>> {
         /// Response rollups interleave with session readings, and a replaced incarnation's
         /// last readings can land after the new one's first, so the newest session reading
         /// of a live incarnation sits well inside this.
         const LATEST_USAGE_MODEL_WINDOW: i64 = 64;
-        fn model_of(body: &Value, incarnation: &str) -> Option<String> {
+        fn model_of(body: &Value, incarnation: &str) -> Option<model_drift::ModelObservation> {
             let fields = body.get("fields")?;
             if fields.get("incarnation_id").and_then(Value::as_str) != Some(incarnation)
                 || !matches!(
@@ -7060,7 +7043,10 @@ impl Store {
             {
                 return None;
             }
-            fields.get("model").and_then(Value::as_str).map(str::to_owned)
+            Some(model_drift::ModelObservation {
+                model: fields.get("model").and_then(Value::as_str)?.to_owned(),
+                observed_at_ms: fields.get("observed_at_unix_ms").and_then(Value::as_u64).map(u128::from),
+            })
         }
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
@@ -7129,7 +7115,6 @@ impl Store {
             items.push(fault.item);
         }
         items.extend(gates);
-        items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
         let dismissed = self.dismissed_faults()?;
@@ -8071,6 +8056,7 @@ impl Store {
         matches!(
             kind,
             "slo.breach-transition"
+                | "step.execution-phase"
                 | "lane.approved"
                 | "arrangement.edited"
                 | "ordered-membership.edited"
@@ -8130,6 +8116,7 @@ impl Store {
                 | "work.released"
                 | "work.handoff-returned"
                 | "work.extended"
+                | "work.rebound"
                 | "subagent.appeared"
                 | "subagent.renewed"
                 | "subagent.ended"
@@ -9427,14 +9414,13 @@ pub fn desired_row_at(
     if subject.starts_with("message/") {
         if let Some(row) = current_desired_row(connection, subject)? {
             let unchanged: bool = connection.query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                /* sqlite-large-value: allow-for-now lv-hb1f5eb722a0b owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!("SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                  WHERE subject=?1 AND kind='intent.desired' AND store_index>?2)
                  AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                    WHERE subject=?1 AND kind='intent.desired'
                      AND store_index>COALESCE((SELECT last_good_store_index FROM projection_health
                        WHERE aggregate='graph' AND status='healthy'),0)
-                     AND EXISTS(SELECT 1 FROM replica_records
-                       WHERE claim_id=claims.id AND state='valid'))",
+                     AND {})", smallclaims::store::record_bytes::admitted_claim_sql("claims")),
                 params![subject,at_index], |row| row.get(0),
             )?;
             if unchanged { return Ok(Some(row)); }
@@ -12237,7 +12223,12 @@ pub fn append_claim_tx_with_assistant_answer(
     authorization: Option<&assistant_write::AssistantWriteAuthorization>,
 ) -> Result<ClaimRecord> {
     append_claim_tx_admitted(transaction, origin, subject, kind, actor, body, predecessors, forced_batch,
-        authorization, false)
+        authorization.map(ClaimAppendAuthorization::AssistantAnswer), false)
+}
+
+enum ClaimAppendAuthorization<'a> {
+    AssistantAnswer(&'a assistant_write::AssistantWriteAuthorization),
+    NativeAttach(native_attach::WriteAuthorization),
 }
 
 /// `source_forced`: the subject's owning set already admitted this declaration as a forced
@@ -12252,9 +12243,21 @@ fn append_claim_tx_admitted(
     body: &Value,
     predecessors: &[String],
     forced_batch: Option<&str>,
-    authorization: Option<&assistant_write::AssistantWriteAuthorization>,
+    authorization: Option<ClaimAppendAuthorization<'_>>,
     source_forced: bool,
 ) -> Result<ClaimRecord> {
+    let authorization = match authorization {
+        Some(ClaimAppendAuthorization::NativeAttach(_))
+            if native_attach::protected(kind) && actor == Some(native_attach::REQUESTER) => None,
+        Some(ClaimAppendAuthorization::NativeAttach(_)) => {
+            return Err(native_attach::writer_required().into());
+        }
+        _ if native_attach::protected(kind) => {
+            return Err(native_attach::writer_required().into());
+        }
+        Some(ClaimAppendAuthorization::AssistantAnswer(authorization)) => Some(authorization),
+        None => None,
+    };
     let mut assistant_body;
     let body = if let Some(authorization) = authorization {
         if kind != "message.sent" || actor != Some(authorization.principal())
@@ -19759,7 +19762,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-override','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.rebound','work.person-asked','work.person-reassigned','work.person-done','work.person-override','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -20244,6 +20247,35 @@ pub fn project_mission_run_update(
                         not_before_unix_ms=?4, activated_at_unix_ms=NULL, updated_at_unix_ms=?5,
                         goals=COALESCE(?6, goals) WHERE subject=?1").map_err(internal)?.execute(
                 /* sqlite-large-value: allow-for-now lv-h9f9fbaefd206 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![claim.subject, attempt, fields.get("reason").and_then(Value::as_str), not_before, claim.accepted_at_unix_ms.to_string(), goals],
+            )
+            .map_err(internal)?;
+        return Ok(());
+    }
+    if claim.kind == "work.rebound" {
+        // A seat that resumed the same native session under a new incarnation keeps the leases
+        // that incarnation's predecessor held. The guards make replay idempotent: only the
+        // exact lease the fact names moves, once, whatever else has happened since.
+        let (Some(attempt), Some(claimant), Some(from), Some(to)) = (
+            fields.get("attempt").and_then(Value::as_u64),
+            fields.get("claimant").and_then(Value::as_str),
+            fields.get("from_incarnation").and_then(Value::as_str),
+            fields.get("to_incarnation").and_then(Value::as_str),
+        ) else {
+            return Ok(());
+        };
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h1c9bf15e6dc5 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_incarnation=?2, updated_at_unix_ms=?3
+                 WHERE subject=?1 AND attempt=?4 AND lease_owner=?5 AND lease_incarnation=?6
+                   AND status IN ('claimed','working','verifying','blocked','waiting-person')",
+                params![
+                    claim.subject,
+                    to,
+                    claim.accepted_at_unix_ms.to_string(),
+                    attempt,
+                    claimant,
+                    from
+                ],
             )
             .map_err(internal)?;
         return Ok(());
@@ -22730,7 +22762,7 @@ pub fn step_execution_clock_at(
 /// The claim kinds a step's execution timing folds. The cache key and the fold read the same set.
 const STEP_TIMING_KINDS: &str = "'step-run.state','step-run.carried','work.claimed','work.renewed',\
     'work.progress','work.submitted','work.failed','work.released','work.extended',\
-    'work.person-asked','work.person-done','work.person-cancelled'";
+    'work.person-asked','work.person-done','work.person-cancelled','step.execution-phase'";
 
 /// A step's step and work events in canonical order, as its execution timing folds them.
 pub fn step_timing_events(
@@ -22894,6 +22926,9 @@ pub fn fold_step_clock(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> StepTiming {
+    if let Some(timing) = native_step_clock::fold(events, attempt, snapshot_unix_ms, currently_active) {
+        return timing;
+    }
     let ClockFold {
         mut started,
         mut elapsed,
@@ -24935,6 +24970,9 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        if native_attach::protected(&input.kind) {
+            return Err(native_attach::writer_required());
+        }
         if input.kind == observation_minutes::KIND {
             return Err(FractalError::new("claim-write-forbidden", "phone minutes require authenticated observation admission"));
         }
