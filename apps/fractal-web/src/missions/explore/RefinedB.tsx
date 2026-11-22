@@ -71,7 +71,7 @@ const Inspector = ({ mission, linked, onOpen }: { readonly mission: ExploreMissi
   const step = mission.steps.find(s => s.id === linked.selected)
   if (step === undefined) return <aside style={{ padding: 16, color: C.muted, fontSize: 12 }}>Pick a step in the graph or the trace.</aside>
   return <aside aria-label={`${step.title} details`} style={{ display: 'flex', flexDirection: 'column', gap: 14, padding: 16 }}>
-    <StepCard mission={mission} step={step} cursor={linked.cursor} />
+    <div style={{ fontSize: 12, lineHeight: '16px' }}><StepCard mission={mission} step={step} cursor={linked.cursor} /></div>
     {(step.work ?? []).length > 0 ? <section aria-label="Linked work"><div style={{ color: C.muted, fontSize: 11, marginBlockEnd: 4 }}>Linked work</div>
       <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>{step.work!.map((w, i) => <WorkRow key={i} work={w} now={mission.now} />)}</ul></section> : null}
     {(step.excerpts ?? []).length > 0 ? <section aria-label="From the conversation"><div style={{ color: C.muted, fontSize: 11, marginBlockEnd: 4 }}>From the conversation</div>

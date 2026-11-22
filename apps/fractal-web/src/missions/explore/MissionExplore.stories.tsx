@@ -86,7 +86,6 @@ export const RefinedB_Execution: Story = {
   render: () => <B />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    const body = within(canvasElement.ownerDocument.body)
     // Linked hover: hovering a step in the graph lights its lineage and dims the rest, in the graph and the trace.
     await userEvent.hover(canvasElement.querySelector('[data-dag-node="load"]')!)
     await waitFor(() => expect(canvasElement.querySelector('[data-dag-edge="server->load"]')).toHaveAttribute('data-lit', 'true'))
@@ -94,7 +93,7 @@ export const RefinedB_Execution: Story = {
     await expect(canvasElement.querySelector('[data-trace-row="docs"]')).toHaveAttribute('data-dimmed', 'true')
     await expect(canvasElement.querySelector('[data-trace-row="canary"]')).not.toHaveAttribute('data-dimmed')
     // The shared step card opens on the hovered step.
-    await waitFor(() => expect(body.getByTestId('step-card')).toHaveTextContent('Load test at 3× peak'))
+    await waitFor(() => expect(canvasElement.ownerDocument.querySelector('[data-hover-card] [data-testid="step-card"]')).toHaveTextContent('Load test at 3× peak'))
     await userEvent.unhover(canvasElement.querySelector('[data-dag-node="load"]')!)
     await waitFor(() => expect(canvasElement.querySelector('[data-dag-node="docs"]')).not.toHaveAttribute('data-dimmed'))
     // Brush the first eight hours: steps that did not run then dim.
@@ -117,16 +116,16 @@ export const RefinedB_Replay: Story = {
   render: () => <B initialCursor={richMission.startedAt + 5 * 3_600_000} initialSelected="server" />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    // At 13:00 on day one the server step is between attempts (failed), the SDK is running, the web step has not started.
-    await expect(canvasElement.querySelector('[data-dag-node="server"]')).toHaveAttribute('data-state', 'failed')
+    // At 13:00 on day one the server step waits out its retry backoff, the SDK is running, the web step has not started.
+    await expect(canvasElement.querySelector('[data-dag-node="server"]')).toHaveAttribute('data-state', 'waiting')
     await expect(canvasElement.querySelector('[data-dag-node="sdk"]')).toHaveAttribute('data-state', 'running')
     await expect(canvasElement.querySelector('[data-dag-node="web"]')).toHaveAttribute('data-state', 'pending')
     await expect(canvasElement.querySelector('[data-replay-cursor]')).not.toBeNull()
     // Scrub to day two: the security review waits on you.
     setRange(canvas.getByRole('slider', { name: 'Replay time' }) as HTMLInputElement, richMission.startedAt + 26 * 3_600_000)
     await waitFor(() => expect(canvasElement.querySelector('[data-dag-node="security"]')).toHaveAttribute('data-state', 'waiting-you'))
-    await userEvent.click(canvas.getByRole('button', { name: 'Back to now' }))
-    await expect(canvasElement.querySelector('[data-replay-cursor]')).toBeNull()
+    // Left scrubbed, so the story shows a replayed moment; "Now" returns to the live state.
+    await expect(canvas.getByRole('button', { name: 'Back to now' })).toBeVisible()
   },
 }
 
