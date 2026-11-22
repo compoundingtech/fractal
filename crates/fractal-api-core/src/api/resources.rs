@@ -42,11 +42,12 @@ fn require_exec_platform(macos: bool, lane: &str, helper: bool) -> Result<u32, A
     Ok(slots.len() as u32)
 }
 
-/// A run credential owns its exact attempt; an agent additionally owns its native invocation.
+/// A run credential owns its exact attempt; an agent owns every live invocation of its current incarnation.
 /// Missing/stale native evidence never falls back to local-operator authority.
 struct CallerOwner {
     owner: crate::store::resource_membership::Owner,
     agent: bool,
+    live_owners: Vec<crate::store::resource_membership::Owner>,
 }
 
 impl CallerOwner {
@@ -55,12 +56,13 @@ impl CallerOwner {
         if let Some(Extension(BoundRun(binding))) = run {
             return Ok(Some(Self { owner: crate::store::resource_membership::Owner {
                 run: binding.run, step: binding.step_run, attempt: binding.attempt, invocation: None,
-            }, agent: false }));
+            }, agent: false, live_owners: Vec::new() }));
         }
         match bound {
-            Some(BoundActor::Agent(agent)) => Ok(Some(Self {
-                owner: state.store.shell_resource_agent_owner(&agent).map_err(owner_error)?, agent: true,
-            })),
+            Some(BoundActor::Agent(agent)) => {
+                let live_owners = state.store.shell_resource_agent_owners(&agent).map_err(owner_error)?;
+                Ok(Some(Self { owner: live_owners[0].clone(), agent: true, live_owners }))
+            },
             Some(BoundActor::Run(_)) => Err(ApiError::bad(FractalError::new(
                 "resource-exec-owner", "run caller has no verified attempt binding"))),
             None => Ok(None),
@@ -68,8 +70,8 @@ impl CallerOwner {
     }
 
     fn owns(&self, owner: &crate::store::resource_membership::Owner) -> bool {
+        if self.agent { return self.live_owners.contains(owner); }
         self.owner.run == owner.run && self.owner.step == owner.step && self.owner.attempt == owner.attempt
-            && (!self.agent || self.owner.invocation == owner.invocation)
     }
 }
 
@@ -84,7 +86,7 @@ fn authorize_execution(caller: Option<&CallerOwner>, execution: &Execution) -> R
 fn request_scope<'a>(state: &'a AppState, caller: Option<&'a CallerOwner>) -> crate::store::shell_resources::RequestScope<'a> {
     use crate::store::shell_resources::RequestScope;
     match caller {
-        Some(caller) if caller.agent => RequestScope::Agent { owner: &caller.owner },
+        Some(caller) if caller.agent => RequestScope::Agent { owner: &caller.owner, live_owners: &caller.live_owners },
         Some(caller) => RequestScope::Run { run: &caller.owner.run, step: &caller.owner.step, attempt: caller.owner.attempt },
         None => RequestScope::Local { person: state.owning_person.as_deref(), host: &state.node },
     }
@@ -101,13 +103,23 @@ pub(super) async fn cancel_request(State(state): State<AppState>, bound: Option<
     let caller = CallerOwner::resolve(&state, bound, run)?;
     let request_id = uuid::Uuid::parse_str(&request_id).map_err(|_| ApiError::bad(FractalError::new("invalid-resource-request-id", "request-id must be a UUID")))?;
     let execution = state.store.cancel_shell_resource_by_request(&request_scope(&state, caller.as_ref()), request_id,
-        u64::try_from(client_now_ms()).unwrap_or(u64::MAX)).map_err(ApiError::internal)?;
+        u64::try_from(client_now_ms()).unwrap_or(u64::MAX)).map_err(cancel_error)?;
     if let Some(execution) = &execution { authorize_execution(caller.as_ref(), execution)?; }
     state.notify.notify_one();
     state.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
     Ok(Json(crate::store::shell_resources::RequestCancellation {
         request_id: request_id.to_string(), cancelled: true, tombstone: execution.is_none(), execution: execution.map(present),
     }))
+}
+
+fn cancel_error(error: anyhow::Error) -> ApiError {
+    let mut error = ApiError::internal(error);
+    // Only a stale cancellation snapshot is transient; intent conflicts remain 409.
+    // A 503 preserves the existing error envelope's retryable classification.
+    if error.details.get("reason").and_then(Value::as_str) == Some("resource-owner-set-changed") {
+        error.status = StatusCode::SERVICE_UNAVAILABLE;
+    }
+    error
 }
 
 
@@ -152,11 +164,14 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
     })().map_err(|error| ApiError::bad(FractalError::new("resource-exec-refused", error.to_string())))?;
     command.lane.host.clone_from(&state.node);
     let caller = CallerOwner::resolve(&state, bound, run)?;
-    let local_operator = caller.is_none();
     let agent_caller = caller.as_ref().is_some_and(|caller| caller.agent);
     if let Some(request_id) = command.request_id.as_deref() {
         let request_id = uuid::Uuid::parse_str(request_id).map_err(|_| ApiError::bad(FractalError::new("invalid-resource-request-id", "request-id must be a UUID")))?;
-        command.id = crate::store::shell_resources::request_execution_id(&request_scope(&state, caller.as_ref()), request_id).map_err(ApiError::internal)?;
+        let scope = request_scope(&state, caller.as_ref());
+        command.id = match state.store.shell_resource_by_request(&scope, request_id).map_err(ApiError::internal)? {
+            Some(existing) => existing.command.id,
+            None => crate::store::shell_resources::request_execution_id(&scope, request_id).map_err(ApiError::internal)?,
+        };
         command.request_id = Some(request_id.to_string());
         let id = format!("shell:{}", command.id);
         command.lane.id.clone_from(&id);
@@ -176,7 +191,7 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
     };
     if let Some(existing) = state.store.shell_resource_if_exists(&command.id).map_err(ApiError::internal)? {
         authorize_execution(caller.as_ref(), &existing)?;
-        if existing.command.lane.owner.run != owner.run {
+        if !agent_caller && existing.command.lane.owner.run != owner.run {
             return Err(ApiError::bad(FractalError::new("resource-exec-owner",
                 "shell execution belongs to another execution owner")));
         }
@@ -186,9 +201,7 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
         ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?;
     if let Some(parent) = &command.parent {
         let record = state.store.resource_membership_for_grant(parent).map_err(ApiError::internal)?;
-        if record.request.owner.run != owner.run || (!local_operator
-            && (record.request.owner.step != owner.step || record.request.owner.attempt != owner.attempt))
-            || (agent_caller && record.request.owner.invocation != owner.invocation) {
+        if caller.as_ref().map_or(record.request.owner.run != owner.run, |caller| !caller.owns(&record.request.owner)) {
             return Err(ApiError::bad(FractalError::new("resource-exec-owner", "nested membership belongs to another execution owner")));
         }
         validate_parent(&command, &record.request, &record.state).map_err(ApiError::internal)?;
@@ -361,6 +374,21 @@ mod tests {
         assert_eq!(value, json!({ "execId":"nested-id", "generation":"nested-generation", "state":"running",
             "cgroupPath":"/user.slice/exact-child.scope", "rootExecId":"outer-root-id",
             "requestId":"root-request-id", "lane":"checks", "class":"check", "profile":"check.unit" }));
+    }
+
+    #[test]
+    fn cancellation_owner_change_is_retryable_but_intent_conflicts_are_not() {
+        let error = cancel_error(FractalError::new("resource-request-conflict",
+            "invocation ownership changed during cancellation; retry the same cancellation request")
+            .with_detail("retryable", true).with_detail("reason", "resource-owner-set-changed").into());
+        assert_eq!(error.code, "resource-request-conflict");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        let envelope = client_error_envelope(error.status,
+            &json!({"code":error.code,"message":error.message,"details":error.details}), "request");
+        assert_eq!(envelope["retryable"], true);
+        let intent = cancel_error(FractalError::new("resource-request-conflict", "different execution intent").into());
+        assert_eq!(intent.status, StatusCode::CONFLICT);
+        assert!(!client_error_retryable(intent.status, Some(&intent.code)));
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -707,6 +735,288 @@ mod tests {
         (status, value)
     }
 
+    fn observe_resource_agent(state: &AppState, agent: &str, incarnation: &str) {
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"worker","incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":incarnation})),
+        ] {
+            state.store.append_claim(&crate::model::ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+                fields:serde_json::from_value(fields).unwrap(), evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
+        }
+    }
+
+    fn resource_agent_receipt(state: &AppState, agent: &str, operation: &str,
+        owner: Option<&Owner>, phase: fractal_schema::invocation::InvocationPhase) {
+        let mut receipt = crate::store::invocation_receipts::native_receipt(operation, agent,
+            &json!({"subject":{"kind":"agent"},"launch_member":{"driver":"omp","environment":{}}}),
+            phase, Some(&json!({"verification":"operation-incarnation","incarnation":"exact"}))).unwrap().unwrap();
+        if let Some(owner) = owner {
+            receipt.owner_run = Some(owner.run.clone());
+            receipt.owner_step = Some(owner.step.clone());
+            receipt.owner_attempt = Some(owner.attempt);
+        }
+        state.store.append_claim(&crate::model::ClaimInput { subject:agent.into(),
+            kind:fractal_schema::invocation::KIND.into(), actor:None,
+            fields:serde_json::from_value(serde_json::to_value(receipt).unwrap()).unwrap(),
+            evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
+    }
+
+    fn resource_agent_command(state: &AppState, request_id: uuid::Uuid) -> Command {
+        let id = uuid::Uuid::now_v7().to_string();
+        let transport = format!("shell:{id}");
+        let mut lane = request();
+        lane.id = transport.clone();
+        lane.host.clone_from(&state.node);
+        lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport) };
+        Command { id, lane, request_id:Some(request_id.to_string()), argv:vec!["true".into()],
+            cwd:"/work".into(), environment:BTreeMap::new(), timeout_ms:None, parent:None }
+    }
+
+    async fn resource_agent_execution(state: &AppState, agent: &str, request_id: uuid::Uuid) -> Execution {
+        let command = resource_agent_command(state, request_id);
+        let (status, body) = bound_request(state, Some(agent), None, "POST",
+            "/v1/internal/resources/exec", serde_json::to_value(command).unwrap()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let mut execution: Execution = serde_json::from_value(body).unwrap();
+        execution.state = "completed".into();
+        state.store.update_shell_resource(&execution).unwrap();
+        state.store.shell_resource(&execution.command.id).unwrap()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn cancel_before_acceptance_survives_primary_owner_ending() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        let key = uuid::Uuid::now_v7();
+        let (status, body) = bound_request(&state, Some(agent), None, "POST",
+            &format!("/v1/internal/resources/by-request/{key}/cancel"), Value::Null).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["tombstone"], true);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Ended);
+        assert_eq!(state.store.shell_resource_agent_owners(agent).unwrap()[0].invocation.as_deref(), Some("invocation/a"));
+        let error = submit(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            Json(resource_agent_command(&state, key))).await.unwrap_err();
+        assert_eq!(error.code, "resource-request-cancelled");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn newest_ended_owner_falls_back_for_uncancelled_request() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Ended);
+        let execution = resource_agent_execution(&state, agent, uuid::Uuid::now_v7()).await;
+        assert_eq!(execution.command.lane.owner.invocation.as_deref(), Some("invocation/a"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn later_observation_reorders_primary_without_losing_cancellation() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        let key = uuid::Uuid::now_v7();
+        let Json(cancelled) = cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            AxumPath(key.to_string())).await.unwrap();
+        assert!(cancelled.tombstone);
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Observed);
+        assert_eq!(state.store.shell_resource_agent_owners(agent).unwrap()[0].invocation.as_deref(), Some("invocation/a"));
+        let error = submit(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            Json(resource_agent_command(&state, key))).await.unwrap_err();
+        assert_eq!(error.code, "resource-request-cancelled");
+        let execution = resource_agent_execution(&state, agent, uuid::Uuid::now_v7()).await;
+        assert_eq!(execution.command.lane.owner.invocation.as_deref(), Some("invocation/a"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn cancellation_reaches_owner_that_appears_after_acknowledgement() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        let key = uuid::Uuid::now_v7();
+        let Json(cancelled) = cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            AxumPath(key.to_string())).await.unwrap();
+        assert!(cancelled.tombstone);
+        resource_agent_receipt(&state, agent, "c", None, InvocationPhase::Started);
+        let error = submit(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            Json(resource_agent_command(&state, key))).await.unwrap_err();
+        assert_eq!(error.code, "resource-request-cancelled");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn owner_ending_during_submission_does_not_lose_acknowledged_cancellation() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
+        let caller = CallerOwner::resolve(&state, Some(BoundActor::Agent(agent.into())), None).unwrap().unwrap();
+        let key = uuid::Uuid::now_v7();
+        // Pause after API owner resolution, before the store's acceptance transaction.
+        let mut command = resource_agent_command(&state, key);
+        command.id = crate::store::shell_resources::request_execution_id(&request_scope(&state, Some(&caller)), key).unwrap();
+        command.lane.owner = caller.owner;
+        resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Ended);
+        let Json(cancelled) = cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+            AxumPath(key.to_string())).await.unwrap();
+        assert!(cancelled.tombstone);
+        let error = state.store.submit_shell_resource(command, u64::try_from(client_now_ms()).unwrap()).unwrap_err();
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "resource-request-cancelled");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn agent_resources_survive_work_claim() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "before-claim", None, InvocationPhase::Started);
+        let request_id = uuid::Uuid::now_v7();
+        let execution = resource_agent_execution(&state, agent, request_id).await;
+        let step = state.store.start_program_step_for_tests();
+        let credential = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+        let binding = state.store.run_binding(&credential).unwrap();
+        let run_owner = Owner { run:binding.run, step:binding.step_run, attempt:binding.attempt, invocation:None };
+        resource_agent_receipt(&state, agent, "after-claim", Some(&run_owner), InvocationPhase::Started);
+        assert_ne!(state.store.shell_resource_agent_owner(agent).unwrap(), execution.command.lane.owner);
+        for (method, path) in [
+            ("GET", format!("/v1/internal/resources/{}", execution.command.id)),
+            ("POST", format!("/v1/internal/resources/{}/wait?after=0", execution.command.id)),
+            ("POST", format!("/v1/internal/resources/{}/cancel", execution.command.id)),
+            ("GET", format!("/v1/internal/resources/by-request/{request_id}")),
+            ("POST", format!("/v1/internal/resources/by-request/{request_id}/cancel")),
+        ] {
+            let (status, body) = bound_request(&state, Some(agent), None, method, &path, Value::Null).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{method} {path}: {body}");
+            if path.contains("by-request") { assert_eq!(body["execution"]["command"]["id"], execution.command.id); }
+        }
+        let (status, body) = bound_request(&state, Some(agent), None, "GET", "/v1/internal/resources", Value::Null).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["executions"][0]["command"]["id"], execution.command.id);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn earlier_invocation_reads_execution_created_after_work_claim() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "before-claim", None, InvocationPhase::Started);
+        let earlier = state.store.shell_resource_agent_owner(agent).unwrap();
+        let step = state.store.start_program_step_for_tests();
+        let credential = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+        let binding = state.store.run_binding(&credential).unwrap();
+        let owner = Owner { run:binding.run, step:binding.step_run, attempt:binding.attempt, invocation:None };
+        resource_agent_receipt(&state, agent, "after-claim", Some(&owner), InvocationPhase::Started);
+        let key = uuid::Uuid::now_v7();
+        let execution = resource_agent_execution(&state, agent, key).await;
+        let caller = CallerOwner { owner:earlier, agent:true,
+            live_owners:state.store.shell_resource_agent_owners(agent).unwrap() };
+        authorize_execution(Some(&caller), &execution).unwrap();
+        assert_eq!(state.store.shell_resource_by_request(&request_scope(&state, Some(&caller)), key)
+            .unwrap().unwrap().command.id, execution.command.id);
+        let (status, body) = bound_request(&state, Some(agent), None, "GET",
+            &format!("/v1/internal/resources/{}", execution.command.id), Value::Null).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn different_agent_cannot_access_shell_execution() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        let other = "agent/host-a/other";
+        for agent in [agent, other] {
+            observe_resource_agent(&state, agent, "exact");
+            resource_agent_receipt(&state, agent, agent, None, InvocationPhase::Started);
+        }
+        let execution = resource_agent_execution(&state, agent, uuid::Uuid::now_v7()).await;
+        for (method, suffix) in [("GET",""), ("POST","/wait?after=0"), ("POST","/cancel")] {
+            let (status, body) = bound_request(&state, Some(other), None, method,
+                &format!("/v1/internal/resources/{}{suffix}", execution.command.id), Value::Null).await;
+            assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["code"], "resource-exec-owner");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn ended_or_other_incarnation_cannot_access_shell_execution() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "old", None, InvocationPhase::Started);
+        let execution = resource_agent_execution(&state, agent, uuid::Uuid::now_v7()).await;
+        resource_agent_receipt(&state, agent, "current", None, InvocationPhase::Started);
+        resource_agent_receipt(&state, agent, "old", None, InvocationPhase::Ended);
+        for incarnation in ["exact", "replacement"] {
+            if incarnation == "replacement" { observe_resource_agent(&state, agent, incarnation); }
+            for (method, suffix) in [("GET",""), ("POST","/wait?after=0"), ("POST","/cancel")] {
+                let (status, body) = bound_request(&state, Some(agent), None, method,
+                    &format!("/v1/internal/resources/{}{suffix}", execution.command.id), Value::Null).await;
+                assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+                assert_eq!(body["code"], "resource-exec-owner");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn run_credential_keeps_exact_step_attempt_scope_after_agent_claim() {
+        use fractal_schema::invocation::InvocationPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        observe_resource_agent(&state, agent, "exact");
+        resource_agent_receipt(&state, agent, "before-claim", None, InvocationPhase::Started);
+        let earlier = resource_agent_execution(&state, agent, uuid::Uuid::now_v7()).await;
+        let step = state.store.start_program_step_for_tests();
+        let credential = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+        let binding = state.store.run_binding(&credential).unwrap();
+        let owner = Owner { run:binding.run, step:binding.step_run, attempt:binding.attempt, invocation:None };
+        resource_agent_receipt(&state, agent, "after-claim", Some(&owner), InvocationPhase::Started);
+        let newer = resource_agent_execution(&state, agent, uuid::Uuid::now_v7()).await;
+        for (execution, expected) in [(&earlier, axum::http::StatusCode::UNPROCESSABLE_ENTITY),
+            (&newer, axum::http::StatusCode::OK)] {
+            for (method, suffix) in [("GET",""), ("POST","/wait?after=0"), ("POST","/cancel")] {
+                let (status, body) = bound_request(&state, None, Some(&credential), method,
+                    &format!("/v1/internal/resources/{}{suffix}", execution.command.id), Value::Null).await;
+                assert_eq!(status, expected, "{body}");
+                if !status.is_success() { assert_eq!(body["code"], "resource-exec-owner"); }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn bound_resource_routes_enforce_native_ownership_through_transport_guard() {
         use axum::http::StatusCode;
@@ -814,7 +1124,7 @@ mod tests {
     #[test]
     fn owner_scope_separates_attempts_steps_and_agent_invocations() {
         let owner = request().owner;
-        let caller = CallerOwner { owner:owner.clone(), agent:true };
+        let caller = CallerOwner { owner:owner.clone(), agent:true, live_owners:vec![owner.clone()] };
         assert!(caller.owns(&owner));
         let mut other = owner.clone(); other.attempt += 1;
         assert!(!caller.owns(&other));
@@ -824,7 +1134,7 @@ mod tests {
         assert!(!caller.owns(&other));
         let mut other = owner.clone(); other.invocation = Some("another-invocation".into());
         assert!(!caller.owns(&other));
-        let run = CallerOwner { owner, agent:false };
+        let run = CallerOwner { owner, agent:false, live_owners:Vec::new() };
         assert!(run.owns(&other), "run scope is the authenticated step attempt, not one shell ID");
     }
 }
