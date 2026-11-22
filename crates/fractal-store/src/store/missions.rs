@@ -1335,9 +1335,42 @@ impl Store {
     /// otherwise idle daemon.
     pub fn mission_run_for_reconcile(&self, id: &str) -> Result<MissionRunView> {
         let connection = self.readers.get();
+        self.record_mission_read_reconstruction();
         let view = mission_run_view_for_reconcile_tx(&connection, id)?;
         note_run_view_reads(&view);
         Ok(view)
+    }
+
+    /// Post-evaluation state reduction needs only current effective states. Do not rebuild
+    /// pinned definitions, execution clocks, handoffs, loops or lineage a second time.
+    pub fn mission_run_state_for_evaluation(&self, id: &str) -> Result<MissionRunView> {
+        self.read_snapshot_unindexed(|| {
+            let connection = self.readers.get();
+            let mut run = mission_run_header_tx(&connection, id)?;
+            run.steps = mission_generation_steps_tx(&connection, &run.generation)?;
+            let at = now_ms();
+            for step in &mut run.steps {
+                apply_effective_step_state(&connection, step, at)?;
+            }
+            note_run_view_reads(&run);
+            self.extension::<MissionReadWork>().state_refreshes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(run)
+        })
+    }
+
+    /// Count actual full mission reconstructions separately from cheap state reductions.
+    pub fn record_mission_read_reconstruction(&self) {
+        self.extension::<MissionReadWork>().reconstructions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn mission_read_work(&self) -> serde_json::Value {
+        let work = self.extension::<MissionReadWork>();
+        serde_json::json!({
+            "reconstructions": work.reconstructions.load(std::sync::atomic::Ordering::Relaxed),
+            "state_refreshes": work.state_refreshes.load(std::sync::atomic::Ordering::Relaxed),
+        })
     }
 
     /// Return the work fields needed by the reconciler without computing CLI-only
@@ -2526,6 +2559,12 @@ pub fn note_run_view_reads(view: &MissionRunView) {
     for step in &view.steps {
         smallclaims::touched::note_read(|| step.subject.clone());
     }
+}
+
+#[derive(Default)]
+struct MissionReadWork {
+    reconstructions: std::sync::atomic::AtomicU64,
+    state_refreshes: std::sync::atomic::AtomicU64,
 }
 
 /// Current held and ready agent steps, for every seat or for one seat.

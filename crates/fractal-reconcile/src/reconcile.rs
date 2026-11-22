@@ -2676,7 +2676,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if !recipient.is_empty() {
                     self.incremental.touch(&format!("mailbox:{recipient}"));
                 }
-                self.incremental.touch(&subject);
+                self.incremental.touch_subject(&subject);
             }
             after = next;
             *seen = Some(after);
@@ -3625,13 +3625,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Eval cleanup can delete desired rows without appending a claim. Watch selection must
         // see those removals through the complete roster this pass already reads, not only the
         // claim/local-observation feed or the host/authority-filtered active member list.
-        self.incremental.observe_value(
+        self.incremental.observe_membership(
             "desired-subject-membership",
-            desired
-                .iter()
-                .map(|declaration| declaration.subject.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
+            "desired:",
+            desired.iter().map(|declaration| declaration.subject.clone()).collect(),
         );
         let mut pending_subjects = BTreeSet::new();
         for declaration in &desired {
@@ -13176,7 +13173,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         if run.phase == "normal" {
-            let refreshed = self.store.mission_run_for_reconcile(&run.id)?;
+            let refreshed = self.store.mission_run_state_for_evaluation(&run.id)?;
             let normal = refreshed
                 .steps
                 .iter()
@@ -21720,7 +21717,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&watched_subject);
                     // A file change is not a claim: mark what read the file.
-                    incremental.touch(&watched_subject);
+                    incremental.touch_subject(&watched_subject);
                     crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::FileWatch, None);
                     notify.notify_one();
                 }

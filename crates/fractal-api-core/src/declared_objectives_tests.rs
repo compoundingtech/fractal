@@ -1310,3 +1310,44 @@ objective "delivery/selected" {
     let Indicator::GithubMergedCount(config) = selected.objective.unwrap().indicator else { panic!() };
     assert_eq!(config.author_logins, ["example-bot"]);
 }
+
+#[test]
+fn native_producer_reports_only_its_bound_declarations_and_episodes() {
+    let store = store_with(r#"version 2
+objective "example/mail" {
+  about "Mail owner"
+  indicator "native" { objective "agents/mail-delivery"; }
+  on-breach "fault" owner="agent/node.ops" condition="mail-burn"
+}
+objective "example/read" {
+  about "Read owner"
+  indicator "native" { objective "person-read"; }
+  on-breach "fault" owner="agent/node.ops" condition="read-burn"
+}
+"#);
+    with_owner(&store, "node");
+    let mail = json!({
+        "id": "agents/mail-delivery/node", "kind": "objective", "about": "Mail",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    check_native_and_report(&store, *NOW, "agents/mail-delivery", std::slice::from_ref(&mail)).unwrap();
+    let evaluations = store.fractal.extensions.get::<Evaluations>();
+    assert_eq!(evaluations.0.lock().unwrap().len(), 1, "mail must not initialize unrelated evaluations");
+    assert_eq!(fault_status(&store, "example/mail/node"), "pending");
+
+    let read = json!({
+        "id": "person-read", "kind": "objective", "about": "Reads",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    let all = rows(&store, *NOW, &[mail.clone(), read]).unwrap();
+    check(&store, &all).unwrap();
+    assert_eq!(fault_status(&store, "example/read"), "pending");
+    let mut recovered = mail;
+    recovered["status"] = json!("met");
+    recovered["remaining_percent"] = json!(100.0);
+    check_native_and_report(&store, *NOW, "agents/mail-delivery", &[recovered]).unwrap();
+    assert_eq!(fault_status(&store, "example/mail/node"), "resolved");
+    assert_eq!(fault_status(&store, "example/read"), "pending", "mail cannot close another producer's episode");
+}

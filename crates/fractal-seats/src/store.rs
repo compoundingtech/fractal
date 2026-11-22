@@ -441,7 +441,7 @@ impl SeatsStoreCore for Store {
 
     fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>> {
         for subject in subjects {
-            smallclaims::touched::note_read(|| subject.clone());
+            smallclaims::touched::note_read(|| format!("desired:{subject}"));
         }
         if subjects.is_empty() {
             return Ok(Vec::new());
