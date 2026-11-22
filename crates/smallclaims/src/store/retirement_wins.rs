@@ -106,6 +106,15 @@ impl Store {
         self.retirement_wins.store(on, Ordering::Relaxed);
     }
 
+    /// One step of deleting what peers retired, as the checkpoint worker runs it, for a
+    /// measurement on a copy of a store.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trim_peer_retired_step(&self) -> Result<Vec<CheckpointAction>> {
+        let mut actions = Vec::new();
+        self.trim_peer_retired(&mut actions)?;
+        Ok(actions)
+    }
+
     /// How many claims peers retired that this member never held and no peer has supplied: it
     /// lacks their tombstones.
     pub fn peer_retired_claims_unheld(&self) -> Result<u64> {

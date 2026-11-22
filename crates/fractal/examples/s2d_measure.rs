@@ -298,11 +298,19 @@ fn main() -> anyhow::Result<()> {
     }
 
     if passes.contains(&"retire") {
-        // A retirement wins: the checkpoint worker's step deletes the pending retirements through
+        // A retirement wins: the checkpoint worker's retirement step deletes the pending ones through
         // the trim's paced chunks, each its own write. A step is many writes, so the writer holds
         // are read from the control writer: its waits while the steps run, beside a quiet minute.
         store.trim_locally(true)?;
         store.trim_locally_at_most(retire_claims);
+        // A cut the member's own trim left `trimming` holds every retirement back, as it would on
+        // the member. S2D_RETIRE_SET_ASIDE sets it aside on the copy, so the steps measure the
+        // retirements' own deletion rather than the cut's backlog.
+        if std::env::var_os("S2D_RETIRE_SET_ASIDE").is_some() {
+            let set_aside = store.connection.batched(|tx| tx.execute("UPDATE checkpoints SET state='set-aside' WHERE state='trimming'", []))
+                .map_err(|error| anyhow::anyhow!(error))??;
+            println!("retire_cuts_set_aside={set_aside}");
+        }
         let pending = |store: &Store| -> anyhow::Result<u64> {
             Ok(store.readers.get().query_row("SELECT COUNT(*) FROM peer_retired_claims WHERE state='pending'", [], |row| row.get(0))?)
         };
@@ -310,16 +318,13 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_secs(60));
         let from = control.lock().unwrap().len();
         let mut quiet_holds = control.lock().unwrap()[quiet..from].to_vec();
-        let scratch = path.with_extension("retire-scratch");
         let started = Instant::now();
         let mut deleted = 0;
         loop {
             let waiting = pending(&store)?;
             let job = Instant::now();
-            let actions = store.checkpoint_step(&fractal_daemon::store::CheckpointContext {
-                now_unix_ms: smallclaims::store::now_ms(),
-                scratch: scratch.clone(),
-            })?;
+            // The retirements' step alone: the member's own cut is the trim's business.
+            let actions = store.trim_peer_retired_step()?;
             let took = job.elapsed();
             let mut stop = actions.is_empty();
             for action in &actions {
