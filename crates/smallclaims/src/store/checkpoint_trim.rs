@@ -919,6 +919,8 @@ impl Store {
             );
             let mut connection = self.connection.write_background();
             let held_since = std::time::Instant::now();
+            // Recording again changes nothing, so a crash loses only what the restart records.
+            connection.commit_without_fsync()?;
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
             let (envelope_before, claim_before) = (envelope, claim);
@@ -1029,6 +1031,9 @@ impl Store {
             }
             let mut connection = self.connection.write_background();
             let held_since = std::time::Instant::now();
+            // The walk's cursor commits with the chunk, so a crash loses only what the next step
+            // deletes again.
+            connection.commit_without_fsync()?;
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
             #[cfg(test)]

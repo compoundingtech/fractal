@@ -3,6 +3,7 @@ use super::*;
 
 /// Run `work`, whose commits redo themselves after a crash (giving free pages back, retiring
 /// closed mail, moving blob bytes), without waiting on the disk at commit, then restore the connection's settings.
+/// A trim's chunks do the same within a writer loan (`WriterGuard::commit_without_fsync`).
 /// On a busy host the waits took most of a 100 ms hold:
 /// - synchronous=NORMAL skips the WAL fsync. In WAL mode it is corruption-safe; the writer's
 ///   next FULL commit fsyncs the WAL and these frames with it, and a crash before then loses
