@@ -40,10 +40,17 @@ pub(super) fn install(connection: &Connection) -> Result<()> {
             move |_| { pending.fetch_or(bit, Ordering::Relaxed); Ok(0) })?;
     }
     // Keep hints raised until the OUTER transaction ends. Rolling back a savepoint
-    // may restore queue rows that a preceding flush removed.
+    // may restore queue rows that a preceding flush removed. Register with the
+    // writer's transaction-resolution dispatcher instead of the raw hook slot: the
+    // mutation dispatcher owns that slot and swaps it at construction and loan
+    // boundaries, which silently drops a hook installed here.
     let committed = pending.clone();
-    connection.commit_hook(Some(move || { committed.store(0, Ordering::Relaxed); false }));
-    connection.rollback_hook(Some(move || pending.store(0, Ordering::Relaxed)));
+    let rolled_back = pending.clone();
+    smallclaims::sqlite::observe_transaction_resolution(
+        connection,
+        move || { committed.store(0, Ordering::Relaxed); false },
+        move || rolled_back.store(0, Ordering::Relaxed),
+    )?;
     Ok(())
 }
 

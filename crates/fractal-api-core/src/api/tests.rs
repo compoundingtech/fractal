@@ -16,6 +16,19 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn performance_exports_native_writer_work_counts() {
+    let root = tempfile::tempdir().unwrap();
+    let (status, report) = get_request(router(state(root.path())), "/v1/performance").await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    for counter in [
+        "boundaries", "noops", "rollbacks", "index_refreshes",
+        "global_evaluations", "scoped_evaluations",
+    ] {
+        assert!(report["writer_observers"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+}
+
 #[test]
 fn worker_authorization_warning_is_process_wide_and_rate_limited() {
     let now = std::time::Instant::now();
