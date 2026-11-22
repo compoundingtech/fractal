@@ -182,6 +182,18 @@ fn the_corpus_generates_valid_deployment_inputs() {
 }
 
 #[test]
+fn the_corpus_generates_valid_native_model_fallback_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(&corpus()["harness.model-fallback.observed"], 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+}
+
+#[test]
 fn the_corpus_generates_valid_read_position_inputs() {
     let mut world = World::new(1, Sabotage::None);
     let spec = &corpus()[fractal_schema::read_positions::KIND];
@@ -1069,6 +1081,26 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == "harness.model-fallback.observed" {
+            let subject = self.subject_of("agent", index)?;
+            let event = self.fresh("model-fallback");
+            return Some(ClaimInput {
+                actor: Some(subject.clone()), subject, kind: spec.kind.clone(),
+                fields: BTreeMap::from([
+                    ("observation".into(), json!("applied")),
+                    ("cause".into(), json!("transient")),
+                    ("from".into(), json!("openai/gpt-5")),
+                    ("to".into(), json!("anthropic/claude-sonnet-4-5")),
+                    ("native_session".into(), json!("convergence-session")),
+                    ("source_event".into(), json!(event)),
+                    ("episode_id".into(), json!(event)),
+                    ("incarnation_id".into(), json!("convergence-incarnation")),
+                    ("observed_at_unix_ms".into(), json!(self.clock(index))),
+                    ("reason".into(), json!("native-retry-fallback")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(event),
+            });
+        }
         if spec.kind == "custom.client.observation-minute" {
             let source = "person/operator/device/phone";
             let start_ms = (self.clock(index).max(60_000) as u64 / 60_000 - 1) * 60_000;
