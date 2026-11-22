@@ -309,9 +309,9 @@ impl Default for SeatFreshnessPace {
     }
 }
 
-/// Push this node's seats' freshness to the other members whenever it commits, in rounds at
-/// least [`SEAT_FRESHNESS_COALESCE`] apart. A round that failed a member, or left a seat owed, is
-/// retried after [`SEAT_FRESHNESS_RETRY`] even with no new commit, then less often.
+/// Push this node's seats' freshness when local reports, declarations or peer authority
+/// change, in rounds at least [`SEAT_FRESHNESS_COALESCE`] apart. A round that failed a member,
+/// or left a seat owed, is retried after [`SEAT_FRESHNESS_RETRY`] even with no new commit.
 pub fn start_seat_freshness_push(state: &AppState) {
     let Some(relay) = state.client_relay.clone() else {
         // Not in a fleet: no other member reads this node's re-stamps.
@@ -328,7 +328,12 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
     let wake = Arc::new(tokio::sync::Notify::new());
     let observer = {
         let wake = Arc::clone(&wake);
-        store.observe_commits(move |_| wake.notify_one())
+        store.observe_tables(&[
+            "local_observations", "desired", "claims", "claim_positions",
+            "batches", "replica_records", "replica_envelopes", "released_envelopes",
+            "claim_verdicts", "claim_signature_judging", "claim_verdict_queue",
+            "replica_envelope_signatures", "replica_restore_quarantine",
+        ], move |_| wake.notify_one())
     };
     tokio::spawn(crate::task_cpu::account("seat_freshness.push", async move {
         let _observer = observer;

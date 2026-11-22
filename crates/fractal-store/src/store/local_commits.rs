@@ -157,11 +157,11 @@ impl LocalCommits {
         let looks = Arc::new(AtomicU64::new(0));
         let checked = Arc::new(AtomicU64::new(0));
         let looking = Arc::new(AtomicBool::new(false));
-        // The writer's callback only wakes the scanner; it never reads.
+        // Only claim mutations can add local work; frontier-only changes add no claims.
         let commits = Arc::new(tokio::sync::Notify::new());
         let observer = {
             let commits = Arc::clone(&commits);
-            store.observe_commits(move |_| commits.notify_one())
+            store.connection.observe_tables(&["claims"], move |_| commits.notify_one())
         };
         let task = tokio::spawn(scan_commits(
             Arc::clone(store),
