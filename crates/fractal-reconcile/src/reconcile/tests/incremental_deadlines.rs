@@ -1680,3 +1680,99 @@ fn idle_residency_arms_the_exact_stable_epoch_deadline_and_rearms_after_a_blocke
     });
     assert_eq!(after_restart, Some(START + 15_000), "restart starts a full local grace interval");
 }
+
+#[test]
+fn unchanged_running_workspaces_with_retained_render_failures_spawn_no_leases() {
+    let _clock = Clock::at(START);
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    store.set_write_clock_at(START).unwrap();
+    let mut source = String::from("version 2\n");
+    for index in 0..3 {
+        let workspace = root.path().join(format!("worker-{index}"));
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "--quiet", "-b", &format!("worker-{index}"),
+            workspace.to_str().unwrap(),
+        ]);
+        source.push_str(&format!(
+            "agent \"worker-{index}\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"worker-{index}\"; command \"true\" }}\n",
+            workspace.to_str().unwrap(), repository.to_str().unwrap(),
+        ));
+    }
+    apply_source(&store, &source, "existing-workspaces");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ).skipping_unneeded(true);
+    reconciler.reconcile_once().unwrap();
+    *runtime.ptys.lock().unwrap() = runtime.started_members.lock().unwrap().iter()
+        .map(|member| RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("current".into()),
+        }).collect();
+    assert_eq!(runtime.ptys.lock().unwrap().len(), 3);
+    reconciler.reconcile_once().unwrap();
+    reconciler.incremental.observe(&store).unwrap();
+    for subject in store.desired_subjects().unwrap() {
+        let item = format!("member:{}", subject.subject);
+        let reads = reconciler.incremental.reads_of(&item);
+        reconciler.incremental.evaluated(&item, reads, Some(u128::MAX));
+        // A retained failure keeps validation/observation selected even when neither
+        // rendering nor a start is due. This used to spawn one lease per workspace.
+        reconciler.render_failures.lock().unwrap()
+            .insert(subject.subject, "retained render failure".into());
+    }
+    let reads = reconciler.incremental.reads_of("render");
+    reconciler.incremental.evaluated("render", reads, None);
+    assert!(!reconciler.incremental.needs("render", now_ms()));
+    let before = crate::checkout::test_support::lease_count(&repository);
+    let starts = runtime.started_members.lock().unwrap().len();
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before,
+        "validation/observation of unchanged running workspaces must spawn zero leases");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+    assert_eq!(reconciler.render_failures.lock().unwrap().len(), 3,
+        "the pass must retain prior failures rather than render again");
+}
+
+#[test]
+fn an_existing_workspace_renders_and_publishes_with_exactly_one_lease() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+        repository.to_str().unwrap(),
+    ), "render-existing-workspace");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store.clone(), runtime, "node".into(), Arc::new(Notify::new()),
+    );
+    let owner = repository.clone();
+    let lease_store = root.path().join("mr-store");
+    let published = store.clone();
+    let checked = Arc::new(AtomicBool::new(false));
+    let marker = checked.clone();
+    *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(move || {
+        assert_eq!(crate::checkout::test_support::lease_count(&owner), 1,
+            "render and runtime initialization must share one lease");
+        assert_eq!(std::fs::read_to_string(owner.join("output")).unwrap(), "ready");
+        assert!(!published.observations_for("agent/node.worker", "render.applied").unwrap().is_empty());
+        // Bypass the counting seam for the contention probe, not for reconciliation.
+        let mut command = std::process::Command::new(
+            fractal_runtime::store_worktree_lease::mr_executable().unwrap(),
+        );
+        command.env("MEGAREPO_STORE", &lease_store);
+        assert!(fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
+            command, &owner, &owner,
+        ).is_err(), "completion publication must remain fenced");
+        marker.store(true, Ordering::SeqCst);
+    }));
+    reconciler.reconcile_once().unwrap();
+    assert!(checked.load(Ordering::SeqCst), "completion publication must be exercised");
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+    assert!(!store.observations_for("agent/node.worker", "runtime.action.succeeded").unwrap().is_empty());
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_ok(),
+        "the completed pass must release admission");
+}
