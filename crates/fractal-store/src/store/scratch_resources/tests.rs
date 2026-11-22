@@ -6,7 +6,7 @@ fn fixture() -> (Store, tempfile::TempDir, ScratchRequest) {
     let root = fs::canonicalize(directory.path()).unwrap().join("dedicated");
     let store = Store::open_memory("host-a").unwrap();
     store.start_resource_authority("host-a", "epoch-a").unwrap();
-    owner(&store, "running", "executing", "generation-a");
+    owner(&store, "running", "normal", "generation-a");
     let request = ScratchRequest { id: "scratch/test".into(), host: "host-a".into(),
         owner: "mission-run/owner".into(), owner_generation: "run-generation/generation-a".into(),
         root: root.to_string_lossy().into_owned() };
@@ -181,7 +181,7 @@ fn inventory_is_bounded_read_only_and_owner_evidence_is_positive() {
     assert!(!release(&store, &handle).unwrap());
     assert!(Path::new(&handle.path).is_dir());
     assert_eq!(store.scratch_inventory("host-a", None, 1).unwrap()[0].owner_observation, OwnerObservation::Unknown);
-    owner(&store, "running", "executing", "generation-a");
+    owner(&store, "running", "normal", "generation-a");
     assert_eq!(store.scratch_inventory("host-a", None, 1).unwrap()[0].owner_observation, OwnerObservation::Live);
     owner(&store, "failed", "terminal", "generation-a");
     assert_eq!(store.scratch_inventory("host-a", None, 1).unwrap()[0].owner_observation, OwnerObservation::Terminal);
@@ -195,7 +195,7 @@ fn inventory_is_bounded_read_only_and_owner_evidence_is_positive() {
 #[test]
 fn real_scratch_lifecycle_and_terminal_owner_dry_run_receipt() {
     let (store, _directory, request) = fixture();
-    owner(&store, "running", "executing", "generation-a");
+    owner(&store, "running", "normal", "generation-a");
     let handle = store.acquire_scratch(&request).unwrap();
     fs::write(Path::new(&handle.path).join("artifact"), b"real scratch payload").unwrap();
     let held = store.scratch_inventory("host-a", None, 10).unwrap();
@@ -216,13 +216,17 @@ fn real_scratch_lifecycle_and_terminal_owner_dry_run_receipt() {
 #[test]
 fn late_acquire_refuses_terminal_missing_successor_and_expired_owner() {
     let (store, _directory, request) = fixture();
+    for phase in ["final", "cleanup-completed", "cleanup-failed", "cleanup-cancelled"] {
+        owner(&store, "running", phase, "generation-a");
+        assert!(store.acquire_scratch(&request).is_err());
+    }
     owner(&store, "completed", "terminal", "generation-a");
     assert!(store.acquire_scratch(&request).is_err());
-    owner(&store, "running", "executing", "successor");
+    owner(&store, "running", "normal", "successor");
     assert!(store.acquire_scratch(&request).is_err());
     store.connection.write().execute("DELETE FROM mission_runs WHERE id='owner'", []).unwrap();
     assert!(store.acquire_scratch(&request).is_err());
-    owner(&store, "running", "executing", "generation-a");
+    owner(&store, "running", "normal", "generation-a");
     store.connection.write().execute("INSERT INTO mission_run_deadlines(run_id,timeout_ms,deadline_at_unix_ms) VALUES('owner',1,'1')", []).unwrap();
     assert!(store.acquire_scratch(&request).is_err());
     assert!(store.scratch_inventory("host-a", None, 1).unwrap().is_empty());
@@ -239,7 +243,7 @@ fn persisted_intent_and_release_resume_across_store_reopen() {
     let handle = {
         let store = Store::open(&database, "host-a").unwrap();
         store.start_resource_authority("host-a", "epoch-a").unwrap();
-        owner(&store, "running", "executing", "generation-a");
+        owner(&store, "running", "normal", "generation-a");
         let handle = store.acquire_scratch(&request).unwrap();
         let mut intent = record(&store, &request.id);
         intent.state = "intent".into();
@@ -282,7 +286,7 @@ fn scratch_crash_child() {
     let request: ScratchRequest = serde_json::from_str(&std::env::var("FRACTAL_TEST_SCRATCH_REQUEST").unwrap()).unwrap();
     let store = Store::open(Path::new(&database), "host-a").unwrap();
     store.start_resource_authority("host-a", "child-epoch").unwrap();
-    owner(&store, "running", "executing", "generation-a");
+    owner(&store, "running", "normal", "generation-a");
     store.acquire_scratch(&request).unwrap();
     panic!("child must be killed at requested acquire boundary");
 }

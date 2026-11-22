@@ -208,8 +208,8 @@ impl Store {
         let (status, phase, generation, deadline) = current.ok_or_else(|| anyhow::anyhow!("scratch owner unavailable"))?;
         anyhow::ensure!(generation == generation_id_from_subject(&request.owner_generation),
             "stale scratch owner generation");
-        anyhow::ensure!(matches!(status.as_str(), "running" | "standing" | "blocked") && phase != "terminal",
-            "scratch owner is not live");
+        anyhow::ensure!(matches!(status.as_str(), "running" | "standing" | "blocked") && phase == "normal",
+            "scratch owner is not accepting normal acquisitions");
         if let Some(deadline) = deadline {
             anyhow::ensure!(u128::from(deadline.parse::<u64>()?) > now_ms(), "scratch owner deadline elapsed");
         }
