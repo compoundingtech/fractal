@@ -51,6 +51,18 @@ fn outside_root() -> Option<PathBuf> {
     Some(canonical)
 }
 
+/// Where a test socket goes: the temporary directory, short enough for a socket path, unless it is
+/// under /dev. The sandbox mounts a /dev of its own, so a socket in /dev/shm (where ci-local puts
+/// TMPDIR when RAM allows) is not there for the sandboxed command; the real st socket never is.
+/// Named by process and a count, so tests in one process (`cargo test`) do not share one.
+fn socket_path(name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let temporary = std::env::temp_dir();
+    let dir = if temporary.starts_with("/dev") { PathBuf::from("/tmp") } else { temporary };
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!("st-sb-{name}{}-{n}.sock", std::process::id()))
+}
+
 struct Fixture {
     _root: tempfile::TempDir,
     base: PathBuf,
@@ -71,7 +83,7 @@ impl Fixture {
         let tmp = path.join("tmp");
         fs::create_dir_all(&tmp).unwrap();
         // A short path: a socket path has a hard length limit.
-        let socket = std::env::temp_dir().join(format!("st-sb-{}.sock", std::process::id()));
+        let socket = socket_path("");
         let _ = fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
         let slash_tmp_git_before = Path::new("/tmp/.git").exists();
@@ -83,6 +95,7 @@ impl Drop for Fixture {
     // A sandbox once left an empty /tmp/.git mount point behind. Every concurrent test that uses /tmp
     // as a mission workspace then failed with mission-workspace-in-worktree.
     fn drop(&mut self) {
+        let _ = fs::remove_file(&self.socket);
         if !std::thread::panicking() && !self.slash_tmp_git_before {
             assert!(!Path::new("/tmp/.git").exists(), "a sandboxed command left /tmp/.git behind");
         }
@@ -197,7 +210,7 @@ fn the_known_limit_other_local_sockets_stay_reachable() {
     };
     let workspace = fixture.base.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
-    let other = std::env::temp_dir().join(format!("st-sb-other-{}.sock", std::process::id()));
+    let other = socket_path("other-");
     let _ = fs::remove_file(&other);
     let _listener = UnixListener::bind(&other).unwrap();
     let reached = sandboxed(&fixture, &workspace, &format!("python3 -c \"{CONNECT}\" \"$1\""), &[other.to_str().unwrap()]);

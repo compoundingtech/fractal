@@ -8261,7 +8261,7 @@ impl Store {
         Ok(receipt)
     }
 
-    pub /* sqlite-large-value-flow: allow-for-now flow-h7818827323a6 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_via(
+    pub fn receive_replication_exchange_via(
         &self,
         relay: &str,
         fleet_id: &str,
@@ -8270,6 +8270,29 @@ impl Store {
         carrier: crate::replication::ReplicationCarrier,
         authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceipt, FractalError> {
+        self.receive_replication_exchange_before(
+            relay, fleet_id, input, asks, crate::replication::ReceiveOptions {
+                carrier,
+                authenticated_member_key,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// The local connector's optional answer deadline. Admission may refuse the page;
+    /// once its receipt transaction starts, it commits atomically without cancellation.
+    pub /* sqlite-large-value-flow: allow-for-now flow-h9e43d13e01a3 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_before(
+        &self,
+        relay: &str,
+        fleet_id: &str,
+        input: &ReplicationExchange,
+        asks: bool,
+        options: crate::replication::ReceiveOptions<'_>,
+    ) -> Result<ReplicationReceipt, FractalError> {
+        let crate::replication::ReceiveOptions {
+            carrier, authenticated_member_key, deadline_unix_ms, ..
+        } = options;
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
         if input.peer != relay {
             return Err(FractalError::new(
                 "peer-label-mismatch",
@@ -8334,7 +8357,7 @@ impl Store {
         let registry_key = format!("peer_projection_registry:{relay}");
         let inventory_key = format!("peer_projection_inventory:{relay}");
         let (received, duplicate, signatures, received_at, checkpoint_at) = 'receipt: {
-            let mut connection = self.connection.write_background();
+            let mut connection = self.connection.write_background_before(deadline_unix_ms)?;
             let received_at = now_ms();
             // Compare under the writer loan so concurrent failures and acknowledgements remain
             // ordered. Unchanged receipts open no transaction and run no managed finalizers.
@@ -8365,6 +8388,9 @@ impl Store {
             if let Some(checkpoint_at) = checkpoint_at {
                 break 'receipt (0, 0, 0, received_at, checkpoint_at as u128);
             }
+            // This is the last cancellable boundary. Once receipt writes begin, complete
+            // the atomic receipt and its follow-up phases so duplicate retries stay cheap.
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;
