@@ -1775,6 +1775,7 @@ mod tests {
         limits: crate::config::LimitsConfig::default(),
         logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
+        model_return: crate::config::model_return::Config::default(),
         programs: crate::config::ProgramsConfig::default(),
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
