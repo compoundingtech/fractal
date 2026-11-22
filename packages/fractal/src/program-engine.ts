@@ -74,6 +74,8 @@ export interface ResourceRequest {
     | 'resource.lane.release'
     | 'resource.lane.exec'
     | 'resource.lane.run'
+    | 'resource.scratch.acquire'
+    | 'resource.scratch.inventory'
   readonly payload: unknown
 }
 

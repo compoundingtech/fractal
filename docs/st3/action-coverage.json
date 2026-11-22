@@ -1657,6 +1657,16 @@
       "verification": "HTTP router through the native transport guard; owner-filtered resource inventory"
     },
     {
+      "command": "st resources scratch-inventory",
+      "description": "Observe a bounded dry-run page of host-local dedicated scratch custody without releasing allocations",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::scratch_inventory_requires_bounded_read_only_arguments",
+        "crates/fractal-api-core/src/api/resources.rs::scratch_inventory_is_bounded_read_only_and_local_operator_only",
+        "crates/fractal-reconcile/src/reconcile/tests/scratch_resources.rs::native_deadline_skips_scratch_final_work_and_reports_terminal_owner"
+      ],
+      "verification": "real Clap parsing, local-operator and page-bound checks, and retained custody after mission timeout skips final work"
+    },
+    {
       "command": "st resources show",
       "description": "Inspect a shell execution's admission blockers, custody and actual outcome",
       "tests": [
