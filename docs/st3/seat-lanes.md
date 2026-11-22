@@ -426,6 +426,14 @@ With no holders or granted bursts and no host hold, a finite FIFO head is admitt
 fits room minus measured outside memory. Impossible finite footprints refuse with code `impossible`;
 wait attribution distinguishes holders, holds, outside bytes, PSI withholding ARC credit, reserve and FIFO.
 
+The daemon samples native admission PSI independently of reconciliation, every five seconds
+with delayed missed ticks. Admission reads only that cached decision: a decision older than ten
+seconds closes admission even if the sampler stops. Sustained-pressure thresholds and the
+120-second healthy recovery window are unchanged; slow reconciliation cannot interrupt sampling.
+Blocked memberships retain a tagged pressure reason (signal/value/threshold, recovery milliseconds
+remaining, or unknown-observation cause). The existing `fractal resources show` reason and admission
+journal include its details without changing the client-v0 schema.
+
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start
 claim), and its reason shows where admission reasons show (`fractal agents show`'s `ADMISSION` line, the

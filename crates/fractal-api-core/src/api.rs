@@ -5769,6 +5769,11 @@ fn message_delivery_for(
         return Ok(delivery);
     };
     let runtime = runtime.body.get("fields").unwrap_or(&runtime.body);
+    if matches!(runtime.get("status").and_then(Value::as_str), Some("stopped" | "exited" | "absent")) {
+        delivery["state"] = json!("waiting");
+        delivery["reason"] = json!("recipient stopped; queued message will be delivered when it starts");
+        return Ok(delivery);
+    }
     if runtime.get("status").and_then(Value::as_str) != Some("running") { return Ok(delivery); }
     let Some(incarnation) = runtime.get("incarnation_id").and_then(Value::as_str) else {
         return Ok(delivery);
