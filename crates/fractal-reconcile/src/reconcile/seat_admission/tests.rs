@@ -9,6 +9,21 @@ fn reconciler() -> Reconciler<FakeRuntime> {
         Arc::new(Notify::new()),
     )
 }
+
+#[tokio::test]
+async fn lane_psi_downgrade_is_queryable_as_a_deduplicated_daemon_diagnostic() {
+    let reconciler = reconciler();
+    let placement = "0::/system.slice/example.service";
+    for _ in 0..2 {
+        reconciler.record_pressure_layout_diagnostic(placement).unwrap();
+    }
+    let diagnostics = reconciler.store.observations_for("daemon/node", "daemon.diagnostic").unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].body["fields"]["code"], "lane-psi-not-applicable");
+    assert_eq!(diagnostics[0].body["fields"]["severity"], "warning");
+    assert!(diagnostics[0].body["fields"]["reason"].as_str().unwrap().contains(placement));
+}
+
 #[tokio::test]
 async fn admission_refresh_does_not_schedule_pressure_polling() {
     let reconciler = reconciler();
@@ -65,13 +80,28 @@ async fn sampler_recovers_while_incremental_observe_holds_its_lock_past_freshnes
     }
 
     let mut reconciler = reconciler();
-    // Read real kernel PSI, with thresholds near 100% so ordinary host activity is healthy.
-    // An intentional observation gap below closes the real Brake before recovery begins.
+    // Inject kernel fixtures: this cadence regression must not depend on host pressure.
+    let root = tempfile::tempdir().unwrap();
+    let memory = root.path().join("memory.pressure");
+    let io = root.path().join("io");
+    let meminfo = root.path().join("meminfo");
+    let root_memory = root.path().join("root-memory");
+    let vmstat = root.path().join("vmstat");
+    std::fs::write(&memory, "full avg10=0.00\n").unwrap();
+    std::fs::write(&io, "some avg10=0.00\n").unwrap();
+    std::fs::write(&meminfo, "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n").unwrap();
+    std::fs::write(&root_memory, "full avg10=0.00\n").unwrap();
+    std::fs::write(&vmstat, "allocstall_normal 0\n").unwrap();
     reconciler.seat_admission.finite_policy.psi_brake = Policy {
         rules: vec![Rule { signal: Signal::MemoryFull, window: Window::Avg10,
             threshold_millipercent: 100000, resume_millipercent: 99999 }],
         sustained_ms: 1, resume_ms: 2000, freshness_ms: 1000,
+        ..Policy::default()
     };
+    *reconciler.seat_admission.pressure.lock().unwrap() =
+        Some(fractal_runtime::resource_pressure::Observer::with_paths(
+            reconciler.seat_admission.finite_policy.psi_brake.clone(),
+            [memory, io, meminfo, root_memory, vmstat]).unwrap());
     assert!(!reconciler.seat_admission.pressure_decision().unwrap().blocked);
     let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
     reconciler.seat_admission.pressure_samples.set(samples).unwrap();
