@@ -40,6 +40,25 @@ pub(crate) fn worker_timer_cap() -> Option<std::time::Duration> {
     })
 }
 
+/// `ST3_REPLICATION_IDLE_MAX_MS`, read once: raise or lower the idle polling ceiling.
+/// Starts at 30 seconds, doubles to 10 minutes by default, and is bounded to 30s..=1h.
+/// `ST3_WORKER_INTERVAL_MS` still caps the resulting timer when set.
+pub(crate) fn replication_idle_max() -> std::time::Duration {
+    static MAX: std::sync::LazyLock<std::time::Duration> = std::sync::LazyLock::new(|| {
+        replication_idle_max_from(std::env::var("ST3_REPLICATION_IDLE_MAX_MS").ok().as_deref())
+    });
+    *MAX
+}
+
+pub(crate) fn replication_idle_max_from(value: Option<&str>) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        value
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(600_000)
+            .clamp(30_000, 3_600_000),
+    )
+}
+
 /// `default`, or `cap` when that is shorter.
 pub(crate) fn capped(
     default: std::time::Duration,
