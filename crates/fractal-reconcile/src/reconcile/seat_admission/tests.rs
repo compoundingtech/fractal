@@ -9,6 +9,21 @@ fn reconciler() -> Reconciler<FakeRuntime> {
         Arc::new(Notify::new()),
     )
 }
+
+#[tokio::test]
+async fn lane_psi_downgrade_is_queryable_as_a_deduplicated_daemon_diagnostic() {
+    let reconciler = reconciler();
+    let placement = "0::/system.slice/example.service";
+    for _ in 0..2 {
+        reconciler.record_pressure_layout_diagnostic(placement).unwrap();
+    }
+    let diagnostics = reconciler.store.observations_for("daemon/node", "daemon.diagnostic").unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].body["fields"]["code"], "lane-psi-not-applicable");
+    assert_eq!(diagnostics[0].body["fields"]["severity"], "warning");
+    assert!(diagnostics[0].body["fields"]["reason"].as_str().unwrap().contains(placement));
+}
+
 #[tokio::test]
 async fn admission_refresh_does_not_schedule_pressure_polling() {
     let reconciler = reconciler();

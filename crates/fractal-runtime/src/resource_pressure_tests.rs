@@ -507,7 +507,7 @@ impl tracing::Subscriber for WarningLog {
 }
 
 #[test]
-fn unrecognized_layout_uses_host_signals_and_warns_only_once_with_the_placement() {
+fn well_formed_unrecognized_v2_layout_uses_host_signals_and_warns_only_once_with_the_placement() {
     let mut fixture = PressureFixture::new();
     let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let placement = "0::/system.slice/example-daemon.service\n";
@@ -515,6 +515,7 @@ fn unrecognized_layout_uses_host_signals_and_warns_only_once_with_the_placement(
         for now in (0..=65000).step_by(2500) {
             assert!(!fixture.observe_layout(now, placement).blocked);
         }
+        assert!(fixture.reader.lane_layout_not_applicable);
     });
     let warnings = warnings.lock().unwrap();
     assert_eq!(warnings.len(), 1);
@@ -526,6 +527,24 @@ fn unrecognized_layout_uses_host_signals_and_warns_only_once_with_the_placement(
     }
     assert_eq!(fixture.observe_layout(127500, placement).reason,
         Some(Reason::Pressure(Signal::MemoryFull)));
+}
+
+#[test]
+fn malformed_or_non_unified_placement_fails_closed_without_a_layout_downgrade() {
+    for placement in [
+        "",
+        "garbage\n",
+        "1:memory:/system.slice/example.service\n",
+        "0::relative/path\n",
+        "0::/../system.slice/example.service\n",
+        "0::/system.slice/one.service\n0::/system.slice/two.service\n",
+    ] {
+        let mut fixture = PressureFixture::new();
+        assert_eq!(fixture.observe_layout(0, placement).reason,
+            Some(Reason::UnknownObservation), "{placement:?}");
+        assert!(!fixture.reader.warned_lane_layout, "{placement:?}");
+        assert!(!fixture.reader.lane_layout_not_applicable, "{placement:?}");
+    }
 }
 
 #[test]

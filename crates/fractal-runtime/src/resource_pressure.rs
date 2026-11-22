@@ -302,6 +302,7 @@ pub struct Reader {
     vmstat: String,
     own_cgroup: String,
     warned_lane_layout: bool,
+    lane_layout_not_applicable: bool,
     previous_allocstall: Option<u64>,
     last_allocstall_at_ms: Option<u64>,
     readings: Vec<Reading>,
@@ -338,22 +339,22 @@ impl Reader {
         paths: KernelPaths<'_>,
     ) -> Result<&[Reading]> {
         use std::io::Read as _;
+        self.lane_layout_not_applicable = false;
         let mut lane = None;
         if policy.rules.iter().any(|rule| matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull)) {
             self.own_cgroup.clear();
             std::fs::File::open(placement_path)?.read_to_string(&mut self.own_cgroup)?;
             ensure!(!self.own_cgroup.trim().is_empty(), "empty cgroup placement");
             let mut unified = self.own_cgroup.lines().filter_map(|line| line.strip_prefix("0::"));
-            let placement = unified.next();
+            let placement = unified.next().ok_or_else(|| anyhow::anyhow!("missing unified cgroup placement"))?;
             ensure!(unified.next().is_none(), "duplicate unified cgroup placement");
-            if let Some(placement) = placement {
-                let path = std::path::Path::new(placement);
-                ensure!(path.is_absolute() && path.components().all(|part|
-                    matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))),
-                    "malformed unified cgroup placement");
-                lane = crate::lane::user_manager_cgroup_in(placement, cgroup_root)
-                    .map(|manager| manager.join("app.slice").join(crate::lane::LANES_SLICE).join("memory.pressure"));
-            }
+            let path = std::path::Path::new(placement);
+            ensure!(path.is_absolute() && path.components().all(|part|
+                matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))),
+                "malformed unified cgroup placement");
+            lane = crate::lane::user_manager_cgroup_in(placement, cgroup_root)
+                .map(|manager| manager.join("app.slice").join(crate::lane::LANES_SLICE).join("memory.pressure"));
+            self.lane_layout_not_applicable = lane.is_none();
             if lane.is_none() && !self.warned_lane_layout {
                 self.warned_lane_layout = true;
                 tracing::warn!(cgroup = %self.own_cgroup.trim(),
@@ -467,6 +468,11 @@ pub struct Observer {
 }
 
 impl Observer {
+    /// Placement for a well-formed layout where finite-lane PSI is not applicable.
+    pub fn lane_psi_not_applicable_placement(&self) -> Option<&str> {
+        self.reader.lane_layout_not_applicable.then(|| self.reader.own_cgroup.trim())
+    }
+
     pub fn new(policy: Policy) -> Result<Self> {
         let reader = Reader::new(&policy, std::path::Path::new("/proc/meminfo"))?;
         Ok(Self {
