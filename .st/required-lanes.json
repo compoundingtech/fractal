@@ -648,6 +648,7 @@
         "slo/fractal-ci.kdl",
         "slo/objectives.kdl",
         "vendor/libghostty-vt-sys",
+        "vendor/notify",
         "wit"
       ]
     },
@@ -859,6 +860,7 @@
         "slo/fractal-ci.kdl",
         "slo/objectives.kdl",
         "vendor/libghostty-vt-sys",
+        "vendor/notify",
         "wit"
       ]
     }
