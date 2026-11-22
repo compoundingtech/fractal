@@ -8384,6 +8384,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
             ));
+            tokio::spawn(fractal_daemon::maintenance::run_usage_period(
+                Arc::downgrade(&store),
+            ));
             let admission_notify = notify.clone();
             let admission_events = event_notify.clone();
             let admission_state_dir = config.state_dir.clone();
