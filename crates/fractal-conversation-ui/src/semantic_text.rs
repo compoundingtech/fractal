@@ -1,12 +1,35 @@
 use std::{borrow::Cow, sync::Arc};
 use ratatui::{layout::Alignment, style::Style};
 
+/// Whether drawn cells belong to the source or only to its presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CopyRole { #[default] Content, Decoration }
+
+/// How a physical line continues its source line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Continuation { #[default] Newline, Space, Word }
+
+impl Continuation {
+    pub fn separator(self) -> Option<&'static str> {
+        match self { Self::Newline => None, Self::Space => Some(" "), Self::Word => Some("") }
+    }
+}
+
+/// Shared identity of a source table row, independent of its physical layout.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TableRow {
+    pub columns: usize,
+    pub header: Vec<Vec<Span<'static>>>,
+}
+
 /// Styled text whose semantic link target survives layout and composition.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Span<'a> {
     pub content: Cow<'a, str>,
     pub style: Style,
     pub link: Option<Arc<str>>,
+    pub role: CopyRole,
+    pub table_column: Option<usize>,
 }
 
 impl<'a> Span<'a> {
@@ -14,7 +37,10 @@ impl<'a> Span<'a> {
         Self { content: content.into(), ..Self::default() }
     }
     pub fn styled(content: impl Into<Cow<'a, str>>, style: impl Into<Style>) -> Self {
-        Self { content: content.into(), style: style.into(), link: None }
+        Self { content: content.into(), style: style.into(), ..Self::default() }
+    }
+    pub fn decoration(content: impl Into<Cow<'a, str>>, style: impl Into<Style>) -> Self {
+        Self { role: CopyRole::Decoration, ..Self::styled(content, style) }
     }
     pub fn width(&self) -> usize { super::width(&self.content) }
     pub fn style(mut self, style: impl Into<Style>) -> Self {
@@ -28,7 +54,7 @@ impl<'a> Span<'a> {
 
 impl<'a> From<ratatui::text::Span<'a>> for Span<'a> {
     fn from(span: ratatui::text::Span<'a>) -> Self {
-        Self { content: span.content, style: span.style, link: None }
+        Self { content: span.content, style: span.style, ..Self::default() }
     }
 }
 impl<'a> From<&'a str> for Span<'a> {
@@ -44,12 +70,23 @@ pub struct Line<'a> {
     pub spans: Vec<Span<'a>>,
     pub style: Style,
     pub alignment: Option<Alignment>,
+    pub role: CopyRole,
+    pub continuation: Continuation,
+    pub table_row: Option<Arc<TableRow>>,
+    /// Whether this physical record line also represents the table's source headings.
+    pub table_header: bool,
+    pub table_continuations: Vec<Continuation>,
 }
 
 impl<'a> Line<'a> {
     pub fn raw(content: impl Into<Cow<'a, str>>) -> Self { Self::from(Span::raw(content)) }
     pub fn styled(content: impl Into<Cow<'a, str>>, style: impl Into<Style>) -> Self {
         Self::from(Span::styled(content, style))
+    }
+    pub fn decoration(mut self) -> Self {
+        self.role = CopyRole::Decoration;
+        for span in &mut self.spans { span.role = CopyRole::Decoration; }
+        self
     }
     pub fn width(&self) -> usize { self.spans.iter().map(Span::width).sum() }
     pub fn style(mut self, style: impl Into<Style>) -> Self {
@@ -98,7 +135,7 @@ impl From<String> for Line<'_> {
 }
 impl<'a> From<ratatui::text::Line<'a>> for Line<'a> {
     fn from(line: ratatui::text::Line<'a>) -> Self {
-        Self { spans: line.spans.into_iter().map(Span::from).collect(), style: line.style, alignment: line.alignment }
+        Self { spans: line.spans.into_iter().map(Span::from).collect(), style: line.style, alignment: line.alignment, ..Self::default() }
     }
 }
 impl<'a> FromIterator<Span<'a>> for Line<'a> {
