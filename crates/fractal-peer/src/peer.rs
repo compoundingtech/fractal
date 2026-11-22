@@ -2153,7 +2153,7 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     if !wake_file.exists() {
         fs::write(&wake_file, b"worker-start\n")?;
     }
-    let watcher_wake = raw_wake;
+    let watcher_wake = raw_wake.clone();
     let mut database_watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if event.is_ok() {
@@ -2193,6 +2193,7 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     run_with_wake_drain(
         smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards),
         database_watcher,
+        raw_wake,
         wake_pacer,
     ).await
 }
@@ -2200,12 +2201,16 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
 async fn run_with_wake_drain(
     worker: impl Future<Output = Result<()>>,
     watcher: notify::RecommendedWatcher,
+    raw_wake: watch::Sender<u64>,
     mut pacer: tokio::task::JoinHandle<()>,
 ) -> Result<()> {
     let result = worker.await;
-    // Some watcher backends retain the raw producer on a backend thread after drop.
-    // Drain the trailing generation, but never prevent a failed worker from exiting.
+    // Dropping the watcher may discard kernel events not yet delivered to its handler.
+    // Force one final dirty generation, then drain generations already delivered by the
+    // watcher. Some backends retain their raw producer, so keep the drain bounded.
     drop(watcher);
+    raw_wake.send_modify(|generation| *generation = generation.saturating_add(1));
+    drop(raw_wake);
     let drained = match tokio::time::timeout(Duration::from_secs(2), &mut pacer).await {
         Ok(joined) => joined.context("replication wake pacer failed"),
         Err(_) => {
@@ -2314,9 +2319,9 @@ mod tests {
         for _ in 0..100 {
             raw.send_modify(|generation| *generation += 1);
         }
-        drop(raw); // The actual watcher closure is now the only producer.
+        // Retirement releases both the watcher closure and the explicit final producer.
         let shutdown = run_with_wake_drain(
-            async { Err(anyhow::anyhow!("settings-task-failure")) }, watcher, pacer,
+            async { Err(anyhow::anyhow!("settings-task-failure")) }, watcher, raw, pacer,
         );
         tokio::pin!(shutdown);
         assert!(futures_util::poll!(&mut shutdown).is_pending());
@@ -2336,15 +2341,65 @@ mod tests {
             drop(event);
         }).unwrap();
         let pacer = tokio::spawn(std::future::pending::<()>());
+        let (raw, _events) = watch::channel(0_u64);
         let aborted = pacer.abort_handle();
         let started = tokio::time::Instant::now();
         let error = run_with_wake_drain(
-            async { Err(anyhow::anyhow!("original-worker-failure")) }, watcher, pacer,
+            async { Err(anyhow::anyhow!("original-worker-failure")) }, watcher, raw, pacer,
         ).await.unwrap_err();
         assert_eq!(started.elapsed(), Duration::from_secs(2));
         assert_eq!(error.to_string(), "original-worker-failure");
         tokio::task::yield_now().await;
         assert!(aborted.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watcher_retirement_wakes_for_a_write_during_an_in_flight_round() {
+        for fail in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let wake_file = root.path().join("replication.wake");
+            fs::write(&wake_file, b"before-round\n").unwrap();
+            let (raw, events) = watch::channel(0_u64);
+            let (paced, mut observed) = watch::channel(0_u64);
+            let producer = raw.clone();
+            // Model a backend with pending kernel events that never reach the raw channel.
+            // Keep its producer alive until retirement, but do not deliver file events.
+            let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                let _ = &producer;
+                drop(event);
+            }).unwrap();
+            watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive).unwrap();
+            let pacer = tokio::spawn(smallclaims::sync::coalesce_replication_wakes(events, paced));
+            raw.send_modify(|generation| *generation += 1);
+            observed.changed().await.unwrap();
+            assert_eq!(*observed.borrow(), 1);
+            let (finish, round_finished) = tokio::sync::oneshot::channel();
+            let worker = async {
+                round_finished.await.unwrap();
+                if fail { Err(anyhow::anyhow!("round-failed")) } else { Ok(()) }
+            };
+            let shutdown = run_with_wake_drain(worker, watcher, raw, pacer);
+            tokio::pin!(shutdown);
+            // The round is in flight before the write, and cannot retire until released.
+            assert!(futures_util::poll!(&mut shutdown).is_pending());
+            fs::write(&wake_file, b"during-round\n").unwrap();
+            assert!(!observed.has_changed().unwrap());
+            finish.send(()).unwrap();
+            assert!(futures_util::poll!(&mut shutdown).is_pending());
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::time::timeout(Duration::from_secs(1), observed.changed())
+                .await.expect("retirement lost a write not delivered by the watcher").unwrap();
+            assert_eq!(*observed.borrow_and_update(), 2);
+            let result = tokio::time::timeout(Duration::from_secs(2), shutdown)
+                .await.expect("retirement waited for the idle timer");
+            assert_eq!(result.is_err(), fail);
+            if let Err(error) = result {
+                assert_eq!(error.to_string(), "round-failed");
+            }
+            // Retirement contributes exactly one final broadcast, including clean returns.
+            assert_eq!(*observed.borrow(), 2);
+            assert!(observed.changed().await.is_err());
+        }
     }
 
     #[tokio::test(start_paused = true)]

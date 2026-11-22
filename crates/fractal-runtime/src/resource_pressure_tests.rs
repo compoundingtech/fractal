@@ -456,7 +456,7 @@ fn bursty_allocator_events_qualify_root_pressure_through_the_sustained_interval(
 }
 
 #[test]
-fn one_allocator_event_qualifies_a_long_stall_for_exactly_the_psi_window() {
+fn one_allocator_event_qualifies_root_pressure_for_window_plus_sustained_interval() {
     for window in [Window::Avg10, Window::Avg60, Window::Avg300] {
         let mut fixture = PressureFixture::new();
         fixture.policy.rules[0].window = window;
@@ -467,19 +467,50 @@ fn one_allocator_event_qualifies_a_long_stall_for_exactly_the_psi_window() {
         assert!(!fixture.observe(0).blocked); // No earlier increment is inferred.
         assert_eq!(fixture.reader.readings[0].millipercent, 0);
         fixture.write("proc/vmstat", "allocstall_normal 101\n");
-        for now in (2500..=2500 + window.duration_ms()).step_by(2500) {
+        let evidence_ms = window.duration_ms() + fixture.policy.sustained_ms;
+        for now in (2500..=2500 + evidence_ms).step_by(2500) {
             fixture.observe(now);
             assert_eq!(fixture.reader.readings[0].millipercent, 3000);
         }
-        fixture.observe(5000 + window.duration_ms());
+        fixture.observe(5000 + evidence_ms);
         assert_eq!(fixture.reader.readings[0].millipercent, 0);
         // A reset clears even unexpired evidence, rather than qualifying the root.
         fixture.write("proc/vmstat", "allocstall_normal 102\n");
-        fixture.observe(7500 + window.duration_ms());
+        fixture.observe(7500 + evidence_ms);
         assert_eq!(fixture.reader.readings[0].millipercent, 3000);
         fixture.write("proc/vmstat", "allocstall_normal 0\n");
-        fixture.observe(10000 + window.duration_ms());
+        fixture.observe(10000 + evidence_ms);
         assert_eq!(fixture.reader.readings[0].millipercent, 0);
+        fixture.observe(12500 + evidence_ms);
+        assert_eq!(fixture.reader.readings[0].millipercent, 0);
+        // Corroboration resumes only after an observed post-reset increment.
+        fixture.write("proc/vmstat", "allocstall_normal 1\n");
+        fixture.observe(15000 + evidence_ms);
+        assert_eq!(fixture.reader.readings[0].millipercent, 3000);
+    }
+}
+
+#[test]
+fn one_allocator_event_trips_with_delayed_root_pressure_and_a_late_sustained_sample() {
+    for (window, sustained_ms) in [(Window::Avg10, 60000), (Window::Avg60, 90000)] {
+        let mut fixture = PressureFixture::new();
+        fixture.policy.rules[0].window = window;
+        fixture.policy.sustained_ms = sustained_ms;
+        fixture.brake = Brake::new(fixture.policy.clone()).unwrap();
+        fixture.write("proc/pressure/memory", "full avg10=0.0 avg60=0.0\n");
+        fixture.write("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure",
+            "full avg10=0.0 avg60=0.0\n");
+        assert!(!fixture.observe(0).blocked);
+        fixture.write("proc/vmstat", "allocstall_normal 101\n");
+        assert!(!fixture.observe(2500).blocked);
+        // Root pressure crosses one sample after the only allocator event.
+        fixture.write("proc/pressure/memory", "full avg10=3.0 avg60=3.0\n");
+        for now in (5000..5000 + sustained_ms).step_by(2500) {
+            assert!(!fixture.observe(now).blocked);
+        }
+        // Skip the exact sustained boundary; the next fresh sample is 1.25 s late.
+        assert_eq!(fixture.observe(6250 + sustained_ms).reason,
+            Some(Reason::Pressure(Signal::MemoryFull)));
     }
 }
 

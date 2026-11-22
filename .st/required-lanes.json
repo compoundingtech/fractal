@@ -762,6 +762,7 @@
         "crates/fractal-github",
         "crates/fractal-github-base",
         "crates/fractal-kernel",
+        "crates/fractal-mac-custody",
         "crates/fractal-migrate/Cargo.toml",
         "crates/fractal-mission-ui",
         "crates/fractal-missions",
