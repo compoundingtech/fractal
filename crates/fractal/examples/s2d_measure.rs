@@ -2,7 +2,8 @@
 //! build runs after an upgrade, with their switches forced on for the copy only: emptying valid
 //! records' bytes (S1), deleting valid records with no rollback window (S2b), and releasing
 //! envelopes (S2d) with the age gate measured from the copy's newest envelope rather than from
-//! now, so the copy's age profile is the member's. Then it gives the freed pages back. It prints
+//! now, so the copy's age profile is the member's, and deleting what peers retired (a retirement
+//! wins). Then it gives the freed pages back. It prints
 //! bytes per table, file size, each job's writer hold, the digests before and after, and why
 //! envelopes stay. Only counts, timings and digests are printed, never stored content.
 //!
@@ -80,8 +81,9 @@ fn main() -> anyhow::Result<()> {
     let node = args.get(2).ok_or_else(|| anyhow::anyhow!("the copy's node name is required"))?;
     let state_dir = args.get(3).map(Path::new);
     let run = Instant::now();
-    // S2D_PASSES picks the passes (sign, empty, delete, release, vacuum; all by default) and
-    // S2D_NO_SPACE skips the byte counts, to measure one pass again on a copy already measured.
+    // S2D_PASSES picks the passes (sign, empty, delete, release, retire, vacuum; all but retire
+    // by default) and S2D_NO_SPACE skips the byte counts, to measure one pass again on a copy
+    // already measured. S2D_RETIRE_CLAIMS sets how many retirements retire seeds (a day's cap).
     let passes_env = std::env::var("S2D_PASSES").unwrap_or_else(|_| "sign,empty,delete,release,vacuum".into());
     let passes: Vec<&str> = passes_env.split(',').collect();
     let count_space = std::env::var_os("S2D_NO_SPACE").is_none();
@@ -117,6 +119,42 @@ fn main() -> anyhow::Result<()> {
                 std::thread::sleep(Duration::from_secs(5));
             }
         });
+    }
+    // A copy has no peers, so nothing teaches it a retirement: retire seeds what a peer whose cut
+    // is later would retire, a day's cap of the observed claims a newer one of the same subject
+    // and kind replaced, as the claim-range walk records them. Seeded before the control starts.
+    let retire_claims: u64 = std::env::var("S2D_RETIRE_CLAIMS").ok().and_then(|claims| claims.parse().ok())
+        .unwrap_or(smallclaims::store::checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS);
+    if passes.contains(&"retire") {
+        let started = Instant::now();
+        let mut seeded = Vec::new();
+        {
+            let connection = store.readers.get();
+            let mut replaced = connection.prepare(
+                "SELECT id, kind, actor FROM claims AS held WHERE kind=?1 AND EXISTS(SELECT 1 FROM claims AS newer
+                   WHERE newer.subject=held.subject AND newer.kind=held.kind
+                     AND CAST(newer.accepted_at_unix_ms AS INTEGER) > CAST(held.accepted_at_unix_ms AS INTEGER))
+                 ORDER BY CAST(accepted_at_unix_ms AS INTEGER) LIMIT ?2",
+            )?;
+            for kind in smallclaims::store::checkpoint_trim::LOCAL_TRIM_KINDS {
+                let left = retire_claims.saturating_sub(seeded.len() as u64);
+                let rows = replaced
+                    .query_map(rusqlite::params![kind, left], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                seeded.extend(rows);
+            }
+        }
+        let pending = seeded.iter().filter(|(_, kind, actor)| smallclaims::store::retirement_wins::deletable_on_a_peers_word(kind, actor.as_deref())).count();
+        let now = i64::try_from(smallclaims::store::now_ms())?;
+        store.connection.batched(|tx| -> rusqlite::Result<()> {
+            let mut insert = tx.prepare("INSERT OR IGNORE INTO peer_retired_claims(id, peer, state, learned_at_unix_ms) VALUES (?1, 'peer/measure', ?2, ?3)")?;
+            for (id, kind, actor) in &seeded {
+                let state = if smallclaims::store::retirement_wins::deletable_on_a_peers_word(kind, actor.as_deref()) { "pending" } else { "kept" };
+                insert.execute(rusqlite::params![id, state, now])?;
+            }
+            Ok(())
+        }).map_err(|error| anyhow::anyhow!(error))??;
+        println!("retire_seeded={} retire_pending={pending} seed_ms={}", seeded.len(), started.elapsed().as_millis());
     }
     let before = digests(&store, fleet.as_deref())?;
     // The control: one short write every 50 ms, as a busy member's own appends would queue.
@@ -257,6 +295,57 @@ fn main() -> anyhow::Result<()> {
             println!("kept_reason={reason} kept={count}");
         }
         report("release", &mut holds);
+    }
+
+    if passes.contains(&"retire") {
+        // A retirement wins: the checkpoint worker's step deletes the pending retirements through
+        // the trim's paced chunks, each its own write. A step is many writes, so the writer holds
+        // are read from the control writer: its waits while the steps run, beside a quiet minute.
+        store.trim_locally(true)?;
+        store.trim_locally_at_most(retire_claims);
+        let pending = |store: &Store| -> anyhow::Result<u64> {
+            Ok(store.readers.get().query_row("SELECT COUNT(*) FROM peer_retired_claims WHERE state='pending'", [], |row| row.get(0))?)
+        };
+        let quiet = control.lock().unwrap().len();
+        std::thread::sleep(Duration::from_secs(60));
+        let from = control.lock().unwrap().len();
+        let mut quiet_holds = control.lock().unwrap()[quiet..from].to_vec();
+        let scratch = path.with_extension("retire-scratch");
+        let started = Instant::now();
+        let mut deleted = 0;
+        loop {
+            let waiting = pending(&store)?;
+            let job = Instant::now();
+            let actions = store.checkpoint_step(&fractal_daemon::store::CheckpointContext {
+                now_unix_ms: smallclaims::store::now_ms(),
+                scratch: scratch.clone(),
+            })?;
+            let took = job.elapsed();
+            let mut stop = actions.is_empty();
+            for action in &actions {
+                println!("retire_step_ms={} action={}", took.as_millis(), serde_json::to_string(action)?);
+                match action {
+                    smallclaims::store::checkpoint_agreement::CheckpointAction::Trimmed { claims, .. } => deleted += claims,
+                    smallclaims::store::checkpoint_agreement::CheckpointAction::TrimGraphChanged { .. } => stop = true,
+                    _ => {}
+                }
+            }
+            if stop || pending(&store)? == 0 || pending(&store)? == waiting {
+                break;
+            }
+        }
+        let to = control.lock().unwrap().len();
+        let mut retire_holds = control.lock().unwrap()[from..to].to_vec();
+        println!(
+            "retire_deleted={deleted} retire_left_pending={} retire_kept={} retire_ms={}",
+            pending(&store)?,
+            store.peer_retired_claims_kept()?,
+            started.elapsed().as_millis()
+        );
+        println!("control_quiet_over_100ms={}", quiet_holds.iter().filter(|took| took.as_millis() >= 100).count());
+        report("control_quiet", &mut quiet_holds);
+        println!("control_retire_over_100ms={}", retire_holds.iter().filter(|took| took.as_millis() >= 100).count());
+        report("control_retire", &mut retire_holds);
     }
 
     if passes.contains(&"vacuum") {
