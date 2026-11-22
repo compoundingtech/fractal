@@ -7976,6 +7976,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "resource_recovery_observations": 1,
                     "idle_residency": 1,
                     "per_run_missions": 1,
+                    "work_rebind_v1": 1,
                     "shell_resource_exec": 2,
                     "runtime_workspace": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
@@ -8102,6 +8103,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     reconciler.set_idle_residency(config.reconcile.idle_residency()?);
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
+    reconciler.set_model_return_policy(&config.model_return)?;
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
     reconciler.set_ask_digest_policy(&config.asks)?;
@@ -10074,21 +10076,28 @@ async fn trace_claims(client: &Client, args: &TraceArgs) -> Result<Vec<ClaimReco
 
 fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> Result<()> {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    let summary = ["state", "status", "verdict", "action", "reason"]
-        .into_iter()
+    let keys: &[&str] = if claim.kind == "step.execution-phase" {
+        &["attempt", "phase", "exec", "at_unix_ms", "host"]
+    } else {
+        &["state", "status", "verdict", "action", "reason"]
+    };
+    let summary = keys.iter().copied()
         .filter_map(|key| {
             fields
                 .get(key)
                 .filter(|value| !value.is_null())
-                .map(|value| format!("{key}={}", trace_scalar(value)))
+                .map(|value| {
+                    if key == "at_unix_ms" {
+                        value.as_u64().map(|at| format!("{key}={}", format_trace_timestamp(u128::from(at))))
+                            .unwrap_or_else(|| format!("{key}={}", trace_scalar(value)))
+                    } else {
+                        format!("{key}={}", trace_scalar(value))
+                    }
+                })
         })
         .collect::<Vec<_>>()
         .join(" · ");
-    let timestamp = chrono::DateTime::from_timestamp_millis(
-        claim.accepted_at_unix_ms.min(i64::MAX as u128) as i64,
-    )
-    .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-    .unwrap_or_else(|| claim.accepted_at_unix_ms.to_string());
+    let timestamp = format_trace_timestamp(claim.accepted_at_unix_ms);
     if summary.is_empty() {
         writeln!(
             output,
@@ -10103,6 +10112,13 @@ fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> R
         )?;
     }
     Ok(())
+}
+
+fn format_trace_timestamp(at_unix_ms: u128) -> String {
+    i64::try_from(at_unix_ms).ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| at_unix_ms.to_string())
 }
 
 fn trace_scalar(value: &Value) -> String {
@@ -15551,6 +15567,24 @@ fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
     Some(line)
 }
 
+fn agent_model_line(agent: &fractal_client::Agent) -> String {
+    use std::fmt::Write as _;
+    let drift = agent.extra.get("model_drift");
+    let declared = agent.extra.get("declared_model").and_then(Value::as_str).unwrap_or("unknown");
+    let state = drift.and_then(|value| value.get("state")).and_then(Value::as_str).unwrap_or("unknown");
+    let mut line = format!("declared {declared} · live {} · {state}", agent.live_model.as_deref().unwrap_or("unknown"));
+    if let Some(since) = drift.and_then(|value| value.get("drift_since")).and_then(Value::as_str) {
+        let _ = write!(line, " · since {since}");
+    }
+    let reason = drift.and_then(|value| value.get("fallback_reason")).and_then(Value::as_str).unwrap_or("unknown");
+    let _ = write!(line, " · fallback {reason} · returns ");
+    match drift.and_then(|value| value.get("return_attempts")).and_then(Value::as_u64) {
+        Some(attempts) => { let _ = write!(line, "{attempts}"); }
+        None => line.push_str("unknown"),
+    }
+    line
+}
+
 fn render_client_agent(
     agent: &fractal_client::Agent,
     current_steps: &[StepRunView],
@@ -15593,9 +15627,7 @@ fn render_client_agent(
         agent.driver.as_deref().unwrap_or("none"),
         agent.harness_state.as_deref().unwrap_or("unobserved")
     );
-    if let Some(live) = agent.live_model.as_deref() {
-        let _ = writeln!(output, "LIVE MODEL   {live}");
-    }
+    let _ = writeln!(output, "MODEL        {}", agent_model_line(agent));
     if agent.blocked_on.as_deref() == Some("human")
         && agent.ask.as_deref() == Some("permission")
     {
@@ -15941,6 +15973,7 @@ fn render_client_agents(
                     agent.header.id, agent.name, agent.state
                 );
             }
+            let _ = writeln!(output, "  model {}", agent_model_line(agent));
             if let Some(admission) = agent.extra.get("seat_admission") {
                 let _ = writeln!(output, "  {}", agents_cli::admission_start_message(&agent.header.id, admission));
             }
@@ -16008,6 +16041,7 @@ fn render_client_agents(
                     agent.reachability
                 );
                 let _ = writeln!(output, "{member_prefix}   {}", agent.header.id);
+                let _ = writeln!(output, "{member_prefix}   model {}", agent_model_line(agent));
                 if let Some(admission) = agent.extra.get("seat_admission") {
                     let _ = writeln!(output, "{member_prefix}   {}", agents_cli::admission_start_message(&agent.header.id, admission));
                 }
@@ -18300,9 +18334,9 @@ impl ObservationClient<'_> {
         let mut claim = claim.clone();
         bind_observation_account(&mut claim, account.as_deref());
         if let Some((runtime, sequence, dir, _)) = self.event {
-            // Diagnostics are retained graph facts, not local observation slots. Preserve
-            // their episode key; /harness-events replaces keys with its observation slot.
-            if claim.kind == "harness.diagnostic" {
+            // Reasoned native facts are retained graph claims, not local observation slots.
+            // Preserve their episode keys across lost acknowledgements and channel replay.
+            if matches!(claim.kind.as_str(), "harness.diagnostic" | "harness.model-fallback.observed") {
                 return self.client.post(path, &claim).await;
             }
             let slot = format!(
@@ -18770,6 +18804,32 @@ async fn native_timeline_claim(
     client: &Client, subject: &str, incarnation: &str,
     operation: fractal_drivers::harness_timeline::Operation,
 ) -> Result<ClaimInput> {
+    if operation.driver == "omp" && operation.entry_type == "status"
+        && operation.body["code"] == "model-fallback"
+    {
+        let mut body = operation.body;
+        let mut fields = BTreeMap::from([
+            ("incarnation_id".into(), Value::from(incarnation)),
+            ("observed_at_unix_ms".into(), Value::from(operation.observed_at_unix_ms)),
+            ("reason".into(), Value::from(if body["observation"] == "applied" {
+                "native-retry-fallback"
+            } else { "native-model-selection" })),
+        ]);
+        for key in ["observation", "cause", "from", "to", "native_session", "source_event", "episode_id"] {
+            if let Some(value) = body.as_object_mut().and_then(|body| body.remove(key)) {
+                fields.insert(key.into(), value);
+            }
+        }
+        fractal_schema::registry().validate_claim(subject, "harness.model-fallback.observed", &fields)?;
+        return Ok(ClaimInput {
+            subject: subject.into(), kind: "harness.model-fallback.observed".into(),
+            actor: Some(subject.into()),
+            idempotency_key: Some(format!("model-fallback:{subject}:{incarnation}:{}:{}:{}",
+                fields["episode_id"].as_str().unwrap(), fields["source_event"].as_str().unwrap(),
+                fields["observation"].as_str().unwrap())),
+            fields, evidence: Vec::new(), expected_subject: None,
+        });
+    }
     let mut failure = None;
     if operation.entry_type == "error"
         && operation.body["code"] == fractal_drivers::work_claim_failure::CODE
@@ -21829,13 +21889,16 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
             .ok()
             .flatten();
         match reloaded {
-            Some(Ok((reloaded, reconcile, asks))) => {
+            Some(Ok((reloaded, reconcile, asks, model_return))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
                 reconciler.set_idle_residency(reconcile.idle_residency().expect("validated idle residency"));
                 reconciler.set_default_stall_reports(reconcile.default_stall_reports);
+                if let Err(error) = reconciler.set_model_return_policy(&model_return) {
+                    tracing::warn!("the model return policy keeps its last config: {error:#}");
+                }
                 if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }
