@@ -4,6 +4,7 @@ import type { UxTelemetry } from '../telemetry/ux.ts'
 import { makeKindRegistry, type KindPolicy } from './registry.ts'
 import type { KindDescriptor, PresentationWorld } from './presentation.ts'
 import { AgentAside, type AsidePanelProps } from '../web/AgentAside.tsx'
+import { MissionAside } from '../missions/MissionAside.tsx'
 import type { Subject, SubjectKind } from './subject.ts'
 import { githubContributions, GithubTab } from '../plugins/github/index.ts'
 import { AgentSurface, AlertSurface, DeclarationSurface, DocumentSurface, InboxSurface, MissionsSurface, ResourceSurface, UnsupportedSurface, UsageSurface } from './surfaces.tsx'
@@ -58,6 +59,8 @@ const agent: KindSurface = {
   Aside: { threshold: ({ terminal }) => terminal ? 1080 : 960, Panel: AgentAside },
 }
 const missions: KindSurface = { Surface: MissionsSurface, hidden: 'activity', scrollMemory: true }
+/** One mission: the graph and the trace want a wide column, so its panel docks from a wider pane than an agent's. */
+const mission: KindSurface = { ...missions, Aside: { threshold: () => 1080, Panel: MissionAside } }
 
 const views: Readonly<Record<SubjectKind, KindSurface>> = {
   Conversation: agent,
@@ -65,7 +68,7 @@ const views: Readonly<Record<SubjectKind, KindSurface>> = {
   Inbox: { Surface: InboxSurface, hidden: 'activity', scrollMemory: true },
   Alert: { Surface: AlertSurface, hidden: 'activity', scrollMemory: true },
   Missions: missions,
-  Mission: missions,
+  Mission: mission,
   Usage: { Surface: UsageSurface, hidden: 'activity', scrollMemory: true },
   Document: { Surface: DocumentSurface, hidden: 'activity', scrollMemory: true },
   Declaration: { Surface: DeclarationSurface, hidden: 'activity', scrollMemory: true },

@@ -26,6 +26,29 @@ const usage = { since_ms: 1000, until_ms: 5000, rows: [{ agent: 'agent/example-d
 const declaration = { id: 'agent/example-details', revision: '1', revisions: ['1'], kdl: 'private raw text', tree: { name: 'agent', children: [{ name: 'workspace', arguments: ['/private/workspace'] }, { name: 'env', properties: { TOKEN: 'redacted' } }] } }
 
 describe('real native Details getter adapters', () => {
+  it.effect('reads a mission run’s spend since its start, one read per run start minute', () => Effect.gen(function* () {
+    const registry = yield* Effect.acquireRelease(Effect.sync(() => AtomRegistry.make()), registry => Effect.sync(() => registry.dispose()))
+    const requests: URL[] = []
+    const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) => {
+      requests.push(new URL(String(input)))
+      if (String(input).endsWith('/capabilities')) return Response.json(recording.capabilities)
+      return Response.json(envelope({ ...usage, rows: [{ ...usage.rows[0], step: 'step-run/m/1/g1/build', mission_run: 'mission-run/m/1' }] }))
+    } }
+    const facts = gatewayNativeDetails({ options, discovery: new FractalClient(options), registry, now: () => 9_000_000 })
+    const spend = facts.missionUsage(1_234_567)
+    // Every view of one run shares one read: the start is rounded down to its minute.
+    expect(facts.missionUsage(1_200_000)).toBe(spend)
+    expect(facts.missionUsage(1_260_000)).not.toBe(spend)
+    const mounted = registry.mount(spend)
+    yield* Effect.addFinalizer(() => Effect.sync(mounted))
+    const first = yield* nextFeed({ registry, atom: spend, predicate: feed => feed._tag === 'Observed' && feed.freshness === 'live' })
+    expect(first).toMatchObject({ _tag: 'Observed', value: { rows: [{ step: 'step-run/m/1/g1/build', mission_run: 'mission-run/m/1', cost_microusd: 1230000 }] } })
+    const read = requests.filter(url => url.pathname === '/v1/client/usage')
+    expect(read).toHaveLength(1)
+    expect(read[0]?.searchParams.get('since_ms')).toBe('1200000')
+    expect(read[0]?.searchParams.get('until_ms')).toBe('9000000')
+  }).pipe(Effect.scoped))
+
   it.effect('shares one Details agent period demand, decodes native wire, and retains failed observations as stale until retry', () => Effect.gen(function* () {
     const registry = yield* Effect.acquireRelease(Effect.sync(() => AtomRegistry.make()), registry => Effect.sync(() => registry.dispose()))
     const requests: URL[] = []

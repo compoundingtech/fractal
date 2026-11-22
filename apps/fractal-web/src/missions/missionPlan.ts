@@ -5,9 +5,9 @@ import { DateTime, Option } from 'effect'
 import { markdownPlainText } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-source.ts'
 import { missionSteps, type MissionPresentation, type PresentedStep } from './presentation.ts'
 
-// The mission's plan as a dependency-ordered stepper: levels from the visualization's dependency edges (else the steps'
-// blockers), steps sharing a level run side by side, and a level's depth is its indentation. The presentation's own
-// step order is by state, which would scramble the plan, so it only supplies each step's word and owner here.
+// The mission's plan in dependency order: levels from the visualization's dependency edges (else the steps' blockers),
+// then declaration order within a level. The presentation's own step order is by state, which would scramble the
+// plan, so it only supplies each step's word and owner here.
 
 /** An optional decoded field: an Option, a DateTime, a number or nothing, as Unix ms. */
 export const millis = (value: unknown): number | undefined => {
@@ -35,8 +35,6 @@ export type PlanStep = PresentedStep & {
   readonly after: readonly string[]
   /** What the step is for, as its author wrote it (inline Markdown). */
   readonly goal: MarkdownInline | undefined
-  readonly startedAt: number | undefined
-  readonly completedAt: number | undefined
   readonly since: number | undefined
   /** The agent's last progress line (inline Markdown). */
   readonly progress: MarkdownInline | undefined
@@ -101,8 +99,6 @@ export const missionPlan = (mission: Fractal.Mission, presentation: MissionPrese
       level: level(step.path),
       after: after(step.path),
       goal,
-      startedAt: millis(step.started_at),
-      completedAt: millis(step.completed_at),
       since: millis(step.since),
       progress: markdown(step.last_progress),
       blockedReason: text(step.blocked_reason),
@@ -111,49 +107,4 @@ export const missionPlan = (mission: Fractal.Mission, presentation: MissionPrese
   const depth = steps.reduce((max, step) => Math.max(max, step.level), -1) + 1
   const levels = Array.from({ length: depth }, (_, index) => steps.filter(step => step.level === index))
   return { levels, steps, edges: known }
-}
-
-/** How long a step took or has been going: done → started..completed; working → started..now. */
-export const stepDuration = (step: PlanStep, now: number): number | undefined => {
-  const start = step.startedAt ?? (step.word === 'working' ? step.since : undefined)
-  if (start === undefined) return undefined
-  const end = step.word === 'done' ? step.completedAt : step.word === 'working' ? now : undefined
-  return end === undefined || end < start ? undefined : end - start
-}
-
-export type ActivityEntry = {
-  readonly at: number
-  readonly kind: 'completed' | 'claimed' | 'retry' | 'failed' | 'waiting' | 'run' | 'gate'
-  readonly text: string
-  readonly step?: string
-  readonly agent?: string
-}
-
-/**
- * What happened, newest first, from what the mission serves: step starts (claims), completions, retries and failures,
- * run starts and outcomes, and gates opened on the person. Nothing is invented: a fact without a time is left out.
- */
-export const missionActivity = ({ mission, plan, attention }: { readonly mission: Fractal.Mission; readonly plan: MissionPlan; readonly attention: readonly Fractal.Attention[] }): readonly ActivityEntry[] => {
-  const entries: ActivityEntry[] = []
-  for (const step of plan.steps) {
-    const who = step.owner.kind === 'agent' ? step.owner.label : step.owner.kind === 'st' ? 'Fractal' : undefined
-    const agent = step.owner.kind === 'agent' ? step.owner.agent : undefined
-    const base = { step: step.id, ...(agent === undefined ? {} : { agent }) }
-    if (step.startedAt !== undefined) entries.push({ ...base, at: step.startedAt, kind: 'claimed', text: who === undefined ? `Started ${step.title}` : `${who} took ${step.title}` })
-    if (step.completedAt !== undefined && step.word === 'done') entries.push({ ...base, at: step.completedAt, kind: 'completed', text: `${step.title} done` })
-    if (step.word === 'failed' && step.since !== undefined) entries.push({ ...base, at: step.since, kind: 'failed', text: `${step.title} failed${step.attempts > 1 ? ` on attempt ${step.attempts}` : ''}` })
-    else if (step.attempts > 1 && step.since !== undefined) entries.push({ ...base, at: step.since, kind: 'retry', text: `${step.title}: attempt ${step.attempts}` })
-    if ((step.word === 'waiting' || step.word === 'ready') && step.since !== undefined && (step.blockedReason ?? step.note) !== undefined && (step.blockedReason ?? step.note) !== null) entries.push({ ...base, at: step.since, kind: 'waiting', text: `${step.title}: ${step.blockedReason ?? step.note}` })
-  }
-  for (const run of mission.run_details ?? []) {
-    const started = millis(run.started_at)
-    if (started !== undefined) entries.push({ at: started, kind: 'run', text: `Run ${run.id.split('/').pop()} started` })
-    const outcome = Option.isOption(run.outcome) ? Option.getOrUndefined(run.outcome) : run.outcome ?? undefined
-    if (outcome !== undefined && outcome !== null) entries.push({ at: millis(outcome.at) ?? 0, kind: outcome.status === 'failed' ? 'failed' : 'run', text: `Run ${run.id.split('/').pop()} ${outcome.status}${outcome.reason === '' ? '' : `: ${outcome.reason}`}` })
-  }
-  for (const item of attention) {
-    const at = millis(item.requested_at)
-    if (at !== undefined) entries.push({ at, kind: 'gate', text: `Asked you: ${item.title}` })
-  }
-  return entries.filter(entry => entry.at > 0).sort((a, b) => b.at - a.at)
 }

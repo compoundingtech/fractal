@@ -127,7 +127,7 @@ export const AlertSurface = ({ subject, onOpen, onReplace, onClose, onBackToAler
   {subject._tag === 'Alert' ? <AlertDetailsPane id={subject.id} onOpenAlert={id => onReplace(`alert/${id}`)} onOpenRef={onOpen} onClose={onClose} onBack={onBackToAlerts} {...(ux === undefined ? {} : { ux })} /> : <Fragment />}
 </React.Suspense>
 
-/** The Missions screen, or one mission as its own tab: header, banner, plan, agents, activity, linked work and actions. */
+/** The Missions screen, or one mission as its own tab: overview, agents, the plan graph over the trace, and its definition. */
 export const MissionsSurface = ({ subject, visible, onOpen }: SurfaceProps) => <React.Suspense fallback={<Loading title="Loading missions" />}>
   {subject._tag === 'Mission'
     ? <MissionDetailView missionRef={subject.ref} visible={visible} onOpen={ref => onOpen(ref)} />

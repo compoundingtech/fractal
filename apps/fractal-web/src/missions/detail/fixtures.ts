@@ -1,5 +1,10 @@
-import { Attention, Mission, Work, decodeUnknownSync, type AttentionEncoded, type MissionEncoded, type MissionStepEncoded, type WorkEncoded } from '@fractal/client/schema'
+import { Attention, Mission, MissionDeclaration, UsagePeriod, Work, decodeUnknownSync, type AttentionEncoded, type MissionEncoded, type MissionStepEncoded, type WorkEncoded } from '@fractal/client/schema'
+import type * as Native from '@fractal/client/schema'
 import { Option } from 'effect'
+import * as Atom from 'effect/reactivity/Atom'
+
+import type { NativeDetailsSource } from '../../data/nativeDetailsSource.ts'
+import { observed, unavailable, waiting, type Feed } from '../../data/source.ts'
 
 import { worldNow } from '../../fixtures/world.ts'
 import type { UsageRowLike } from './detailModel.ts'
@@ -168,3 +173,38 @@ export const withServedHistory = (mission: Mission): Mission => {
     })),
   }) as Mission
 }
+
+/** A `usage.period` read over rows: what the gateway returns for the mission detail's spend. */
+export const usagePeriodOf = (rows: readonly UsageRowLike[], since = syncStart): Native.UsagePeriod => decodeUnknownSync(UsagePeriod)({
+  since_ms: since, until_ms: syncNow,
+  rows: rows.map(row => ({ agent: syncSeats.server, input_tokens: row.total_tokens, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, cache_write_1h_tokens: 0, reported_cost_microusd: 0, unpriced_tokens: 0, ...row })),
+})
+
+/** The native details a fixture source carries for the mission detail: spend observed, still loading, or unavailable. */
+export const missionDetailsFixture = (spend: 'observed' | 'waiting' | 'unavailable' = 'observed', rows: readonly UsageRowLike[] = syncUsageRows): NativeDetailsSource => {
+  const notHere = Atom.make<Feed<never>>(unavailable({ reason: 'unsupported', detail: 'Not in this fixture' }))
+  const period = Atom.make<Feed<Native.UsagePeriod>>(spend === 'observed' ? observed({ value: usagePeriodOf(rows) }) : spend === 'waiting' ? waiting : unavailable({ reason: 'unsupported', detail: 'This gateway does not serve usage.' }))
+  return { usagePeriod: () => notHere, missionUsage: () => period, rawDeclarations: () => notHere, declarations: () => notHere, retry: () => undefined, refresh: () => undefined }
+}
+
+const kdl = `mission "platform/sync-v2" {
+  title "Ship sync v2"
+  goal "Clients follow collections with a v2 cursor; v1 readers keep working for 60 days."
+
+  step "spec" { goal "Write the sync v2 spec"; assignee "agent/build-host-b/docs-writer" }
+  step "schema" { after "spec"; goal "Change the wire schema"; assignee "agent/build-host-a/gateway-schema" }
+  step "server" { after "schema"; goal "Implement the server side"; assignee "agent/build-host-a/workbench-shell"; retry max=3 }
+  step "sdk" { after "schema"; goal "Update the client SDK"; assignee "agent/build-host-c/sdk-interop" }
+  step "migration" { after "schema"; goal "Dry-run the data migration"; assignee "agent/build-host-a/workbench-shell" }
+  step "docs" { after "sdk"; goal "Document the new sync API"; assignee "agent/build-host-b/docs-writer" }
+  step "web" { after "sdk"; goal "Move the web app onto sync v2"; assignee "agent/build-host-a/terminal-renderer" }
+  step "security" { after "server"; goal "Security review of the token scope change"
+    assignee "agent/build-host-a/missions-ui"; gate "human" { ask "Approve widening sync tokens to read.projections?" } }
+  step "load" { after "server" "migration"; goal "Load test at 3x peak"; assignee "agent/build-host-b/cas-janitor" }
+  step "canary" { after "security" "load" "web"; goal "Canary at 5% for two hours" }
+  step "rollout" { after "canary"; goal "Roll out to all hosts" }
+  step "announce" { after "rollout"; goal "Announce sync v2" }
+}
+`
+/** The canonical KDL Fractal serves for the mission. */
+export const syncDeclaration: MissionDeclaration = decodeUnknownSync(MissionDeclaration)({ mission: syncMissionRef, revision: 'sha256:5ab0c41e9d', published_at: at(0), text: kdl, legacy: false })
