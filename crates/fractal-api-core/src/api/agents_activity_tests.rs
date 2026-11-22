@@ -81,6 +81,12 @@ async fn host_filter_uses_actual_origin_and_scopes_completeness() {
     let state = state(root.path());
     declare(&state, "local");
     declare(&state, "unobserved");
+    declare(&state, "remote");
+    state.store.bind_fleet(crate::test_support::PAUSE_FLEET).unwrap();
+    let other = Store::open_memory("other").unwrap();
+    other.bind_fleet(crate::test_support::PAUSE_FLEET).unwrap();
+    observe(&other, "remote", running());
+    crate::test_support::replicate(&other, &state.store);
     // A host field inside the observation is not its selected origin authority.
     let mut fields = running();
     fields["host"] = json!("other");
@@ -89,11 +95,18 @@ async fn host_filter_uses_actual_origin_and_scopes_completeness() {
     assert_eq!(body["agents"].as_array().unwrap().len(), 1);
     assert_eq!(body["agents"][0]["id"], "agent/local");
     assert_eq!(body["agents"][0]["host"], "host/node");
-    assert_eq!(body["incomplete"], json!([]));
-    assert_eq!(body["complete"], true);
-    let empty = activity(&state, "?host=host%2Fother").await;
+    let unknown = json!([{"id":"agent/unobserved", "reason":"no-actual"}]);
+    assert_eq!(body["incomplete"], unknown);
+    assert_eq!(body["complete"], false);
+    let remote = activity(&state, "?host=host%2Fother").await;
+    assert_eq!(remote["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(remote["agents"][0]["id"], "agent/remote");
+    assert_eq!(remote["incomplete"], unknown);
+    assert_eq!(remote["complete"], false);
+    let empty = activity(&state, "?host=host%2Fabsent").await;
     assert_eq!(empty["agents"], json!([]));
-    assert_eq!(empty["complete"], true);
+    assert_eq!(empty["incomplete"], unknown);
+    assert_eq!(empty["complete"], false);
 }
 
 #[tokio::test]
@@ -130,16 +143,16 @@ async fn pagination_remembers_incomplete_rows_on_earlier_pages() {
     declare(&state, "a");
     declare(&state, "b");
     observe(&state.store, "b", running());
-    let first = activity(&state, "?limit=1").await;
+    let first = activity(&state, "?limit=1&host=host%2Fnode").await;
     assert_eq!(first["incomplete"][0]["reason"], "no-actual");
     let cursor = first["next_cursor"].as_str().unwrap();
-    let last = activity(&state, &format!("?cursor={}", urlencoding::encode(cursor))).await;
+    let last = activity(&state, &format!("?host=host%2Fnode&cursor={}", urlencoding::encode(cursor))).await;
     assert_eq!(last["incomplete"], json!([]));
     assert_eq!(last["agents"].as_array().unwrap().len(), 1);
     assert!(last["next_cursor"].is_null());
     assert_eq!(last["complete"], false);
     let (status, _) = get_request(router(state), &format!(
-        "{ROUTE}?host=host%2Fnode&cursor={}", urlencoding::encode(cursor)
+        "{ROUTE}?host=host%2Fother&cursor={}", urlencoding::encode(cursor)
     )).await;
     assert_eq!(status, StatusCode::GONE);
 }
@@ -164,10 +177,16 @@ async fn missing_workspace_never_uses_declared_workspace() {
     let state = state(root.path());
     declare(&state, "workspace");
     observe(&state.store, "workspace", json!({"status":"running", "incarnation_id":"one"}));
-    let body = activity(&state, "").await;
-    assert_eq!(body["agents"], json!([]));
-    assert_eq!(body["incomplete"][0]["reason"], "missing-workspace");
-    assert_eq!(body["complete"], false);
+    for suffix in ["", "?host=host%2Fnode"] {
+        let body = activity(&state, suffix).await;
+        assert_eq!(body["agents"], json!([]));
+        assert_eq!(body["incomplete"][0]["reason"], "missing-workspace");
+        assert_eq!(body["complete"], false);
+    }
+    let other_host = activity(&state, "?host=host%2Fother").await;
+    assert_eq!(other_host["agents"], json!([]));
+    assert_eq!(other_host["incomplete"], json!([]));
+    assert_eq!(other_host["complete"], true);
 }
 
 #[tokio::test]
@@ -202,12 +221,14 @@ async fn concurrent_actual_authorities_remain_incomplete() {
         observe(source, "concurrent", running());
         crate::test_support::replicate(source, &state.store);
     }
-    let body = activity(&state, "").await;
-    assert_eq!(body["agents"], json!([]));
-    assert_eq!(body["incomplete"], json!([{
-        "id":"agent/concurrent", "reason":"indeterminate-authority"
-    }]));
-    assert_eq!(body["complete"], false);
+    for suffix in ["", "?host=host%2Fnode"] {
+        let body = activity(&state, suffix).await;
+        assert_eq!(body["agents"], json!([]));
+        assert_eq!(body["incomplete"], json!([{
+            "id":"agent/concurrent", "reason":"indeterminate-authority"
+        }]));
+        assert_eq!(body["complete"], false);
+    }
 }
 
 #[tokio::test]

@@ -3,9 +3,9 @@
   "summary": "Expose paged internal agent activity with explicit completeness evidence",
   "replay": {"status": "none", "detail": "Activity is derived from existing agent declarations and authoritative actual runtime evidence; no new claims are written."},
   "schema": {"status": "none", "detail": "No authoritative storage schema or client-v0 contract changes."},
-  "rules": {"status": "changed", "detail": "Internal activity reads retain actual runtime status and the exact absolute workspace path on its host. Missing actual evidence, indeterminate authority, missing workspace and missing host remain explicit incomplete reasons. Completeness is true only on the final page with no incomplete evidence across the traversal, scoped to the host filter when present."},
+  "rules": {"status": "changed", "detail": "Internal activity reads retain actual runtime status and the exact absolute workspace path on its host. Missing actual evidence, indeterminate authority, missing workspace and missing host remain explicit incomplete reasons. Host filters always retain unknown-host rows as incomplete and exclude only known different hosts. Completeness is true only on the final page and certifies the entire cut-bound selection has no incomplete evidence."},
   "compatibility": {"status": "changed", "detail": "The new CLI command uses GET /v1/internal/agents/activity directly and preserves its raw JSON envelope. Older daemons without that route cannot serve this command; generated clients are unchanged."},
   "downtime": {"status": "none", "detail": "No planned downtime."},
-  "manual": {"status": "changed", "detail": "Use fractal agents activity --json with optional --limit, --cursor, --min-cut and --host. The CLI prints one page; callers follow the returned cursor and inspect completeness rather than treating missing evidence as inactivity."},
+  "manual": {"status": "changed", "detail": "Use fractal agents activity --json with optional --limit, --cursor, --min-cut and --host. The CLI prints one page; callers follow every returned cursor and evaluate completeness only on the last page rather than treating missing evidence as inactivity."},
   "recovery": {"status": "none", "detail": "The command is read-only and leaves existing agent lifecycle operations unchanged."}
 }

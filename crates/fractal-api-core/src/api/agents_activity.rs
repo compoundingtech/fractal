@@ -43,40 +43,67 @@ impl ActivityStatus {
     }
 }
 
-fn activity_row(subject: crate::model::SubjectStatus) -> Value {
-    let actual = subject.actual.as_ref();
-    let workspace = actual.and_then(|actual| actual.get("workspace")).and_then(Value::as_str)
-        .filter(|workspace| Path::new(workspace).is_absolute());
-    let origin = subject.actual_origin.as_deref().filter(|origin| !origin.is_empty());
-    let reason = if actual.is_none() || subject.actual_claim.is_none() {
-        Some(IncompleteReason::NoActual)
-    } else if subject.reason.as_deref() == Some(crate::store::INDETERMINATE_ACTUAL_AUTHORITY) {
-        Some(IncompleteReason::IndeterminateAuthority)
-    } else if origin.is_none() {
-        Some(IncompleteReason::MissingHost)
-    } else if workspace.is_none() {
-        Some(IncompleteReason::MissingWorkspace)
-    } else {
-        None
+enum ActivityClassification<'a> {
+    Complete {
+        origin: &'a str,
+        workspace: &'a str,
+        actual: &'a Value,
+        claim: &'a str,
+    },
+    Incomplete(IncompleteReason),
+}
+
+fn classify_activity(subject: &crate::model::SubjectStatus) -> ActivityClassification<'_> {
+    let (Some(actual), Some(claim)) = (subject.actual.as_ref(), subject.actual_claim.as_deref()) else {
+        return ActivityClassification::Incomplete(IncompleteReason::NoActual);
     };
-    if let Some(reason) = reason {
-        return json!({"id": subject.subject, "reason": reason});
+    if subject.reason.as_deref() == Some(crate::store::INDETERMINATE_ACTUAL_AUTHORITY) {
+        return ActivityClassification::Incomplete(IncompleteReason::IndeterminateAuthority);
     }
-    let actual = actual.expect("complete actual");
-    let (status, status_raw) = ActivityStatus::from_actual(actual.get("status").and_then(Value::as_str));
-    let mut row = json!({
-        "id": subject.subject,
-        "status": status,
-        "host": client_host_id(origin.expect("complete host")),
-        "workspace": workspace.expect("complete workspace"),
-        "incarnation_id": actual.get("incarnation_id"),
-        "actual_claim": subject.actual_claim,
-        "actual_origin": origin,
-    });
-    if let Some(raw) = status_raw {
-        row["status_raw"] = json!(raw);
+    let Some(origin) = subject.actual_origin.as_deref().filter(|origin| !origin.is_empty()) else {
+        return ActivityClassification::Incomplete(IncompleteReason::MissingHost);
+    };
+    let Some(workspace) = actual.get("workspace").and_then(Value::as_str)
+        .filter(|workspace| Path::new(workspace).is_absolute()) else {
+        return ActivityClassification::Incomplete(IncompleteReason::MissingWorkspace);
+    };
+    ActivityClassification::Complete { origin, workspace, actual, claim }
+}
+
+fn activity_row(subject: &crate::model::SubjectStatus, host: Option<&str>) -> Option<Value> {
+    let classification = classify_activity(subject);
+    // Missing workspace still has an authoritative origin. Every other incomplete
+    // classification has an unknown host and must remain visible under any host filter.
+    let known_origin = match &classification {
+        ActivityClassification::Complete { origin, .. } => Some(*origin),
+        ActivityClassification::Incomplete(IncompleteReason::MissingWorkspace) =>
+            subject.actual_origin.as_deref(),
+        ActivityClassification::Incomplete(_) => None,
+    };
+    if let (Some(host), Some(origin)) = (host, known_origin)
+        && client_host_id(origin) != host
+    {
+        return None;
     }
-    row
+    Some(match classification {
+        ActivityClassification::Incomplete(reason) => json!({"id": subject.subject, "reason": reason}),
+        ActivityClassification::Complete { origin, workspace, actual, claim } => {
+            let (status, status_raw) = ActivityStatus::from_actual(actual.get("status").and_then(Value::as_str));
+            let mut row = json!({
+                "id": subject.subject,
+                "status": status,
+                "host": client_host_id(origin),
+                "workspace": workspace,
+                "incarnation_id": actual.get("incarnation_id"),
+                "actual_claim": claim,
+                "actual_origin": origin,
+            });
+            if let Some(raw) = status_raw {
+                row["status_raw"] = json!(raw);
+            }
+            row
+        }
+    })
 }
 
 pub(super) async fn list(
@@ -119,10 +146,9 @@ pub(super) async fn list(
                 // This is the roster's current-layer membership and chunked desired/actual fold,
                 // not the presented card (whose workspace may come from the declaration).
                 let status = reader.store.agent_card_status_for_generic_reads_at(None, cut, false)?;
-                let items = status.subjects.into_iter()
-                    .filter(|subject| host.as_ref().is_none_or(|host| subject.actual_origin.as_deref()
-                        .is_some_and(|origin| client_host_id(origin) == *host)))
-                    .map(activity_row).collect::<Vec<_>>();
+                let items = status.subjects.iter()
+                    .filter_map(|subject| activity_row(subject, host.as_deref()))
+                    .collect::<Vec<_>>();
                 Ok((client_snapshot_at(&reader, cut), items))
             })
         }).await.map_err(ApiError::internal)?.map_err(ApiError::internal)?;

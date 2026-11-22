@@ -89,7 +89,9 @@ fractal agents activity --json [--limit N] [--cursor C] [--min-cut N] [--host ID
 This command reads one page from `GET /v1/internal/agents/activity` and prints its
 raw JSON envelope, including pagination and completeness metadata. It does not
 expand agent cards or follow cursors automatically. `--min-cut` sends `min_cut`;
-`--host` restricts both the results and completeness to that exact host ID.
+`--host` selects rows on that exact host plus every row whose host is unknown.
+Rows with no actual, no origin, or indeterminate authority are always included as
+incomplete under `--host`; only rows with a known, different host are excluded.
 Continue with the returned opaque cursor and unchanged selection options.
 The native page cache retains the same snapshot cut across those pages.
 
@@ -104,9 +106,11 @@ path from the desired declaration.
 
 Incomplete reasons are `no-actual`, `indeterminate-authority`, `missing-workspace`,
 and `missing-host`. Missing or ambiguous evidence is not proof of inactivity.
-`complete` is true only on the final page when no page in that traversal has
-incomplete evidence; an earlier page with no local omissions is not a complete
-answer. Host-filtered completeness applies only to the selected host, not the
+Page through `next_cursor` until it is null, then evaluate `complete` on that last
+page. It is true only there, when the entire cut-bound fold has no incomplete
+evidence; it certifies the whole selection at that cut, not merely the last page.
+Earlier pages always report false, even if their rows have no omissions.
+Host-filtered completeness covers that host plus unknown-host evidence, not the
 whole fleet. This is an internal read, not a client-v0 operation.
 
 ## Single-subject status reads
