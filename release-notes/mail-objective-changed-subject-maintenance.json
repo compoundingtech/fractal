@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Maintain mail delivery objectives from changed messages and recipient coverage instead of rebuilding every retained lifecycle",
+  "replay": { "status": "none", "detail": "The producer initializes its in-memory reductions from the existing retained mail source, acceptance and lifecycle ledgers. No durable facts are rewritten." },
+  "schema": { "status": "none", "detail": "No persisted schema or migration changes. Changed-subject routing and bounded generation journals are process-local." },
+  "rules": { "status": "none", "detail": "Original durable send onsets, explicit holds, certified native acceptance, terminal failures, retention and native-frontier freshness remain authoritative. Genuine lifecycle and accounting boundaries are retained; producer heartbeats cannot extend native coverage." },
+  "compatibility": { "status": "changed", "detail": "Mail source commits replace only their affected message reductions. Recipient frontier changes reuse retained source and lifecycle facts. Identity, schema, lost-key and journal-rollover cuts require a full rebuild. Cumulative work counters expose full rebuilds, message evaluations, source rows, acceptance rows, lifecycle rows and owner lookups. Mail-owned episode evaluation no longer assembles unrelated SLO sources or evaluates unrelated declared objectives." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout; the initial producer capture rebuilds its reductions." },
+  "manual": { "status": "none", "detail": "No configuration or manual backfill is required." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback restores full captures without changing retained source facts." }
+}
