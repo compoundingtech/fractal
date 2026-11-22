@@ -644,3 +644,41 @@ fn a_verdict_judged_again_after_the_summary_moves_rather_than_differs() {
     let rebuilt = settled(&cache, &alder, &summary).summary.unwrap();
     assert_eq!(rebuilt.kinds[&kind].keys, 0);
 }
+
+#[test]
+fn a_kept_verdict_that_waits_again_moves_and_a_requeue_leaves_the_reader_out() {
+    let alder = Arc::new(node("alder"));
+    let birch = node("birch");
+    let claim = state(&alder, "item/a", "one");
+    push(&alder, &birch);
+    let cut = cut();
+    let kind = verdicts_kind();
+    let every: BTreeSet<usize> = (0..BUCKETS).collect();
+    let cache = Arc::new(AnswersCache::default());
+    let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
+    let ask = AnswersRequest { cut_unix_ms: cut, kind: Some(kind.clone()), buckets: every.clone() };
+    alder
+        .connection
+        .write()
+        .execute(
+            "INSERT OR REPLACE INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+            [&claim],
+        )
+        .unwrap();
+    assert_eq!(settled(&cache, &alder, &summary).summary.unwrap().kinds[&kind].keys, 1);
+
+    // A delegation requeues item/a: no verdict row is written until it is judged, but alder no
+    // longer serves it as settled, so its kept key moves rather than differs from birch's verdict.
+    alder.connection.write().execute("INSERT INTO claim_verdict_queue(claim_id) VALUES (?1)", [&claim]).unwrap();
+    assert_eq!(settled(&cache, &alder, &summary).summary.unwrap().kinds[&kind].keys, 0);
+    let ours = settled(&cache, &alder, &ask).buckets.unwrap();
+    assert!(ours.keys.iter().all(|key| key.moving), "{:?}", ours.keys);
+    let theirs = birch.answer_buckets(&kind, cut, &every).unwrap();
+    assert!(differing_keys(&ours.keys, &theirs.keys).is_empty());
+
+    // A requeue that starts after the summary was kept leaves the reader out, as computing now would.
+    alder.connection.write().execute("INSERT INTO meta(key,value) VALUES ('claim_candidate_requeue:root','')", []).unwrap();
+    let served = settled(&cache, &alder, &summary).summary.unwrap();
+    assert!(!served.kinds.contains_key(&kind), "no verdicts while a requeue pages");
+    assert!(differing_kinds(&served, &birch.answers_summary(cut).unwrap(), false).is_empty());
+}

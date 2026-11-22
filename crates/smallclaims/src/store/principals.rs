@@ -920,6 +920,11 @@ impl ServedVerdicts {
         }
         self.judged.get(claim_id).map_or(Served::Plain, |reason| Served::Invalid(reason))
     }
+
+    /// The claims judged invalid.
+    pub(crate) fn invalid(&self) -> impl Iterator<Item = &String> {
+        self.judged.keys()
+    }
 }
 
 /// The served verdicts as [`judging::unavailable`] and [`cached_verdict`] give them, claim by
