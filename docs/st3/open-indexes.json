@@ -1,6 +1,6 @@
 {
   "owner": "Fractal Product Lead",
-  "note": "Baseline from main at e679ab2d7c9e68df32c19a4db1dd0bfad989140e. This is a ceiling, not permission to add startup DDL. New indexes on claims or local_observations must use offline fractal store prepare-indexes (owner_indexes) or reuse an existing index. Extending this list requires Fractal Product Lead approval. Includes SQLite implicit indexes. Remove entries when indexes stop being created at open.",
+  "note": "Baseline from main at e679ab2d7c9e68df32c19a4db1dd0bfad989140e, with five native_attach_* indexes removed after #7038 merged at c2de8bf275ec7521059879784bd00c3d77d74f36. This is a ceiling, not permission to add startup DDL. New indexes on claims or local_observations must use offline fractal store prepare-indexes (owner_indexes) or reuse an existing index. Extending this list requires Fractal Product Lead approval. Includes SQLite implicit indexes. Remove entries when indexes stop being created at open.",
   "indexes": {
     "claims": [
       "claims_accepted_order_index",
@@ -96,11 +96,6 @@
       "claims_transport_pair_accepted_index",
       "input_history_author_agent",
       "input_history_author_conversation",
-      "native_attach_agents",
-      "native_attach_answers",
-      "native_attach_processes",
-      "native_attach_requests",
-      "native_attach_sessions",
       "sqlite_autoindex_claims_1",
       "st3_lifecycle_operation_index_v2"
     ],
