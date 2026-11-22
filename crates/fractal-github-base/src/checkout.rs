@@ -266,17 +266,29 @@ pub mod test_support {
     use std::process::Command;
     use std::sync::{LazyLock, Mutex};
 
-    static STORES: LazyLock<Mutex<BTreeMap<PathBuf, PathBuf>>> =
+    #[derive(Default)]
+    struct LeaseFixture {
+        store: PathBuf,
+        acquisitions: usize,
+    }
+
+    static STORES: LazyLock<Mutex<BTreeMap<PathBuf, LeaseFixture>>> =
         LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
     /// Command-local fixture injection: never mutate the parallel test runner's environment.
     pub(super) fn lease_command(mut command: Command, repository: &Path) -> Command {
         if let Ok(repository) = std::fs::canonicalize(repository)
-            && let Some(store) = STORES.lock().unwrap().get(&repository)
+            && let Some(fixture) = STORES.lock().unwrap().get_mut(&repository)
         {
-            command.env("MEGAREPO_STORE", store);
+            fixture.acquisitions += 1;
+            command.env("MEGAREPO_STORE", &fixture.store);
         }
         command
+    }
+
+    /// Count real lease command attempts for this repository's isolated fixture.
+    pub fn lease_count(repository: &Path) -> usize {
+        STORES.lock().unwrap()[&std::fs::canonicalize(repository).unwrap()].acquisitions
     }
 
     pub fn git(directory: &Path, arguments: &[&str]) {
@@ -349,9 +361,15 @@ pub mod test_support {
         let store = if store_shaped { root } else { root.join("mr-store") };
         let mut stores = STORES.lock().unwrap();
         if store_shaped {
-            stores.insert(std::fs::canonicalize(&bare).unwrap(), store.clone());
+            stores.insert(std::fs::canonicalize(&bare).unwrap(), LeaseFixture {
+                store: store.clone(),
+                ..LeaseFixture::default()
+            });
         }
-        stores.insert(std::fs::canonicalize(&clone).unwrap(), store);
+        stores.insert(std::fs::canonicalize(&clone).unwrap(), LeaseFixture {
+            store,
+            ..LeaseFixture::default()
+        });
         clone
     }
 }

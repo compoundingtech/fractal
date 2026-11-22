@@ -609,3 +609,49 @@ added. Member-local trim convergence, retained claim equality, oracle reader
 comparisons, person-authored claim preservation, invalid/pending-record checks and
 majority trim coverage remain enforced. The former shared-checkpoint never-trim
 sets and post-excusal continuation remain historical, not active assertions.
+
+## Native execution and delivery phases
+
+`claims-v43.json` adds durable `step.execution-phase` evidence and the
+`exec_exited_at_unix_ms` and `start_operation` fields on `runtime.observed` to
+main's spend-source registry. Versions 1 through 42 remain frozen, including
+main's native-turn v41 and spend-source v42 snapshots. Generate the complete
+merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v43.json`.
+The simulation, diagnostics and audit reports select v43. The active-corpus
+freshness regression compares the complete generated registry byte-for-byte;
+the focused execution-phase regression also validates a generated phase input.
+Main's local-trim convergence and oracle checks remain unchanged; obsolete shared
+checkpoint agreement and its historical never-trim characterizations are not restored.
+
+Native execution wait accounting is shared through
+`fractal_kernel::step_execution::execution_wait`; both the store's timing fold
+and the reconciler's executor attestation use that leaf helper after the crate split.
+
+
+## Native-session work lease continuity
+
+`claims-v44.json` adds the durable `work.rebound` evidence kind to main's v43
+registry. Versions 1 through 43 remain frozen. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v44.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, freshness check, and audit
+reports select v44. Rebound inputs identify an agent claimant, a positive attempt, distinct
+old and new harness incarnations, and the native session resumed by the new incarnation.
+The focused `the_corpus_generates_valid_work_rebound_inputs` regression checks the
+specification against the live registry, validates and admits the generated input, and
+replicates it to the oracle.
+
+The complete owning serialization was captured byte-for-byte from the strict registry
+freshness assertion in hosted run
+[45039725615](https://github.com/compoundingtech/fractal/actions/runs/45039725615)
+at source `1653f03a265710ea65d0f3a4d1bb5afddb97cb61`; all three attempts emitted identical
+335,746-byte outputs (SHA-256
+`9464faa501cd654dec87b75744009d595661acefb1bad944d1995565092548d1`).
+After integrating main's final v43, the entire `fractal-schema` crate tree and `Cargo.lock`
+were identical to that captured source before promoting the output as the new v44.
+No historical JSON was hand-merged. Main's local-trim semantics remain unchanged: no
+shared checkpoint agreement, old-build excusal continuation, or historical never-trim
+expectations are reintroduced. Retained claim equality, oracle reader comparisons,
+person-authored claim preservation, invalid/pending-record checks, retired-ledger
+sabotage coverage, and complete active-corpus freshness remain enforced.
+

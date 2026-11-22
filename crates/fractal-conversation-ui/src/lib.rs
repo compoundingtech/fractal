@@ -57,6 +57,8 @@ pub use entry::{Body, Density, Entry, MailImage, ToolState, bundle_id, display_r
 pub use pane::{PaneIntent, PaneState, Selection, SelectionLine, State};
 #[cfg(feature = "ratatui")]
 pub use theme::Theme;
+#[cfg(feature = "ratatui")]
+pub use text::{Continuation, CopyRole};
 pub use timeline::{Frame, Older, Timeline};
 
 #[cfg(test)]

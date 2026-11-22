@@ -197,7 +197,7 @@ fn call_line(entry: &Entry, width: usize, spinner: &str, theme: &Theme) -> Doc {
     });
     let title = crate::pane::truncate(&text::sanitize(title), width.saturating_sub(6));
     doc.line(Line::from(vec![
-        Span::styled("▎ ", theme::fg(color)),
+        Span::decoration("▎ ", theme::fg(color)),
         Span::styled(format!("{glyph} "), theme::fg(color)),
         Span::styled(title, fg(RULES.tool.quiet.title, theme)),
     ]));
@@ -220,7 +220,7 @@ fn mail_lines(entry: &Entry, width: usize, theme: &Theme) -> Doc {
         return doc;
     };
     let look = RULES.mail.between_others;
-    let bar = || Span::styled("▎ ", fg(look.edge, theme));
+    let bar = || Span::decoration("▎ ", fg(look.edge, theme));
     let mut from_style = fg(look.from, theme);
     if look.from_bold {
         from_style = from_style.add_modifier(Modifier::BOLD);
@@ -300,7 +300,7 @@ fn bundle_line(
         RULES.tool.ok.color.color(theme)
     };
     let mut spans = vec![
-        Span::styled("▎ ", theme::fg(edge)),
+        Span::decoration("▎ ", theme::fg(edge)),
         Span::styled(
             format!(
                 "{} {} tool calls",
@@ -361,7 +361,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             let bg = RULES.user.fill.color(theme);
             let time = format!("{} ", entry.at);
             doc.line(Line::from(vec![
-                Span::styled(
+                Span::decoration(
                     " ".repeat(width.saturating_sub(text::width(&time))),
                     Style::default().bg(bg),
                 ),
@@ -374,8 +374,8 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 text::wrap(
                     &text::inline(&text::sanitize(body), fg(RULES.user.text, theme), theme),
                     width.saturating_sub(1),
-                    &[run(" ", Style::default())],
-                    &[run(" ", Style::default())],
+                    &[text::decoration(" ", Style::default())],
+                    &[text::decoration(" ", Style::default())],
                     Some(bg),
                 )
                 .into_iter()
@@ -384,7 +384,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             doc.line(Line::from(Span::styled(
                 " ".repeat(width),
                 Style::default().bg(bg),
-            )));
+            )).decoration());
         }
         Body::Assistant(body) => {
             for line in text::markdown(body, inner, fg(RULES.assistant, theme), theme) {
@@ -399,8 +399,8 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             doc.lines(text::wrap(
                 &[run(text::sanitize(body), style)],
                 inner,
-                &[run(format!(" {} ", RULES.thinking.mark), theme.dim())],
-                &[run("   ", theme.dim())],
+                &[text::decoration(format!(" {} ", RULES.thinking.mark), theme.dim())],
+                &[text::decoration("   ", theme.dim())],
                 None,
             ));
         }
@@ -417,7 +417,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 ToolState::Ok => (rules.ok.text, rules.ok.color.color(theme)),
                 ToolState::Failed => (rules.failed.text, rules.failed.color.color(theme)),
             };
-            let edge = || run("▎ ", theme::fg(color));
+            let edge = || text::decoration("▎ ", theme::fg(color));
             let look = if open { rules.open } else { rules.quiet };
             let mut title_style = fg(look.title, theme);
             if look.title_bold {
@@ -435,7 +435,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 hit: PaneIntent::Expand(entry.id.clone()),
             });
             doc.line(Line::from(vec![
-                Span::styled(edge().text, edge().style),
+                Span::decoration(edge().text, edge().style),
                 Span::styled(format!("{glyph} "), theme::fg(color)),
                 Span::styled(title, title_style),
             ]));
@@ -466,8 +466,8 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 rows.extend(text::wrap(
                     &[run(line, style)],
                     width,
-                    &[edge(), run("  ", style)],
-                    &[edge(), run("  ", style)],
+                    &[edge(), text::decoration("  ", style)],
+                    &[edge(), text::decoration("  ", style)],
                     None,
                 ));
                 if opens {
@@ -541,7 +541,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             } else {
                 rules.between_others
             };
-            let bar = run("▎ ", fg(look.edge, theme));
+            let bar = text::decoration("▎ ", fg(look.edge, theme));
             // The person's own mail says how far it got: ✓ st has it, ✓✓ the agent's harness
             // has it.
             let progress = match (from == "you", delivered) {
@@ -563,11 +563,11 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 Some(bg) => style.bg(bg),
                 None => style,
             };
-            let bar = run(bar.text, on(bar.style));
+            let bar = text::decoration(bar.text, on(bar.style));
             // Mail to the person leads with a bullet where their own mail has the bar's first
             // row, so the two read apart at a glance (Nathan, 2026-10-05).
             let lead = if to_you {
-                run("● ", on(fg(look.edge, theme)))
+                text::decoration("● ", on(fg(look.edge, theme)))
             } else {
                 bar.clone()
             };
@@ -625,14 +625,8 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 on(fg(look.text, theme)),
                 theme,
             ) {
-                let alignment = line.alignment;
-                let mut spans = vec![Span::styled(bar.text.clone(), bar.style)];
-                spans.extend(line.spans.into_iter().map(|span| {
-                    let style = on(span.style);
-                    span.style(style)
-                }));
-                let mut line = Line::from(spans);
-                line.alignment = alignment;
+                let mut line = text::prefixed(vec![Span::decoration(bar.text.clone(), bar.style)], line);
+                for span in &mut line.spans { span.style = on(span.style); }
                 rows.push(match tint {
                     Some(bg) => pad(line, inner, bg),
                     None => line,
@@ -669,7 +663,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 });
                 let name = image.name.as_deref().unwrap_or("image");
                 doc.line(Line::from(vec![
-                    Span::styled(bar.text.clone(), bar.style),
+                    Span::decoration(bar.text.clone(), bar.style),
                     Span::styled(
                         format!("▣ {} · {}", text::sanitize(name), size(image.size)),
                         on(fg(look.text, theme)),
@@ -704,7 +698,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                     fg(rules.failed, theme),
                 ),
             };
-            let bar = run("▎ ", theme::fg(bar));
+            let bar = text::decoration("▎ ", theme::fg(bar));
             doc.lines(text::wrap(
                 &[
                     run(label, style),
@@ -718,7 +712,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             for line in text::markdown(body, inner.saturating_sub(2), fg(rules.text, theme), theme)
             {
                 doc.line(text::prefixed(
-                    vec![Span::styled(bar.text.clone(), bar.style)],
+                    vec![Span::decoration(bar.text.clone(), bar.style)],
                     line,
                 ));
             }
@@ -775,20 +769,20 @@ fn fold_control(
         hit: PaneIntent::Expand(id.to_owned()),
     });
     doc.line(Line::from(vec![
-        Span::styled(edge.text, edge.style),
+        Span::decoration(edge.text, edge.style),
         Span::styled(format!("  {label}"), fg(RULES.tool.collapse.color, theme)),
     ]));
 }
 
 fn indent(line: Line<'static>) -> Line<'static> {
-    text::prefixed(vec![Span::raw(" ")], line)
+    text::prefixed(vec![Span::decoration(" ", Style::default())], line)
 }
 
 fn pad(line: Line<'static>, width: usize, bg: ratatui::style::Color) -> Line<'static> {
     let used = line.width();
     let mut line = line;
     if used < width {
-        line.spans.push(Span::styled(
+        line.spans.push(Span::decoration(
             " ".repeat(width - used),
             Style::default().bg(bg),
         ));

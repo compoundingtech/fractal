@@ -3,9 +3,9 @@ use super::*;
 fn readings(now: u64, memory: u32, io: u32) -> [Reading; 2] {
     [
         Reading { signal: Signal::MemoryFull, window: Window::Avg60,
-            millipercent: memory, observed_at_ms: now, memory_shortage: false },
+            millipercent: memory, observed_at_ms: now, memory_shortage: false, memory_available_bytes: None },
         Reading { signal: Signal::IoSome, window: Window::Avg60,
-            millipercent: io, observed_at_ms: now, memory_shortage: false },
+            millipercent: io, observed_at_ms: now, memory_shortage: false, memory_available_bytes: None },
     ]
 }
 
@@ -22,7 +22,9 @@ fn sustained_trip_and_both_signal_recovery_have_separate_hysteresis() {
         assert!(!brake.observe(&readings(now, 1000, 0), now).blocked);
     }
     assert_eq!(brake.observe(&readings(60000, 1000, 0), 60000),
-        Decision { blocked: true, reason: Some(Reason::Pressure(Signal::MemoryFull)) });
+        Decision { blocked: true, reason: Some(Reason::Pressure {
+            signal: Signal::MemoryFull, value: 1000, threshold: 1000,
+        }) });
     for now in (65000..=185000).step_by(5000) {
         // Memory recovered, but IO remains between its resume and trip thresholds.
         assert!(brake.observe(&readings(now, 0, 11000), now).blocked);
@@ -55,7 +57,9 @@ fn missing_stale_future_duplicate_and_out_of_range_readings_never_mean_healthy()
     for values in cases {
         let mut brake = Brake::new(Policy::default()).unwrap();
         assert_eq!(brake.observe(&values, 20000),
-            Decision { blocked: true, reason: Some(Reason::UnknownObservation) });
+            Decision { blocked: true, reason: Some(Reason::UnknownObservation {
+                cause: ObservationCause::MissingOrInvalid,
+            }) });
         for now in (25000..145000).step_by(5000) {
             assert!(brake.observe(&readings(now, 0, 0), now).blocked);
         }
@@ -68,9 +72,9 @@ fn a_sampling_gap_or_backwards_clock_resets_continuous_evidence() {
     let mut brake = Brake::new(Policy::default()).unwrap();
     assert!(!brake.observe(&readings(0, 0, 0), 0).blocked);
     assert_eq!(brake.observe(&readings(20000, 0, 0), 20000).reason,
-        Some(Reason::UnknownObservation));
+        Some(Reason::UnknownObservation { cause: ObservationCause::ObservationGap }));
     assert_eq!(brake.observe(&readings(10000, 0, 0), 10000).reason,
-        Some(Reason::UnknownObservation));
+        Some(Reason::UnknownObservation { cause: ObservationCause::ObservationGap }));
 }
 
 #[test]
@@ -79,19 +83,20 @@ fn independent_samples_release_while_reconcile_passes_are_17_to_27_seconds_apart
     let period = u64::try_from(policy.sample_interval().as_millis()).unwrap();
     let mut brake = Brake::new(policy).unwrap();
     // Missing data closes admission. Only the independent healthy samples recover it.
-    assert_eq!(brake.observe(&[], 0).reason, Some(Reason::UnknownObservation));
+    assert_eq!(brake.observe(&[], 0).reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     let reconcile_times = [17000, 44000, 61000, 88000, 105000, 132000];
     let mut sampled = 0;
+    let mut decision = Decision { blocked: true, reason: None };
     for now in reconcile_times {
         while sampled + period <= now {
             sampled += period;
-            brake.observe(&readings(sampled, 0, 0), sampled);
+            decision = brake.observe(&readings(sampled, 0, 0), sampled);
         }
-        // Admission may also consult the shared observer between periodic samples.
-        let decision = brake.observe(&readings(sampled, 0, 0), now);
-        assert_eq!(decision.blocked, now < 122500, "reconcile at {now}ms");
+        // Admission reads the last sampler decision without adding observations.
+        assert_eq!(decision.blocked, now < 125000, "reconcile at {now}ms");
         if decision.blocked {
-            assert_eq!(decision.reason, Some(Reason::Recovering));
+            assert_eq!(decision.reason, Some(Reason::Recovering { remaining: 125000 - sampled }));
         }
     }
 }
@@ -103,9 +108,9 @@ fn healthy_recovery_is_distinct_from_the_original_pressure_signal() {
         brake.observe(&readings(now, 1000, 0), now);
     }
     assert_eq!(brake.observe(&readings(62500, 0, 0), 62500).reason,
-        Some(Reason::Recovering));
+        Some(Reason::Recovering { remaining: 120000 }));
     assert_eq!(brake.observe(&readings(65000, 1000, 0), 65000).reason,
-        Some(Reason::Pressure(Signal::MemoryFull)));
+        Some(Reason::Pressure { signal: Signal::MemoryFull, value: 1000, threshold: 1000 }));
 }
 
 #[test]
@@ -118,7 +123,7 @@ fn configured_signal_window_threshold_and_timings_are_used() {
     };
     let mut brake = Brake::new(policy).unwrap();
     let input = |now, pressure| [Reading { signal: Signal::IoFull, window: Window::Avg10,
-        millipercent: pressure, observed_at_ms: now, memory_shortage: false }];
+        millipercent: pressure, observed_at_ms: now, memory_shortage: false, memory_available_bytes: None }];
     assert!(!brake.observe(&input(0, 6000), 0).blocked);
     assert!(brake.observe(&input(10, 6000), 10).blocked);
     assert!(brake.observe(&input(11, 0), 11).blocked);
@@ -166,7 +171,9 @@ fn host_reader_parses_real_files_without_substituting_missing_or_stale_data() {
     let paths = KernelPaths { memory_path: Some(&memory), io_path: &io,
         meminfo_path: &meminfo, root_memory_path: &memory, vmstat_path: &vmstat };
     let observed = reader.read_paths(&policy, 123, paths).unwrap();
-    assert_eq!(observed, &readings(123, 3140, 1420));
+    let mut expected = readings(123, 3140, 1420);
+    for reading in &mut expected { reading.memory_available_bytes = Some(8 << 30); }
+    assert_eq!(observed, &expected);
     std::fs::remove_file(&io).unwrap();
     assert!(reader.read_paths(&policy, 124, paths).is_err());
     std::fs::write(&io, "full avg60=0.00\n").unwrap();
@@ -181,6 +188,7 @@ fn omitted_policy_durations_use_declared_defaults_without_ignoring_unknown_field
     assert_eq!(policy.sustained_ms, 15000);
     assert_eq!(policy.resume_ms, 120000);
     assert_eq!(policy.memory_available_floor_bytes, 2 << 30);
+    assert_eq!(policy.sample_interval(), std::time::Duration::from_secs(5));
     assert_eq!(policy.rules, Policy::default().rules);
     assert!(serde_json::from_str::<Policy>("{\"tripWhenever\":true}").is_err());
 }
@@ -280,7 +288,11 @@ fn host_shortage_or_lane_pressure_trips_and_requires_sustained_recovery() {
         for now in (0..60000).step_by(2500) {
             assert!(!fixture.observe(now).blocked);
         }
-        assert_eq!(fixture.observe(60000).reason, Some(Reason::Pressure(Signal::MemoryFull)));
+        assert_eq!(fixture.observe(60000).reason, Some(if lane_pressure {
+            Reason::Pressure { signal: Signal::MemoryFull, value: 1000, threshold: 1000 }
+        } else {
+            Reason::Pressure { signal: Signal::MemoryAvailable, value: 1 << 30, threshold: 2 << 30 }
+        }));
         fixture.lane("0.49");
         fixture.available(2 << 30); // The absolute floor itself is healthy.
         for now in (62500..182500).step_by(2500) {
@@ -298,20 +310,22 @@ fn missing_malformed_and_stale_fixture_observations_fail_closed() {
         let mut fixture = PressureFixture::new();
         assert!(!fixture.observe(0).blocked);
         std::fs::remove_file(fixture.root.path().join(path)).unwrap();
-        assert_eq!(fixture.observe(2500).reason, Some(Reason::UnknownObservation));
+        assert_eq!(fixture.observe(2500).reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     }
     for meminfo in ["MemFree: 8000000 kB\n", "MemAvailable: NaN kB\n",
         "MemAvailable: 8000000 MB\n", "MemAvailable: 1 kB\nMemAvailable: 8000000 kB\n"]
     {
         let mut fixture = PressureFixture::new();
         fixture.write("proc/meminfo", &format!("MemTotal: 16777216 kB\n{meminfo}"));
-        assert_eq!(fixture.observe(0).reason, Some(Reason::UnknownObservation));
+        assert_eq!(fixture.observe(0).reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     }
     let mut fixture = PressureFixture::new();
     assert!(!fixture.observe(0).blocked);
     assert_eq!(fixture.brake.observe(&fixture.reader.readings, 10001).reason,
-        Some(Reason::UnknownObservation));
-    assert_eq!(fixture.observe(12500).reason, Some(Reason::Recovering));
+        Some(Reason::UnknownObservation { cause: ObservationCause::ObservationGap }));
+    assert_eq!(fixture.observe(12500).reason, Some(Reason::Recovering { remaining: 120000 }));
 }
 
 #[test]
@@ -331,7 +345,13 @@ fn absent_lane_slice_is_quiet_but_host_memory_and_io_still_protect_admission() {
         }
         let decision = fixture.observe(60000);
         assert_eq!(decision.blocked, shortage.is_some());
-        assert_eq!(decision.reason, shortage.map(Reason::Pressure));
+        assert_eq!(decision.reason, shortage.map(|signal| match signal {
+            Signal::MemoryFull => Reason::Pressure {
+                signal: Signal::MemoryAvailable, value: 1 << 30, threshold: 2 << 30,
+            },
+            Signal::IoSome => Reason::Pressure { signal, value: 25000, threshold: 25000 },
+            _ => unreachable!(),
+        }));
     }
 }
 
@@ -346,12 +366,14 @@ fn absent_lane_does_not_substitute_for_missing_host_or_existing_lane_observation
         } else {
             std::fs::remove_file(fixture.root.path().join(path)).unwrap();
         }
-        assert_eq!(fixture.observe(0).reason, Some(Reason::UnknownObservation));
+        assert_eq!(fixture.observe(0).reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     }
     let mut fixture = PressureFixture::new();
     fixture.write("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure",
         "some avg60=0.0\nfull avg60=NaN\n");
-    assert_eq!(fixture.observe(0).reason, Some(Reason::UnknownObservation));
+    assert_eq!(fixture.observe(0).reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
 }
 
 #[test]
@@ -368,7 +390,8 @@ fn root_pressure_with_allocator_stalls_trips_even_when_lanes_are_idle_or_absent(
             assert!(!fixture.observe(now).blocked);
         }
         fixture.write("proc/vmstat", "allocstall_dma 62500\nallocstall_normal 100\n");
-        assert_eq!(fixture.observe(62500).reason, Some(Reason::Pressure(Signal::MemoryFull)));
+        assert_eq!(fixture.observe(62500).reason,
+            Some(Reason::Pressure { signal: Signal::MemoryFull, value: 3000, threshold: 1000 }));
     }
 }
 
@@ -384,7 +407,8 @@ fn allocator_counter_reset_is_not_pressure_and_malformed_vmstat_is_unknown() {
         "allocstall_normal 1\nallocstall_normal 2\n", "allocstall_normal\n",
         "allocstall_normal 1", "allocstall_ 1\n"] {
         fixture.write("proc/vmstat", value);
-        assert_eq!(fixture.observe(67500).reason, Some(Reason::UnknownObservation));
+        assert_eq!(fixture.observe(67500).reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     }
 }
 
@@ -407,9 +431,11 @@ fn io_only_policy_keeps_the_memory_floor_independent_and_zero_disables_it() {
     for now in (0..60000).step_by(2500) {
         assert!(!fixture.observe(now).blocked);
     }
-    assert_eq!(fixture.observe(60000).reason, Some(Reason::Pressure(Signal::MemoryFull)));
+    assert_eq!(fixture.observe(60000).reason,
+        Some(Reason::Pressure { signal: Signal::MemoryAvailable, value: 1 << 30, threshold: 2 << 30 }));
     std::fs::remove_file(fixture.root.path().join("proc/meminfo")).unwrap();
-    assert_eq!(fixture.observe(62500).reason, Some(Reason::UnknownObservation));
+    assert_eq!(fixture.observe(62500).reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     fixture.policy.memory_available_floor_bytes = 0;
     fixture.brake = Brake::new(fixture.policy.clone()).unwrap();
     assert!(!fixture.observe(65000).blocked);
@@ -510,7 +536,7 @@ fn one_allocator_event_trips_with_delayed_root_pressure_and_a_late_sustained_sam
         }
         // Skip the exact sustained boundary; the next fresh sample is 1.25 s late.
         assert_eq!(fixture.observe(6250 + sustained_ms).reason,
-            Some(Reason::Pressure(Signal::MemoryFull)));
+            Some(Reason::Pressure { signal: Signal::MemoryFull, value: 3000, threshold: 1000 }));
     }
 }
 
@@ -557,7 +583,7 @@ fn well_formed_unrecognized_v2_layout_uses_host_signals_and_warns_only_once_with
         assert!(!fixture.observe_layout(now, placement).blocked);
     }
     assert_eq!(fixture.observe_layout(127500, placement).reason,
-        Some(Reason::Pressure(Signal::MemoryFull)));
+        Some(Reason::Pressure { signal: Signal::MemoryAvailable, value: 1 << 30, threshold: 2 << 30 }));
 }
 
 #[test]
@@ -572,7 +598,7 @@ fn malformed_or_non_unified_placement_fails_closed_without_a_layout_downgrade() 
     ] {
         let mut fixture = PressureFixture::new();
         assert_eq!(fixture.observe_layout(0, placement).reason,
-            Some(Reason::UnknownObservation), "{placement:?}");
+            Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }), "{placement:?}");
         assert!(!fixture.reader.warned_lane_layout, "{placement:?}");
         assert!(!fixture.reader.lane_layout_not_applicable, "{placement:?}");
     }
@@ -586,10 +612,137 @@ fn recognized_layout_with_unreadable_or_missing_lane_psi_fails_closed() {
         "sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/memory.pressure");
     // A directory cannot be read as a PSI file, even when tests run as root.
     std::fs::create_dir_all(&pressure).unwrap();
-    assert_eq!(fixture.observe_layout(0, placement).reason, Some(Reason::UnknownObservation));
+    assert_eq!(fixture.observe_layout(0, placement).reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     assert!(!fixture.reader.warned_lane_layout);
     std::fs::remove_dir(&pressure).unwrap();
-    assert_eq!(fixture.observe_layout(2500, placement).reason, Some(Reason::UnknownObservation));
+    assert_eq!(fixture.observe_layout(2500, placement).reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     std::fs::write(&pressure, "full avg60=NaN\n").unwrap();
-    assert_eq!(fixture.observe_layout(5000, placement).reason, Some(Reason::UnknownObservation));
+    assert_eq!(fixture.observe_layout(5000, placement).reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopped_sampler_expires_cached_admission_without_reading_or_advancing_the_brake() {
+    let fixture = PressureFixture::new();
+    let root = fixture.root.path();
+    let policy = fixture.policy.clone();
+    let mut observer = Observer::with_paths(policy.clone(), [
+        root.join("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure"),
+        root.join("proc/pressure/io"), root.join("proc/meminfo"),
+        root.join("proc/pressure/memory"), root.join("proc/vmstat"),
+    ]).unwrap();
+    assert_eq!(observer.decision().reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::NotYetSampled }));
+    assert!(!observer.observe(&policy).unwrap().blocked);
+    std::fs::remove_file(root.join("proc/pressure/io")).unwrap();
+    tokio::time::advance(std::time::Duration::from_millis(policy.freshness_ms)).await;
+    // Cached reads do not touch the now-missing kernel fixture.
+    assert!(!observer.decision().blocked);
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    assert_eq!(observer.decision().reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::StaleDecision }));
+    assert!(!observer.brake.tripped, "reading stale decisions must not mutate the brake");
+    fixture.write("proc/pressure/io", "some avg60=0.0\n");
+    assert_eq!(observer.observe(&policy).unwrap().reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::ObservationGap }));
+    tokio::time::advance(policy.sample_interval()).await;
+    assert_eq!(observer.observe(&policy).unwrap().reason,
+        Some(Reason::Recovering { remaining: policy.resume_ms }));
+    let cached = observer.decision();
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    assert_eq!(observer.decision(), cached);
+    assert_eq!(observer.observe(&policy).unwrap().reason,
+        Some(Reason::Recovering { remaining: policy.resume_ms - 1 }),
+        "every sampler invocation must count its fresh observation");
+}
+
+#[tokio::test(start_paused = true)]
+async fn observation_error_cause_survives_cached_reads_and_recovers_only_from_samples() {
+    let fixture = PressureFixture::new();
+    let root = fixture.root.path();
+    let policy = fixture.policy.clone();
+    let mut observer = Observer::with_paths(policy.clone(), [
+        root.join("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure"),
+        root.join("proc/pressure/io"), root.join("proc/meminfo"),
+        root.join("proc/pressure/memory"), root.join("proc/vmstat"),
+    ]).unwrap();
+    std::fs::remove_file(root.join("proc/pressure/io")).unwrap();
+    let missing = observer.observe(&policy).unwrap();
+    assert_eq!(missing.reason, Some(Reason::UnknownObservation {
+        cause: ObservationCause::Io { os_error: Some(libc::ENOENT) },
+    }));
+    fixture.write("proc/pressure/io", "some avg60=0.0\n");
+    assert_eq!(observer.decision(), missing);
+    assert_eq!(observer.observe(&policy).unwrap().reason,
+        Some(Reason::Recovering { remaining: policy.resume_ms }));
+    for elapsed in (5000..=120000).step_by(5000) {
+        tokio::time::advance(policy.sample_interval()).await;
+        let decision = observer.observe(&policy).unwrap();
+        if elapsed < 120000 {
+            assert_eq!(decision.reason,
+                Some(Reason::Recovering { remaining: 120000 - elapsed }));
+        } else {
+            assert!(!decision.blocked);
+        }
+    }
+    fixture.write("proc/pressure/io", "some avg60=NaN\n");
+    tokio::time::advance(policy.sample_interval()).await;
+    let invalid = observer.observe(&policy).unwrap();
+    assert_eq!(invalid.reason,
+        Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
+    assert_eq!(observer.decision(), invalid);
+}
+
+#[tokio::test(start_paused = true)]
+async fn jittered_sampler_ticks_do_not_skip_observations_or_reset_recovery() {
+    let fixture = PressureFixture::new();
+    let root = fixture.root.path();
+    let policy = fixture.policy.clone();
+    let mut observer = Observer::with_paths(policy.clone(), [
+        root.join("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure"),
+        root.join("proc/pressure/io"), root.join("proc/meminfo"),
+        root.join("proc/pressure/memory"), root.join("proc/vmstat"),
+    ]).unwrap();
+    std::fs::remove_file(root.join("proc/pressure/io")).unwrap();
+    assert!(observer.observe(&policy).unwrap().blocked);
+    fixture.write("proc/pressure/io", "some avg60=0.0\n");
+    assert_eq!(observer.observe(&policy).unwrap().reason,
+        Some(Reason::Recovering { remaining: policy.resume_ms }));
+    let mut elapsed = 0;
+    for tick in 0..24 {
+        let spacing = if tick % 2 == 0 { 4999 } else { 5001 };
+        elapsed += spacing;
+        tokio::time::advance(std::time::Duration::from_millis(spacing)).await;
+        let decision = observer.observe(&policy).unwrap();
+        if elapsed < policy.resume_ms {
+            assert_eq!(decision.reason,
+                Some(Reason::Recovering { remaining: policy.resume_ms - elapsed }));
+        } else {
+            assert!(!decision.blocked, "jitter must not interrupt healthy recovery");
+        }
+    }
+    assert_eq!(elapsed, policy.resume_ms);
+}
+
+#[test]
+fn pressure_reasons_round_trip_with_structured_values_and_units() {
+    for reason in [
+        Reason::Pressure { signal: Signal::MemoryFull, value: 3140, threshold: 1000 },
+        Reason::Pressure { signal: Signal::MemoryAvailable, value: 1 << 30, threshold: 2 << 30 },
+        Reason::Recovering { remaining: 120000 },
+        Reason::UnknownObservation { cause: ObservationCause::Io { os_error: Some(libc::ENOENT) } },
+    ] {
+        let serialized = serde_json::to_value(reason).unwrap();
+        assert!(serialized.get("kind").is_some());
+        assert_eq!(serde_json::from_value::<Reason>(serialized).unwrap(), reason);
+    }
+}
+
+#[test]
+fn diagnostic_memory_available_signal_cannot_be_used_as_a_psi_rule() {
+    let mut policy = Policy::default();
+    policy.rules[0].signal = Signal::MemoryAvailable;
+    assert!(Brake::new(policy).is_err());
 }
