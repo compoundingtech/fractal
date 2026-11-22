@@ -11187,11 +11187,12 @@ async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
     let subject = "agent/example/seat";
     let diagnostic_count = || store.claims_for(subject, Some("harness.diagnostic")).unwrap().len();
     let mut reason = 0;
-    for (runtime, owner, states, expected) in [
-        ("runtime-a", "provider-a", vec![true; 32], 1),
-        ("runtime-a", "provider-a", vec![false, false], 2),
-        ("runtime-a", "provider-a", vec![true, true], 3),
-        ("runtime-b", "provider-b", vec![true, true], 4),
+    for (runtime, owner, incarnation, states, expected) in [
+        ("runtime-a", "provider-a", "incarnation-a", vec![true; 32], 1),
+        ("runtime-a", "provider-a", "incarnation-a", vec![false, false], 2),
+        ("runtime-a", "provider-a", "incarnation-a", vec![true, true], 3),
+        ("runtime-a", "provider-a", "incarnation-b", vec![true, true], 4),
+        ("runtime-b", "provider-b", "incarnation-c", vec![true, true], 5),
     ] {
         harness_events::enable(root.path(), runtime).unwrap();
         for ready in states {
@@ -11209,14 +11210,28 @@ async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
             };
             if reason == 1 {
                 assert!(publish_harness_activity(&publisher, subject, "omp", "omp-channel",
-                    Some(runtime), &observed, &mut None).await.is_err());
+                    Some(incarnation), &observed, &mut None).await.is_err());
                 assert_eq!(diagnostic_count(), 1, "the lost acknowledgement followed a committed edge");
             }
             publish_harness_activity(&publisher, subject, "omp", "omp-channel",
-                Some(runtime), &observed, &mut None).await.unwrap();
+                Some(incarnation), &observed, &mut None).await.unwrap();
             harness_events::acknowledge(root.path(), event.sequence).unwrap();
         }
         assert_eq!(diagnostic_count(), expected);
     }
+    // Legacy/non-durable callers still publish both readiness and activity, and retries
+    // keep the original episode/fingerprint idempotency rather than requiring a spool.
+    let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
+    observed.channel_ready = Some(true);
+    observed.state = harness_state::Activity::Idle;
+    let publisher = ObservationClient { client: &client, event: None };
+    let activity_count = store.claims_for(subject, Some("harness.observed")).unwrap().len();
+    let mut last_fingerprint = None;
+    for _ in 0..2 {
+        publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+            Some("incarnation-c"), &observed, &mut last_fingerprint).await.unwrap();
+    }
+    assert_eq!(diagnostic_count(), 6);
+    assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().len(), activity_count + 1);
     server.abort();
 }

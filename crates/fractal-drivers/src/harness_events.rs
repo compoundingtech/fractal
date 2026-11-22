@@ -642,12 +642,13 @@ pub fn prepare_publication(
 }
 
 /// Freeze the channel edge decision before HTTP, just like a prepared claim. Updating the
-/// per-runtime fence and saving the decision together means a lost HTTP acknowledgement or
-/// wrapper re-exec retries the edge instead of suppressing it. Unknown metadata emits an edge.
+/// per-runtime incarnation/readiness fence and saving the decision together means a lost HTTP
+/// acknowledgement or wrapper re-exec retries the edge. Unknown metadata emits an edge.
 pub fn prepare_channel_readiness(
     agent_dir: &Path,
     sequence: u64,
     runtime: &str,
+    incarnation: &str,
     ready: bool,
 ) -> Result<bool> {
     let mut connection = open(agent_dir)?;
@@ -668,7 +669,7 @@ pub fn prepare_channel_readiness(
         return Ok(emit);
     }
     let key = format!("omp-channel-readiness:{runtime}");
-    let state = if ready { "ready" } else { "unready" };
+    let state = serde_json::to_string(&(incarnation, ready))?;
     let unchanged: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1 AND value=?2)",
         params![key, state],
@@ -1294,13 +1295,13 @@ mod protocol_tests {
             write_snapshot(root.path(), "harness-state",
                 &serde_json::to_vec(&json!({"incarnation":"provider","reason":index})).unwrap()).unwrap();
             let sequence = pending(root.path(), 1).unwrap()[0].sequence;
-            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", true).unwrap());
+            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", "incarnation", true).unwrap());
             // Reopening the spool after preparation must retain the edge, even though the
             // metadata already says ready. A caller retries the same idempotency key.
-            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", true).unwrap());
-            assert!(prepare_channel_readiness(root.path(), sequence, "foreign", true).is_err());
+            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", "incarnation", true).unwrap());
+            assert!(prepare_channel_readiness(root.path(), sequence, "foreign", "incarnation", true).is_err());
             acknowledge(root.path(), sequence).unwrap();
-            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", true).is_err());
+            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", "incarnation", true).is_err());
         }
     }
 

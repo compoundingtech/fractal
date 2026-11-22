@@ -18463,13 +18463,20 @@ async fn publish_harness_activity(
     if driver == "omp"
         && let (Some(incarnation), Some(ready)) = (incarnation, channel_ready)
     {
-        // Idle suspension consumes the latest edge for this runtime, not a heartbeat.
-        // Freeze the decision in the outbox so retries and re-exec cannot lose an edge.
-        let (runtime, sequence, dir, _) = client.event
-            .context("OMP channel readiness requires a durable native event")?;
-        if fractal_drivers::harness_events::prepare_channel_readiness(
-            dir, sequence, runtime, ready,
-        )? {
+        // Idle suspension consumes the latest incarnation edge, not a heartbeat.
+        // Freeze durable decisions so retries and re-exec cannot lose an edge.
+        let key = match client.event {
+            Some((runtime, sequence, dir, _)) => {
+                fractal_drivers::harness_events::prepare_channel_readiness(
+                    dir, sequence, runtime, incarnation, ready,
+                )?.then(|| format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}"))
+            }
+            // Without an outbox, retain the original fail-open publication and episode key.
+            None => Some(format!("native-channel:{subject}:{incarnation}:{}:{}:{}:{ready}:{fingerprint}",
+                observed.evidence_incarnation.as_deref().unwrap_or(""),
+                observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0))),
+        };
+        if let Some(key) = key {
             let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
                 subject: subject.into(), kind: "harness.diagnostic".into(),
                 actor: Some(subject.into()),
@@ -18480,7 +18487,7 @@ async fn publish_harness_activity(
                     ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
                 ]),
                 evidence: Vec::new(), expected_subject: None,
-                idempotency_key: Some(format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}")),
+                idempotency_key: Some(key),
             }).await?;
         }
     }
