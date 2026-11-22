@@ -67,7 +67,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v40.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v45.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -83,13 +83,12 @@ fn keyed_only(kind: &str) -> bool {
 }
 
 #[test]
-fn the_corpus_includes_every_registry_kind() {
-    for kind in fractal_schema::registry().claims.keys() {
-        assert!(
-            corpus().contains_key(kind),
-            "add {kind} to a versioned corpus"
-        );
-    }
+fn the_current_corpus_matches_the_registry() {
+    assert_eq!(
+        include_str!("../../../fixtures/convergence/claims-v45.json"),
+        serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
+        "regenerate the active corpus with the owning fractal-schema claim_corpus example"
+    );
 }
 
 #[test]
@@ -117,6 +116,26 @@ fn the_corpus_generates_valid_native_continuity_inputs() {
             if field.required {
                 assert!(input.fields.contains_key(name), "{kind} requires {name}");
             }
+        }
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_step_execution_phase_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["step.execution-phase", "runtime.observed"] {
+        assert_eq!(
+            serde_json::to_value(&corpus()[kind]).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current execution evidence fields"
+        );
+    }
+    let spec = &corpus()["step.execution-phase"];
+    let input = world.claim_of(spec, 0).expect("generate step execution phase input");
+    fractal_schema::registry().validate_claim(&input.subject, &input.kind, &input.fields).unwrap();
+    for (name, field) in &spec.fields {
+        if field.required {
+            assert!(input.fields.contains_key(name), "step.execution-phase requires {name}");
         }
     }
 }
@@ -180,6 +199,18 @@ fn the_corpus_generates_valid_deployment_inputs() {
         fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         world.nodes[0].store.append_claim(&input).unwrap();
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_native_model_fallback_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(&corpus()["harness.model-fallback.observed"], 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
 }
 
 #[test]
@@ -295,6 +326,26 @@ fn the_corpus_generates_valid_native_admission_inputs() {
     for id in written {
         assert!(replicated.contains_key(&id), "native admission evidence {id} must replicate");
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_work_rebound_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let kind = "work.rebound";
+    let spec = &corpus()[kind];
+    assert_eq!(serde_json::to_value(spec).unwrap(),
+        serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+    let input = world.claim_of(spec, 0).expect("generate work rebound evidence");
+    fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+    assert_eq!(input.fields["attempt"], 1);
+    assert!(input.fields["claimant"].as_str().unwrap().starts_with("agent/"));
+    assert_ne!(input.fields["from_incarnation"], input.fields["to_incarnation"]);
+    assert!(!input.fields["session_id"].as_str().unwrap().is_empty());
+    assert_eq!(input.fields["harness"], "codex");
+    let claim = world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    assert!(claims(&world.oracle).contains_key(&claim.id), "work rebound evidence must replicate");
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -739,6 +790,24 @@ impl World {
     }
 
 
+    /// `to` walks `from`'s differing claim ranges, as the worker does after an exchange.
+    fn walk(&mut self, from: usize, to: usize) -> bool {
+        let result = smallclaims::sync::walk_claim_ranges_in_process(
+            &self.nodes[to].store, &self.nodes[from].store, FLEET, 64,
+        );
+        match result {
+            Ok(fetched) => {
+                self.check_index(to);
+                fetched
+            }
+            Err(error) => {
+                let message = format!("{} could not walk {}: {error:#}", self.nodes[to].name, self.nodes[from].name);
+                self.fail(message);
+                false
+            }
+        }
+    }
+
     fn check_actions(&mut self, index: usize, actions: &[CheckpointAction]) {
         for action in actions {
             if let CheckpointAction::TrimGraphChanged { .. } = action {
@@ -1052,6 +1121,42 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == "harness.model-fallback.observed" {
+            let subject = self.subject_of("agent", index)?;
+            let event = self.fresh("model-fallback");
+            return Some(ClaimInput {
+                actor: Some(subject.clone()), subject, kind: spec.kind.clone(),
+                fields: BTreeMap::from([
+                    ("observation".into(), json!("applied")),
+                    ("cause".into(), json!("transient")),
+                    ("from".into(), json!("openai/gpt-5")),
+                    ("to".into(), json!("anthropic/claude-sonnet-4-5")),
+                    ("native_session".into(), json!("convergence-session")),
+                    ("source_event".into(), json!(event)),
+                    ("episode_id".into(), json!(event)),
+                    ("incarnation_id".into(), json!("convergence-incarnation")),
+                    ("observed_at_unix_ms".into(), json!(self.clock(index))),
+                    ("reason".into(), json!("native-retry-fallback")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(event),
+            });
+        }
+        if spec.kind == "work.rebound" {
+            let id = self.fresh("rebound");
+            return Some(ClaimInput {
+                subject: self.subject_of("step-run", index)?,
+                kind: spec.kind.clone(), actor: None,
+                fields: BTreeMap::from([
+                    ("attempt".into(), json!(1)),
+                    ("claimant".into(), json!(self.subject_of("agent", index)?)),
+                    ("from_incarnation".into(), json!(format!("{id}-before"))),
+                    ("to_incarnation".into(), json!(format!("{id}-after"))),
+                    ("session_id".into(), json!(format!("{id}-native-session"))),
+                    ("harness".into(), json!("codex")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(id),
+            });
+        }
         if spec.kind == "custom.client.observation-minute" {
             let source = "person/operator/device/phone";
             let start_ms = (self.clock(index).max(60_000) as u64 / 60_000 - 1) * 60_000;
@@ -1731,6 +1836,18 @@ impl World {
                     }
                 }
             }
+            // The claim-range walk the worker runs after a summary exchange, which carries each
+            // peer's retired claim IDs to the trimming nodes that lack them, and fetches a claim
+            // one retired that this node never held from any peer that still has it.
+            for from in 0..count {
+                for to in 0..count {
+                    if from != to && !self.nodes[to].old_build {
+                        let before = retired_claims(&self.nodes[to].store);
+                        moved |= self.walk(from, to);
+                        moved |= retired_claims(&self.nodes[to].store) != before;
+                    }
+                }
+            }
             for index in 0..count {
                 if self.nodes[index].old_build {
                     continue;
@@ -1771,7 +1888,7 @@ impl World {
         // Every claim some node retired.
         let retired_anywhere = retired.iter().flatten().cloned().collect::<BTreeSet<_>>();
         // The first trimming node's retained claims, which every other trimming node must hold.
-        let mut reference: Option<(String, BTreeSet<String>)> = None;
+        let mut reference: Option<(String, BTreeSet<String>, BTreeSet<String>)> = None;
         for (node, retired) in self.nodes.iter().zip(&retired) {
             let name = &node.name;
             let store = &node.store;
@@ -1785,14 +1902,13 @@ impl World {
             }
             let held = claims(store);
             // 3 and 4. A node lacks only claims of a kind local trim drops, never a person's,
-            // and only claims it retired.
-            //
-            // TODO(#6878, T-wins deletion, set-sync S2d): a node may still lack a claim that another
-            // node retired before this one ever received it: the trimming holders list its
-            // envelope without a payload, and this node does not yet learn the retired ID. Then
-            // it should retire the claim too; until it does, such a claim is allowed here, and
-            // the tables that keep a dropped claim's facts (`claim_sources`, `operations`, and
-            // so the graph digest) are not compared for this node.
+            // and only claims it retired. A node may lack one some node retired before it ever
+            // received it: an old build, which learns no retired ID, or a trimming node that
+            // learned the ID and found no peer still holding the claim to supply it
+            // (`peer_retired_unheld`). Neither holds the dropped claim's facts (its tombstone),
+            // so the tables that keep them (`claim_sources`, `operations`, and so the graph
+            // digest) are not compared for it. A trimming node that lacks such facts for any
+            // other reason fails.
             let mut learned_late = 0;
             for (id, claim) in &oracle_claims {
                 let droppable = LOCAL_TRIM_KINDS.contains(&claim.kind.as_str())
@@ -1812,11 +1928,22 @@ impl World {
                             claim.kind, claim.subject
                         ));
                     }
-                    None if retired.contains(id) && !node.old_build => {}
-                    None if retired_anywhere.contains(id) => learned_late += 1,
+                    // A node that learned the retired ID without ever holding the claim has no
+                    // tombstone of it, and so not the facts the oracle keeps of it.
+                    None if retired.contains(id) && !node.old_build => {
+                        if !tombstoned(store, id) {
+                            if own.peer_retired_unheld == 0 {
+                                failures.push(format!(
+                                    "{name}: lacks {id} and its tombstone, yet counts no unheld retirement"
+                                ));
+                            }
+                            learned_late += 1;
+                        }
+                    }
+                    None if retired_anywhere.contains(id) && node.old_build => learned_late += 1,
                     None => {
                         failures.push(format!(
-                            "{name}: lacks {id} ({} on {}), which no node retired",
+                            "{name}: lacks {id} ({} on {}), which it did not retire",
                             claim.kind, claim.subject
                         ));
                     }
@@ -1867,26 +1994,25 @@ impl World {
             if node.old_build {
                 continue;
             }
-            // 1. Trimming nodes retain the same claims, but for those some node retired.
-            //
-            // TODO(#6878, T-wins deletion, set-sync S2d): every trimming node should retain exactly
-            // the same claims and hold the same retired claim IDs. Each trims its own cuts and
-            // retired IDs do not yet travel with an exchange, so today only the claims no node
-            // retired must match.
-            let retained = held
-                .keys()
-                .filter(|id| !retired_anywhere.contains(*id))
-                .cloned()
-                .collect::<BTreeSet<_>>();
+            // 1. Trimming nodes retain exactly the same claims and hold the same retired claim
+            // IDs: retired IDs travel in the claim-range walk, and a peer's retirement deletes a
+            // held copy (`retirement_wins`).
+            let retained = held.keys().cloned().collect::<BTreeSet<_>>();
             match &reference {
-                None => reference = Some((name.clone(), retained)),
-                Some((first, first_retained)) => {
+                None => reference = Some((name.clone(), retained, retired.clone())),
+                Some((first, first_retained, first_retired)) => {
                     if &retained != first_retained {
                         failures.push(format!(
-                            "{name}: retains {} claims no node retired that {first} lacks, and \
-                             lacks {} that {first} retains",
+                            "{name}: retains {} claims that {first} lacks, and lacks {} that {first} retains",
                             retained.difference(first_retained).count(),
                             first_retained.difference(&retained).count()
+                        ));
+                    }
+                    if retired != first_retired {
+                        failures.push(format!(
+                            "{name}: retired {} claim IDs that {first} did not, and not {} that {first} did",
+                            retired.difference(first_retired).count(),
+                            first_retired.difference(retired).count()
                         ));
                     }
                 }
@@ -1913,6 +2039,8 @@ fn trim_unless_old(store: &Store, old_build: bool) {
     if !old_build {
         store.import_retired_identities_paced(|_| {}).unwrap();
         store.trim_locally(true).unwrap();
+        // What a peer retired deletes the copy this node holds (`retirement_wins`).
+        store.set_retirement_wins(true);
     }
 }
 
@@ -1925,6 +2053,15 @@ fn reader_answers(store: &Store, subjects: &BTreeSet<String>, now: u128) -> BTre
         .into_iter()
         .map(|(subject, answer)| (subject, smallclaims::hash::canonical_json_text(&answer).unwrap()))
         .collect()
+}
+
+/// Whether `store` holds a tombstone of claim `id`: it held the claim and a trim dropped it.
+fn tombstoned(store: &Store, id: &str) -> bool {
+    store
+        .readers
+        .get()
+        .query_row("SELECT EXISTS(SELECT 1 FROM checkpoint_claims WHERE id=?1)", [id], |row| row.get(0))
+        .unwrap()
 }
 
 /// The claim IDs a node retired, as their text.
@@ -2172,11 +2309,11 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs retired a claim");
 }
 
-/// One fixed seed converges. Prior corpus characterizations are recorded in
-/// fixtures/convergence/README.md; the seeds' schedules are those of corpus v39.
+/// One fixed seed converges under member-local trim. Prior corpus characterizations
+/// are historical and recorded in fixtures/convergence/README.md.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v39 seed {seed}: retired={}", outcome.trimmed);
+    eprintln!("convergence corpus v44 seed {seed}: retired={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2384,7 +2521,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v40.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v45.json"
         }))
         .unwrap(),
     )

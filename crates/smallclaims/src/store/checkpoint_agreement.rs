@@ -257,6 +257,7 @@ impl Store {
         );
         self.finish_interrupted_trims(&mut actions)?;
         self.trim_local_cut(context, &mut actions)?;
+        self.trim_peer_retired(&mut actions)?;
         Ok(actions)
     }
 

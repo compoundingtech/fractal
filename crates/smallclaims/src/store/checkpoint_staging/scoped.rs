@@ -16,55 +16,74 @@
 //! - the citations of the claims the cut could drop, from the store's citation cache
 //!   (`local_trim_citations`), caught up first, counting a citer only if it is present and
 //!   sealed at the cut, as a full capture would stage it.
+//!
+//! Every envelope here is read from `replica_envelopes` and `released_envelopes` alike, by the
+//! rowid it had: one this member released (`envelope_release`) is staged as the stored one was,
+//! so its claims are still cut. Each table is read in its own branch and each record count by
+//! its own seeks (`envelope_record_count_sql`): SQLite runs a view compound in full for a
+//! correlated term.
 use super::*;
 use crate::store::checkpoint::sealed_envelope_records_sql;
 use crate::store::record_bytes::{envelope_has_late_record_sql, envelope_record_count_sql};
 use std::sync::LazyLock;
 
-// Each record count and late-claim check seeks its own indexes (`envelope_record_count_sql`):
-// SQLite runs a view compound in full for a correlated term, which made each of these
-// statements read every record and claim.
-
 /// The envelopes up to the seal row that hold a record of claim `?1`, each with its accepted
-/// time and record count.
+/// time and record count: the stored ones, then those this member released.
 static HELD: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
-                envelopes.accepted_at_unix_ms, {}
-         FROM replica_record_rows records JOIN replica_envelopes envelopes
-           ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
-             AND envelopes.envelope_hash=records.envelope_hash
-         WHERE records.claim_id=?1 AND envelopes.rowid <= ?2",
-        envelope_record_count_sql("envelopes")
-    )
+    let branch = |table: &str, rowid: &str| {
+        format!(
+            "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+                    envelopes.accepted_at_unix_ms, {}
+             FROM replica_record_rows records JOIN {table} envelopes
+               ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+                 AND envelopes.envelope_hash=records.envelope_hash
+             WHERE records.claim_id=?1 AND envelopes.{rowid} <= ?2",
+            envelope_record_count_sql("envelopes")
+        )
+    };
+    format!("{} UNION ALL {}", branch("replica_envelopes", "rowid"), branch("released_envelopes", "original_rowid"))
 });
 
 /// Writer `?1`'s newest envelope up to the seal row `?2` and before the cut `?3`, with its record
-/// count, that holds no claim dated at or after the cut.
+/// count, that holds no claim dated at or after the cut, stored or released.
 static NEWEST_SEALED: LazyLock<String> = LazyLock::new(|| {
+    let branch = |table: &str, rowid: &str| {
+        format!(
+            "SELECT * FROM (SELECT sequence, envelope_hash, accepted_at_unix_ms, {}
+             FROM {table} envelopes
+             WHERE writer=?1 AND {rowid} <= ?2 AND CAST(accepted_at_unix_ms AS INTEGER) < ?3 AND NOT {}
+             ORDER BY sequence DESC LIMIT 1)",
+            envelope_record_count_sql("envelopes"),
+            envelope_has_late_record_sql("envelopes", "?3")
+        )
+    };
     format!(
-        "SELECT sequence, envelope_hash, accepted_at_unix_ms, {}
-         FROM replica_envelopes envelopes
-         WHERE writer=?1 AND rowid <= ?2 AND CAST(accepted_at_unix_ms AS INTEGER) < ?3 AND NOT {}
-         ORDER BY sequence DESC LIMIT 1",
-        envelope_record_count_sql("envelopes"),
-        envelope_has_late_record_sql("envelopes", "?3")
+        "{} UNION ALL {} ORDER BY 1 DESC LIMIT 1",
+        branch("replica_envelopes", "rowid"),
+        branch("released_envelopes", "original_rowid")
     )
 });
 
 /// Whether claim `?1` is present with a record that is not repaired, in an envelope up to the
 /// seal row `?2` and before the cut `?3` that holds no claim dated at or after the cut.
 static SEALED_CITER: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "SELECT EXISTS(SELECT 1 FROM claims citer JOIN batches ON batches.id=citer.batch_id WHERE citer.id=?1)
-             AND EXISTS(
-               SELECT 1 FROM replica_record_rows records JOIN replica_envelopes envelopes
+    let branch = |table: &str, rowid: &str| {
+        format!(
+            "EXISTS(
+               SELECT 1 FROM replica_record_rows records JOIN {table} envelopes
                  ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
                    AND envelopes.envelope_hash=records.envelope_hash
                WHERE records.claim_id=?1 AND records.state<>'repaired'
-                 AND envelopes.rowid <= ?2 AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3
+                 AND envelopes.{rowid} <= ?2 AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3
                  AND NOT {})",
-        envelope_has_late_record_sql("envelopes", "?3")
+            envelope_has_late_record_sql("envelopes", "?3")
+        )
+    };
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM claims citer JOIN batches ON batches.id=citer.batch_id WHERE citer.id=?1)
+             AND ({} OR {})",
+        branch("replica_envelopes", "rowid"),
+        branch("released_envelopes", "original_rowid")
     )
 });
 
@@ -347,14 +366,14 @@ mod tests {
     use crate::store::runtime::Plain;
     use std::sync::Arc;
 
-    /// Each statement the scoped capture runs per claim or writer seeks every table: a
-    /// correlated term on the record view would scan it once per run.
+    /// Each statement the scoped capture runs per claim or writer seeks every table, released
+    /// envelopes included: a correlated term on a view compound would scan it once per run.
     #[test]
-    fn the_scoped_capture_seeks_and_scans_nothing() {
+    fn the_scoped_capture_seeks_stored_and_released_envelopes() {
         let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
         let connection = store.connection.write();
         for sql in [&*HELD, &*NEWEST_SEALED, &*SEALED_CITER] {
-            crate::store::record_bytes::assert_plan_seeks(&connection, sql);
+            crate::store::envelope_release::assert_plan_seeks(&connection, sql);
         }
     }
 

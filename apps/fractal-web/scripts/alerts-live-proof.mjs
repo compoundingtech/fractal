@@ -68,13 +68,13 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** A transient user unit running ARGV with the instance's clean environment. */
 const isolated = (argv) => [env, '-i', `HOME=${home}`, `PATH=${tools}:${dirname(sleep)}:/usr/bin:/bin`, `USER=${process.env.USER ?? 'webproof'}`, 'LANG=C.UTF-8', 'SHELL=/bin/sh', ...argv]
-const st = (args, { check = true } = {}) => {
+const fractal = (args, { check = true } = {}) => {
   const result = spawnSync('systemd-run', ['--user', '--wait', '--pipe', '--collect', '--quiet', ...isolated([join(tools, 'st3'), '--instance', instance, ...args])], { encoding: 'utf8' })
   if (check && result.status !== 0) throw new Error(`Fractal ${args.join(' ')} exited ${result.status}: ${result.stderr || result.stdout}`)
   return result
 }
-const stJson = (args) => JSON.parse(st(['--json', ...args]).stdout)
-const alive = () => existsSync(gateway()) && st(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
+const fractalJson = (args) => JSON.parse(fractal(['--json', ...args]).stdout)
+const alive = () => existsSync(gateway()) && fractal(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
 
 /** One unauthenticated request to the paired gateway socket (pairing completion). */
 const gatewayPost = (path, body) => new Promise((resolve, reject) => {
@@ -93,11 +93,11 @@ async function up() {
   // A program seat: it needs no harness sign-in, only to exist in the roster and run.
   const seats = join(root, 'seats.kdl')
   writeFileSync(seats, `version 2\nagent "${seat.slice('agent/'.length)}" {\n  workspace "${join(root, 'workspace')}"\n  argv "${sleep}" "infinity"\n}\n`)
-  st(['apply', seats, '--as', person])
-  for (let i = 0; i < 60 && !/running/.test(st(['agents', 'ls']).stdout); i++) await pause(500)
+  fractal(['apply', seats, '--as', person])
+  for (let i = 0; i < 60 && !/running/.test(fractal(['agents', 'ls']).stdout); i++) await pause(500)
   if (!existsSync(authorizationFile)) {
     // Pair as a web device would: begin locally for avery, complete on the paired gateway.
-    const challenge = stJson(['devices', 'pair', 'Webproof browser', '--full-control', '--as', person]).value
+    const challenge = fractalJson(['devices', 'pair', 'Webproof browser', '--full-control', '--as', person]).value
     // A non-signing device key: the strip's answers need no message signing.
     const session = await gatewayPost(`/v1/client/pairings/${encodeURIComponent(challenge.pairing_id.replace(/^pairing\//, ''))}/complete`, {
       api_version: 'st3.client.v0', code: challenge.code, device_public_key: `webproof-${randomBytes(24).toString('base64url')}`,
@@ -121,7 +121,7 @@ async function start() {
   mkdirSync(home, { recursive: true })
   for (const profile of ['.profile', '.bash_profile', '.zprofile']) writeFileSync(join(home, profile), `export PATH="${tools}:$PATH"\n`)
   if (!existsSync(join(root, 'fleet-created'))) {
-    st(['fleet', 'create', '--no-service', '--dial-out', '--name', instance])
+    fractal(['fleet', 'create', '--no-service', '--dial-out', '--name', instance])
     writeFileSync(join(root, 'fleet-created'), '')
   }
   spawnSync('systemctl', ['--user', 'reset-failed', unit], { stdio: 'ignore' })
@@ -129,7 +129,7 @@ async function start() {
   for (let i = 0; i < 120 && !alive(); i++) await pause(500)
   if (!alive()) throw new Error(`The instance daemon did not start; see journalctl --user -u ${unit}`)
   if (!existsSync(join(root, 'setup-done'))) {
-    st(['setup', '--person', person.slice('person/'.length), '--yes', '--service', 'false', '--install', 'false', '--harness', 'none', '--claude-channel', 'false', '--expert', 'false'])
+    fractal(['setup', '--person', person.slice('person/'.length), '--yes', '--service', 'false', '--install', 'false', '--harness', 'none', '--claude-channel', 'false', '--expert', 'false'])
     writeFileSync(join(root, 'setup-done'), '')
   }
 }
@@ -144,7 +144,7 @@ function down() {
   }
   spawnSync('systemctl', ['--user', 'stop', unit], { stdio: 'inherit' })
   if (existsSync(tools)) {
-    const result = st(['uninstall', '--yes', '--erase-local-graph', '--no-service', '--offline'], { check: false })
+    const result = fractal(['uninstall', '--yes', '--erase-local-graph', '--no-service', '--offline'], { check: false })
     process.stdout.write(result.stdout + result.stderr)
   }
   rmSync(root, { recursive: true, force: true })
@@ -153,16 +153,16 @@ function down() {
 
 /** The step behind an alert, as Fractal reports it once answered. */
 const stepAnswer = (step) => {
-  const view = stJson(['work', 'show', step]).value
+  const view = fractalJson(['work', 'show', step]).value
   const last = view.person_answers?.at(-1)
   return { state: view.state, summary: last?.summary ?? null, answer: last?.answer?.id ?? null }
 }
 
 /** Earlier runs' unanswered asks from the seat, so the strip shows only this run's. */
 const clearStale = () => {
-  for (const item of stJson(['alerts', 'ls', '--as', person]).value.items) {
+  for (const item of fractalJson(['alerts', 'ls', '--as', person]).value.items) {
     if (item.state !== 'open' || item.requester_id !== seat || !item.actions.includes('work.done')) continue
-    st(['work', 'done', item.source_id, '--as', person, ...(item.request?.answers?.length ? ['--answer', 'dismiss'] : ['--summary', 'Cleared before a proof run.'])])
+    fractal(['work', 'done', item.source_id, '--as', person, ...(item.request?.answers?.length ? ['--answer', 'dismiss'] : ['--summary', 'Cleared before a proof run.'])])
   }
 }
 
@@ -171,7 +171,7 @@ async function proof() {
   clearStale()
   const nonce = randomBytes(3).toString('hex')
   const ask = (title, args) => {
-    const result = stJson(['work', 'ask', '--for', person, '--new-run', `webproof-${nonce}-${title.length}`, '--title', title, '--as', seat, '--idempotency-key', `webproof-${nonce}-${title}`, ...args])
+    const result = fractalJson(['work', 'ask', '--for', person, '--new-run', `webproof-${nonce}-${title.length}`, '--title', title, '--as', seat, '--idempotency-key', `webproof-${nonce}-${title}`, ...args])
     return result.subject
   }
   const decisionTitle = `Publish example notes ${nonce}?`
@@ -189,7 +189,7 @@ async function proof() {
   // The newest alert shows open, so the yes-or-no ask comes last.
   const yesTitle = `Ship example build ${nonce}?`
   const yesStep = ask(yesTitle, ['--reason', 'Answer yes or no.'])
-  const alertIds = new Map(stJson(['alerts', 'ls', '--as', person]).value.items.map((item) => [item.title, item.id]))
+  const alertIds = new Map(fractalJson(['alerts', 'ls', '--as', person]).value.items.map((item) => [item.title, item.id]))
 
   process.env.WF_ST_GATEWAY = gateway()
   process.env.WF_ST_AUTHORIZATION = readFileSync(authorizationFile, 'utf8').trim()
@@ -209,7 +209,7 @@ async function proof() {
     const origin = `http://127.0.0.1:${server.httpServer.address().port}`
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()) })
     page.on('pageerror', (error) => errors.push(String(error)))
-    // Collection frames as they arrive, to tell st's push from the app's paint.
+    // Collection frames as they arrive, to tell Fractal's push from the app's paint.
     const frames = []
     page.on('websocket', (socket) => socket.on('framereceived', ({ payload }) => frames.push({ at: Date.now(), payload: String(payload) })))
     const strip = page.locator('[data-testid="conversation-alerts"]')
@@ -262,7 +262,7 @@ async function proof() {
       // A refusal stays in the alert, in the words the person reads.
       const status = cleared === null ? await section.getByRole('status').textContent().catch(() => null) : undefined
       await shoot(shot)
-      // The first collection frame after the click that names the alert: st's push of the change.
+      // The first collection frame after the click that names the alert: Fractal's push of the change.
       const pushed = frames.find((frame) => frame.at >= clickedAt && frame.payload.includes(alertIds.get(title)))
       return {
         answerToClearedMs: ms, budgetMet: ms !== null && ms < BUDGET_MS, requests: cleared?.requests,
@@ -271,20 +271,20 @@ async function proof() {
     }
     const yes = await answer(yesTitle, 'Yes', 'alerts-after-yes.png')
     const decision = await answer(decisionTitle, 'Publish the notes', 'alerts-after-decision.png')
-    const yesSt = stepAnswer(yesStep)
-    const decisionSt = stepAnswer(decisionStep)
+    const yesFractal = stepAnswer(yesStep)
+    const decisionFractal = stepAnswer(decisionStep)
     const receipt = {
-      status: yes.answerToClearedMs !== null && yesSt.state === 'completed' && yesSt.summary === 'Yes' &&
-        decision.answerToClearedMs !== null && decisionSt.state === 'completed' && decisionSt.answer === 'publish' ? 'pass' : 'fail',
+      status: yes.answerToClearedMs !== null && yesFractal.state === 'completed' && yesFractal.summary === 'Yes' &&
+        decision.answerToClearedMs !== null && decisionFractal.state === 'completed' && decisionFractal.answer === 'publish' ? 'pass' : 'fail',
       buildRev: execFileSync('git', ['-C', app, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       // Timings move with host load; compare runs on a quiet host.
       load1: Number(readFileSync('/proc/loadavg', 'utf8').split(' ')[0]),
       budgetMs: BUDGET_MS,
       coldFirstDataMs,
       firstDataMs,
-      yes: { ...yes, step: yesStep, st: yesSt },
-      decision: { ...decision, step: decisionStep, st: decisionSt },
-      openAlerts: stJson(['alerts', 'ls', '--as', person]).value.items.filter((item) => item.state === 'open').map((item) => item.title),
+      yes: { ...yes, step: yesStep, st: yesFractal },
+      decision: { ...decision, step: decisionStep, st: decisionFractal },
+      openAlerts: fractalJson(['alerts', 'ls', '--as', person]).value.items.filter((item) => item.state === 'open').map((item) => item.title),
       screenshots: ['alerts-before.png', 'alerts-after-yes.png', 'alerts-after-decision.png'].map((name) => join(out, name)),
       // Vite's own HMR socket is off (see the server options), so its client's failures are expected.
       consoleErrors: errors.filter((text) => !text.includes('/?token=')),

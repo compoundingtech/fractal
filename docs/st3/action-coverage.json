@@ -1641,7 +1641,7 @@
       "description": "Admit a finite shell payload and forward its actual outcome after custody retirement",
       "tests": [
         "crates/fractal/src/resources_cli.rs::exec_requires_resources_and_preserves_payload_argv",
-        "crates/fractal/src/resources_cli.rs::platform_refusal_precedes_daemon_contact_and_capacity_acquisition",
+        "crates/fractal/src/resources_cli.rs::darwin_exec_requires_a_known_lane_and_authorized_helper",
         "crates/fractal/src/resources_cli.rs::payload_exit_code_is_passed_through_and_result_is_durable",
         "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard",
         "crates/fractal-api-core/src/api/resources.rs::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials"
@@ -2727,6 +2727,14 @@
         "crates/fractal/tests/action_coverage.rs::cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated"
       ],
       "verification": "real offline CLI on a private store; cross-process daemon and SQLite writer locks refused, startup SQL byte-identical, second run byte-identical, invalid schema exits nonzero"
+    },
+    {
+      "command": "st store restore-blob-bytes",
+      "description": "Restore moved blob bytes to the store offline so a previous release can open it; stop the daemon first",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_rollback"
+      ],
+      "verification": "real offline CLI between fleet-member versions; previous release refuses the moved store and opens it after restoration (requires ST3_COMPAT_BIN)"
     },
     {
       "command": "st subject basis",

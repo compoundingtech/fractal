@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the generated picker against a local GitHub API stand-in."""
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -189,11 +190,11 @@ for job in ("linux-clippy", "linux-fleet-compat"):
 # The VM tests and the mail redelivery canaries run once a day (daily-long.yml), never per pull request or in the merge queue.
 for job in ('isolation-vm', 'mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-mail-redelivery-canaries'):
     assert job not in blocks, (job, 'daily only')
-dispatch_jobs = ('upgrade-impact', 'linux-gate', 'fractal-web-changes', 'fractal-web',
-                 'genie-freshness', 'typescript-client',
-                 *(job for job in blocks if job.startswith('evidence-gate-')))
-assert len(dispatch_jobs) == 14, 'four required gates and their controls avoid hosted merge dispatch'
-for job in dispatch_jobs:
+control_jobs = ('upgrade-impact', 'linux-gate', 'fractal-web-changes', 'fractal-web',
+                'genie-freshness', 'typescript-client')
+evidence_jobs = tuple(job for job in blocks if job.startswith('evidence-gate-'))
+assert len(control_jobs + evidence_jobs) == 14, 'four required gates and their controls avoid hosted merge dispatch'
+for job in control_jobs:
     labels = blocks[job].split('    runs-on:', 1)[1].split('    timeout-minutes:', 1)[0]
     assert 'needs.' not in labels and 'namespace-' not in labels, (job, 'no picker dependency or new metered capacity')
     expression = labels.split('fromJSON(', 1)[1].rsplit(')', 1)[0]
@@ -208,8 +209,17 @@ for job in dispatch_jobs:
         evaluated = expression.replace('github.event_name', repr(event)).replace('github.ref', repr(ref))
         evaluated = evaluated.replace('&&', ' and ').replace('||', ' or ')
         assert json.loads(eval(evaluated, {'__builtins__': {}})) == expected, (job, event, ref)
-for job in ('pick-runner', 'namespace-capacity'):
-    assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'bootstrap and watchdogs stay independent of workload pools')
+# Receipt verification and picking must start without hosted or selected-pool capacity.
+# Pin the entire small prerequisite shape, priority and run affinity rather than
+# allowing arbitrary metered capacity or a dependency on the picker being bootstrapped.
+prerequisite_labels = [
+    "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+    "namespace-features:github.run-id=${{ github.run_id }}",
+]
+for job in ('pick-runner', *evidence_jobs):
+    labels = blocks[job].split('    runs-on:', 1)[1].split('    timeout-minutes:', 1)[0]
+    assert ast.literal_eval(labels.strip()) == prerequisite_labels, (job, 'independent small prerequisite capacity with queue priority and run affinity')
+assert 'runs-on: ubuntu-latest' in blocks['namespace-capacity'], 'watchdog stays independent of workload pools'
 for job in ('ci-script-tests',):
     assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'unchanged real-work placement')
     assert 'cargo-cache' not in blocks[job], job

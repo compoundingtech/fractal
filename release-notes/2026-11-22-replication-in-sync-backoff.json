@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Coalesce replication wake storms before shared fan-out and back off quiet rounds independently for each store and peer, while preserving prompt propagation and immediate backlog draining.",
+  "replay": {"status": "none", "detail": "Replication replay is unchanged."},
+  "schema": {"status": "none", "detail": "No durable schema, client API or wire protocol changes."},
+  "rules": {"status": "changed", "detail": "Filesystem wakes broadcast immediately on the leading edge and at most once per second thereafter, shared by graph, shard and membership followers. Authority guard reads use the same one-second minimum gap. Consecutive in_sync rounds double the idle interval to 10 minutes by default. Movement, local wakes, inbound exchanges and route or connectivity changes reset it. Failure backoff and authenticated overload polling are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Local wakes are announced within one second; scheduling can approach two seconds including the existing no-movement window, plus round time. Remote-only changes or missed notifications can wait up to 600 seconds by default or 3600 seconds when raised, versus 30 seconds previously: an accepted idle-I/O tradeoff. Worker return allows two seconds to drain the trailing wake, then aborts a stuck pacer with a warning while preserving the original error. Existing peer and outcome round metrics retain their labels; st.replication.wakes adds bounded stage=raw/paced counters."},
+  "downtime": {"status": "none", "detail": "No coordinated restart or migration is required."},
+  "manual": {"status": "changed", "detail": "ST3_REPLICATION_IDLE_MAX_MS configures the ceiling between 30000 and 3600000 milliseconds; default 600000. ST3_WORKER_INTERVAL_MS still only shortens timers. Worker status includes the next idle retry deadline."},
+  "recovery": {"status": "none", "detail": "No persisted state changes; ordinary binary rollback applies."}
+}

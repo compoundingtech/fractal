@@ -148,7 +148,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             .is_some_and(|seed| seed.recovery_capable);
         if cfg!(target_os = "linux") {
             smallclaims::touched::note_read(|| "host-lane-pressure".into());
-            fit.pressure_blocked = self.seat_admission.pressure_decision()?.blocked;
+            let decision = self.seat_admission.pressure_decision();
+            fit.pressure_blocked = decision.blocked;
+            fit.pressure_reason = decision.reason;
         }
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
@@ -298,6 +300,51 @@ impl<R: RuntimeControl> Reconciler<R> {
 mod tests {
     use super::*;
     const GIB: u64 = 1 << 30;
+
+    /// Disk/ARC fit tests supply all host observations, including a real file-backed PSI reader.
+    /// Keep the directory alive for the test so sampling never reaches the actual host.
+    fn quiet_pressure<R: RuntimeControl>(reconciler: &Reconciler<R>) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroups = directory.path().join("cgroups");
+        let protected = cgroups.join("system.slice/fractal.service");
+        std::fs::create_dir_all(&protected).unwrap();
+        std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+        std::fs::create_dir_all(cgroups.join("interactive.slice")).unwrap();
+        let placement = directory.path().join("cgroup");
+        let meminfo = directory.path().join("meminfo");
+        let quiet = "some avg10=0.00 avg60=0.00 avg300=0.00\nfull avg10=0.00 avg60=0.00 avg300=0.00\n";
+        for group in [protected, cgroups.join("system.slice"), cgroups.join("app.slice"),
+            cgroups.join("interactive.slice")] {
+            for name in ["memory.pressure", "io.pressure"] { std::fs::write(group.join(name), quiet).unwrap(); }
+        }
+        std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
+        std::fs::write(&meminfo, "MemTotal: 134217728 kB\nMemAvailable: 125829120 kB\n").unwrap();
+        let policy = reconciler.seat_admission.finite_policy.psi_brake.clone();
+        *reconciler.seat_admission.pressure.lock().unwrap() =
+            Some(fractal_runtime::resource_pressure::Observer::with_paths(
+                policy, placement, cgroups, meminfo).unwrap());
+        assert!(!reconciler.seat_admission.sample_pressure().unwrap().blocked);
+        directory
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn admission_reads_cached_pressure_and_stopped_sampler_fails_closed() {
+        use fractal_runtime::resource_pressure::{ObservationCause, Reason};
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(crate::reconcile::tests::FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let fixtures = quiet_pressure(&reconciler);
+        fixtures.close().unwrap();
+        // Even with all kernel fixtures gone, admission must not sample.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(!reconciler.seat_admission.pressure_decision().blocked);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(reconciler.seat_admission.pressure_decision().reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::StaleDecision }));
+        assert!(reconciler.seat_admission.pressure_decision().blocked);
+    }
 
     fn test_fit() -> Fit {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 * GIB }), ..Fit::default() }
@@ -462,6 +509,7 @@ mod tests {
         let policy = fractal_runtime::host::FinitePolicy { heavy_io_slots: Some(0), ..Default::default() };
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "disabled".into(), name: "checks".into(), host: "node".into(), max_members: 1,
@@ -490,6 +538,7 @@ mod tests {
             .with_disk_probe(vec![], Arc::new(move |_| Ok(crate::disk::DiskSpace {
                 filesystem: 7, available: reading.load(Ordering::Relaxed), total: 200 * GIB,
             })));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "disk-wait".into(), name: "checks".into(), host: "node".into(), max_members: 1,
@@ -590,6 +639,7 @@ mod tests {
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy))
             .with_disk_probe(vec![], Arc::new(|_| Ok(crate::disk::DiskSpace { filesystem: 7, available: 100, total: 200 })));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "ci-check".into(), name: "ci".into(), host: "node".into(), max_members: 1,
@@ -630,6 +680,7 @@ mod tests {
         store.start_resource_authority("node", "epoch").unwrap();
         let mut reconciler = Reconciler::new(
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let _pressure = quiet_pressure(&reconciler);
         let room = host::for_lanes(Capacity { cores: 32, memory: 125 * GIB });
         reconciler.seat_admission.lanes = Some(seat_admission::LaneHost {
             room, outside, burst_lane: Some(seat_admission::BURST_LANE),

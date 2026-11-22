@@ -1224,6 +1224,22 @@ fn cached_worker_pid<I>(
     validate(identity)
 }
 
+/// Unit identities considered by the observer, including when resolution fails.
+pub(crate) fn replication_worker_supervisor() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let old = replication_service_name();
+        let mut names = vec![old.to_owned(), old.replacen("st3", "fractal", 1)];
+        if crate::instance::current().is_none() { names.push("smalltalk-replication.service".into()); }
+        format!("systemd-user: {}", names.join(", "))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        format!("launchd-user: {}, {}, org.nix-community.home.smalltalk-replication, org.nix-community.home.fractal-replication",
+            replication_service_label(), replication_service_label().replacen("st3", "fractal", 1))
+    }
+}
+
 /// Observe the worker through its supervisor, never through caller-supplied argv.
 pub(crate) fn replication_worker_pid() -> Result<u32> {
     #[cfg(target_os = "linux")]
@@ -1759,6 +1775,7 @@ mod tests {
         limits: crate::config::LimitsConfig::default(),
         logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
+        model_return: crate::config::model_return::Config::default(),
         programs: crate::config::ProgramsConfig::default(),
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,

@@ -7976,7 +7976,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "resource_recovery_observations": 1,
                     "idle_residency": 1,
                     "per_run_missions": 1,
+                    "work_rebind_v1": 1,
                     "shell_resource_exec": 2,
+                    "runtime_workspace": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -8101,6 +8103,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     reconciler.set_idle_residency(config.reconcile.idle_residency()?);
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
+    reconciler.set_model_return_policy(&config.model_return)?;
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
     reconciler.set_ask_digest_policy(&config.asks)?;
@@ -8120,6 +8123,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone(), config.store.valid_record_delete_after_ms()?)));
+    if smallclaims::store::envelope_release::ENVELOPE_RELEASE {
+        tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_release", release_old_envelopes(store.clone())));
+    }
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.record_repairs", resolve_record_repairs(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_signatures", sign_own_claims(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
@@ -8376,6 +8382,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 Arc::downgrade(&store), notify.clone(), event_notify.clone(),
             ));
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
+                Arc::downgrade(&store),
+            ));
+            tokio::spawn(fractal_daemon::maintenance::run_usage_period(
                 Arc::downgrade(&store),
             ));
             let admission_notify = notify.clone();
@@ -10070,21 +10079,28 @@ async fn trace_claims(client: &Client, args: &TraceArgs) -> Result<Vec<ClaimReco
 
 fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> Result<()> {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    let summary = ["state", "status", "verdict", "action", "reason"]
-        .into_iter()
+    let keys: &[&str] = if claim.kind == "step.execution-phase" {
+        &["attempt", "phase", "exec", "at_unix_ms", "host"]
+    } else {
+        &["state", "status", "verdict", "action", "reason"]
+    };
+    let summary = keys.iter().copied()
         .filter_map(|key| {
             fields
                 .get(key)
                 .filter(|value| !value.is_null())
-                .map(|value| format!("{key}={}", trace_scalar(value)))
+                .map(|value| {
+                    if key == "at_unix_ms" {
+                        value.as_u64().map(|at| format!("{key}={}", format_trace_timestamp(u128::from(at))))
+                            .unwrap_or_else(|| format!("{key}={}", trace_scalar(value)))
+                    } else {
+                        format!("{key}={}", trace_scalar(value))
+                    }
+                })
         })
         .collect::<Vec<_>>()
         .join(" · ");
-    let timestamp = chrono::DateTime::from_timestamp_millis(
-        claim.accepted_at_unix_ms.min(i64::MAX as u128) as i64,
-    )
-    .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-    .unwrap_or_else(|| claim.accepted_at_unix_ms.to_string());
+    let timestamp = format_trace_timestamp(claim.accepted_at_unix_ms);
     if summary.is_empty() {
         writeln!(
             output,
@@ -10099,6 +10115,13 @@ fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> R
         )?;
     }
     Ok(())
+}
+
+fn format_trace_timestamp(at_unix_ms: u128) -> String {
+    i64::try_from(at_unix_ms).ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| at_unix_ms.to_string())
 }
 
 fn trace_scalar(value: &Value) -> String {
@@ -15547,6 +15570,24 @@ fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
     Some(line)
 }
 
+fn agent_model_line(agent: &fractal_client::Agent) -> String {
+    use std::fmt::Write as _;
+    let drift = agent.model_drift.as_ref();
+    let declared = agent.declared_model.as_deref().unwrap_or("unknown");
+    let state = drift.map(|value| value.state.as_str()).unwrap_or("unknown");
+    let mut line = format!("declared {declared} · live {} · {state}", agent.live_model.as_deref().unwrap_or("unknown"));
+    if let Some(since) = drift.and_then(|value| value.drift_since.as_deref()) {
+        let _ = write!(line, " · since {since}");
+    }
+    let reason = drift.and_then(|value| value.fallback_reason.as_deref()).unwrap_or("unknown");
+    let _ = write!(line, " · fallback {reason} · returns ");
+    match drift.and_then(|value| value.return_attempts) {
+        Some(attempts) => { let _ = write!(line, "{attempts}"); }
+        None => line.push_str("unknown"),
+    }
+    line
+}
+
 fn render_client_agent(
     agent: &fractal_client::Agent,
     current_steps: &[StepRunView],
@@ -15589,9 +15630,7 @@ fn render_client_agent(
         agent.driver.as_deref().unwrap_or("none"),
         agent.harness_state.as_deref().unwrap_or("unobserved")
     );
-    if let Some(live) = agent.live_model.as_deref() {
-        let _ = writeln!(output, "LIVE MODEL   {live}");
-    }
+    let _ = writeln!(output, "MODEL        {}", agent_model_line(agent));
     if agent.blocked_on.as_deref() == Some("human")
         && agent.ask.as_deref() == Some("permission")
     {
@@ -15937,6 +15976,7 @@ fn render_client_agents(
                     agent.header.id, agent.name, agent.state
                 );
             }
+            let _ = writeln!(output, "  model {}", agent_model_line(agent));
             if let Some(admission) = agent.extra.get("seat_admission") {
                 let _ = writeln!(output, "  {}", agents_cli::admission_start_message(&agent.header.id, admission));
             }
@@ -16004,6 +16044,7 @@ fn render_client_agents(
                     agent.reachability
                 );
                 let _ = writeln!(output, "{member_prefix}   {}", agent.header.id);
+                let _ = writeln!(output, "{member_prefix}   model {}", agent_model_line(agent));
                 if let Some(admission) = agent.extra.get("seat_admission") {
                     let _ = writeln!(output, "{member_prefix}   {}", agents_cli::admission_start_message(&agent.header.id, admission));
                 }
@@ -17462,6 +17503,10 @@ impl NativePaths {
 struct NativeLoopState {
     #[serde(default)]
     paths: Option<fractal_drivers::driver_paths::Paths>,
+    /// Provider launch boundary, captured before its hooks can start children. Re-exec carries
+    /// the same boundary because it adopts the running provider rather than launching another.
+    #[serde(default)]
+    provider_started_at_ms: u64,
     ready: bool,
     /// Whether the harness-state file already belongs to this session. A resumed driver adopts a
     /// running session, so its record is always current.
@@ -18035,6 +18080,7 @@ impl NativeObservations {
             let publisher = ObservationClient {
                 client,
                 event: Some((&self.runtime, event.sequence, &self.dir, account_ref.as_ref().and_then(Value::as_str))),
+                source_runtime: Some(&event.runtime_incarnation),
             };
             let raw = serde_json::to_vec(&event.payload)?;
             let source_driver = event.payload["harness"]
@@ -18270,6 +18316,7 @@ impl NativeObservations {
 struct ObservationClient<'a> {
     client: &'a Client,
     event: Option<(&'a str, u64, &'a Path, Option<&'a str>)>,
+    source_runtime: Option<&'a str>,
 }
 impl std::ops::Deref for ObservationClient<'_> {
     type Target = Client;
@@ -18290,9 +18337,9 @@ impl ObservationClient<'_> {
         let mut claim = claim.clone();
         bind_observation_account(&mut claim, account.as_deref());
         if let Some((runtime, sequence, dir, _)) = self.event {
-            // Diagnostics are retained graph facts, not local observation slots. Preserve
-            // their episode key; /harness-events replaces keys with its observation slot.
-            if claim.kind == "harness.diagnostic" {
+            // Reasoned native facts are retained graph claims, not local observation slots.
+            // Preserve their episode keys across lost acknowledgements and channel replay.
+            if matches!(claim.kind.as_str(), "harness.diagnostic" | "harness.model-fallback.observed") {
                 return self.client.post(path, &claim).await;
             }
             let slot = format!(
@@ -18460,25 +18507,52 @@ async fn publish_harness_activity(
     if driver == "omp"
         && let (Some(incarnation), Some(ready)) = (incarnation, channel_ready)
     {
-        // Extensible diagnostics are reader-first: older readers retain these facts without
-        // rejecting the native activity claim. No suspension action consumes this proof yet.
-        let episode = match client.event {
-            Some((runtime, sequence, _, _)) => format!("{runtime}:{sequence}"),
-            None => format!("{}:{}:{}", observed.evidence_incarnation.as_deref().unwrap_or(""),
-                observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0)),
+        // Idle suspension consumes the latest incarnation edge, not a heartbeat.
+        // Freeze durable decisions so retries and re-exec cannot lose an edge.
+        let legacy_key = || {
+            let episode = match client.event {
+                Some((runtime, sequence, _, _)) => format!("{runtime}:{sequence}"),
+                None => format!("{}:{}:{}", observed.evidence_incarnation.as_deref().unwrap_or(""),
+                    observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0)),
+            };
+            format!("native-channel:{subject}:{incarnation}:{episode}:{ready}:{fingerprint}")
         };
-        let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
-            subject: subject.into(), kind: "harness.diagnostic".into(),
-            actor: Some(subject.into()),
-            fields: BTreeMap::from([
-                ("code".into(), Value::from(if ready { "omp-channel-ready" } else { "omp-channel-unready" })),
-                ("driver".into(), Value::from("omp")),
-                ("incarnation_id".into(), Value::from(incarnation)),
-                ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
-            ]),
-            evidence: Vec::new(), expected_subject: None,
-            idempotency_key: Some(format!("native-channel:{subject}:{incarnation}:{episode}:{ready}:{fingerprint}")),
-        }).await?;
+        let key = match (client.event, client.source_runtime) {
+            // The publication envelope can belong to a successor wrapper. Readiness is
+            // prepared against the retained event's own runtime, never that successor.
+            (Some((_, sequence, dir, _)), Some(runtime)) => {
+                match fractal_drivers::harness_events::prepare_channel_readiness(
+                    dir, sequence, runtime, incarnation, ready,
+                ) {
+                    Ok(emit) => emit.then(|| format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}")),
+                    Err(error) => {
+                        tracing::warn!(%error, "preparing channel readiness failed; invalidating fence before fallback");
+                        // Without invalidation a fallback edge could leave a stale fence
+                        // suppressing its successor. Retain the event until this succeeds.
+                        fractal_drivers::harness_events::invalidate_channel_readiness(dir, runtime)
+                            .context("invalidating channel readiness before fallback publication")?;
+                        Some(legacy_key())
+                    }
+                }
+            }
+            // Non-durable callers and failed preparation must not lose the readiness edge
+            // or prevent subsequent activity publication and outbox acknowledgement.
+            _ => Some(legacy_key()),
+        };
+        if let Some(key) = key {
+            let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
+                subject: subject.into(), kind: "harness.diagnostic".into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([
+                    ("code".into(), Value::from(if ready { "omp-channel-ready" } else { "omp-channel-unready" })),
+                    ("driver".into(), Value::from("omp")),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                    ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
+                ]),
+                evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some(key),
+            }).await?;
+        }
     }
     if last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return Ok(());
@@ -18733,6 +18807,32 @@ async fn native_timeline_claim(
     client: &Client, subject: &str, incarnation: &str,
     operation: fractal_drivers::harness_timeline::Operation,
 ) -> Result<ClaimInput> {
+    if operation.driver == "omp" && operation.entry_type == "status"
+        && operation.body["code"] == "model-fallback"
+    {
+        let mut body = operation.body;
+        let mut fields = BTreeMap::from([
+            ("incarnation_id".into(), Value::from(incarnation)),
+            ("observed_at_unix_ms".into(), Value::from(operation.observed_at_unix_ms)),
+            ("reason".into(), Value::from(if body["observation"] == "applied" {
+                "native-retry-fallback"
+            } else { "native-model-selection" })),
+        ]);
+        for key in ["observation", "cause", "from", "to", "native_session", "source_event", "episode_id"] {
+            if let Some(value) = body.as_object_mut().and_then(|body| body.remove(key)) {
+                fields.insert(key.into(), value);
+            }
+        }
+        fractal_schema::registry().validate_claim(subject, "harness.model-fallback.observed", &fields)?;
+        return Ok(ClaimInput {
+            subject: subject.into(), kind: "harness.model-fallback.observed".into(),
+            actor: Some(subject.into()),
+            idempotency_key: Some(format!("model-fallback:{subject}:{incarnation}:{}:{}:{}",
+                fields["episode_id"].as_str().unwrap(), fields["source_event"].as_str().unwrap(),
+                fields["observation"].as_str().unwrap())),
+            fields, evidence: Vec::new(), expected_subject: None,
+        });
+    }
     let mut failure = None;
     if operation.entry_type == "error"
         && operation.body["code"] == fractal_drivers::work_claim_failure::CODE
@@ -21792,13 +21892,16 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
             .ok()
             .flatten();
         match reloaded {
-            Some(Ok((reloaded, reconcile, asks))) => {
+            Some(Ok((reloaded, reconcile, asks, model_return))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
                 reconciler.set_idle_residency(reconcile.idle_residency().expect("validated idle residency"));
                 reconciler.set_default_stall_reports(reconcile.default_stall_reports);
+                if let Err(error) = reconciler.set_model_return_policy(&model_return) {
+                    tracing::warn!("the model return policy keeps its last config: {error:#}");
+                }
                 if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }
@@ -22589,21 +22692,49 @@ async fn release_valid_record_bytes(store: Arc<Store>, delete_after_ms: u64) {
     }
 }
 
-/// Find the records repairs wait for once valid records are gone (`record_bytes`): a page at a
-/// time while any waits, otherwise a look every ten minutes.
-async fn resolve_record_repairs(store: Arc<Store>) {
+/// Old envelopes lose their payloads once every claim they carry has its writer's signature
+/// (`envelope_release`), a page per writer batch, each committing its cursor; the pages they held
+/// then go back to the filesystem, one short write at a time. A walk that reaches envelopes too
+/// young to release, or that waits for the signature migration, goes on within the hour. A failed
+/// page retries, including after a daemon restart.
+async fn release_old_envelopes(store: Arc<Store>) {
+    use smallclaims::store::{envelope_release::ENVELOPE_RELEASE_AGE_MS, record_bytes::FREE_PAGES_PER_WRITE};
     loop {
-        let page_store = store.clone();
-        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.record_repairs", || page_store.resolve_record_repairs())).await;
-        let pause = match result {
-            Ok(Ok(report)) if report.waiting == 0 || report.done => Duration::from_secs(10 * 60),
-            Ok(Ok(_)) => Duration::from_millis(50),
-            error => {
-                stderr_message("fractal", format_args!("finding repaired records failed: {error:?}"));
-                Duration::from_secs(60)
+        let mut released = 0;
+        loop {
+            let page_store = store.clone();
+            let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.envelope_release", || page_store.release_envelopes(ENVELOPE_RELEASE_AGE_MS))).await;
+            match result {
+                Ok(Ok(report)) => {
+                    released += report.released;
+                    if report.done {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                error => {
+                    stderr_message("fractal", format_args!("releasing envelopes failed: {error:?}"));
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
             }
-        };
-        tokio::time::sleep(pause).await;
+        }
+        if released > 0 {
+            let mut pages = 0;
+            loop {
+                let vacuum_store = store.clone();
+                match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.envelope_release", || vacuum_store.release_free_pages_in(FREE_PAGES_PER_WRITE))).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(freed)) => pages += freed,
+                    error => {
+                        stderr_message("fractal", format_args!("giving released envelope pages back stopped: {error:?}"));
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            stderr_message("fractal", format_args!("released {released} envelopes and gave {pages} free pages back"));
+        }
+        tokio::time::sleep(Duration::from_secs(60 * 60)).await;
     }
 }
 
@@ -22624,6 +22755,24 @@ async fn sign_own_claims(store: Arc<Store>) {
             Ok(Ok(_)) => Duration::from_millis(50),
             error => {
                 stderr_message("fractal", format_args!("signing own claims failed: {error:?}"));
+                Duration::from_secs(60)
+            }
+        };
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// Find the records repairs wait for once valid records are gone (`record_bytes`): a page at a
+/// time while any waits, otherwise a look every ten minutes.
+async fn resolve_record_repairs(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.record_repairs", || page_store.resolve_record_repairs())).await;
+        let pause = match result {
+            Ok(Ok(report)) if report.waiting == 0 || report.done => Duration::from_secs(10 * 60),
+            Ok(Ok(_)) => Duration::from_millis(50),
+            error => {
+                stderr_message("fractal", format_args!("finding repaired records failed: {error:?}"));
                 Duration::from_secs(60)
             }
         };

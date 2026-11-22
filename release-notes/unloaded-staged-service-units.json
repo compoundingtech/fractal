@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Recognize the supervised replication worker when an alternate service namespace is installed but unloaded and not enabled, and warn on failed worker authorization.",
+  "replay": { "status": "none", "detail": "No claim replay or projection changes." },
+  "schema": { "status": "none", "detail": "No persisted schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or sync changes." },
+  "compatibility": { "status": "changed", "detail": "Systemd lookup ignores unloaded alternate-family staging only beside a running or enabled family and after checking local user-unit search paths for masks, unusable links and target wants/requires dependencies, including aliases. Active, enabled, masked and unknown alternate installations still conflict. Failed worker authorization and blocking-task errors are logged at warn at most once per minute per process, with the connector PID, supervisor unit candidates and error chain, without process environments." },
+  "downtime": { "status": "none", "detail": "No service is renamed, enabled or restarted by this change." },
+  "manual": { "status": "none", "detail": "No service migration is performed or required." },
+  "recovery": { "status": "none", "detail": "Existing service files and enablement links are unchanged." }
+}

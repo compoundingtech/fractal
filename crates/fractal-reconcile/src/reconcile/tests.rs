@@ -1,5 +1,8 @@
     #![cfg_attr(not(test), allow(unused, dead_code))]
     mod agent_review_loop_branches;
+    mod restart_preparation;
+    #[cfg(test)]
+    mod file_watch_scope;
 
 mod native_effect_convergence {
     use super::*;
@@ -441,12 +444,31 @@ mission "example/report" state="ready" {
                     "path":transcript,
                 })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
             let runtime = Arc::new(FakeRuntime::default());
+            if case == "exact" {
+                for index in 0..128 {
+                    let other = format!("agent/example/other-{index}");
+                    store.append_claim(&ClaimInput { subject:other.clone(), kind:"harness.invocation".into(),
+                        actor:None, fields:serde_json::from_value(serde_json::json!({
+                            "invocation_id":format!("invocation/other-{index}"),
+                            "operation_id":format!("other-{index}"), "agent":other,
+                            "phase":"started", "incarnation":"other-incarnation"
+                        })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+                }
+            }
             let mut reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
             reconciler.driver_state_dir = root.path().join("drivers");
             let status = match case { "running" => "running", "vanished" => "vanished", _ => "stopped" };
             // Exercise the actual observation writer, including its unchanged-observation retry.
-            for _ in 0..2 {
+            let member_receipts = store.claims_for(subject, Some("harness.invocation")).unwrap().len();
+            store.take_invocation_receipt_read_work();
+            for pass in 0..2 {
                 reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+                let (rows, vm) = store.take_invocation_receipt_read_work();
+                if pass == 0 && status != "running" {
+                    assert_eq!(rows, member_receipts as u64, "{case}: one subject-only reconstruction");
+                } else {
+                    assert_eq!((rows, vm), (0, 0), "{case}: unchanged observation must not reload receipts");
+                }
             }
             let claims = store.claims_for(subject, Some("harness.invocation-artifact")).unwrap();
             let captured = claims.iter().filter(|claim| claim.body["fields"]["status"] == "retained").collect::<Vec<_>>();
@@ -614,6 +636,7 @@ mission "example/report" state="ready" {
     mod program_faults;
     mod program_children;
     mod native_retry;
+    mod step_execution_phases;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -1138,6 +1161,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
+        exec_started: Mutex<HashMap<(String, String), u128>>,
+        exec_payloads: Mutex<HashMap<(String, String), fractal_runtime::payload_receipt::PayloadState>>,
         resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
         resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         resource_ignore_terminate: Mutex<bool>,
@@ -2190,6 +2215,12 @@ mission "cancel-driver" state="ready" {
                 anyhow::bail!("the PTY snapshot is unavailable")
             }
             Ok(self.ptys.lock().unwrap().clone())
+        }
+        fn exec_started_at(&self, runtime_id: &str, incarnation: &str) -> Result<Option<u128>> {
+            Ok(self.exec_started.lock().unwrap().get(&(runtime_id.into(), incarnation.into())).copied())
+        }
+        fn exec_payload_state(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+            Ok(self.exec_payloads.lock().unwrap().get(&(runtime_id.into(), incarnation.into())).copied())
         }
         fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
             if let Some(before) = self.before_observe_exec.lock().unwrap().take() {
@@ -8063,6 +8094,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_observation(&subject).unwrap();
         // Publishing the initial file.observed claim signals a graph change. Consume
         // that known wake before asserting that subsequent reads stay quiet.
@@ -8227,6 +8259,10 @@ agent "import/omp/fixture" {{
         for path in [&rules, &missing] {
             reconciler.ensure_file_watch(&format!("launch-input/{}", path.display()), path).unwrap();
         }
+        reconciler.incremental.evaluated("launch-inputs:test", BTreeSet::from([
+            format!("launch-input/{}", rules.display()), format!("launch-input/{}", missing.display()),
+            "old".into(), "second".into(),
+        ]), None);
         std::fs::create_dir_all(rules.join("nested")).unwrap();
         tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
         reconciler.ensure_file_watch(&format!("launch-input/{}", rules.display()), &rules).unwrap();
@@ -8266,6 +8302,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         for parent in [root.path().join("outer"), root.path().join("outer/inner")] {
             std::fs::write(parent.parent().unwrap().join("unrelated.txt"), "ignore").unwrap();
@@ -8371,6 +8408,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from(["file/node:gate".into()]), None);
         reconciler.ensure_file_watch("file/node:gate", &first).unwrap();
         reconciler.ensure_file_watch("file/node:gate", &second).unwrap();
         std::fs::write(&first, "old target changed").unwrap();
@@ -8402,6 +8440,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         std::fs::write(actual.join("unrelated"), "ignore").unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
@@ -8443,6 +8482,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
         std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();
@@ -8648,10 +8688,10 @@ agent "import/omp/fixture" {{
             .unwrap();
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
-        assert!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        assert_eq!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap(), RequestedRestart::Handled);
         // A later pass finds the request completed: nothing to retire, retry or raise again, and
         // the member pass goes on as usual.
-        assert!(!reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        assert_eq!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap(), RequestedRestart::Continue);
         let retirements = store.claims_for(&seat, Some("runtime.reconcile-decision")).unwrap().into_iter()
             .filter(|claim| claim.body["fields"]["decision"] == "restart-retired-obsolete-request")
             .count();
@@ -11727,10 +11767,31 @@ agent "example/relaunch" { workspace "/tmp"; harness "codex" {}; env { REVISION 
         reconciler.reconcile_once().unwrap();
         assert_eq!(store.observations_for("agent/example/relaunch", "runtime.observed").unwrap()
             .iter().filter(|claim| claim.store_index > finished_cut).count(), 0, "ready clear must remain stable");
-        let replacement_observations = store.observations_for("agent/example/relaunch", "runtime.observed")
-            .unwrap().into_iter().filter(|claim| claim.store_index > replacement_cut).count();
-        assert_eq!(replacement_observations, 4,
-            "cutover, starting, new running, and ready clear; no per-pass claims");
+        // A verified physical launch is already running at completion: it must not
+        // emit an artificial starting claim, nor clear the restart before readiness.
+        let replacement_observations: Vec<_> = store
+            .observations_for("agent/example/relaunch", "runtime.observed")
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.store_index > replacement_cut)
+            .map(|claim| {
+                let fields = &claim.body["fields"];
+                (
+                    fields["status"].clone(),
+                    fields["incarnation_id"].clone(),
+                    fields["restarting_from"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            replacement_observations,
+            vec![
+                (serde_json::json!("running"), serde_json::json!(old), serde_json::json!(old)),
+                (serde_json::json!("running"), serde_json::json!(new), serde_json::json!(old)),
+                (serde_json::json!("running"), serde_json::json!(new), Value::Null),
+            ],
+            "exactly cutover, verified running replacement, and ready clear; no per-pass claims"
+        );
 
         // An explicit stop during a later cutover ends the replacement interval.
         apply_source(&store, source, "relaunch-back");
@@ -12557,6 +12618,32 @@ agent "worker" {
     }
 
     #[test]
+    fn a_declared_checkout_below_a_symlinked_parent_starts_with_one_lease() {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let workspace = alias.join("new/worker");
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"symlink-worker\"; command \"true\"; restart \"never\" }}",
+            workspace.to_str().unwrap(), repository.to_str().unwrap()), "symlinked-checkout");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(std::fs::canonicalize(&workspace).unwrap(), real.join("new/worker"));
+        assert_eq!(runtime.starts.lock().unwrap().len(), 1,
+            "render/start must reuse admission acquired before the checkout existed");
+        assert!(!store.observations_for("agent/node.worker", "runtime.action.succeeded").unwrap().is_empty());
+        assert!(crate::checkout::activation_lease(&workspace, &repository).is_ok(),
+            "the completed pass must release its shared lease");
+    }
+
+    #[test]
     fn a_top_level_checkout_leaves_after_stop_and_workspace_observations_do_not_repeat() {
         let root = crate::test_support::canonical_tempdir();
         let repository = crate::checkout::test_support::repository(root.path());
@@ -12646,8 +12733,9 @@ agent "worker" {
             Arc::new(Notify::new()),
         );
         let workspace = root.path().join("new");
+        let lease = checkout.activation_lease(&workspace).unwrap();
         let failure = reconciler
-            .create_checkout("agent/node.worker", &checkout, &workspace)
+            .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
             .unwrap()
             .unwrap();
         assert!(failure.contains(existing.to_str().unwrap()), "{failure}");
@@ -12656,7 +12744,7 @@ agent "worker" {
         checkout.remove(&existing).unwrap();
         assert_eq!(
             reconciler
-                .create_checkout("agent/node.worker", &checkout, &workspace)
+                .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
                 .unwrap(),
             Some(failure)
         );
@@ -12666,7 +12754,7 @@ agent "worker" {
         };
         assert!(
             reconciler
-                .create_checkout("agent/node.worker", &revised, &workspace)
+                .create_checkout("agent/node.worker", &revised, &workspace, &lease)
                 .unwrap()
                 .is_none()
         );
@@ -25051,6 +25139,7 @@ observer "repo" {
                 fields: BTreeSet::from(["issues".into(), "pull_requests".into()]),
                 cursor: None, previous_facts: None, every_ms: Some(0), refresh: false,
                 webhook_covered: false, workflow_runs: None, github_capture: None,
+                await_prs: Vec::new(),
             };
             let unavailable = observe(request.clone(), &base).await.unwrap();
             store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
@@ -29143,7 +29232,25 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 ("running".into(), Some(format!("{name}-one")))
             );
         }
-        assert_eq!(latest_runtime(&store, "vanished").0, "starting");
+        // The replacement's verified launch is running, but its driver is not
+        // ready yet. Use its durable incarnation instead of inventing a second one.
+        let replacement = store
+            .observations_for("agent/node.vanished", "runtime.action.succeeded")
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body.pointer("/fields/action") == Some(&serde_json::json!("start")))
+            .unwrap();
+        let replacement_incarnation = replacement.body["fields"]["incarnation_id"]
+            .as_str()
+            .unwrap();
+        assert_ne!(replacement_incarnation, "vanished-one");
+        assert_eq!(
+            latest_runtime(&store, "vanished"),
+            ("running".into(), Some(replacement_incarnation.into()))
+        );
+        assert!(!store.current_harness("agent/node.vanished").unwrap()
+            .is_some_and(|harness| harness.incarnation_id == replacement_incarnation && harness.is_ready()));
 
         // The starting seat's driver reports ready after the restart; no seat is left waiting.
         store
@@ -29154,21 +29261,21 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             ))
             .unwrap();
         runtime.ptys.lock().unwrap().push(RuntimeObservation {
-            incarnation_id: Some("vanished-two".into()),
+            incarnation_id: Some(replacement_incarnation.into()),
             ..pty("vanished")
         });
         store
             .append_claim(&harness_claim(
                 "agent/node.vanished",
                 "ready",
-                "vanished-two",
+                replacement_incarnation,
             ))
             .unwrap();
         reconciler.reconcile_once().unwrap();
         for (name, incarnation) in [
             ("running", "running-one"),
             ("starting", "starting-one"),
-            ("vanished", "vanished-two"),
+            ("vanished", replacement_incarnation),
         ] {
             let harness = store
                 .current_harness(&format!("agent/node.{name}"))
@@ -29930,6 +30037,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .find(|subject| subject.subject == "agent/node.worker")
             .unwrap();
         let member = desired.member.as_ref().unwrap().clone();
+        mark_harness_ready(&store, &desired.subject, &member, "omp", "worker-one");
         let notify = Arc::new(Notify::new());
         let reconciler = Reconciler::new(
             store.clone(),
@@ -29950,6 +30058,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("model".into(), Value::String(model.into())),
                         ("semantics".into(), Value::String("context_occupancy".into())),
                         ("incarnation_id".into(), Value::String("worker-one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -30006,14 +30115,21 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         report("gpt-6.1-sol", "drift-usage-fallback-again");
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         let first = drift().expect("drift fault raised again");
-        let since = first.detail.rsplit("[drift-since-ms:").next().unwrap().split(']').next().unwrap().to_owned();
-        // The live model moves to another undeclared model while drifted: the fault names
-        // the new model and keeps its `since`, and the next pass is quiet again.
+        let first_since = crate::store::model_drift::ModelDrift::parse(&first.detail).unwrap().since_ms;
+        // A different model pair starts a new fenced drift clock; it must not borrow
+        // the prior fallback pair's elapsed duration.
         report("gpt-6-luna", "drift-usage-second-rung");
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         let moved = drift().expect("drift fault follows the live model");
         assert!(moved.detail.contains("running on gpt-6-luna"), "{}", moved.detail);
-        assert!(moved.detail.contains(&format!("[drift-since-ms:{since}]")), "{}", moved.detail);
+        let moved_since = store.model_drift_since(
+            &desired.subject, "worker-one", "anthropic/claude-opus-5-5", "gpt-6-luna",
+        ).unwrap().expect("the new model pair has a fenced clock");
+        assert!(moved_since >= first_since);
+        assert_eq!(store.model_drift_since(
+            &desired.subject, "worker-one", "anthropic/claude-opus-5-5", "gpt-6.1-sol",
+        ).unwrap(), None);
+        assert!(moved.detail.contains(&format!("[drift-since-ms:{moved_since}]")), "{}", moved.detail);
         assert!(woke());
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         assert_eq!(drift().unwrap().detail, moved.detail);
@@ -30039,9 +30155,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         // previous incarnation's readings never count for it.
         reconciler.reconcile_model_drift(&desired, "worker-two").unwrap();
         assert!(drift().is_none());
-        assert_eq!(store.latest_usage_model("agent/node.worker", "worker-two").unwrap(), None);
+        assert_eq!(store.latest_usage_model_observation("agent/node.worker", "worker-two").unwrap(), None);
         assert_eq!(
-            store.latest_usage_model("agent/node.worker", "worker-one").unwrap().as_deref(),
+            store.latest_usage_model_observation("agent/node.worker", "worker-one").unwrap().as_ref().map(|observation| observation.model.as_str()),
             Some("gpt-6.1-sol")
         );
         drop(member);
@@ -30087,6 +30203,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("semantics".into(), Value::String(semantics.into())),
                         ("total_tokens".into(), Value::from(1)),
                         ("incarnation_id".into(), Value::String("one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -30108,7 +30225,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         reconciler.reconcile_model_drift(&desired("agent/node.parent"), "one").unwrap();
         assert!(drift("agent/node.parent").is_none());
         assert_eq!(
-            store.latest_usage_model("agent/node.parent", "one").unwrap().as_deref(),
+            store.latest_usage_model_observation("agent/node.parent", "one").unwrap().as_ref().map(|observation| observation.model.as_str()),
             Some("claude-opus-5-5")
         );
         // A declared Claude alias matches its family's full API ID, and only that family.
@@ -30159,6 +30276,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("model".into(), Value::String(model.into())),
                         ("semantics".into(), Value::String("context_occupancy".into())),
                         ("incarnation_id".into(), Value::String("one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -30450,7 +30568,7 @@ mission "wake" state="ready" {
         let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), notify.clone());
         let before = store.index().unwrap();
         reconciler
-            .reconcile_work_messages(&desired.subject, "worker-one", None)
+            .reconcile_work_messages(&desired.subject, "worker-one", None, RequestedRestart::Continue)
             .unwrap();
         assert_eq!(store.index().unwrap(), before);
         assert_eq!(
@@ -32150,7 +32268,7 @@ mission "context" state="ready" {
         ordinary.fresh_context = false;
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "old", &ordinary, &member)
+                .prepare_fresh_context(SEAT, "old", &ordinary, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert!(runtime.stops.lock().unwrap().is_empty());
@@ -32161,14 +32279,14 @@ mission "context" state="ready" {
             .insert("st3.fresh_context".into(), "true".into());
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &ordinary, &seat_member)
+                .prepare_fresh_context(SEAT, "old", &ordinary, &seat_member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
 
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &step, &member)
+                .prepare_fresh_context(SEAT, "old", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
@@ -32178,7 +32296,7 @@ mission "context" state="ready" {
         );
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "new", &step, &member)
+                .prepare_fresh_context(SEAT, "new", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(
@@ -32335,13 +32453,13 @@ mission "seat-context" state="ready" {
         assert!(!store.fresh_context_ready(&step, SEAT, "old").unwrap());
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &step, &member)
+                .prepare_fresh_context(SEAT, "old", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "new", &step, &member)
+                .prepare_fresh_context(SEAT, "new", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert!(store.fresh_context_ready(&step, SEAT, "new").unwrap());
@@ -32987,12 +33105,12 @@ mission "queued" state="ready" {
         };
         observe("working");
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         assert!(faults().is_empty(), "do not interrupt a working turn");
         observe("idle");
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         let first = faults();
         assert_eq!(first.len(), 1);
@@ -33002,7 +33120,7 @@ mission "queued" state="ready" {
         );
         assert_eq!(first[0].body["evidence"], serde_json::json!([sent.id]));
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         assert_eq!(faults().len(), 1, "one diagnostic per readiness episode");
         assert_eq!(
@@ -33041,20 +33159,20 @@ mission "queued" state="ready" {
             .into_iter().filter(|claim| claim.body["fields"]["code"] == "work-wake-exhausted").collect::<Vec<_>>();
         failure("old-seat", step.readiness_epoch);
         failure("seat-one", step.readiness_epoch + 1);
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert!(faults().is_empty());
         let current = failure("seat-one", step.readiness_epoch);
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         let raised = faults();
         assert_eq!(raised.len(), 1);
         assert!(raised[0].body["fields"]["reason"].as_str().unwrap().contains("Operation not permitted"));
         assert!(raised[0].body["evidence"].as_array().unwrap().contains(&serde_json::json!(current.id)));
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert_eq!(faults().len(), 1);
         assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), 1);
         assert_eq!(seat.store.step_run(&subject).unwrap().unwrap().status, "ready");
         seat.work(&subject, "claim", "socket-fixed-claim").unwrap();
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert_eq!(faults().len(), 1, "a successful claim must not raise another fault");
     }
 
@@ -33304,7 +33422,7 @@ mission "queued" state="ready" {
                 member.tags.insert("st3.fresh_context".into(), "true".into());
             }
             seat.move_run(&third.subject, "top", None, "person/operator", "context-top").unwrap();
-            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
+            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member), RequestedRestart::Continue).unwrap();
             assert!(!seat.woken().contains(&SeatQueueFixture::step(&third, "work")));
             assert!(seat.reconciler.runtime.stops.lock().unwrap().is_empty());
             assert!(seat.store.observations_for(SEAT, "runtime.action.requested").unwrap().is_empty());
@@ -33312,7 +33430,7 @@ mission "queued" state="ready" {
             seat.work(&held, "complete", "context-complete").unwrap();
             seat.reconciler.reconcile_once().unwrap();
             assert_eq!(seat.store.step_run(&held).unwrap().unwrap().status, "completed");
-            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
+            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member), RequestedRestart::Continue).unwrap();
             assert_eq!(seat.reconciler.runtime.stops.lock().unwrap().len(), 1);
             assert!(seat.store.step_run(&SeatQueueFixture::step(&second, "work")).unwrap().is_some());
         }

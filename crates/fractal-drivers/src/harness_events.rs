@@ -641,6 +641,64 @@ pub fn prepare_publication(
     Ok(serde_json::from_str(&body)?)
 }
 
+/// Freeze the channel edge decision before HTTP, just like a prepared claim. Updating the
+/// per-runtime incarnation/readiness fence and saving the decision together means a lost HTTP
+/// acknowledgement or wrapper re-exec retries the edge. Unknown metadata emits an edge.
+pub fn prepare_channel_readiness(
+    agent_dir: &Path,
+    sequence: u64,
+    runtime: &str,
+    incarnation: &str,
+    ready: bool,
+) -> Result<bool> {
+    let mut connection = open(agent_dir)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let pending: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE sequence=?1 AND runtime_incarnation=?2)",
+        params![sequence, runtime],
+        |r| r.get(0),
+    )?;
+    anyhow::ensure!(pending, "channel event has already been acknowledged or belongs to another runtime");
+    const SLOT: &str = "omp-channel-readiness";
+    let prepared: Option<bool> = tx.query_row(
+        "SELECT body!='false' FROM prepared WHERE sequence=?1 AND slot=?2",
+        params![sequence, SLOT],
+        |r| r.get(0),
+    ).optional()?;
+    if let Some(emit) = prepared {
+        return Ok(emit);
+    }
+    let key = format!("omp-channel-readiness:{runtime}");
+    let state = serde_json::to_string(&(incarnation, ready))?;
+    let unchanged: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1 AND value=?2)",
+        params![key, state],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-h167c33090bba owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO prepared(sequence,slot,body) VALUES (?1,?2,?3)",
+        params![sequence, SLOT, if unchanged { "false" } else { "true" }],
+    )?;
+    if !unchanged {
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-ha7e65391ff10 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, state],
+        )?;
+    }
+    tx.commit()?;
+    Ok(!unchanged)
+}
+
+/// A fail-open publication bypassed preparation, so the previous fence can no longer prove
+/// the latest graph edge. Invalidate it separately from the failed preparation transaction.
+pub fn invalidate_channel_readiness(agent_dir: &Path, runtime: &str) -> Result<()> {
+    open(agent_dir)?.execute(
+        /* sqlite-large-value: allow-for-now lv-he6f8ffaece65 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM metadata WHERE key=?1",
+        [format!("omp-channel-readiness:{runtime}")],
+    )?;
+    Ok(())
+}
+
 pub fn acknowledge(agent_dir: &Path, sequence: u64) -> Result<()> {
     let mut connection = open(agent_dir)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1231,6 +1289,32 @@ mod protocol_tests {
             io::ErrorKind::WouldBlock
         );
     }
+    #[test]
+    fn channel_readiness_replays_edges_and_emits_when_metadata_is_missing_or_invalid() {
+        let root = tempfile::tempdir().unwrap();
+        enable(root.path(), "runtime").unwrap();
+        for (index, damaged) in [None, Some("invalid"), Some("missing")].into_iter().enumerate() {
+            if let Some(damaged) = damaged {
+                let connection = open(root.path()).unwrap();
+                if damaged == "missing" {
+                    connection.execute("DELETE FROM metadata WHERE key='omp-channel-readiness:runtime'", []).unwrap();
+                } else {
+                    connection.execute("UPDATE metadata SET value='invalid' WHERE key='omp-channel-readiness:runtime'", []).unwrap();
+                }
+            }
+            write_snapshot(root.path(), "harness-state",
+                &serde_json::to_vec(&json!({"incarnation":"provider","reason":index})).unwrap()).unwrap();
+            let sequence = pending(root.path(), 1).unwrap()[0].sequence;
+            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", "incarnation", true).unwrap());
+            // Reopening the spool after preparation must retain the edge, even though the
+            // metadata already says ready. A caller retries the same idempotency key.
+            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", "incarnation", true).unwrap());
+            assert!(prepare_channel_readiness(root.path(), sequence, "foreign", "incarnation", true).is_err());
+            acknowledge(root.path(), sequence).unwrap();
+            assert!(prepare_channel_readiness(root.path(), sequence, "runtime", "incarnation", true).is_err());
+        }
+    }
+
     #[test]
     fn account_capture_child() {
         let Some(directory) = std::env::var_os("ST_ACCOUNT_TEST_DIRECTORY") else {

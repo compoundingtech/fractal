@@ -12,6 +12,26 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use serde_json::Value;
 
+/// One command boundary for checkout and reconciliation activation.
+pub fn activation_lease(
+    workspace: &Path,
+    repository: &Path,
+) -> Result<fractal_runtime::store_worktree_lease::StoreWorktreeLease> {
+    let command = activation_command(&crate::environment::snapshot()?)?;
+    #[cfg(any(test, feature = "test-support"))]
+    let command = test_support::lease_command(command, repository);
+    fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
+        command, workspace, repository,
+    )
+}
+
+fn activation_command(environment: &std::collections::BTreeMap<String, String>) -> Result<std::process::Command> {
+    crate::environment::command_in(
+        fractal_runtime::store_worktree_lease::mr_executable()?,
+        environment,
+    )
+}
+
 /// A fetch runs inside the reconciler, so a stalled remote must not hold it for long.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -83,6 +103,24 @@ impl Checkout {
     /// checked out as it is; a new branch starts at the base. When the base names a remote
     /// branch, Fractal fetches it first. A failed fetch leaves the local base and returns a warning.
     pub fn create(&self, workspace: &Path) -> Result<Vec<String>> {
+        let lease = self.activation_lease(workspace)?;
+        self.create_leased(workspace, &lease)
+    }
+
+    pub fn activation_lease(
+        &self,
+        workspace: &Path,
+    ) -> Result<fractal_runtime::store_worktree_lease::StoreWorktreeLease> {
+        activation_lease(workspace, &self.repository)
+    }
+
+    /// The caller retains the lease through initialization and workspace publication.
+    pub fn create_leased(
+        &self,
+        workspace: &Path,
+        lease: &fractal_runtime::store_worktree_lease::StoreWorktreeLease,
+    ) -> Result<Vec<String>> {
+        lease.ensure_owner(workspace)?;
         anyhow::ensure!(
             self.repository.is_absolute(),
             "checkout repository {} is not an absolute path",
@@ -224,6 +262,34 @@ impl Checkout {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::path::{Path, PathBuf};
+    use std::collections::BTreeMap;
+    use std::process::Command;
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Default)]
+    struct LeaseFixture {
+        store: PathBuf,
+        acquisitions: usize,
+    }
+
+    static STORES: LazyLock<Mutex<BTreeMap<PathBuf, LeaseFixture>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    /// Command-local fixture injection: never mutate the parallel test runner's environment.
+    pub(super) fn lease_command(mut command: Command, repository: &Path) -> Command {
+        if let Ok(repository) = std::fs::canonicalize(repository)
+            && let Some(fixture) = STORES.lock().unwrap().get_mut(&repository)
+        {
+            fixture.acquisitions += 1;
+            command.env("MEGAREPO_STORE", &fixture.store);
+        }
+        command
+    }
+
+    /// Count real lease command attempts for this repository's isolated fixture.
+    pub fn lease_count(repository: &Path) -> usize {
+        STORES.lock().unwrap()[&std::fs::canonicalize(repository).unwrap()].acquisitions
+    }
 
     pub fn git(directory: &Path, arguments: &[&str]) {
         let status = crate::test_support::git()
@@ -240,8 +306,17 @@ pub mod test_support {
         assert!(status.success(), "git {arguments:?}");
     }
 
-    /// A bare origin with one commit on main, and a clone of it.
+    /// An ordinary clone; its lease state is isolated in a sibling store.
     pub fn repository(root: &Path) -> PathBuf {
+        repository_fixture(root, false)
+    }
+
+    /// A real store container and main worktree, for container-admission tests.
+    pub fn store_repository(root: &Path) -> PathBuf {
+        repository_fixture(root, true)
+    }
+
+    fn repository_fixture(root: &Path, store_shaped: bool) -> PathBuf {
         let origin = root.join("origin.git");
         let seed = root.join("seed");
         let clone = root.join("repo");
@@ -257,10 +332,24 @@ pub mod test_support {
             &seed,
             &["push", "--quiet", &origin.to_string_lossy(), "main"],
         );
-        git(
-            root,
-            &["clone", "--quiet", &origin.to_string_lossy(), "repo"],
-        );
+        let bare = root.join(".bare");
+        if store_shaped {
+            git(
+                root,
+                &["clone", "--quiet", "--bare", &origin.to_string_lossy(), ".bare"],
+            );
+            git(
+                &bare,
+                &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+            );
+            git(&bare, &["fetch", "--quiet", "origin"]);
+            git(
+                &bare,
+                &["worktree", "add", "--quiet", &clone.to_string_lossy(), "main"],
+            );
+        } else {
+            git(root, &["clone", "--quiet", &origin.to_string_lossy(), "repo"]);
+        }
         // A commit that reaches origin after the clone is only visible after a fetch.
         std::fs::write(seed.join("README"), "second\n").unwrap();
         git(&seed, &["commit", "--quiet", "-am", "second"]);
@@ -268,41 +357,111 @@ pub mod test_support {
             &seed,
             &["push", "--quiet", &origin.to_string_lossy(), "main"],
         );
+        let root = std::fs::canonicalize(root).unwrap();
+        let store = if store_shaped { root } else { root.join("mr-store") };
+        let mut stores = STORES.lock().unwrap();
+        if store_shaped {
+            stores.insert(std::fs::canonicalize(&bare).unwrap(), LeaseFixture {
+                store: store.clone(),
+                ..LeaseFixture::default()
+            });
+        }
+        stores.insert(std::fs::canonicalize(&clone).unwrap(), LeaseFixture {
+            store,
+            ..LeaseFixture::default()
+        });
         clone
     }
+}
+
+/// The reclamation owner is the worktree root, even when an agent works in a subdirectory.
+pub fn workspace_worktree(workspace: &Path) -> Option<PathBuf> {
+    let workspace = std::fs::canonicalize(workspace).ok()?;
+    workspace.ancestors().find(|root| {
+        let git = root.join(".git");
+        git.is_dir() || git.is_file()
+    }).map(Path::to_path_buf)
 }
 
 /// Read Git's directory pointers on the owning host during reconciliation. Checks only the
 /// declared workspace and its ancestors, with no search through other host directories.
 pub fn workspace_repository(workspace: &Path) -> Option<PathBuf> {
-    let workspace = std::fs::canonicalize(workspace).ok()?;
-    for root in workspace.ancestors() {
-        let dot_git = root.join(".git");
-        if dot_git.is_dir() {
-            return Some(root.to_path_buf());
-        }
-        if dot_git.is_file() {
-            let pointer = std::fs::read_to_string(dot_git).ok()?;
-            let git_dir = root.join(pointer.strip_prefix("gitdir:")?.trim());
-            if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
-                let common = std::fs::canonicalize(git_dir.join(common.trim())).ok()?;
-                return Some(if common.file_name().is_some_and(|name| name == ".git") {
-                    common.parent()?.to_path_buf()
-                } else {
-                    // Bare repositories keep their shared Git directory at the repository root.
-                    common
-                });
-            }
-            return Some(root.to_path_buf());
-        }
+    let root = workspace_worktree(workspace)?;
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(root);
     }
-    None
+    let pointer = std::fs::read_to_string(dot_git).ok()?;
+    let git_dir = root.join(pointer.strip_prefix("gitdir:")?.trim());
+    if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
+        let common = std::fs::canonicalize(git_dir.join(common.trim())).ok()?;
+        return Some(if common.file_name().is_some_and(|name| name == ".git") {
+            common.parent()?.to_path_buf()
+        } else {
+            // Bare repositories keep their shared Git directory at the repository root.
+            common
+        });
+    }
+    Some(root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::test_support::{git, repository};
     use super::*;
+
+    #[test]
+    fn activation_uses_the_compiled_mr_despite_a_reset_login_path() {
+        let environment = std::collections::BTreeMap::from([
+            ("PATH".into(), "/host-with-an-old-mr:/nonexistent".into()),
+        ]);
+        let command = activation_command(&environment).unwrap();
+        assert_eq!(command.get_program(), Path::new(
+            fractal_runtime::store_worktree_lease::mr_executable().unwrap(),
+        ).as_os_str());
+        assert!(Path::new(command.get_program()).is_absolute());
+    }
+
+    #[test]
+    fn checkout_fixture_leases_use_only_their_own_store() {
+        for store_shaped in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let repository = if store_shaped {
+                test_support::store_repository(root.path())
+            } else {
+                repository(root.path())
+            };
+            let canonical = std::fs::canonicalize(root.path()).unwrap();
+            let store = if store_shaped { canonical } else { canonical.join("mr-store") };
+            let host_store = root.path().join("host-store-must-not-be-used");
+            let bare = root.path().join(".bare");
+            let sources = [Some(&repository), store_shaped.then_some(&bare)];
+            for source in sources.into_iter().flatten() {
+                let mut command = std::process::Command::new("mr");
+                command.env("MEGAREPO_STORE", &host_store);
+                let command = test_support::lease_command(command, source);
+                assert!(command.get_envs().any(|(name, value)|
+                    name == "MEGAREPO_STORE" && value == Some(store.as_os_str())));
+                let _lease = fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
+                    command, &root.path().join("prospective"), source,
+                ).unwrap();
+                assert!(store.join(".state/deletion-leases").is_dir());
+                assert!(!host_store.exists());
+            }
+        }
+    }
+    #[test]
+    fn a_workspace_subdirectory_uses_the_worktree_root_as_lease_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = super::test_support::repository(root.path());
+        let workspace = repository.join("nested/project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        assert_eq!(
+            super::workspace_worktree(&workspace),
+            Some(std::fs::canonicalize(&repository).unwrap()),
+        );
+    }
+
 
     #[test]
     fn a_checkout_is_read_from_its_agent_declaration() {

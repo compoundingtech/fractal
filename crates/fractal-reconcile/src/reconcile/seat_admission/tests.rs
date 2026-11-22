@@ -9,8 +9,9 @@ fn reconciler() -> Reconciler<FakeRuntime> {
         Arc::new(Notify::new()),
     )
 }
+
 #[tokio::test]
-async fn idle_host_without_finite_custody_does_not_poll_pressure() {
+async fn admission_refresh_does_not_schedule_pressure_polling() {
     let reconciler = reconciler();
     reconciler.refresh_seat_admission_at(u64::try_from(now_ms() / 1000).unwrap());
     assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
@@ -18,44 +19,154 @@ async fn idle_host_without_finite_custody_does_not_poll_pressure() {
 }
 
 
-#[tokio::test]
-async fn logical_admission_keeps_pressure_refresh_platform_explicit_without_native_lanes() {
-    let reconciler = reconciler();
+#[tokio::test(start_paused = true)]
+async fn daemon_sampler_observes_without_a_pass_or_native_lanes() {
+    let reconciler = Arc::new(reconciler());
     assert!(reconciler.seat_admission.lanes.is_none());
     assert!(reconciler.seat_admission.config.is_none());
-    use crate::store::resource_membership::{Admission, Fit, LaneRequest};
-    let request: LaneRequest = serde_json::from_value(serde_json::json!({
-        "id":"pressure-owner", "name":"checks", "host":"node", "maxMembers":1,
-        "capacity":{"cores":1,"memory":1024}, "coverage":"logical",
-        "owner":{"run":"run","step":"step","attempt":1}, "class":"check",
-    })).unwrap();
-    reconciler.store.start_resource_authority("node", "pressure-authority").unwrap();
-    let fit = Fit { room: request.capacity, ..Fit::default() };
-    let Admission::Admitted(grant) = reconciler.store.request_resource_membership(&request, fit.clone(), 1).unwrap()
-        else { panic!("finite fixture must admit"); };
-    let mut queued = request.clone();
-    queued.id = "pressure-queued".into();
-    assert!(matches!(reconciler.store.request_resource_membership(&queued, fit, 2).unwrap(), Admission::Queued { .. }));
-    let now = u64::try_from(now_ms() / 1000).unwrap();
-    reconciler.refresh_seat_admission_at(now);
-    let deadlines = reconciler.step_deadlines.lock().unwrap();
+    assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
+    let events = reconciler.event_notify.subscribe();
+    let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
+    reconciler.seat_admission.pressure_samples.set(samples).unwrap();
+    let sampler = reconciler.sample_resource_pressure();
+    tokio::pin!(sampler);
     if cfg!(target_os = "linux") {
+        tokio::select! {
+            () = &mut sampler => panic!("sampler must remain scoped to the daemon run"),
+            sample = sampled.recv() => { sample.unwrap(); },
+        }
         assert!(reconciler.seat_admission.pressure.lock().unwrap().is_some());
-        assert!(deadlines.get("resource-pressure").is_some_and(|deadline|
-            *deadline >= u128::from(now + 5) * 1000));
+        assert!(!reconciler.step_deadlines.lock().unwrap().contains_key("resource-pressure"));
+        assert!(!events.has_changed().unwrap(), "sampling must not publish a graph mutation");
     } else {
+        tokio::select! {
+            () = &mut sampler => panic!("unsupported platforms keep the sampler dormant"),
+            () = std::future::ready(()) => {},
+        }
         assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
-        assert!(!deadlines.contains_key("resource-pressure"));
     }
-    drop(deadlines);
-    reconciler.store.cancel_resource_membership(&grant, &request.owner, 3).unwrap();
-    let runtime = fractal_runtime::ExecRuntime::new(PathBuf::new(), PathBuf::new());
-    assert!(reconciler.store.retire_resource_membership(&grant, &request.owner, &runtime, 3).unwrap());
-    assert!(reconciler.store.has_live_finite_resource_memberships("node").unwrap(),
-        "queued custody alone keeps pressure recovery observable");
-    reconciler.store.withdraw_resource_membership(&queued.id, &queued.owner, 4).unwrap();
-    assert!(!reconciler.store.has_live_finite_resource_memberships("node").unwrap(),
-        "terminal custody no longer needs pressure observations");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(start_paused = true)]
+async fn sampler_recovers_after_120_seconds_with_a_90_second_reconcile_stall() {
+    use crate::incremental::{ChangeFeed, ChangeSource};
+    use fractal_runtime::resource_pressure::{ObservationCause, Policy, Reason};
+    use tokio::time::Instant;
+
+    struct BlockingFeed {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl ChangeSource for BlockingFeed {
+        fn changes_since(&self, _: u64, _: i64) -> Result<ChangeFeed> {
+            self.entered.lock().unwrap().take().unwrap().send(()).unwrap();
+            self.release.recv().unwrap();
+            Ok(ChangeFeed::default())
+        }
+    }
+
+    let reconciler = reconciler();
+    let root = tempfile::tempdir().unwrap();
+    let cgroups = root.path().join("cgroups");
+    let protected = cgroups.join("system.slice/fractal.service");
+    std::fs::create_dir_all(&protected).unwrap();
+    std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+    let memory = protected.join("memory.pressure");
+    let io = protected.join("io.pressure");
+    let placement = root.path().join("cgroup");
+    let meminfo = root.path().join("meminfo");
+    let quiet = "some avg10=0.00 avg60=0.00\nfull avg10=0.00 avg60=0.00\n";
+    std::fs::write(&memory, "").unwrap();
+    std::fs::write(&io, quiet).unwrap();
+    for group in ["system.slice", "app.slice"] {
+        for name in ["memory.pressure", "io.pressure"] {
+            std::fs::write(cgroups.join(group).join(name), quiet).unwrap();
+        }
+    }
+    std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
+    std::fs::write(&meminfo, "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n").unwrap();
+    *reconciler.seat_admission.pressure.lock().unwrap() =
+        Some(fractal_runtime::resource_pressure::Observer::with_paths(
+            Policy::default(), placement, cgroups, meminfo).unwrap());
+    assert!(reconciler.seat_admission.sample_pressure().unwrap().blocked);
+    std::fs::write(&memory, quiet).unwrap();
+    let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
+    reconciler.seat_admission.pressure_samples.set(samples).unwrap();
+    let reconciler = Arc::new(reconciler);
+    let incremental = reconciler.incremental.clone();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, stalled) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        incremental.observe(&BlockingFeed { entered: Mutex::new(Some(entered)), release: stalled }).unwrap();
+    });
+    entering.await.unwrap();
+
+    let sampler = reconciler.sample_resource_pressure();
+    tokio::pin!(sampler);
+    let start = Instant::now();
+    let mut release = Some(release);
+    let mut observer = Some(observer);
+    for elapsed in (0..=120).step_by(5) {
+        if elapsed != 0 {
+            tokio::time::advance(Duration::from_secs(5)).await;
+        }
+        let (at, decision) = tokio::select! {
+            () = &mut sampler => panic!("sampler ended during reconciliation"),
+            sample = sampled.recv() => sample.unwrap(),
+        };
+        assert_eq!(at.duration_since(start), Duration::from_secs(elapsed));
+        assert!(!matches!(&decision.reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::ObservationGap | ObservationCause::StaleDecision })));
+        if elapsed < 120 {
+            assert_eq!(decision.reason, Some(Reason::Recovering { remaining: (120 - elapsed) * 1000 }));
+        }
+        assert_eq!(reconciler.seat_admission.pressure_decision(), decision);
+        if elapsed == 90 {
+            release.take().unwrap().send(()).unwrap();
+            observer.take().unwrap().join().unwrap();
+        }
+        if elapsed == 120 {
+            assert!(!decision.blocked, "120 seconds of healthy samples must recover");
+        }
+    }
+    assert!(reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
+    reconciler.refresh_seat_admission_at(0);
+    assert!(!reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn discovered_interactive_slice_keeps_default_admission_quiet_when_present() {
+    use fractal_runtime::resource_pressure::Policy;
+
+    // Companion to the stall-recovery fixture above, which keeps passing without an
+    // interactive.slice: a present, quiet interactive.slice is sampled, never skipped
+    // as a failure, and default admission stays open.
+    let reconciler = reconciler();
+    let root = tempfile::tempdir().unwrap();
+    let cgroups = root.path().join("cgroups");
+    let protected = cgroups.join("system.slice/fractal.service");
+    std::fs::create_dir_all(&protected).unwrap();
+    std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+    std::fs::create_dir_all(cgroups.join("interactive.slice")).unwrap();
+    let placement = root.path().join("cgroup");
+    let meminfo = root.path().join("meminfo");
+    let quiet = "some avg10=0.00 avg60=0.00\nfull avg10=0.00 avg60=0.00\n";
+    for group in ["system.slice", "app.slice", "interactive.slice"] {
+        for name in ["memory.pressure", "io.pressure"] {
+            std::fs::write(cgroups.join(group).join(name), quiet).unwrap();
+        }
+    }
+    for name in ["memory.pressure", "io.pressure"] {
+        std::fs::write(protected.join(name), quiet).unwrap();
+    }
+    std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
+    std::fs::write(&meminfo, "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n").unwrap();
+    *reconciler.seat_admission.pressure.lock().unwrap() =
+        Some(fractal_runtime::resource_pressure::Observer::with_paths(
+            Policy::default(), placement, cgroups, meminfo).unwrap());
+    assert!(!reconciler.seat_admission.sample_pressure().unwrap().blocked);
 }
 
 #[test]

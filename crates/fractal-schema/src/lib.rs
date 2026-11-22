@@ -845,6 +845,17 @@ impl Registry {
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
+        if kind == "harness.model-fallback.observed" {
+            let bounded = |name: &str| fields.get(name).and_then(Value::as_str).is_some_and(|text|
+                !text.is_empty() && text.len() <= 256 && text.bytes().all(|byte|
+                    byte.is_ascii_alphanumeric() || b"-_./:@+".contains(&byte)));
+            if !["incarnation_id", "native_session", "source_event", "episode_id", "to"].into_iter().all(bounded)
+                || (fields.get("observation").and_then(Value::as_str) == Some("applied")
+                    && (!bounded("from") || !fields.contains_key("cause")))
+            {
+                return Err(error("invalid-model-fallback", "model fallback requires bounded native provenance and sanitized cause"));
+            }
+        }
         usage_limits::validate(subject, kind, fields)?;
         if kind == "terminal.launch-geometry" {
             for name in ["rows", "columns"] {
@@ -1466,6 +1477,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("head", reference()),
                 ("state", string()),
                 ("pull_requests", array()),
+                ("await_prs_not_found", array()),
                 ("issues", array()),
                 ("repository_id", integer()),
                 ("main_performance_failures", array()),
@@ -1523,6 +1535,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("author", string()),
                 ("head", reference()),
                 ("head_sha", string()),
+                ("await_pr_observation", object()),
                 ("branch", string()),
                 ("opened_by", reference()),
                 ("opened_by_run", reference()),
@@ -1787,6 +1800,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "harness.todo.observed",
+            &["agent"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "harness.model-fallback.observed",
             &["agent"],
             WritePolicy::SameSubjectActor,
             Cardinality::Append,
@@ -2110,6 +2132,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["revision"],
         ),
         (
+            "step.execution-phase",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &["step"],
+        ),
+        (
             "step-run.state",
             &["step-run"],
             WritePolicy::SystemOnly,
@@ -2162,6 +2193,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             None,
             false,
             &["step", "program"],
+        ),
+        (
+            "program.turn.report",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            true,
+            &[],
         ),
         (
             "work.person-asked",
@@ -2270,6 +2310,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::AuthorizedParticipant,
             Cardinality::Append,
             Some("work"),
+            true,
+            &[],
+        ),
+        (
+            "work.rebound",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("step-runs"),
             true,
             &[],
         ),
@@ -3809,6 +3858,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "mission-run.created" => &[
             ("mission_spec", object()),
             ("ad_hoc_title", string()),
+            ("native_turn", object()),
+            ("native_turn_key", string()),
+            ("parent_attempt", integer()),
             ("status", string()),
             ("phase", string()),
             ("admission_publication", string()),
@@ -3923,6 +3975,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("successor", reference()),
         ],
+        "step.execution-phase" => &[
+            ("attempt", required_integer()),
+            ("phase", required_enum(&[
+                "dispatched", "received", "admitted", "exec-started", "exec-exited",
+                "result-replicated", "dispatch-stalled", "execution-timeout",
+            ])),
+            ("exec", required_string()),
+            ("at_unix_ms", required_integer()),
+            ("host", required_string()),
+            ("reason", string()),
+            ("incarnation_id", string()),
+            ("start_operation", string()),
+            ("timeout_extension_ms", integer()),
+        ],
         "step-run.state" => &[
             ("status", string()),
             ("reason", string()),
@@ -3953,6 +4019,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "mission.run.trace" => &[("trace", any())],
         "program.attempt.trace" => &[("attempt", required_integer()), ("trace", any())],
+        "program.turn.report" => &[("report", required_object())],
         "program.step" => &[
             ("key", required_string()),
             ("status", required_enum(&["started", "completed", "failed"])),
@@ -4041,6 +4108,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("handoff_to", reference()),
             ("handoff_message", reference()),
             ("handoff_acknowledged", reference()),
+        ],
+        "work.rebound" => &[
+            ("attempt", integer()),
+            ("claimant", reference()),
+            ("from_incarnation", string()),
+            ("to_incarnation", string()),
+            ("session_id", string()),
+            ("harness", string()),
         ],
         "work.nudged" => &[
             ("attempt", integer()),
@@ -4481,6 +4556,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source_host", string()),
             ("rollout", object()),
             ("operation", string()),
+            ("model_return_attempt", integer()),
             ("runtime_id", string()),
             ("terminal", boolean()),
             ("incarnation_id", string()),
@@ -4529,7 +4605,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_code", integer()),
             ("exit_signal", integer()),
             ("exit_evidence", object()),
+            ("exec_exited_at_unix_ms", integer()),
             ("incarnation_id", string()),
+            ("start_operation", string()),
+            ("workspace", FieldSpec { nullable: true, ..string() }),
             ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),
@@ -4720,6 +4799,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "usage.limits.observed" => &[
             ("readings", FieldSpec { required: true, ..array() }),
             ("credit_readings", FieldSpec { required: true, ..array() }),
+            ("source_frontier", object()),
+            ("period_readings", array()),
+            ("gaps", array()),
         ],
         // The harness's own subagent ID names the subagent within its parent seat. The prompt and
         // transcript stay on the host.
@@ -4846,6 +4928,18 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("result_digest", string()),
             ("error", string()),
             ("evidence", array()),
+        ],
+        "harness.model-fallback.observed" => &[
+            ("observation", required_enum(&["applied", "selected"])),
+            ("cause", enumeration(&["transient", "quota", "auth", "unknown"])),
+            ("from", string()),
+            ("to", required_string()),
+            ("native_session", required_string()),
+            ("source_event", required_string()),
+            ("episode_id", required_string()),
+            ("incarnation_id", required_string()),
+            ("observed_at_unix_ms", required_integer()),
+            ("reason", required_enum(&["native-retry-fallback", "native-model-selection"])),
         ],
         "harness.timeline" => &[
             (
@@ -5465,6 +5559,55 @@ mod tests {
     }
 
     #[test]
+    fn native_turn_creation_and_verified_report_are_registered_durable_system_claims() {
+        let subject = "mission-run/native-turn/episode";
+        let mut creation: BTreeMap<String, Value> = serde_json::from_value(serde_json::json!({
+            "native_turn": {
+                "agent": "agent/node.publisher", "instructions": "Produce an answer.",
+                "context": "Literal context.", "fresh_context": false,
+                "products": [{"path": "answer", "kind": "custom.test", "fields": {"head": "h1"}}]
+            },
+            "native_turn_key": "program:step-run/parent/program:1:turn", "parent_attempt": 1,
+            "status": "running", "mission": "mission/native-turn", "revision": "hash",
+            "current_generation": "run-generation/native-turn-hash",
+            "root_revision": "parent-hash", "root_mission_run": "mission-run/parent",
+            "parent_step_run": "step-run/parent/program", "workspace": ".",
+            "requester": "person/owner", "inputs": {}, "mode": "run"
+        })).unwrap();
+        registry().validate_claim(subject, "mission-run.created", &creation).unwrap();
+        for (name, value) in [
+            ("native_turn", serde_json::json!("not an object")),
+            ("native_turn_key", serde_json::json!(1)),
+            ("parent_attempt", serde_json::json!("1")),
+        ] {
+            let mut invalid = creation.clone();
+            invalid.insert(name.into(), value);
+            assert_eq!(registry().validate_claim(subject, "mission-run.created", &invalid)
+                .unwrap_err().code, "invalid-claim-field");
+        }
+        // Additive native metadata must not invalidate pre-existing graph creations.
+        for name in ["native_turn", "native_turn_key", "parent_attempt"] {
+            creation.remove(name);
+        }
+        registry().validate_claim("mission-run/graph", "mission-run.created", &creation).unwrap();
+        let report = BTreeMap::from([("report".into(), serde_json::json!({
+            "run": subject, "step": "step-run/native-turn-hash/turn",
+            "summary": "Actual worker summary", "evidence": [], "executions": [],
+            "products": {"answer": {"fields": {"kind": "custom.test", "head": "h1"}}}
+        }))]);
+        let spec = registry().validate_claim(subject, "program.turn.report", &report).unwrap();
+        assert_eq!(spec.write_policy, WritePolicy::SystemOnly);
+        assert_eq!(spec.cardinality, Cardinality::Once);
+        assert_eq!(spec.retention, Retention::Durable);
+        assert!(registry().validate_claim(subject, "program.turn.report", &BTreeMap::new()).is_err());
+        let invalid = BTreeMap::from([("report".into(), serde_json::json!("not an object"))]);
+        assert_eq!(registry().validate_claim(subject, "program.turn.report", &invalid)
+            .unwrap_err().code, "invalid-claim-field");
+        assert_eq!(registry().validate_public_claim(subject, "program.turn.report", &report, Some("agent/node.publisher"))
+            .unwrap_err().code, "claim-write-forbidden");
+    }
+
+    #[test]
     fn run_report_stall_policy_is_an_optional_boolean() {
         for kind in ["mission-run.created", "mission-run.report-to"] {
             let mut fields =
@@ -5635,6 +5778,7 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        current.claims.remove("work.rebound").unwrap();
         for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
             current.claims.remove(kind).unwrap();
         }
@@ -5671,10 +5815,13 @@ mod tests {
         current.subjects.remove("notice-owner").unwrap();
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("step.execution-phase").unwrap();
+        current.claims.remove("program.turn.report").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
         current.claims.remove("harness.invocation-artifact").unwrap();
+        current.claims.remove("harness.model-fallback.observed").unwrap();
         for kind in [effects::KIND_INTENDED, effects::KIND_IN_FLIGHT, effects::KIND_CONFIRMED, effects::KIND_UNRESOLVED] {
             current.claims.remove(kind).unwrap();
         }
@@ -5685,7 +5832,8 @@ mod tests {
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
         current.claims.remove("mission-run.gate-carried").unwrap();
-        for field in ["phase", "admission_publication", "workspace_declaration"] {
+        for field in ["phase", "admission_publication", "workspace_declaration",
+            "native_turn", "native_turn_key", "parent_attempt"] {
             current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
         }
         for kind in ["work.person-asked", "work.person-done", "work.person-cancelled", "gate.requested"] {
@@ -5708,6 +5856,7 @@ mod tests {
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("model_return_attempt").unwrap();
         for field in ["idle_declaration", "idle_after_ms", "idle_enabled_at_unix_ms",
             "idle_eligible_since_unix_ms", "idle_frontier", "suspend_operation_id",
             "idle_wake_lineage", "idle_wake_attempt"] {
@@ -5718,8 +5867,9 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        current.claims.get_mut("runtime.observed").unwrap()
-            .fields.remove("exit_evidence").unwrap();
+        for field in ["exit_evidence", "exec_exited_at_unix_ms", "start_operation", "workspace"] {
+            current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
+        }
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }
@@ -5732,6 +5882,8 @@ mod tests {
         for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
             current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
+        current.resources.get_mut("vcs.repository").unwrap().fields.remove("await_prs_not_found").unwrap();
+        current.resources.get_mut("vcs.pull-request").unwrap().fields.remove("await_pr_observation").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
@@ -6189,6 +6341,32 @@ mod tests {
         registry()
             .validate_claim("gate-operation/run/step/gate", "gate.result", &fields)
             .unwrap();
+    }
+
+    #[test]
+    fn native_pr_wait_observation_proofs_are_registered_resource_facts() {
+        for (kind, name, value) in [
+            ("vcs.repository", "await_prs_not_found", serde_json::json!([])),
+            (
+                "vcs.repository",
+                "await_prs_not_found",
+                serde_json::json!([{"pr": 42, "registrations": ["registration"]}]),
+            ),
+            (
+                "vcs.pull-request",
+                "await_pr_observation",
+                serde_json::json!({
+                    "registrations": ["registration"],
+                    "head": "exact-head",
+                    "merged": true,
+                    "merge_commit_sha": "merge-commit",
+                }),
+            ),
+        ] {
+            registry()
+                .validate_resource_facts(kind, &BTreeMap::from([(name.into(), value)]))
+                .unwrap();
+        }
     }
 
     #[test]

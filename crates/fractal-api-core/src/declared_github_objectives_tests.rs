@@ -34,7 +34,7 @@ fn projection(now: u64) -> Projection {
 fn parsed_measured_only_latency_has_no_success_or_budget_even_when_covered() {
     let now = 1_800_000_000_000;
     let objective = declaration("github-ready-to-merged", "only", "");
-    let measured = measure(&projection(now), now, Cut::Now, "UTC", true).unwrap();
+    let measured = measure(&projection(now), now, Cut::Now, "UTC", true, &[]).unwrap();
     let row = measured_row(&objective, "declaration-revision", &measured);
     assert_eq!(row["status"], "no-data");
     assert_eq!(row["verdict"], "measured-only");
@@ -52,10 +52,10 @@ fn covered_zero_misses_authored_minimum_but_uncovered_zero_never_meets_or_misses
     let now = 1_800_000_000_000;
     let objective = declaration("github-merged-count", "targeted", "target \"per-hour\" min=7");
     let mut projection = projection(now);
-    let measured = measure(&projection, now, Cut::Now, "UTC", false).unwrap();
+    let measured = measure(&projection, now, Cut::Now, "UTC", false, &[]).unwrap();
     assert_eq!(measured_row(&objective, "rev", &measured)["status"], "missed");
     projection.coverage.clear();
-    let measured = measure(&projection, now, Cut::Now, "UTC", false).unwrap();
+    let measured = measure(&projection, now, Cut::Now, "UTC", false, &[]).unwrap();
     let row = measured_row(&objective, "rev", &measured);
     assert_eq!(row["status"], "no-data");
     assert_eq!(row["verdict"], "unknown");
@@ -75,16 +75,34 @@ fn count_rows_keep_covered_days_when_lifecycle_or_a_new_member_is_uncovered() {
     let objective = declaration("github-merged-count", "targeted", "target \"per-hour\" min=7");
     let mut projection = projection(now);
     projection.coverage.retain(|record| record.family != FactFamily::Lifecycle);
-    let measured = measure(&projection, now, Cut::Watermark, "UTC", false).unwrap();
+    let measured = measure(&projection, now, Cut::Watermark, "UTC", false, &[]).unwrap();
     assert_eq!(measured_row(&objective, "revision", &measured)["status"], "missed");
     projection.roster.members.push(RosterMember {
         repository_id: "new-member".into(), effective_from_ms: today, effective_until_ms: None,
     });
-    let measured = measure(&projection, now, Cut::Watermark, "UTC", false).unwrap();
+    let measured = measure(&projection, now, Cut::Watermark, "UTC", false, &[]).unwrap();
     let row = measured_row(&objective, "revision", &measured);
     assert_eq!(row["verdict"], "unknown");
     let yesterday = row["measurement"]["days"].as_array().unwrap().iter()
         .find(|day| day["start_ms"] == today - 86_400_000).unwrap();
     assert_eq!(yesterday["complete"], true);
     assert_eq!(yesterday["merged_count"], 0);
+}
+
+#[test]
+fn selected_count_rows_keep_the_native_target_and_unknown_coverage_contract() {
+    let now = 1_800_000_000_000;
+    let mut objective = declaration("github-merged-count", "targeted", "target \"per-hour\" min=1");
+    let Indicator::GithubMergedCount(config) = &mut objective.indicator else { panic!() };
+    config.author_logins = vec!["example-bot".into()];
+    let mut projection = projection(now);
+    let measured = measure(&projection, now, Cut::Now, "UTC", false, &config.author_logins).unwrap();
+    let row = measured_row(&objective, "selected-revision", &measured);
+    assert_eq!(row["status"], "missed");
+    assert_eq!(row["declaration_revision"], "selected-revision");
+    assert!(row["explain"].as_str().unwrap().contains("author logins [example-bot]"));
+    projection.coverage.clear();
+    let Indicator::GithubMergedCount(config) = &objective.indicator else { panic!() };
+    let measured = measure(&projection, now, Cut::Now, "UTC", false, &config.author_logins).unwrap();
+    assert_eq!(measured_row(&objective, "selected-revision", &measured)["verdict"], "unknown");
 }

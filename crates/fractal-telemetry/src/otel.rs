@@ -121,6 +121,9 @@ pub struct RosterAttributes {
     reader_acquire_ms: Option<f64>,
 }
 
+/// SDK 0.30 appends repeated keys. Rebuild roots emit their final accumulated attributes once.
+pub struct DeferredRosterAttributes;
+
 thread_local! {
     static ROSTER_SCOPE: std::cell::RefCell<Option<RosterAttributes>> = const { std::cell::RefCell::new(None) };
     static COLLECT_ROSTER_WARM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -222,7 +225,7 @@ pub fn roster_attribute(key: &'static str, value: impl Into<opentelemetry::Value
     let value = value.into();
     tracing::Span::current().set_attribute(key, value.clone());
     let context = opentelemetry::Context::current();
-    if context.span().is_recording() {
+    if context.span().is_recording() && context.get::<DeferredRosterAttributes>().is_none() {
         context.span().set_attribute(KeyValue::new(key, value.clone()));
     }
     ROSTER_SCOPE.with(|slot| {
@@ -1510,6 +1513,44 @@ impl Drop for Telemetry {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn reconcile_stage_costs_follow_metrics_not_traces() {
+        const CHILD: &str = "ST_STAGE_METRICS_SIGNAL_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "otel::tests::reconcile_stage_costs_follow_metrics_not_traces"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        super::EXPORT_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        super::METRICS_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(crate::reconcile_telemetry::phase("pass/changes"));
+        super::METRICS_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        super::EXPORT_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(crate::reconcile_telemetry::phase("pass/desired"));
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        for name in ["st.reconcile.stage.cpu_time", "st.reconcile.stage.duration"] {
+            let sum = exported.iter().flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics()).find(|metric| metric.name() == name)
+                .and_then(|metric| match metric.data() {
+                    AggregatedMetrics::F64(MetricData::Sum(sum)) => Some(sum),
+                    _ => None,
+                }).expect("metrics-only stage costs must be exported");
+            let points = sum.data_points().collect::<Vec<_>>();
+            assert_eq!(points.len(), 1, "trace-only stage must not record metric costs");
+            assert!(points[0].attributes().any(|attribute|
+                attribute == &opentelemetry::KeyValue::new("stage", "changes")));
+        }
+    }
+
+    #[test]
     fn request_outcomes_distinguish_deadlines_from_upstream_timeouts_and_cancellation() {
         use super::{ReadDeadline, RequestOutcome};
         for code in 100..600 {
@@ -1539,6 +1580,34 @@ mod tests {
     };
     use opentelemetry::{Key, KeyValue, Value};
     use opentelemetry_sdk::Resource;
+
+    #[test]
+    fn deferred_roster_attributes_export_each_final_value_once() {
+        use opentelemetry::trace::{TraceContextExt as _, Tracer as _, TracerProvider as _};
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone()).build();
+        let _export = super::fixture_export_scope();
+        super::roster_collect_warm(|| {
+            super::roster_attribute("st.roster.covered", 0_i64);
+            let context = opentelemetry::Context::new()
+                .with_span(provider.tracer("roster-test").start("st.roster.rebuild"))
+                .with_value(super::DeferredRosterAttributes);
+            let _entered = context.clone().attach();
+            super::roster_attribute("st.roster.covered", 1_i64);
+            super::roster_attribute("st.roster.covered", 2_i64);
+            super::copy_roster_attributes(&context);
+            context.span().end();
+        });
+        let spans = exporter.get_finished_spans().unwrap();
+        let span = spans.iter().find(|span| span.name == "st.roster.rebuild").unwrap();
+        let mut keys = std::collections::BTreeSet::new();
+        for attribute in &span.attributes {
+            assert!(keys.insert(attribute.key.as_str()), "duplicate attribute: {attribute:?}");
+        }
+        assert!(span.attributes.iter().any(|attribute|
+            attribute.key.as_str() == "st.roster.covered" && attribute.value == Value::I64(2)));
+    }
 
     #[test]
     fn subagent_lease_phase_is_exported_on_the_roster_span() {

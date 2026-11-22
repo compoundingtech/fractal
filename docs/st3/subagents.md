@@ -139,8 +139,11 @@ of the agent there: they select and click as the agent and have no actions of th
 ## Tests
 
 `scripts/fractal-subagents-eval/run` runs an isolated daemon with stand-in Claude seats that report
-subagents through the real hooks, with no model. `crates/fractal/tests/subagents_seat.rs` runs it. It
-covers:
+subagents through the real hooks, with no model. `crates/fractal/tests/subagents_seat.rs` runs it.
+The old-settings, stopped, short-lease and restarted-seat scenarios overlap on separate seats,
+with separate controls and ledgers. All four finish before the worker scenario restarts the
+shared daemon. Lease expiry, renewal and negative-observation windows still use real elapsed
+time; overlapping independent seats does not shorten those windows. It covers:
 
 - appear then end, Claude's phantom stop, and many subagents at once;
 - a background child that outlives its parent's turn and initial lease, with an idle parent,

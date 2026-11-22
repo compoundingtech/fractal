@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Avoid durable commits for unchanged replication receives and expose receive commit costs",
+  "replay": {"status": "none", "detail": "Admission, repairs, signature processing and deferred projection draining retain their existing paths."},
+  "schema": {"status": "none", "detail": "No storage or wire schema changes."},
+  "rules": {"status": "none", "detail": "No authorization or claim admission rules change."},
+  "compatibility": {"status": "changed", "detail": "Unchanged empty receipts checkpoint peer timestamps at a bounded interval while live liveness checks retain exact receipt times. Receive and commit counters have bounded exchange class and outcome labels."},
+  "downtime": {"status": "none", "detail": "No migration or coordinated restart required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "Changed metadata and inventory acknowledgements continue to persist immediately; normal replication retries remain idempotent."}
+}

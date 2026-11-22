@@ -17,12 +17,27 @@ fn loan() -> (WriterJob, Loan) {
     let (lent, receives) = mpsc::sync_channel(1);
     let (gives, returned) = mpsc::sync_channel(1);
     (
-        WriterJob::Lend { lent, returned, holder: crate::windows::holds::Holder::current(), enqueued: Instant::now(), origin: None },
+        WriterJob::Lend { lent, returned, holder: crate::windows::holds::Holder::current(), enqueued: Instant::now(), origin: None, deadline_unix_ms: None },
         Loan {
             lent: receives,
             returned: gives,
         },
     )
+}
+
+#[test]
+fn expired_queued_receive_is_never_lent_the_writer() {
+    let writer = writer();
+    let held = writer.write();
+    let (mut job, expired) = loan();
+    let WriterJob::Lend { deadline_unix_ms, .. } = &mut job else { unreachable!() };
+    *deadline_unix_ms = Some(0);
+    writer.enqueue_background(job);
+    // The existing holder is the barrier: the expired request is definitely queued.
+    drop(held);
+    assert!(expired.lent.recv().is_err(), "expired work must receive no connection");
+    // Skipping a loan must not consume or close the writer.
+    drop(writer.write());
 }
 
 impl Loan {
@@ -189,7 +204,7 @@ fn hook_configuration_fence_drains_prior_background_but_not_later_background() {
         .unwrap();
     let through = queue.watermark();
     let (job, fence) = loan();
-    let WriterJob::Lend { lent, returned, holder, enqueued, origin } = job else {
+    let WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms } = job else {
         unreachable!()
     };
     sent.send(WriterJob::FenceLend {
@@ -199,6 +214,7 @@ fn hook_configuration_fence_drains_prior_background_but_not_later_background() {
         holder,
         enqueued,
         origin,
+        deadline_unix_ms,
     })
     .unwrap();
     let (later, later_loan) = loan();

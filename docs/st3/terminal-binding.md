@@ -27,3 +27,34 @@ A driver that is killed before it records its exit leaves the seat's state unkno
 liveness alone cannot show whether its harness still runs.
 
 No database migration or full replay is required. Existing declarations serialize identically. New bindings persist a `terminal-bound` member lifecycle. Older binaries cannot interpret that lifecycle; upgrade the terminal-owning daemon before creating bindings. Rollback is supported before bindings exist. Once bindings exist, roll forward: an older reconciler's stop fallback is not aware that the runtime belongs to a surviving shell.
+
+## Native OMP attach admission
+
+The typed `fractal_runtime::native_attach` proof APIs and
+`fractal_store::store::native_attach` admission APIs support a separate,
+externally owned incarnation. They are intentionally unwired: the in-process
+extension transport and CLI are a later delivery slice, not an alternate client
+approval route.
+
+Preparation requires kernel process generation, boot and UID evidence, the full
+native session ID, a canonical owned transcript with matching device/inode and
+an actual open descriptor, and a one-shot, expiring nonce report from that exact
+process. Keep the returned witness alive through commit. Nonces must never enter
+argv, environment variables, transcripts, logs or work-item text.
+
+`NativeAttachStore::ask_native_attach` creates the native person ask. Its question
+names the host, PID/start, full native ID, transcript, agent and workspace.
+Only an explicit accepting answer from the assigned person's trusted, unrevoked,
+unexpired paired device with `control.work` produces the operation-backed receipt
+required by commit. Local answers, delegation, assistant answers and deadline
+defaults are not attachment authority. Commit binds the answer claim ID and
+candidate digest once, atomically reserves the agent/process/session, and retains
+audit predecessors. Identical retries recover the existing result.
+
+The resulting incarnation is `external` and `channel-pending`; it declares no
+launch and grants no restart, kill or startup-message authority. The preparation's
+absolute expiry remains authoritative even if its ask remains visible longer.
+Restart consent is separate. Before connecting dispatch, the transport slice must
+detach on an in-process session switch or changed native ID and require a fresh
+person approval; ordinary automatic session rebinding is not permitted for these
+incarnations.
