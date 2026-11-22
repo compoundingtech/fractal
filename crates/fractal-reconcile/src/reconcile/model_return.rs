@@ -217,10 +217,10 @@ mod tests {
             ("working", true, 0, fixture.now),
             ("idle", false, 0, fixture.now),
             ("idle", true, 1, fixture.now),
-            ("idle", true, 0, fixture.now - 600_000),
+            ("idle", true, 0, fixture.now - fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis()),
         ] {
             fixture.quiet(state, quiescent, jobs, at);
-            assert!(!fixture.eligible());
+            assert!(!fixture.eligible(), "state={state}, quiescent={quiescent}, jobs={jobs}, observed_at={at}");
         }
         fixture.quiet("idle", true, 0, fixture.now);
         assert!(fixture.eligible());

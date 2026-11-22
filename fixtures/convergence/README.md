@@ -600,7 +600,7 @@ reset-period observations and explicit unsupported account gaps to the complete
 merged registry. Versions 1 through 41 remain frozen, including main's native-turn
 v41 corpus. Generate v42 with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
-The current simulation loader and audit report select v42. Existing producers may
+The simulation loader and audit report selected v42. Existing producers may
 omit the new optional fields, but omission cannot assert source completeness.
 The existing usage draw deliberately exercises that legacy-compatible shape;
 authenticated source chains, reordered replay, native owner bindings and period
@@ -609,3 +609,29 @@ added. Member-local trim convergence, retained claim equality, oracle reader
 comparisons, person-authored claim preservation, invalid/pending-record checks and
 majority trim coverage remain enforced. The former shared-checkpoint never-trim
 sets and post-excusal continuation remain historical, not active assertions.
+
+## Native model fallback claim registration
+
+`claims-v43.json` adds `harness.model-fallback.observed` and the optional
+`runtime.action.requested.model_return_attempt` field to the complete merged
+registry. Versions 1 through 42 remain frozen. Regenerate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v43.json`;
+do not hand-edit the snapshot. The simulation loader, exact registry equality check,
+and audit reports select v43.
+
+This snapshot was recovered losslessly from the owning serialization's complete
+`the_current_corpus_matches_the_registry` assertion output in
+[hosted run 45040516209](https://github.com/compoundingtech/fractal/actions/runs/45040516209),
+`linux-tests-logs` artifact 14762756723, `_temp/ci-logs/tests.log`. The source receipt
+identifies tested merge `bbab7e9e0ea77396eef30d27b9dfe0c1e8eb08d2`; its
+`fractal-schema` and `fractal-storage-version` sources match head
+`2f95c896017d554fedc3115f9d473a616bcfabeb`. The recovered bytes are exactly
+`serde_json::to_string_pretty(&fractal_schema::registry().claims)`, with no added
+newline, as emitted by the `claim_corpus` example.
+
+The native fallback input generator supplies bounded session, incarnation,
+source-event and episode provenance, an explicit sanitized cause, and the
+same-subject agent actor. Model mismatch alone does not establish fallback.
+Member-local trim convergence, retained claim equality, oracle reader comparisons,
+person-authored claim preservation, and invalid/pending-record checks remain unchanged.
+
