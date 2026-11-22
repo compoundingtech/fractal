@@ -130,8 +130,12 @@ fn one(connection: &Connection, subject: &str, kind: &str) -> Result<Option<Clai
     ids.first().map(|id| claim_by_id_tx(connection,id).map_err(internal)?
         .ok_or_else(|| refused("native attach authority record disappeared"))).transpose()
 }
+// Only this verified producer can construct authority for the common local append seam.
+pub(super) struct WriteAuthorization(());
+
 fn append<T: Serialize>(tx: &Transaction<'_>, origin: &str, subject: &str, kind: &str, fields: &T, predecessors: &[String]) -> Result<ClaimRecord, FractalError> {
-    append_admitted_claim_tx(tx,origin,subject,kind,Some(REQUESTER),&json!({"fields":fields}),predecessors,None,false)
+    append_claim_tx_admitted(tx,origin,subject,kind,Some(REQUESTER),&json!({"fields":fields}),predecessors,None,
+        Some(ClaimAppendAuthorization::NativeAttach(WriteAuthorization(()))),false)
         .map_err(claim_append_error)
 }
 fn preparation(connection: &Connection, origin: &str, id: &str) -> Result<(ClaimRecord, Preparation), FractalError> {
@@ -282,5 +286,38 @@ impl Store {
         witness.revalidate().map_err(internal)?;
         tx.commit().map_err(internal)?;
         Ok(binding)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_append_cannot_forge_native_attach_authority() {
+        let store = Store::open_memory("orchid").unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for kind in [PREPARED, ASK_BOUND, COMMITTED] {
+            for actor in [None, Some(REQUESTER)] {
+                let error = append_claim_tx(
+                    &tx, store.origin(), "custom/native-attach/forged", kind, actor,
+                    &json!({"fields": {}}), &[], None,
+                ).unwrap_err();
+                assert_eq!(claim_append_error(error).code, "native-attach-writer-required");
+            }
+        }
+    }
+
+    #[test]
+    fn native_attach_authority_cannot_write_other_claim_kinds() {
+        let store = Store::open_memory("orchid").unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        let error = append(
+            &tx, store.origin(), "custom/not-native-attach", "custom.unrelated",
+            &json!({}), &[],
+        ).unwrap_err();
+        assert_eq!(error.code, "native-attach-writer-required");
     }
 }
