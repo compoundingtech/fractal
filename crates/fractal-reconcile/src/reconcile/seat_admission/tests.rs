@@ -70,9 +70,13 @@ async fn sampler_recovers_while_incremental_observe_holds_its_lock_past_freshnes
     let memory = root.path().join("memory.pressure");
     let io = root.path().join("io");
     let meminfo = root.path().join("meminfo");
+    let root_memory = root.path().join("root-memory");
+    let vmstat = root.path().join("vmstat");
     std::fs::write(&memory, "full avg10=0.00\n").unwrap();
     std::fs::write(&io, "some avg10=0.00\n").unwrap();
-    std::fs::write(&meminfo, "MemAvailable: 8388608 kB\n").unwrap();
+    std::fs::write(&meminfo, "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n").unwrap();
+    std::fs::write(&root_memory, "full avg10=0.00\n").unwrap();
+    std::fs::write(&vmstat, "allocstall_normal 0\n").unwrap();
     reconciler.seat_admission.finite_policy.psi_brake = Policy {
         rules: vec![Rule { signal: Signal::MemoryFull, window: Window::Avg10,
             threshold_millipercent: 100000, resume_millipercent: 99999 }],
@@ -82,7 +86,7 @@ async fn sampler_recovers_while_incremental_observe_holds_its_lock_past_freshnes
     *reconciler.seat_admission.pressure.lock().unwrap() =
         Some(fractal_runtime::resource_pressure::Observer::with_paths(
             reconciler.seat_admission.finite_policy.psi_brake.clone(),
-            [memory, io, meminfo]).unwrap());
+            [memory, io, meminfo, root_memory, vmstat]).unwrap());
     assert!(!reconciler.seat_admission.pressure_decision().unwrap().blocked);
     let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
     reconciler.seat_admission.pressure_samples.set(samples).unwrap();

@@ -88,6 +88,8 @@ pub struct Reading {
     pub millipercent: u32,
     /// Same monotonic clock domain as the caller's now_ms, never a wall-clock timestamp.
     pub observed_at_ms: u64,
+    /// Fresh host MemAvailable is below the independent configured floor.
+    pub memory_shortage: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,6 +109,7 @@ pub struct Decision {
 pub struct Brake {
     policy: Policy,
     over_since: Vec<Option<u64>>,
+    floor_over_since: Option<u64>,
     last_observation: Option<u64>,
     recovering_since: Option<u64>,
     tripped: bool,
@@ -118,7 +121,7 @@ impl Brake {
         policy.validate()?;
         Ok(Self {
             over_since: vec![None; policy.rules.len()], policy,
-            last_observation: None, recovering_since: None,
+            last_observation: None, recovering_since: None, floor_over_since: None,
             tripped: false, trip_signal: None,
         })
     }
@@ -139,12 +142,24 @@ impl Brake {
         });
         if !complete {
             self.over_since.fill(None);
+            self.floor_over_since = None;
             self.recovering_since = None;
             self.tripped = true;
             self.trip_signal = None;
             return Decision { blocked: true, reason: Some(Reason::UnknownObservation) };
         }
-        let mut all_below_resume = true;
+        let shortage = self.policy.memory_available_floor_bytes > 0
+            && readings.iter().any(|reading| reading.memory_shortage);
+        if shortage {
+            let since = self.floor_over_since.get_or_insert(now_ms);
+            if now_ms - *since >= self.policy.sustained_ms {
+                self.tripped = true;
+                self.trip_signal = Some(Signal::MemoryFull);
+            }
+        } else {
+            self.floor_over_since = None;
+        }
+        let mut all_below_resume = !shortage;
         for (index, rule) in self.policy.rules.iter().enumerate() {
             // Complete unique readings were checked above; no allocation or map reconstruction.
             let Some(reading) = readings.iter().find(|reading|
@@ -205,12 +220,59 @@ pub fn parse_millipercent(line: &str, window: Window) -> Result<u32> {
     Ok(result)
 }
 
+#[derive(Debug)]
+struct InvalidMemoryFloor { floor: u64, total: u64 }
+
+impl std::fmt::Display for InvalidMemoryFloor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "psiBrake.memoryAvailableFloorBytes ({}) must be below MemTotal ({})",
+            self.floor, self.total)
+    }
+}
+impl std::error::Error for InvalidMemoryFloor {}
+
+fn meminfo_bytes(source: &str, key: &str) -> Result<u64> {
+    let mut matches = source.lines().filter_map(|line| line.strip_prefix(key));
+    let value = matches.next().ok_or_else(|| anyhow::anyhow!("missing {key}"))?;
+    ensure!(matches.next().is_none(), "duplicate {key}");
+    let mut fields = value.split_ascii_whitespace();
+    let kib: u64 = fields.next().ok_or_else(|| anyhow::anyhow!("missing {key} value"))?.parse()?;
+    ensure!(fields.next() == Some("kB") && fields.next().is_none(), "invalid {key} unit");
+    kib.checked_mul(1024).ok_or_else(|| anyhow::anyhow!("{key} overflow"))
+}
+
+fn allocstall_total(source: &str) -> Result<u64> {
+    let mut total = 0u64;
+    let mut found = false;
+    for line in source.lines() {
+        let mut fields = line.split_ascii_whitespace();
+        if !fields.next().is_some_and(|key| key.starts_with("allocstall_")) { continue; }
+        let count: u64 = fields.next().ok_or_else(|| anyhow::anyhow!("missing allocstall value"))?.parse()?;
+        ensure!(fields.next().is_none(), "invalid allocstall counter");
+        total = total.checked_add(count).ok_or_else(|| anyhow::anyhow!("allocstall overflow"))?;
+        found = true;
+    }
+    ensure!(found, "missing allocstall counters");
+    Ok(total)
+}
+
+fn signal_pressure(source: &str, name: &str, window: Window) -> Result<u32> {
+    let mut matches = source.lines().filter(|line|
+        line.split_ascii_whitespace().next() == Some(name));
+    let line = matches.next().ok_or_else(|| anyhow::anyhow!("missing PSI signal"))?;
+    ensure!(matches.next().is_none(), "duplicate PSI signal");
+    parse_millipercent(line, window)
+}
+
 /// Reuse the small kernel-file and parsed-reading buffers across host observations.
 #[derive(Default, Debug)]
 pub struct Reader {
     memory: String,
     io: String,
     meminfo: String,
+    root_memory: String,
+    vmstat: String,
+    previous_allocstall: Option<u64>,
     readings: Vec<Reading>,
 }
 
@@ -225,7 +287,9 @@ impl Reader {
         } else { std::path::PathBuf::new() };
         self.read_paths(policy, now_ms, &lane.join("memory.pressure"),
             std::path::Path::new("/proc/pressure/io"),
-            std::path::Path::new("/proc/meminfo"))
+            std::path::Path::new("/proc/meminfo"),
+            std::path::Path::new("/proc/pressure/memory"),
+            std::path::Path::new("/proc/vmstat"))
     }
 
     fn read_paths(
@@ -235,6 +299,8 @@ impl Reader {
         memory_path: &std::path::Path,
         io_path: &std::path::Path,
         meminfo_path: &std::path::Path,
+        root_memory_path: &std::path::Path,
+        vmstat_path: &std::path::Path,
     ) -> Result<&[Reading]> {
         use std::io::Read as _;
         self.readings.clear();
@@ -244,6 +310,16 @@ impl Reader {
             matches!(rule.signal, Signal::IoSome | Signal::IoFull));
         let mut shortage = false;
         let mut lane_absent = false;
+        let mut global_reclaim = false;
+        if policy.memory_available_floor_bytes > 0 {
+            self.meminfo.clear();
+            std::fs::File::open(meminfo_path)?.read_to_string(&mut self.meminfo)?;
+            let total = meminfo_bytes(&self.meminfo, "MemTotal:")?;
+            if policy.memory_available_floor_bytes >= total {
+                return Err(InvalidMemoryFloor { floor: policy.memory_available_floor_bytes, total }.into());
+            }
+            shortage = meminfo_bytes(&self.meminfo, "MemAvailable:")? < policy.memory_available_floor_bytes;
+        }
         if needs_memory {
             self.memory.clear();
             match std::fs::File::open(memory_path) {
@@ -264,17 +340,18 @@ impl Reader {
                 }
                 Err(error) => return Err(error.into()),
             }
-            self.meminfo.clear();
-            std::fs::File::open(meminfo_path)?.read_to_string(&mut self.meminfo)?;
-            let mut available = self.meminfo.lines().filter_map(|line|
-                line.strip_prefix("MemAvailable:"));
-            let value = available.next().ok_or_else(|| anyhow::anyhow!("missing MemAvailable"))?;
-            ensure!(available.next().is_none(), "duplicate MemAvailable");
-            let mut fields = value.split_ascii_whitespace();
-            let kib: u64 = fields.next().ok_or_else(|| anyhow::anyhow!("missing MemAvailable value"))?.parse()?;
-            ensure!(fields.next() == Some("kB") && fields.next().is_none(), "invalid MemAvailable unit");
-            let bytes = kib.checked_mul(1024).ok_or_else(|| anyhow::anyhow!("MemAvailable overflow"))?;
-            shortage = bytes < policy.memory_available_floor_bytes;
+            self.root_memory.clear();
+            std::fs::File::open(root_memory_path)?.read_to_string(&mut self.root_memory)?;
+            self.vmstat.clear();
+            std::fs::File::open(vmstat_path)?.read_to_string(&mut self.vmstat)?;
+            let current = allocstall_total(&self.vmstat)?;
+            // memory.high uses try_to_free_mem_cgroup_pages. ALLOCSTALL is accounted
+            // in do_try_to_free_pages only when !cgroup_reclaim(sc) (Linux v6.18
+            // mm/vmscan.c), so it distinguishes global reclaim from that memcg path.
+            // pgscan_direct includes memcg reclaim; kswapd also runs for routine
+            // cache/ARC churn. Neither scan counter alone proves host distress.
+            global_reclaim = self.previous_allocstall.is_some_and(|previous| current > previous);
+            self.previous_allocstall = Some(current); // First sample/reset has no delta.
         }
         if needs_io {
             self.io.clear();
@@ -290,22 +367,18 @@ impl Reader {
             let memory_rule = matches!(rule.signal, Signal::MemoryFull | Signal::MemorySome);
             let pressure = if lane_absent && memory_rule {
                 0
-            } else {
-                let mut matching = source.lines().filter(|line|
-                    line.split_ascii_whitespace().next() == Some(name));
-                let line = matching.next().ok_or_else(|| anyhow::anyhow!("missing PSI signal"))?;
-                ensure!(matching.next().is_none(), "duplicate PSI signal");
-                parse_millipercent(line, rule.window)?
-            };
-            // A real host shortage must trip even when the lane has no current holders.
-            // An existing lane's PSI must still parse, even during host shortage.
-            let pressure = if shortage && memory_rule {
-                100000
+            } else { signal_pressure(source, name, rule.window)? };
+            // Always parse root PSI: missing data cannot become healthy merely because
+            // no allocator stall happened during this interval.
+            let pressure = if memory_rule {
+                let root = signal_pressure(&self.root_memory, "full", rule.window)?;
+                if global_reclaim { pressure.max(root) } else { pressure }
             } else { pressure };
             self.readings.push(Reading {
                 signal: rule.signal, window: rule.window,
                 millipercent: pressure,
                 observed_at_ms: now_ms,
+                memory_shortage: shortage,
             });
         }
         Ok(&self.readings)
@@ -319,7 +392,7 @@ pub struct Observer {
     reader: Reader,
     origin: std::time::Instant,
     sampled_at: Option<u64>,
-    paths: Option<[std::path::PathBuf; 3]>,
+    paths: Option<[std::path::PathBuf; 5]>,
 }
 
 impl Observer {
@@ -330,8 +403,8 @@ impl Observer {
         })
     }
 
-    /// Inject kernel-file locations, including the aggregate finite-lane memory PSI.
-    pub fn with_paths(policy: Policy, paths: [std::path::PathBuf; 3]) -> Result<Self> {
+    /// Inject lane PSI, root IO, meminfo, root memory PSI and vmstat locations, in order.
+    pub fn with_paths(policy: Policy, paths: [std::path::PathBuf; 5]) -> Result<Self> {
         let mut observer = Self::new(policy)?;
         observer.paths = Some(paths);
         Ok(observer)
@@ -342,6 +415,7 @@ impl Observer {
             self.brake = Brake::new(policy.clone())?;
             self.policy = policy.clone();
             self.sampled_at = None;
+            self.reader.previous_allocstall = None;
         }
         let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
         if self.sampled_at.is_none_or(|at|
@@ -349,12 +423,16 @@ impl Observer {
         {
             self.sampled_at = Some(now);
             let readings = match &self.paths {
-                Some([memory, io, meminfo]) =>
-                    self.reader.read_paths(&self.policy, now, memory, io, meminfo),
+                Some([memory, io, meminfo, root_memory, vmstat]) =>
+                    self.reader.read_paths(&self.policy, now, memory, io, meminfo, root_memory, vmstat),
                 None => self.reader.read(&self.policy, now),
             };
             return Ok(match readings {
                 Ok(readings) => self.brake.observe(readings, now),
+                Err(error) if error.is::<InvalidMemoryFloor>() => {
+                    self.sampled_at = None;
+                    return Err(error);
+                }
                 Err(_) => { self.reader.readings.clear(); self.brake.observe(&[], now) },
             });
         }
