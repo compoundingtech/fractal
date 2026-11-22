@@ -11225,6 +11225,9 @@ async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
     let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
     observed.channel_ready = Some(true);
     observed.state = harness_state::Activity::Idle;
+    // The preceding durable fixture already published Idle for incarnation-c. Change
+    // activity evidence so this checks a new publication, not valid fingerprint deduplication.
+    observed.reason = Some("legacy non-durable activity".into());
     let publisher = ObservationClient { client: &client, event: None, source_runtime: None };
     let activity_count = store.claims_for(subject, Some("harness.observed")).unwrap().len();
     let mut last_fingerprint = None;
@@ -11234,6 +11237,10 @@ async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
     }
     assert_eq!(diagnostic_count(), 6);
     assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().len(), activity_count + 1);
+    assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().iter()
+        .filter(|claim| claim.body["fields"]["reason"] == "legacy non-durable activity"
+            && claim.body["fields"]["incarnation_id"] == "incarnation-c")
+        .count(), 1);
     server.abort();
 }
 
