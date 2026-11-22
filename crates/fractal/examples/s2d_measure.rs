@@ -87,6 +87,9 @@ fn main() -> anyhow::Result<()> {
     let passes_env = std::env::var("S2D_PASSES").unwrap_or_else(|_| "sign,empty,delete,release,vacuum".into());
     let passes: Vec<&str> = passes_env.split(',').collect();
     let count_space = std::env::var_os("S2D_NO_SPACE").is_none();
+    // S2D_QUIET_SECS: how long the control writer runs alone before a pass, the spikes it sees
+    // then being what the pass's are compared with (60 s by default).
+    let quiet_for = Duration::from_secs(std::env::var("S2D_QUIET_SECS").ok().and_then(|secs| secs.parse().ok()).unwrap_or(60));
     let before_space = if count_space { space(path, "before")? } else { BTreeMap::new() };
     let started = Instant::now();
     let store = Arc::new(Store::open(path, node)?);
@@ -339,7 +342,7 @@ fn main() -> anyhow::Result<()> {
         )).map_err(|error| anyhow::anyhow!(error))??;
         println!("retire_cleanup_probe_ms={} pending={}", probe.elapsed().as_millis(), pending(&store)?);
         let quiet = control.lock().unwrap().len();
-        std::thread::sleep(Duration::from_secs(60));
+        std::thread::sleep(quiet_for);
         let from = control.lock().unwrap().len();
         let mut quiet_holds = control.lock().unwrap()[quiet..from].to_vec();
         let started = Instant::now();
@@ -389,7 +392,7 @@ fn main() -> anyhow::Result<()> {
         store.connection.batched(|tx| tx.execute("UPDATE checkpoints SET state='trimming' WHERE state='set-aside' AND id NOT LIKE 'checkpoint/retired-by-peers/%'", []))
             .map_err(|error| anyhow::anyhow!(error))??;
         let quiet = control.lock().unwrap().len();
-        std::thread::sleep(Duration::from_secs(60));
+        std::thread::sleep(quiet_for);
         let from = control.lock().unwrap().len();
         let mut quiet_holds = control.lock().unwrap()[quiet..from].to_vec();
         let started = Instant::now();
