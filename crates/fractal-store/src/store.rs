@@ -2231,6 +2231,10 @@ pub fn subject_status_at(
     ).map(Some)
 }
 
+/// The selected runtime observation has unresolved rival authorities.
+pub const INDETERMINATE_ACTUAL_AUTHORITY: &str =
+    "concurrent runtime observations have indeterminate authority";
+
 /// What one subject's status reduction reads at a snapshot: read for one subject by
 /// [`subject_status_at`], or for many at once by the agent card fold.
 pub struct SubjectStatusInputs {
@@ -2331,7 +2335,7 @@ fn assemble_subject_status(
             reason: reason.clone(),
         });
     let reason = actual_origin_conflict
-        .then(|| "concurrent runtime observations have indeterminate authority".to_owned())
+        .then(|| INDETERMINATE_ACTUAL_AUTHORITY.to_owned())
         .or_else(|| {
             unknown_claim
                 .map(|kind| format!("claim kind `{kind}` is not registered"))
