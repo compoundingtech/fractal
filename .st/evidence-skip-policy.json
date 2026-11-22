@@ -203,6 +203,7 @@
         "docs/st3/client-v0",
         "docs/st3/invariants.md",
         "docs/st3/onboarding-guide.md",
+        "docs/st3/open-indexes.json",
         "docs/st3/operational-state/cli-commands.json",
         "docs/st3/schema.md",
         "examples/client-tui",
