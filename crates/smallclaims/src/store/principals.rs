@@ -2194,9 +2194,14 @@ impl Store {
         {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
+            // Nonce links stay: from storage version 29 a nonce use is kept only as its link (see
+            // `nonce_used_in_model`), and the verdicts judged again must read the same uses.
             transaction.execute_batch(
-                /* sqlite-large-value: allow-for-now lv-hc2baa97461fe owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
-                 DELETE FROM claim_verdict_dependency_edges; DELETE FROM claim_verdict_dependency_keys;
+                /* sqlite-large-value: allow-for-now lv-h73d8d72bcf27 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts;
+                 DELETE FROM claim_verdict_links WHERE NOT (link>='nonce:' AND link<'nonce;');
+                 DELETE FROM claim_verdict_dependency_edges WHERE dependency_id IN
+                     (SELECT id FROM claim_verdict_dependency_keys WHERE NOT (link>='nonce:' AND link<'nonce;'));
+                 DELETE FROM claim_verdict_dependency_keys WHERE NOT (link>='nonce:' AND link<'nonce;');
                  DELETE FROM claim_verdict_queue;
                  INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT DISTINCT claim_id FROM claim_signature_candidates;
                  INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT claim_id FROM claim_signatures;",

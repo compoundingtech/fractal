@@ -3377,4 +3377,15 @@ fn a_store_that_keeps_nonce_uses_only_as_links_judges_a_replay_the_same() {
         .execute("INSERT INTO claim_verdict_links VALUES ('nonce:other|nonce', 'forgotten')", [])
         .unwrap();
     assert!(!store.signature_nonce_used("other", "nonce").unwrap(), "a forgotten claim's link is no use");
+
+    // A recheck judges every claim again but keeps the nonce links, which may be the only copy of
+    // a use that judging would not write again (a claim judged invalid before the replay check).
+    store
+        .connection
+        .write()
+        .execute("INSERT INTO claim_verdict_links VALUES ('nonce:kept|nonce', ?1)", [&earlier.id])
+        .unwrap();
+    assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+    assert!(store.signature_nonce_used("kept", "nonce").unwrap(), "a recheck keeps nonce links");
+    assert_eq!(verdicts(&store), before);
 }

@@ -1,11 +1,32 @@
 {
   "version": 1,
   "summary": "This release reads storage version 29, in which a claim's nonce use is kept only as its nonce verdict link and the claim_signature_nonce_uses table and index are gone. The replay check, the seal-time duplicate check and forget's requeue of nonce dependents count a use row or a held claim's nonce link. On a real member the two were the same 3.2 million pairs, so no verdict changes. Nothing in this release drops the table: the writer ships in the next release, and this one is the release it can roll back to. Measured on a copy of a real member, the writer will give back 1.79% of the file, about 340 B per signed claim.",
-  "replay": {"status": "none", "detail": "No replay, no scan at open and no background work."},
-  "schema": {"status": "none", "detail": "No table, index or column change in this release. Version 29 drops claim_signature_nonce_uses and its key index; this release reads stores with or without them."},
-  "rules": {"status": "none", "detail": "Replay rules are unchanged. A nonce use counts only for a claim the store still holds, as before: a forgotten claim lost its use row, and its link, which stays until the link sweep, is not counted. Measured on a copy of a real member: 3,227,325 use rows and 3,227,325 nonce links, equal pair for pair."},
-  "compatibility": {"status": "none", "detail": "No wire, digest, capability or synced-table change; nonce uses and verdict links are host-local. Peers of any version are unaffected in both directions."},
-  "downtime": {"status": "none", "detail": "None. The replay check adds one primary-key range read of the verdict links per judged signature."},
-  "manual": {"status": "none", "detail": "Nothing to do."},
-  "recovery": {"status": "none", "detail": "Roll back to the previous release freely: nothing in this release changes the store."}
+  "replay": {
+    "status": "none",
+    "detail": "No replay, no scan at open and no background work."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index or column change in this release. Version 29 drops claim_signature_nonce_uses and its key index; this release reads stores with or without them."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Replay rules are unchanged. A nonce use counts only for a claim the store still holds, as before: a forgotten claim lost its use row, and its link, which stays until the link sweep, is not counted. Measured on a copy of a real member: 3,227,325 use rows and 3,227,325 nonce links, equal pair for pair. recheck_claim_verdicts keeps nonce links when it judges every claim again, since from version 29 they may be the only copy of a use."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, digest, capability or synced-table change; nonce uses and verdict links are host-local. Peers of any version are unaffected in both directions."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None. The replay check adds one primary-key range read of the verdict links per judged signature."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Nothing to do."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Roll back to the previous release freely: nothing in this release changes the store."
+  }
 }
