@@ -34,12 +34,12 @@ fn idle_rounds_grow_to_the_ceiling_and_movement_resets_them() {
 fn idle_wakes_and_new_inbound_exchanges_reset_only_the_idle_backoff() {
     let mut idle = IdleBackoff::default();
     let ceiling = Duration::from_secs(600);
-    let inbound = Some(tokio::time::Instant::now());
-    idle.observe_inbound(inbound);
+    let inbound = tokio::time::Instant::now();
+    idle.observe_inbound(Some(inbound));
     assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(30)));
-    idle.observe_inbound(inbound);
+    idle.observe_inbound(Some(inbound));
     assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(60)));
-    idle.observe_inbound(Some(inbound.unwrap() + Duration::from_secs(1)));
+    idle.observe_inbound(Some(inbound + Duration::from_secs(1)));
     assert_eq!(idle.round(false, ceiling), Some(Duration::from_secs(30)));
     let _ = idle.round(false, ceiling);
     idle.reset();
