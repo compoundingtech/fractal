@@ -343,6 +343,8 @@ pub async fn outcome_history(
 pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
     let mut report = crate::performance::snapshot();
     report["writer_observers"] = json!(smallclaims::sqlite::writer_observer_stats());
+    report["mission_reads"] = state.store.mission_read_work();
+    report["mail_objectives"] = json!(crate::mail_delivery_objectives::work_counts(&state.store));
     // Lane bursts held and asked now, and those dropped since start because their holder stopped
     // renewing (docs/st3/seat-lanes.md, "Bursts"): a holder that crashes shows here. With them, the
     // room admission keeps from starts for a burst, as it last judged a seat's start.

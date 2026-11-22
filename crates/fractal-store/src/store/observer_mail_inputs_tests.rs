@@ -218,3 +218,69 @@ fn mail_inputs_fence_shard_position_before_mirroring_and_propagate_shard_failure
     changed(&mut receiver, generation);
     assert!(store.mail_objective_input_coverage_failed());
 }
+
+#[test]
+fn mail_subject_deltas_are_retained_coalesced_and_non_destructive() {
+    let store = Store::open_memory("local").unwrap();
+    let receiver = store.subscribe_mail_objective_inputs();
+    let initial = *receiver.borrow();
+    for message in ["message/first", "message/second"] {
+        store.connection.write().execute(
+            "INSERT INTO local_mail_delivery_source_v1(message,recipient,sent_ms,fields) VALUES(?1,'agent/test',1,'{\"sent_clock_valid\":1}')",
+            [message]).unwrap();
+    }
+    let (cut, delta) = store.mail_objective_changes_since(initial);
+    assert!(cut > initial);
+    let expected = BTreeSet::from(["message/first".to_owned(), "message/second".to_owned()]);
+    let (messages, recipients) = delta.unwrap();
+    assert_eq!(messages, expected);
+    assert!(recipients.is_empty());
+    assert_eq!(store.mail_objective_changes_since(initial), (cut, Some((expected, BTreeSet::new()))),
+        "one consumer cannot consume another consumer's changes");
+    assert_eq!(store.mail_objective_changes_since(cut), (cut, Some((BTreeSet::new(), BTreeSet::new()))));
+
+    store.connection.write().execute(
+        "INSERT INTO local_mail_acceptance_frontier_v1 VALUES('agent/test','incarnation/test',2,2)", []).unwrap();
+    let (next, delta) = store.mail_objective_changes_since(cut);
+    assert_eq!(delta, Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
+    store.connection.write().execute(
+        "UPDATE local_mail_acceptance_frontier_v1 SET observed_through_unix_ms=3 WHERE recipient='agent/test'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(next).1,
+        Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
+}
+
+#[test]
+fn mail_subject_key_updates_invalidate_both_old_and_new_messages() {
+    let store = Store::open_memory("local").unwrap();
+    let receiver = store.subscribe_mail_objective_inputs();
+    store.connection.write().execute(
+        "INSERT INTO local_mail_delivery_source_v1 VALUES('message/old','agent/test',1,'{\"sent_clock_valid\":1}')", []).unwrap();
+    let generation = *receiver.borrow();
+    store.connection.write().execute(
+        "UPDATE local_mail_delivery_source_v1 SET message='message/new' WHERE message='message/old'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::from(["message/old".to_owned(), "message/new".to_owned()]), BTreeSet::new())));
+    let generation = *receiver.borrow();
+    store.connection.write().execute(
+        "DELETE FROM local_mail_delivery_source_v1 WHERE message='message/new'", []).unwrap();
+    assert!(store.mail_objective_changes_since(generation).1.is_none(), "deleted routing keys fail closed");
+}
+
+#[test]
+fn mail_subject_journal_rollover_and_projection_reset_require_a_full_rebuild() {
+    let store = Store::open_memory("local").unwrap();
+    let receiver = store.subscribe_mail_objective_inputs();
+    let initial = *receiver.borrow();
+    {
+        let mut state = store.fractal.mail_objective_inputs.0.lock().unwrap();
+        for index in 0..PENDING_LIMIT {
+            state.messages.insert(format!("message/retained-{index}"), initial);
+        }
+    }
+    store.connection.write().execute(
+        "INSERT INTO local_mail_delivery_source_v1 VALUES('message/overflow','agent/test',1,'{\"sent_clock_valid\":1}')", []).unwrap();
+    assert!(store.mail_objective_changes_since(initial).1.is_none());
+    let generation = *receiver.borrow();
+    store.fractal.mail_objective_inputs.invalidate();
+    assert!(store.mail_objective_changes_since(generation).1.is_none());
+}
