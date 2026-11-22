@@ -1,0 +1,449 @@
+//! Transaction-resolved mutation routing for the writer's native hook dispatcher.
+use rusqlite::{Connection, ffi};
+use std::{borrow::Cow, collections::BTreeSet, ffi::{CStr, c_char, c_int, c_uint, c_void}, sync::{Mutex, atomic::{AtomicU64, Ordering}}};
+
+#[derive(Default)]
+pub(super) struct Changes {
+    tables: BTreeSet<String>,
+    pub(super) schema: bool,
+    pub(super) unknown: bool,
+}
+impl Changes {
+    pub(super) fn changed(&self) -> bool { self.schema || self.unknown || !self.tables.is_empty() }
+    pub(super) fn matches(&self, tables: &[&str]) -> bool {
+        self.schema || self.unknown || tables.iter().any(|table| self.tables.iter().any(|changed| changed.eq_ignore_ascii_case(table)))
+    }
+    fn merge(&mut self, other: Self) {
+        self.tables.extend(other.tables);
+        self.schema |= other.schema;
+        self.unknown |= other.unknown;
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Ledger {
+    pending: Changes,
+    tentative: Option<Changes>,
+    committed: Changes,
+    savepoints: Vec<(String, Changes)>,
+    statement: Option<usize>,
+    statement_rows: Changes,
+    changes_at_start: i64,
+}
+impl Ledger {
+    pub(super) fn row(&mut self, database: &str, table: &str) {
+        if database != "main" { return; }
+        let changes = if self.statement.is_some() {
+            &mut self.statement_rows
+        } else {
+            self.pending.unknown = true;
+            &mut self.pending
+        };
+        if !changes.tables.contains(table) {
+            changes.tables.insert(table.to_owned());
+        }
+    }
+    pub(super) fn committing(&mut self) {
+        if self.statement.is_none() {
+            // A replaced trace callback hid transaction-control/DDL execution. The row
+            // and commit hooks still fence this actual write, but cannot route it selectively.
+            self.pending.unknown = true;
+        }
+        self.tentative = Some(std::mem::take(&mut self.pending));
+        // The hook precedes the actual commit. Keep savepoint state until success is known.
+    }
+    pub(super) fn rollback(&mut self) {
+        self.pending = Changes::default();
+        self.tentative = None;
+        self.savepoints.clear();
+        self.statement_rows = Changes::default();
+        ROLLBACKS.fetch_add(1, Ordering::Relaxed);
+    }
+    fn confirm(&mut self, autocommit: bool) {
+        if let Some(changes) = self.tentative.take() {
+            if autocommit {
+                let mut changes = changes;
+                for (_, parent) in self.savepoints.drain(..) {
+                    changes.merge(parent);
+                }
+                self.committed.merge(changes);
+            } else {
+                // A busy/failed COMMIT left the transaction alive.
+                self.pending.merge(changes);
+            }
+        }
+    }
+    pub(super) fn take(&mut self, autocommit: bool, unknown: bool) -> Changes {
+        self.confirm(autocommit);
+        if autocommit {
+            // Prepared/no-op DDL can run without ever opening a write transaction.
+            self.pending = Changes::default();
+        }
+        let mut changes = std::mem::take(&mut self.committed);
+        changes.unknown |= unknown;
+        changes
+    }
+    fn started(&mut self, key: usize, sql: &str, autocommit: bool, readonly: bool, total_changes: i64) {
+        self.confirm(autocommit);
+        if self.statement == Some(key) { return; }
+        self.statement = Some(key);
+        self.changes_at_start = total_changes;
+        self.statement_rows = Changes::default();
+        let mut words = Tokens(sql);
+        let Some(first) = words.next() else { return; };
+        if first.eq_ignore_ascii_case("SAVEPOINT") {
+            if let Some(name) = words.next() { self.savepoints.push((name.into_owned(), std::mem::take(&mut self.pending))); }
+        } else if first.eq_ignore_ascii_case("ROLLBACK") {
+            let mut next = words.next();
+            if next.as_deref().is_some_and(|word| word.eq_ignore_ascii_case("TRANSACTION")) { next = words.next(); }
+            if next.as_deref().is_some_and(|word| word.eq_ignore_ascii_case("TO")) {
+                let mut name = words.next();
+                if name.as_deref().is_some_and(|word| word.eq_ignore_ascii_case("SAVEPOINT")) { name = words.next(); }
+                if let Some(name) = name && let Some(index) = self.savepoints.iter().rposition(|(saved, _)| saved.eq_ignore_ascii_case(&name)) {
+                    self.pending = Changes::default();
+                    self.savepoints.truncate(index + 1);
+                }
+            }
+        } else if first.eq_ignore_ascii_case("RELEASE") {
+            let mut name = words.next();
+            if name.as_deref().is_some_and(|word| word.eq_ignore_ascii_case("SAVEPOINT")) { name = words.next(); }
+            if let Some(name) = name && let Some(index) = self.savepoints.iter().rposition(|(saved, _)| saved.eq_ignore_ascii_case(&name)) {
+                for (_, parent) in self.savepoints.drain(index..) {
+                    self.pending.merge(parent);
+                }
+            }
+        } else if readonly {
+            // Transaction-control statements are readonly too, so process them first.
+        } else if ["CREATE", "ALTER", "DROP", "REINDEX", "VACUUM"].iter().any(|keyword| first.eq_ignore_ascii_case(keyword)) {
+            self.pending.schema = true;
+        } else if first.eq_ignore_ascii_case("PRAGMA") && words.any(|word| word.split(['.', '=', '(']).any(|part| part.eq_ignore_ascii_case("schema_version") || part.eq_ignore_ascii_case("writable_schema"))) {
+            self.pending.unknown = true;
+        }
+    }
+
+    fn finished(&mut self, total_changes: i64, autocommit: bool) {
+        // total_changes excludes ordinary statement-ABORT writes, unlike preupdate hints.
+        // A failing trigger can advance it before its outer statement rolls back: in that
+        // case retaining a hint is deliberately conservative, never an authorization.
+        let rows = std::mem::take(&mut self.statement_rows);
+        if total_changes > self.changes_at_start {
+            if let Some(tentative) = &mut self.tentative {
+                tentative.merge(rows);
+            } else {
+                self.pending.merge(rows);
+            }
+        }
+        self.statement = None;
+        self.confirm(autocommit);
+    }
+}
+
+// Only transaction-control identifiers are interpreted. SQLite accepts quoted savepoint names,
+// doubled quotes and comments between tokens; never split these statements on whitespace.
+struct Tokens<'a>(&'a str);
+impl<'a> Iterator for Tokens<'a> {
+    type Item = Cow<'a, str>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            self.0 = self.0.trim_start();
+            if let Some(rest) = self.0.strip_prefix("--") {
+                self.0 = rest.split_once('\n').map_or("", |(_, rest)| rest);
+            } else if let Some(rest) = self.0.strip_prefix("/*") {
+                self.0 = rest.split_once("*/").map_or("", |(_, rest)| rest);
+            } else { break; }
+        }
+        let first = self.0.chars().next()?;
+        if matches!(first, '\'' | '"' | '`' | '[') {
+            let close = if first == '[' { ']' } else { first };
+            let mut output = String::new();
+            let mut chars = self.0[first.len_utf8()..].char_indices().peekable();
+            while let Some((index, ch)) = chars.next() {
+                if ch == close {
+                    if close != ']' && chars.peek().is_some_and(|(_, ch)| *ch == close) {
+                        chars.next(); output.push(close); continue;
+                    }
+                    self.0 = &self.0[first.len_utf8() + index + ch.len_utf8()..];
+                    return Some(Cow::Owned(output));
+                }
+                output.push(ch);
+            }
+            self.0 = "";
+            Some(Cow::Owned(output))
+        } else {
+            let end = self.0.find(|ch: char| ch.is_whitespace() || ch == ';').unwrap_or(self.0.len());
+            if end == 0 { self.0 = &self.0[1..]; return self.next(); }
+            let word = Cow::Borrowed(&self.0[..end]);
+            self.0 = &self.0[end..];
+            Some(word)
+        }
+    }
+}
+
+// The bundled library enables this stable SQLite ABI via LIBSQLITE3_FLAGS. Declaring
+// only the callback registration avoids bindgen/libclang and does not expose row values.
+type Preupdate = unsafe extern "C" fn(*mut c_void, *mut ffi::sqlite3, c_int, *const c_char, *const c_char, i64, i64);
+unsafe extern "C" {
+    fn sqlite3_preupdate_hook(database: *mut ffi::sqlite3, callback: Option<Preupdate>, context: *mut c_void) -> *mut c_void;
+}
+pub(super) fn preupdate_available() -> bool {
+    // SAFETY: the compile-option API borrows a static NUL-terminated string.
+    unsafe { ffi::sqlite3_compileoption_used(c"ENABLE_PREUPDATE_HOOK".as_ptr()) != 0 }
+}
+pub(super) fn install_preupdate(connection: &Connection, ledger: &Mutex<Ledger>) -> bool {
+    // SAFETY: the dispatcher retains the stable boxed/Arc-owned ledger through connection
+    // closure. SQLite invokes this synchronously, never after closing the connection.
+    // Row ids of WITHOUT ROWID tables are unspecified and deliberately never inspected.
+    unsafe {
+        let context = std::ptr::from_ref(ledger).cast_mut().cast();
+        sqlite3_preupdate_hook(connection.handle(), Some(preupdated), context) == context
+    }
+}
+unsafe extern "C" fn preupdated(context: *mut c_void, _: *mut ffi::sqlite3, _: c_int, database: *const c_char, table: *const c_char, _: i64, _: i64) {
+    let _ = std::panic::catch_unwind(|| unsafe {
+        // SAFETY: SQLite supplies valid UTF-8 names for this synchronous callback; no
+        // borrowed SQLite data is retained and no SQL executes from a row callback.
+        let ledger = &*context.cast::<Mutex<Ledger>>();
+        let database = CStr::from_ptr(database).to_string_lossy();
+        let table = CStr::from_ptr(table).to_string_lossy();
+        ledger.lock().unwrap_or_else(std::sync::PoisonError::into_inner).row(&database, &table);
+    });
+}
+
+pub(super) static INDEX_REFRESHES: AtomicU64 = AtomicU64::new(0);
+pub(super) static GLOBAL_EVALUATIONS: AtomicU64 = AtomicU64::new(0);
+pub(super) static SCOPED_EVALUATIONS: AtomicU64 = AtomicU64::new(0);
+static BOUNDARIES: AtomicU64 = AtomicU64::new(0);
+static NOOPS: AtomicU64 = AtomicU64::new(0);
+static ROLLBACKS: AtomicU64 = AtomicU64::new(0);
+#[derive(serde::Serialize)]
+pub struct WriterObserverStats {
+    pub boundaries: u64,
+    pub noops: u64,
+    pub rollbacks: u64,
+    pub index_refreshes: u64,
+    pub global_evaluations: u64,
+    pub scoped_evaluations: u64,
+}
+pub fn writer_observer_stats() -> WriterObserverStats {
+    WriterObserverStats {
+        boundaries: BOUNDARIES.load(Ordering::Relaxed), noops: NOOPS.load(Ordering::Relaxed),
+        rollbacks: ROLLBACKS.load(Ordering::Relaxed), index_refreshes: INDEX_REFRESHES.load(Ordering::Relaxed),
+        global_evaluations: GLOBAL_EVALUATIONS.load(Ordering::Relaxed), scoped_evaluations: SCOPED_EVALUATIONS.load(Ordering::Relaxed),
+    }
+}
+pub(super) fn boundary(changes: &Changes) {
+    BOUNDARIES.fetch_add(1, Ordering::Relaxed);
+    if !changes.changed() { NOOPS.fetch_add(1, Ordering::Relaxed); }
+}
+
+pub(super) fn install_trace(connection: &Connection, ledger: &Mutex<Ledger>) {
+    // SAFETY: MutationState owns this mutex and is retained by the connection's installed
+    // hooks until SQLite closes. The callback never executes SQL or retains SQLite pointers.
+    unsafe {
+        ffi::sqlite3_trace_v2(connection.handle(), (ffi::SQLITE_TRACE_STMT | ffi::SQLITE_TRACE_PROFILE) as c_uint,
+            Some(traced), std::ptr::from_ref(ledger).cast_mut().cast());
+    }
+}
+unsafe extern "C" fn traced(event: c_uint, context: *mut c_void, statement: *mut c_void, detail: *mut c_void) -> c_int {
+    // SAFETY: SQLite supplies live pointers for the duration of this synchronous callback.
+    // Never unwind across the C boundary, including on a poisoned observer mutex.
+    let _ = std::panic::catch_unwind(|| unsafe {
+        #[cfg(any(test, feature = "test-support"))]
+        super::work::traced(event, std::ptr::null_mut(), statement, detail);
+        let statement = statement.cast::<ffi::sqlite3_stmt>();
+        let sql = ffi::sqlite3_sql(statement);
+        if sql.is_null() { return; }
+        let sql = CStr::from_ptr(sql).to_string_lossy();
+        let ledger = &*context.cast::<Mutex<Ledger>>();
+        let mut ledger = ledger.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let database = ffi::sqlite3_db_handle(statement);
+        if event == ffi::SQLITE_TRACE_STMT as c_uint {
+            ledger.started(statement as usize, &sql, ffi::sqlite3_get_autocommit(database) != 0, ffi::sqlite3_stmt_readonly(statement) != 0, ffi::sqlite3_total_changes64(database));
+        } else {
+            // SQLite does not expose the current VDBE result code until after PROFILE.
+            // Never inspect sqlite3_errcode here: it can still belong to an earlier SQL
+            // error. Transaction and savepoint rollback are resolved by native hooks and
+            // executed control statements, respectively.
+            ledger.finished(ffi::sqlite3_total_changes64(database), ffi::sqlite3_get_autocommit(database) != 0);
+            drop(ledger);
+            let nanos = *detail.cast::<u64>();
+            super::record_sqlite_time(&sql, std::time::Duration::from_nanos(nanos));
+        }
+    });
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sqlite::{CommitObserver, WriterConnection, work::SqliteWorkScope};
+    use std::sync::Arc;
+
+    fn writer() -> WriterConnection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+             CREATE TABLE alpha(id INTEGER PRIMARY KEY);
+             CREATE TABLE beta(id TEXT PRIMARY KEY) WITHOUT ROWID;"
+        ).unwrap();
+        WriterConnection::new(connection, Arc::new(AtomicU64::new(0)))
+    }
+    fn counter(writer: &WriterConnection, tables: Option<&'static [&'static str]>) -> (Arc<AtomicU64>, CommitObserver) {
+        let count = Arc::new(AtomicU64::new(0));
+        let observed = count.clone();
+        let callback = move |_: &Connection| { observed.fetch_add(1, Ordering::Relaxed); };
+        let handle = match tables {
+            Some(tables) => writer.observe_tables(tables, callback),
+            None => writer.observe_commits(callback),
+        };
+        (count, handle)
+    }
+    fn calls(count: &AtomicU64) -> u64 { count.load(Ordering::Relaxed) }
+
+    #[test]
+    fn no_op_read_only_zero_row_and_rollback_boundaries_run_no_refresh_sql() {
+        let writer = writer();
+        let (global, _global) = counter(&writer, None);
+        let (alpha, _alpha) = counter(&writer, Some(&["alpha"]));
+        for sql in [
+            "",
+            "SELECT 1",
+            "BEGIN; SELECT 1; COMMIT",
+            "UPDATE alpha SET id=id WHERE id=999",
+            "BEGIN; INSERT INTO alpha VALUES(1); ROLLBACK",
+            "SAVEPOINT s; INSERT INTO alpha VALUES(1); ROLLBACK TO s; RELEASE s",
+        ] {
+            let connection = writer.write();
+            connection.execute_batch(sql).unwrap();
+            let work = SqliteWorkScope::start();
+            drop(connection);
+            assert_eq!(work.finish().statements, 0, "post-loan SQL after {sql}");
+            assert_eq!(calls(&global), 0, "global evaluation after {sql}");
+            assert_eq!(calls(&alpha), 0, "dependent evaluation after {sql}");
+        }
+    }
+
+    #[test]
+    fn committed_tables_survive_later_rollback_without_waking_other_dependencies() {
+        let writer = writer();
+        let (global, _global) = counter(&writer, None);
+        let (alpha, _alpha) = counter(&writer, Some(&["alpha"]));
+        let (beta, _beta) = counter(&writer, Some(&["beta"]));
+        let (both, _both) = counter(&writer, Some(&["alpha", "beta"]));
+        writer.write().execute_batch(
+            "BEGIN; INSERT INTO alpha VALUES(1); COMMIT;
+             BEGIN; INSERT INTO beta VALUES('rolled-back'); ROLLBACK;
+             BEGIN; INSERT INTO alpha VALUES(2); COMMIT;"
+        ).unwrap();
+        assert_eq!((calls(&global), calls(&alpha), calls(&beta), calls(&both)), (1, 1, 0, 1));
+        writer.write().execute_batch("INSERT INTO beta VALUES('committed')").unwrap();
+        assert_eq!((calls(&global), calls(&alpha), calls(&beta), calls(&both)), (2, 1, 1, 2));
+    }
+
+    #[test]
+    fn nested_quoted_cached_savepoints_discard_only_the_rolled_back_level() {
+        let writer = writer();
+        let (alpha, _alpha) = counter(&writer, Some(&["alpha"]));
+        let (beta, _beta) = counter(&writer, Some(&["beta"]));
+        {
+            let connection = writer.write();
+            let mut rollback = connection.prepare_cached("ROLLBACK /* scope */ TO SAVEPOINT \"inner space\"").unwrap();
+            let mut insert_beta = connection.prepare_cached("INSERT INTO beta VALUES(?1)").unwrap();
+            for value in ["first", "second"] {
+                connection.execute_batch("SAVEPOINT 'outer'; INSERT OR IGNORE INTO alpha VALUES(1); SAVEPOINT \"inner space\"").unwrap();
+                insert_beta.execute([value]).unwrap();
+                rollback.execute([]).unwrap();
+                connection.execute_batch("RELEASE \"inner space\"; RELEASE 'outer'").unwrap();
+            }
+        }
+        assert_eq!((calls(&alpha), calls(&beta)), (1, 0));
+    }
+
+    #[test]
+    fn ddl_commits_route_even_with_zero_total_changes_and_rollback_does_not() {
+        let writer = writer();
+        let (global, _global) = counter(&writer, None);
+        let (alpha, _alpha) = counter(&writer, Some(&["alpha"]));
+        {
+            let connection = writer.write();
+            let before = connection.total_changes();
+            connection.execute_batch("CREATE INDEX alpha_id ON alpha(id)").unwrap();
+            assert_eq!(connection.total_changes(), before);
+        }
+        assert_eq!((calls(&global), calls(&alpha)), (1, 1));
+        writer.write().execute_batch("BEGIN; DROP INDEX alpha_id; ROLLBACK").unwrap();
+        assert_eq!((calls(&global), calls(&alpha)), (1, 1));
+        writer.write().execute_batch("CREATE INDEX IF NOT EXISTS alpha_id ON alpha(id)").unwrap();
+        assert_eq!((calls(&global), calls(&alpha)), (1, 1));
+        writer.write().execute_batch("CREATE TEMP TABLE scratch(id INTEGER)").unwrap();
+        assert_eq!((calls(&global), calls(&alpha)), (1, 1), "temp schema is not main authority");
+    }
+
+    #[test]
+    fn replacement_of_each_native_coverage_hook_invalidates_dependencies_fail_closed() {
+        for hook in ["row", "authorizer", "commit", "rollback", "preupdate"] {
+            let writer = writer();
+            let (alpha, _alpha) = counter(&writer, Some(&["alpha"]));
+            let (beta, _beta) = counter(&writer, Some(&["beta"]));
+            {
+                let connection = writer.write();
+                match hook {
+                    "row" => connection.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>),
+                    "authorizer" => connection.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>),
+                    "commit" => connection.commit_hook(None::<fn() -> bool>),
+                    "rollback" => connection.rollback_hook(None::<fn()>),
+                    "preupdate" => unsafe {
+                        // SAFETY: deliberately remove the callback on this exclusively lent
+                        // connection; the boundary must detect and restore its ownership.
+                        sqlite3_preupdate_hook(connection.handle(), None, std::ptr::null_mut());
+                    },
+                    _ => unreachable!(),
+                }
+            }
+            assert_eq!((calls(&alpha), calls(&beta)), (1, 1), "{hook}");
+            writer.write().execute_batch("INSERT INTO beta VALUES('restored')").unwrap();
+            assert_eq!((calls(&alpha), calls(&beta)), (1, 2), "{hook}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod statement_failure_tests {
+    use super::*;
+    use crate::sqlite::{WriterConnection, work::SqliteWorkScope};
+    use std::sync::Arc;
+
+    #[test]
+    fn caught_statement_abort_then_commit_is_noop_but_partial_fail_publishes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+             CREATE TABLE source(id INTEGER PRIMARY KEY);"
+        ).unwrap();
+        let writer = WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+        let count = Arc::new(AtomicU64::new(0));
+        let observed = count.clone();
+        let _observer = writer.observe_tables(&["source"], move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+        {
+            let connection = writer.write();
+            connection.execute_batch("BEGIN").unwrap();
+            let before = connection.total_changes();
+            assert!(connection.execute_batch("INSERT INTO source VALUES(1),(1)").is_err());
+            assert_eq!(connection.total_changes(), before);
+            connection.execute_batch("COMMIT").unwrap();
+            let work = SqliteWorkScope::start();
+            drop(connection);
+            assert_eq!(work.finish().statements, 0);
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        {
+            let connection = writer.write();
+            connection.execute_batch("BEGIN").unwrap();
+            assert!(connection.execute_batch("INSERT OR FAIL INTO source VALUES(1),(1)").is_err());
+            connection.execute_batch("COMMIT").unwrap();
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+}
