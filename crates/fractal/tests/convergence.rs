@@ -121,6 +121,26 @@ fn the_corpus_generates_valid_native_continuity_inputs() {
 }
 
 #[test]
+fn the_corpus_generates_valid_step_execution_phase_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["step.execution-phase", "runtime.observed"] {
+        assert_eq!(
+            serde_json::to_value(&corpus()[kind]).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current execution evidence fields"
+        );
+    }
+    let spec = &corpus()["step.execution-phase"];
+    let input = world.claim_of(spec, 0).expect("generate step execution phase input");
+    fractal_schema::registry().validate_claim(&input.subject, &input.kind, &input.fields).unwrap();
+    for (name, field) in &spec.fields {
+        if field.required {
+            assert!(input.fields.contains_key(name), "step.execution-phase requires {name}");
+        }
+    }
+}
+
+#[test]
 fn the_corpus_generates_coherent_review_heads_and_request_tuples() {
     let mut world = World::new(1, Sabotage::None);
     for index in 0..2 {
