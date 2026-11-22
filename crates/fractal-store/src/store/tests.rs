@@ -31,7 +31,7 @@ fn assert_open_indexes_reviewed(connection: &rusqlite::Connection) {
     struct Allowlist {
         indexes: std::collections::BTreeMap<String, Vec<String>>,
     }
-    let allowlist: Allowlist = serde_json::from_str(include_str!(
+    let allowlist: Allowlist = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h680ee8d4cd36 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../docs/st3/open-indexes.json"
     )).unwrap();
     let mut actual = std::collections::BTreeMap::from([
@@ -81,6 +81,7 @@ fn store_open_indexes_require_product_lead_review() {
 fn open_index_guard_rejects_new_claims_index() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hd1094061b9cd owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE claims(id INTEGER PRIMARY KEY);
          CREATE INDEX unreviewed_claims_index ON claims(id);",
     ).unwrap();
@@ -92,6 +93,7 @@ fn open_index_guard_rejects_new_claims_index() {
 fn open_index_guard_rejects_new_observation_index() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hbdc943236c85 owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE local_observations(id INTEGER PRIMARY KEY);
          CREATE INDEX unreviewed_observations_index ON local_observations(id);",
     ).unwrap();
