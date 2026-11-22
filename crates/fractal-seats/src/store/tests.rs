@@ -308,7 +308,8 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
                 .unwrap();
         }
     };
-    insert_newer(4_000, 500, 200);
+    insert_newer(0, 500, 200);
+    insert_newer(4_000, 0, 0);
 
     let frontier = |at: u64| {
         store
@@ -322,8 +323,7 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         .readers
         .get()
         .query_row(
-            "SELECT id FROM local_observations WHERE subject='agent/node.amber'
-                 AND kind='harness.timeline' ORDER BY id DESC LIMIT 1",
+            "SELECT MAX(id) FROM local_observations",
             [],
             |row| row.get::<_, u64>(0),
         )
@@ -360,7 +360,7 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         let connection = store.connection.lock().unwrap();
         let run = || {
             let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbcbc0ab76ff4 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS).unwrap();
-            let rows = statement.query_map(params![local - 1, local, cut], |row| row.get::<_, String>(0))
+            let rows = statement.query_map(params![local - 1, local, later], |row| row.get::<_, String>(0))
                 .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             rows
         };
