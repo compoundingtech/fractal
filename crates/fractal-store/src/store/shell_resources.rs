@@ -98,7 +98,7 @@ pub struct RequestCancellation {
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     // Transitional debt: command/result bodies and indexed text keys have no byte-size proof.
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9574bb92e055 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_resources_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
-    // UUID tombstones stay inline for atomic cancellation; retention does not bound cleanup work.
+    // UUID tombstones stay inline for atomic cancellation; cleanup is limited per operation.
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h68c595b5ab84 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_resource_request_cancellations_v1 (
         id TEXT PRIMARY KEY CHECK(length(id)=36), cancelled_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS shell_resource_request_cancellation_time_v1
@@ -280,8 +280,10 @@ impl RequestScope<'_> {
 
 fn expire_request_cancellations(connection: &Connection, now: u64) -> Result<()> {
     if let Some(cutoff) = now.checked_sub(REQUEST_TOMBSTONE_RETENTION_MS) {
-        // Seven-day retention does not bound the number of expired tombstones deleted per submission.
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h3ecd1f97c431 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM shell_resource_request_cancellations_v1 WHERE cancelled_at<=?1", [cutoff])?;
+        // Bound reclamation per request; expired rows are ignored even if this batch
+        // leaves more expired tombstones for the next operation.
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h3ecd1f97c431 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM shell_resource_request_cancellations_v1 WHERE id IN
+            (SELECT id FROM shell_resource_request_cancellations_v1 WHERE cancelled_at<=?1 ORDER BY cancelled_at LIMIT 128)", [cutoff])?;
     }
     Ok(())
 }
@@ -345,6 +347,32 @@ fn invocation_owner(receipt: &fractal_schema::invocation::InvocationReceipt) -> 
     })
 }
 
+struct AgentRequestIncarnation {
+    agent: String,
+    incarnation: String,
+    first_receipt: i64,
+}
+
+impl AgentRequestIncarnation {
+    /// The existing subject/kind index restricts this walk to the incarnation's
+    /// receipt interval. No retained receipts before its start are visited.
+    fn request_ids(&self, connection: &Connection, key: uuid::Uuid) -> Result<std::collections::BTreeSet<String>> {
+        let mut statement = connection.prepare(
+            "SELECT json_extract(body,'$.fields') FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='harness.invocation' AND store_index>=?2 ORDER BY store_index DESC")?;
+        let receipts = statement.query_map(rusqlite::params![self.agent, self.first_receipt], |row|
+            row.get::<_, String>(0))?;
+        let mut ids = std::collections::BTreeSet::new();
+        for receipt in receipts {
+            let receipt: fractal_schema::invocation::InvocationReceipt = serde_json::from_str(&receipt?)?;
+            if receipt.incarnation.as_deref() != Some(self.incarnation.as_str()) { continue; }
+            let Ok(owner) = invocation_owner(&receipt) else { continue; };
+            ids.insert(request_execution_id(&RequestScope::Agent { owner: &owner, live_owners: &[] }, key)?);
+        }
+        Ok(ids)
+    }
+}
+
 
 
 impl Store {
@@ -355,11 +383,8 @@ impl Store {
             "shell execution cwd must be absolute (or omitted for a Darwin job workspace)");
         anyhow::ensure!(command.argv.iter().all(|argument| !argument.contains('\0')), "resource argv contains NUL");
         let submission_digest = submission_digest(&command)?;
-        let cancellation_ids = match command.request_id.as_deref().and_then(|id| uuid::Uuid::parse_str(id).ok()) {
-            Some(key) if command.lane.owner.invocation.as_deref().is_some_and(|id| id.starts_with("invocation/")) =>
-                self.agent_request_ids(&command.lane.owner, key)?,
-            _ => Vec::new(),
-        };
+        let request_id = command.request_id.as_deref().and_then(|id| uuid::Uuid::parse_str(id).ok());
+        let incarnation = if request_id.is_some() { self.agent_request_incarnation(&command.lane.owner)? } else { None };
         let root_exec_id = if let Some(parent) = &command.parent {
             let member = self.resource_membership_for_grant(parent)?;
             anyhow::ensure!(member.request == command.lane, "nested command must retain the verified parent request");
@@ -377,13 +402,18 @@ impl Store {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         expire_request_cancellations(&transaction, now)?;
+        let cancellation_ids = match (&incarnation, request_id) {
+            (Some(incarnation), Some(key)) => incarnation.request_ids(&transaction, key)?,
+            _ => std::collections::BTreeSet::new(),
+        };
         let mut cancelled = false;
-        // Receipt history is resolved before taking the writer lock; admission only
-        // seeks tombstone primary keys, including owners that have since ended.
+        // Refresh the incarnation's indexed receipt interval while holding the writer
+        // lock, then seek each owner's tombstone key before committing acceptance.
         for id in std::iter::once(&execution.command.id).chain(cancellation_ids.iter().filter(|id| **id != execution.command.id)) {
             cancelled = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM shell_resource_request_cancellations_v1 WHERE id=?1)",
-                [id], |row| row.get(0))?;
+                "SELECT EXISTS(SELECT 1 FROM shell_resource_request_cancellations_v1 WHERE id=?1
+                 AND (?2 IS NULL OR cancelled_at>?2))",
+                rusqlite::params![id, now.checked_sub(REQUEST_TOMBSTONE_RETENTION_MS)], |row| row.get(0))?;
             if cancelled { break; }
         }
         if cancelled {
@@ -432,25 +462,68 @@ impl Store {
     }
 
     pub fn cancel_shell_resource_by_request(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid, now: u64) -> Result<Option<Execution>> {
-        let cancellation_ids = match scope {
-            RequestScope::Agent { owner, .. } => self.agent_request_ids(owner, request_id)?,
-            _ => vec![request_execution_id(scope, request_id)?],
+        let incarnation = match scope {
+            RequestScope::Agent { owner, .. } => self.agent_request_incarnation(owner)?,
+            _ => None,
         };
+        self.cancel_shell_resource_by_request_prepared(scope, request_id, now, incarnation)
+    }
+
+    #[cfg(test)]
+    fn cancel_shell_resource_by_request_with_hook(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid,
+        now: u64, after_precomputation: impl FnOnce()) -> Result<Option<Execution>> {
+        let incarnation = match scope {
+            RequestScope::Agent { owner, .. } => self.agent_request_incarnation(owner)?,
+            _ => None,
+        };
+        after_precomputation();
+        self.cancel_shell_resource_by_request_prepared(scope, request_id, now, incarnation)
+    }
+
+    fn cancel_shell_resource_by_request_prepared(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid,
+        now: u64, incarnation: Option<AgentRequestIncarnation>) -> Result<Option<Execution>> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         expire_request_cancellations(&transaction, now)?;
-        let mut execution = shell_request_execution(&transaction, scope, request_id)?;
+        let cancellation_ids = match incarnation {
+            Some(incarnation) => incarnation.request_ids(&transaction, request_id)?,
+            None => {
+                let mut ids = std::collections::BTreeSet::from([request_execution_id(scope, request_id)?]);
+                if let RequestScope::Agent { live_owners, .. } = scope {
+                    for owner in *live_owners {
+                        ids.insert(request_execution_id(&RequestScope::Agent { owner, live_owners: &[] }, request_id)?);
+                    }
+                }
+                ids
+            },
+        };
+        let mut execution = None;
+        for id in &cancellation_ids {
+            let body: Option<String> = transaction.query_row(
+                "SELECT body FROM shell_resources_v1 WHERE id=?1", [id], |row| row.get(0)).optional()?;
+            if let Some(body) = body {
+                let found = serde_json::from_str(&body)?;
+                if let Err(error) = scope.validate_execution(&found, request_id) {
+                    if matches!(scope, RequestScope::Agent { live_owners, .. } if !live_owners.contains(&found.command.lane.owner)) {
+                        return Err(FractalError::new("resource-request-conflict",
+                            "invocation ownership changed during cancellation; retry the same cancellation request")
+                            .with_detail("retryable", true).with_detail("reason", "resource-owner-set-changed").into());
+                    }
+                    return Err(error);
+                }
+                execution = Some(found);
+                break;
+            }
+        }
         if let Some(execution) = &mut execution {
             cancel_command(&transaction, &execution.command.id)?;
             execution.cancel = true;
         } else {
-            // Keep cancellation atomic with request lookup; UUID keys do not prove total storage cost.
-            // Fan out to all known incarnation owners, including ended ones. If a new
-            // owner appears after an admission's history snapshot, cancellation still
-            // reaches that admission through its earlier owner key.
+            // Lookup and fan-out use the same locked owner set, so an owner appended
+            // after precomputation cannot hide an execution from cancellation.
             for id in cancellation_ids {
                 transaction.execute(/* sqlite-large-value: allow-for-now lv-hc433437e984c owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resource_request_cancellations_v1(id,cancelled_at)
-                    VALUES(?1,?2) ON CONFLICT(id) DO NOTHING", rusqlite::params![id, now])?;
+                    VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET cancelled_at=MAX(cancelled_at,excluded.cancelled_at)", rusqlite::params![id, now])?;
             }
         }
         transaction.commit()?;
@@ -559,22 +632,19 @@ impl Store {
         Ok(owners)
     }
 
-    /// Resolve cancellation identity outside the writer transaction. Unlike execution
-    /// access, acknowledged cancellation survives invocation termination.
-    fn agent_request_ids(&self, owner: &resource_membership::Owner, key: uuid::Uuid) -> Result<Vec<String>> {
-        let scope = RequestScope::Agent { owner, live_owners: &[] };
-        let mut ids = vec![request_execution_id(&scope, key)?];
-        let Some(invocation) = owner.invocation.as_deref().filter(|id| id.starts_with("invocation/")) else { return Ok(ids); };
+    /// Resolve only the immutable incarnation boundary outside the writer lock.
+    /// Both acceptance and cancellation refresh its owner keys inside the transaction.
+    fn agent_request_incarnation(&self, owner: &resource_membership::Owner) -> Result<Option<AgentRequestIncarnation>> {
+        let Some(invocation) = owner.invocation.as_deref().filter(|id| id.starts_with("invocation/")) else { return Ok(None); };
         let receipts = self.invocation_receipts(invocation)?;
         let receipt = receipts.iter().rev().find(|receipt| receipt.incarnation.is_some())
             .context("shell owner has no native invocation evidence")?;
-        for candidate in self.agent_invocation_receipts(&receipt.agent)?.iter()
-            .filter(|candidate| candidate.incarnation == receipt.incarnation) {
-            let Ok(owner) = invocation_owner(candidate) else { continue; };
-            let id = request_execution_id(&RequestScope::Agent { owner: &owner, live_owners: &[] }, key)?;
-            if !ids.contains(&id) { ids.push(id); }
-        }
-        Ok(ids)
+        let incarnation = receipt.incarnation.as_deref().unwrap();
+        let first_receipt = self.readers.get().query_row(
+            "SELECT MIN(store_index) FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='harness.invocation' AND json_extract(body,'$.fields.incarnation')=?2",
+            rusqlite::params![receipt.agent, incarnation], |row| row.get(0))?;
+        Ok(Some(AgentRequestIncarnation { agent: receipt.agent.clone(), incarnation: incarnation.into(), first_receipt }))
     }
 
     /// Match native run, step and attempt ownership, not process environment labels.
@@ -1257,12 +1327,23 @@ mod tests {
             [], |row| row.get(0)).unwrap();
         assert_eq!(count, owners.len(), "one tombstone per distinct incarnation owner");
         let mut plan = connection.prepare(
-            "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM shell_resource_request_cancellations_v1 WHERE id=?1)").unwrap();
-        let details = plan.query_map(["key"], |row| row.get::<_, String>(3)).unwrap()
+            "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM shell_resource_request_cancellations_v1
+             WHERE id=?1 AND (?2 IS NULL OR cancelled_at>?2))").unwrap();
+        let details = plan.query_map(rusqlite::params!["key", None::<u64>], |row| row.get::<_, String>(3)).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         for detail in &details { println!("cancellation acceptance: {detail}"); }
-        assert!(details.iter().any(|detail| detail.contains("SEARCH shell_resource_request_cancellations_v1 USING COVERING INDEX")
+        assert!(details.iter().any(|detail| detail.contains("SEARCH shell_resource_request_cancellations_v1 USING INDEX")
             && detail.contains("(id=?)")), "{details:?}");
+        drop(plan);
+        let mut plan = connection.prepare(
+            "EXPLAIN QUERY PLAN SELECT json_extract(body,'$.fields') FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='harness.invocation' AND store_index>=?2 ORDER BY store_index DESC").unwrap();
+        let details = plan.query_map(rusqlite::params![agent, 0_i64], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        for detail in &details { println!("locked incarnation refresh: {detail}"); }
+        assert!(details.iter().any(|detail| detail.contains("SEARCH claims USING INDEX claims_subject_kind_index")
+            && detail.contains("subject=? AND kind=? AND store_index>?")), "{details:?}");
+        assert!(!details.iter().any(|detail| detail.contains("TEMP B-TREE")), "{details:?}");
         drop(plan);
         drop(connection);
 
@@ -1281,5 +1362,74 @@ mod tests {
         submitted.lane.owner = owners[0].clone();
         let error = store.submit_shell_resource(submitted, 2).unwrap_err();
         assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "resource-request-cancelled");
+    }
+
+    #[test]
+    fn cancel_paused_before_writer_lock_detects_new_owner_execution_and_retry_cancels_it() {
+        use crate::store::invocation_receipts::{append_receipt_tx, native_receipt};
+        use fractal_schema::invocation::InvocationPhase;
+        let store = Store::open_memory("host-a").unwrap();
+        let agent = "agent/host-a/worker";
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"worker","incarnation_id":"exact"})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":"exact"})),
+        ] {
+            store.append_claim(&ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+                fields:serde_json::from_value(fields).unwrap(), evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
+        }
+        let receipt = |operation: &str| native_receipt(operation, agent,
+            &json!({"subject":{"kind":"agent"},"launch_member":{"driver":"omp","environment":{}}}),
+            InvocationPhase::Started, Some(&json!({"verification":"operation-incarnation","incarnation":"exact"})))
+            .unwrap().unwrap();
+        let a = receipt("a");
+        store.connection.batched(|tx| append_receipt_tx(tx, store.origin(), &a)).unwrap().unwrap();
+        let owners = store.shell_resource_agent_owners(agent).unwrap();
+        let scope = RequestScope::Agent { owner:&owners[0], live_owners:&owners };
+        let key = uuid::Uuid::now_v7();
+        let mut accepted_id = String::new();
+        let error = store.cancel_shell_resource_by_request_with_hook(&scope, key, 2, || {
+            // Deterministically pause Cancel(A,K) after precomputation. Append C and
+            // complete Accept(C,K) before allowing cancellation to take the lock.
+            let c = receipt("c");
+            store.connection.batched(|tx| append_receipt_tx(tx, store.origin(), &c)).unwrap().unwrap();
+            let owner = invocation_owner(&c).unwrap();
+            let c_scope = RequestScope::Agent { owner:&owner, live_owners:std::slice::from_ref(&owner) };
+            let mut submitted = command("transport");
+            submitted.id = request_execution_id(&c_scope, key).unwrap();
+            submitted.request_id = Some(key.to_string());
+            submitted.lane.owner = owner;
+            accepted_id = store.submit_shell_resource(submitted, 1).unwrap().command.id;
+        }).unwrap_err();
+        let error = error.downcast_ref::<FractalError>().unwrap();
+        assert_eq!(error.code, "resource-request-conflict");
+        assert_eq!(error.details.get("retryable"), Some(&json!(true)));
+        assert_eq!(error.details.get("reason"), Some(&json!("resource-owner-set-changed")));
+        assert!(!store.shell_resource(&accepted_id).unwrap().cancel, "the stale cancel must report failure, not success");
+
+        // Retry the same cancel with freshly resolved live authorization.
+        let owners = store.shell_resource_agent_owners(agent).unwrap();
+        let scope = RequestScope::Agent { owner:&owners[0], live_owners:&owners };
+        let cancelled = store.cancel_shell_resource_by_request(&scope, key, 3).unwrap().unwrap();
+        assert_eq!(cancelled.command.id, accepted_id);
+        assert!(cancelled.cancel);
+        assert!(store.shell_resource(&accepted_id).unwrap().cancel);
+    }
+
+    #[test]
+    fn expiry_reclaims_at_most_128_rows_and_remaining_expired_keys_do_not_refuse_acceptance() {
+        let store = Store::open_memory("host-a").unwrap();
+        let ids: Vec<_> = (0..300).map(|_| uuid::Uuid::now_v7().to_string()).collect();
+        store.connection.batched(|tx| -> Result<()> {
+            for id in &ids {
+                tx.execute("INSERT INTO shell_resource_request_cancellations_v1(id,cancelled_at) VALUES(?1,1)",
+                    [id])?;
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        let now = REQUEST_TOMBSTONE_RETENTION_MS + 2;
+        store.submit_shell_resource(command(ids.last().unwrap()), now).unwrap();
+        let count: usize = store.readers.get().query_row(
+            "SELECT count(*) FROM shell_resource_request_cancellations_v1", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 300 - 128);
     }
 }

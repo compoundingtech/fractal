@@ -103,13 +103,23 @@ pub(super) async fn cancel_request(State(state): State<AppState>, bound: Option<
     let caller = CallerOwner::resolve(&state, bound, run)?;
     let request_id = uuid::Uuid::parse_str(&request_id).map_err(|_| ApiError::bad(FractalError::new("invalid-resource-request-id", "request-id must be a UUID")))?;
     let execution = state.store.cancel_shell_resource_by_request(&request_scope(&state, caller.as_ref()), request_id,
-        u64::try_from(client_now_ms()).unwrap_or(u64::MAX)).map_err(ApiError::internal)?;
+        u64::try_from(client_now_ms()).unwrap_or(u64::MAX)).map_err(cancel_error)?;
     if let Some(execution) = &execution { authorize_execution(caller.as_ref(), execution)?; }
     state.notify.notify_one();
     state.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
     Ok(Json(crate::store::shell_resources::RequestCancellation {
         request_id: request_id.to_string(), cancelled: true, tombstone: execution.is_none(), execution: execution.map(present),
     }))
+}
+
+fn cancel_error(error: anyhow::Error) -> ApiError {
+    let mut error = ApiError::internal(error);
+    // Only a stale cancellation snapshot is transient; intent conflicts remain 409.
+    // A 503 preserves the existing error envelope's retryable classification.
+    if error.details.get("reason").and_then(Value::as_str) == Some("resource-owner-set-changed") {
+        error.status = StatusCode::SERVICE_UNAVAILABLE;
+    }
+    error
 }
 
 
@@ -364,6 +374,21 @@ mod tests {
         assert_eq!(value, json!({ "execId":"nested-id", "generation":"nested-generation", "state":"running",
             "cgroupPath":"/user.slice/exact-child.scope", "rootExecId":"outer-root-id",
             "requestId":"root-request-id", "lane":"checks", "class":"check", "profile":"check.unit" }));
+    }
+
+    #[test]
+    fn cancellation_owner_change_is_retryable_but_intent_conflicts_are_not() {
+        let error = cancel_error(FractalError::new("resource-request-conflict",
+            "invocation ownership changed during cancellation; retry the same cancellation request")
+            .with_detail("retryable", true).with_detail("reason", "resource-owner-set-changed").into());
+        assert_eq!(error.code, "resource-request-conflict");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        let envelope = client_error_envelope(error.status,
+            &json!({"code":error.code,"message":error.message,"details":error.details}), "request");
+        assert_eq!(envelope["retryable"], true);
+        let intent = cancel_error(FractalError::new("resource-request-conflict", "different execution intent").into());
+        assert_eq!(intent.status, StatusCode::CONFLICT);
+        assert!(!client_error_retryable(intent.status, Some(&intent.code)));
     }
 
     #[cfg(not(target_os = "macos"))]
