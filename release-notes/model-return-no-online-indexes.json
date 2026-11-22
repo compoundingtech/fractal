@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No claim or replay semantics change."},
   "schema": {"status": "changed", "detail": "Removes the claims_model_return_attempt_index and local_observations_roster_model_frontier_index CREATE INDEX statements from store open. Adds no index, column, migration or table rewrite. Attempt reads reuse the existing claims subject/kind index with JSON residuals."},
   "rules": {"status": "none", "detail": "No admission or retention rule changes."},
-  "compatibility": {"status": "changed", "detail": "Every local observation append advances the roster snapshot token, including repeats that clear pending usage slots. Card invalidation seeks only the appended rowid interval and filters relevant timeline/usage inputs. Heartbeat-only deltas reuse the same card rows without refolding."},
+  "compatibility": {"status": "changed", "detail": "Every local observation append advances the roster snapshot token, including repeats that clear pending usage slots. Read-only roster pins check at most 256 new rowids and reuse the same card Arc across heartbeat-only deltas, retaining its publication timestamp. Larger intervals use the normal incremental builder. Relevant timeline and usage slot transitions still invalidate the cards."},
   "downtime": {"status": "changed", "detail": "No online index creation or full-table backfill is introduced at daemon open. Already-created indexes are left in place; removal of their creation statements does not drop an installed index."},
   "manual": {"status": "none", "detail": "No operator action is required."},
   "recovery": {"status": "none", "detail": "No authoritative data format or recovery behavior changes."}

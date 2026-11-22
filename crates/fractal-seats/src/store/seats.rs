@@ -1305,12 +1305,18 @@ impl SeatsStore for Store {
             roster_local_frontier(&self.readers.get(), index)
         })?;
         let selected = BTreeSet::from([agent.to_owned()]);
-        Ok(self.fractal.exact_agent_resources_cache.lock()
-            .expect("exact agent resources cache poisoned").iter().rev()
+        let mut cache = self.fractal.exact_agent_resources_cache.lock()
+            .expect("exact agent resources cache poisoned");
+        let entry = cache.iter_mut().rev()
             .find(|entry| exact_agent_entry(entry, agent)
-                && entry.index == index && entry.local == local && entry.history == history)
-            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, Some(&selected)))
-            .map(|entry| Arc::clone(&entry.items)))
+                && entry.index == index && entry.local <= local && entry.history == history)
+            .filter(|entry| agent_resources_entry_hits(entry, now, index, entry.local, history, Some(&selected)));
+        if let Some(entry) = entry
+            && roster_local_unchanged(&self.readers.get(), entry.local, local, index)? {
+            entry.local = local;
+            return Ok(Some(Arc::clone(&entry.items)));
+        }
+        Ok(None)
     }
 
     fn agent_page_refs_cached_at(

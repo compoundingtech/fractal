@@ -63,7 +63,7 @@ fn an_agent_card_build_does_not_hold_other_read_snapshots_at_the_cache_lock() {
     assert_eq!(resumed, published.unwrap());
 }
 
-/// Every append changes the snapshot token; heartbeat-only deltas still pin the same rows
+/// Every append changes the raw token, but a read-only heartbeat pin reuses the same rows
 /// without invoking the card builder.
 #[test]
 fn heartbeat_local_deltas_pin_the_same_roster_rows() {
@@ -91,12 +91,10 @@ fn heartbeat_local_deltas_pin_the_same_roster_rows() {
             "a local observation keeps the graph cut"
         );
         assert!(roster_local_frontier(&store.readers.get(), index).unwrap() > before);
-        assert!(store.agent_resources_cached_at(index, false, None).unwrap().is_none());
-        store.cached_agent_resources(index, false, |_| panic!("heartbeat must refold zero cards")).unwrap();
         let hit = store
             .agent_resources_cached_at(index, false, None)
             .unwrap()
-            .expect("the empty heartbeat delta republishes the same pinned rows");
+            .expect("a read-only heartbeat hit must reuse the pinned rows");
         assert!(Arc::ptr_eq(&hit, &pinned), "heartbeat deltas must reuse the roster rows");
     }
     assert_eq!(store.agent_resources_builds_for_test(), 1);
@@ -135,21 +133,44 @@ fn same_model_local_usage_refresh_invalidates_only_its_agent_card() {
         let card = json!({"id": agent, "live_model": "gpt-6.1"});
         store.cached_agent_resources(index, false, |_| Ok(vec![card.clone()])).unwrap();
         store.cached_exact_agent_resources(index, false, agent, |_| Ok(vec![card.clone()])).unwrap();
+        let pinned = store.agent_resources_cached_at(index, false, None).unwrap().unwrap();
+        let exact = store.exact_agent_resources_cached_at(index, false, agent).unwrap().unwrap();
+        store.append_claim(&local_observation_for_test("harness.observed", json!({
+            "state":"idle", "driver":"codex", "incarnation_id":"amber-1",
+            "observed_at_ms":300_001
+        }))).unwrap();
+        assert!(Arc::ptr_eq(&pinned, &store.agent_resources_cached_at(index, false, None).unwrap().unwrap()));
+        assert!(Arc::ptr_eq(&exact, &store.exact_agent_resources_cached_at(index, false, agent).unwrap().unwrap()));
         observation.fields.insert("observed_at_unix_ms".into(), json!(1_900_000_000_001_u64));
         let (held, _) = store.append_latest_observation(&observation, 1_900_000_000_001).unwrap();
         assert!(local_observation_position(&held).is_some());
         assert_eq!(store.index().unwrap(), index, "same-model held usage keeps the graph cut");
         assert!(store.agent_resources_cached_at(index, false, None).unwrap().is_none());
         assert!(store.exact_agent_resources_cached_at(index, false, agent).unwrap().is_none());
+        let refreshed = json!({"id": agent, "live_model": "gpt-6.1", "observed_at_unix_ms":1_900_000_000_001_u64});
         let rebuild = |changed: Option<(&BTreeSet<String>, &[Value])>| {
             let (subjects, _) = changed.expect("usage refresh must incrementally refold the card");
             assert_eq!(subjects, &BTreeSet::from([agent.to_owned()]));
-            Ok(vec![card.clone()])
+            Ok(vec![refreshed.clone()])
         };
         store.cached_agent_resources(index, false, rebuild).unwrap();
         store.cached_exact_agent_resources(index, false, agent, rebuild).unwrap();
+        assert_ne!(*store.agent_resources_cached_at(index, false, None).unwrap().unwrap(), *pinned);
+        assert_ne!(*store.exact_agent_resources_cached_at(index, false, agent).unwrap().unwrap(), *exact);
     }
 }
+
+#[test]
+fn read_only_roster_delta_caps_the_rowid_span() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("graph.db"), "node").unwrap();
+    let connection = store.readers.get();
+    assert!(roster_local_unchanged(&connection, 0, 0, 0).unwrap());
+    assert!(roster_local_unchanged(&connection, 0, 256, 0).unwrap());
+    assert!(!roster_local_unchanged(&connection, 0, 257, 0).unwrap());
+    assert!(!roster_local_unchanged(&connection, 1, 0, 0).unwrap());
+}
+
 #[test]
 fn repeated_usage_clearing_pending_slot_invalidates_roster_below_another_subjects_max() {
     let store = roster_cache_store();
@@ -360,9 +381,8 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         let connection = store.connection.lock().unwrap();
         let run = || {
             let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbcbc0ab76ff4 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS).unwrap();
-            let rows = statement.query_map(params![local - 1, local, later], |row| row.get::<_, String>(0))
-                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            rows
+            statement.query_map(params![local - 1, local, later], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
         assert!(run().is_empty());
         let before = smallclaims::sqlite::work::total().vm_steps;

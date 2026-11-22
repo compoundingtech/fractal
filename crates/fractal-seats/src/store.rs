@@ -221,6 +221,24 @@ const ROSTER_LOCAL_CHANGED_SUBJECTS: &str =
        AND (kind='harness.timeline' OR (kind='harness.usage'
          AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')))";
 
+/// Read-only pins may reuse rows across an irrelevant append interval. Bound the work under
+/// the pin; larger intervals use the normal incremental builder instead.
+fn roster_local_unchanged(
+    connection: &Connection,
+    before: u64,
+    after: u64,
+    index: u64,
+) -> Result<bool> {
+    if before == after {
+        return Ok(true);
+    }
+    if before > after || after - before > 256 {
+        return Ok(false);
+    }
+    Ok(!connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbf7fc60867bd owner=fractal_seats::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS)?
+        .exists(params![before, after, index])?)
+}
+
 /// The subjects whose claims an agent card reads: its agent, the runs, generations and steps that
 /// own or queue agents, messages (activity and delivery blockers), and the exec and pty children
 /// a memberless card reduces. A claim about any other subject, of any kind, changes no card.
