@@ -193,7 +193,7 @@ fn guard(relative: &Path, source: &str) {
         // This is an ownership-coverage probe, not a consumer registration exception:
         // permit exactly the two removals, inside this one named fail-closed test.
         for (hook, signature) in [("commit", "fn()->bool"), ("rollback", "fn()")] {
-            let removal = format!("connection.{hook}_hook(None::<{signature}>);");
+            let removal = format!("connection.{hook}_hook(None::<{signature}>),");
             assert_eq!(body.matches(&removal).count(), 1, "loss probe must remove {hook} coverage once");
             assert_eq!(compact.matches(&removal).count(), 1, "loss probe exception must not spread");
             compact = compact.replacen(&removal, "", 1);
