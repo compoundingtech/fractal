@@ -263,12 +263,29 @@ fn objective_series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds:
 
 /// The declared objectives' rows, evaluated at `now`.
 pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Vec<Value>> {
+    rows_selected(store, now, native_rows, None)
+}
+
+/// Evaluate and report only declarations bound to this producer's native source.
+/// Other producers retain ownership of their own rows and breach lifecycles.
+pub(crate) fn check_native_and_report(store: &Store, now: u64, source: &str, native_rows: &[Value]) -> anyhow::Result<()> {
+    let rows = rows_selected(store, now, native_rows, Some(source))?;
+    check_selected(store, &rows, Some(source))?;
+    Ok(())
+}
+
+fn rows_selected(store: &Store, now: u64, native_rows: &[Value], native_scope: Option<&str>) -> anyhow::Result<Vec<Value>> {
     let declared = store.declared_objectives()?;
     let evaluations = store.fractal.extensions.get::<Evaluations>();
     let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
     tracked.retain(|subject, _| declared.iter().any(|declaration| &declaration.subject == subject));
     let mut rows = Vec::new();
     for declaration in declared {
+        if let Some(scope) = native_scope
+            && !declaration.objective.as_ref().is_ok_and(|objective|
+                matches!(&objective.indicator, Indicator::Native { objective: source } if native_owns(scope, source))) {
+            continue;
+        }
         let entry = tracked
             .entry(declaration.subject.clone())
             .or_insert_with(|| Tracked::new(&declaration));
@@ -439,6 +456,10 @@ pub fn check_and_report(store: &Store, rows: &[Value]) {
 /// fault for each of its missed rows and end it when the row is met again, or once the objective
 /// no longer judges the row.
 pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalError> {
+    check_selected(store, rows, None)
+}
+
+fn check_selected(store: &Store, rows: &[Value], native_scope: Option<&str>) -> Result<ObjectiveFaults, FractalError> {
     let responders: Vec<(String, Breach, BTreeSet<String>, bool)> = {
         let evaluations = store.fractal.extensions.get::<Evaluations>();
         let tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -446,6 +467,10 @@ pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalEr
             .values()
             .filter_map(|tracked| {
                 let objective = tracked.objective.as_ref().ok()?;
+                if let Some(scope) = native_scope
+                    && !matches!(&objective.indicator, Indicator::Native { objective: source } if native_owns(scope, source)) {
+                    return None;
+                }
                 let native = matches!(objective.indicator, Indicator::Native { .. });
                 Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone(), native))
             })

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reconcile mission reads by their consumed claim predicates instead of unrelated seat heartbeats",
+  "replay": {"status": "none", "detail": "No durable claim or projection changes."},
+  "schema": {"status": "none", "detail": "Dependency indexes and work counters are process-local."},
+  "rules": {"status": "changed", "detail": "Kind-filtered claim reads record subject-and-kind inputs. Desired selection and actual-state reads use distinct projection inputs, so harness reports do not reconstruct missions that only read eligibility or actual state. True liveness readers retain their existing dependencies. Post-evaluation run-state reduction reads current effective step states without rebuilding definitions, execution clocks, handoffs, loops or lineage."},
+  "compatibility": {"status": "changed", "detail": "GET /v1/performance adds mission_reads.reconstructions and mission_reads.state_refreshes, cumulative per-store work counts since process start."},
+  "downtime": {"status": "none", "detail": "Takes effect on daemon restart; no migration."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Binary rollback requires no data conversion."}
+}
