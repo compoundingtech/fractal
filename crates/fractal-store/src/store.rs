@@ -13561,7 +13561,7 @@ pub fn runtime_incarnation_state(
                     });
                 }
             }
-            Some(status) if matches!(status, "exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
+            Some("exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
                 Some(ended) if ended == incarnation => return Ok(IncarnationRuntime::Ended),
                 Some(_) => other_ended = true,
                 None => {

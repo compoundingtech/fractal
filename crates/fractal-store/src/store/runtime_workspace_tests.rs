@@ -55,7 +55,31 @@ fn runtime_workspace_accepts_absent_string_and_null_locally_and_replicated() {
 }
 
 #[test]
-fn unsupported_runtime_workspace_readers_refuse_local_and_signed_but_retain_envelopes() {
+fn previous_schema_accepts_legacy_runtime_but_refuses_workspace_and_unknown_kinds() {
+    // Reconstruct the real pre-phase-1 schema from the same registry source:
+    // workspace is this phase's only claim-registry addition. Keep every other
+    // kind and field, rather than building a registry that refuses all writes.
+    let mut previous = fractal_schema::registry().clone();
+    previous.claims.get_mut("runtime.observed").unwrap().fields.remove("workspace").unwrap();
+    let subject = "agent/a.worker";
+    let legacy: BTreeMap<String, Value> = serde_json::from_value(
+        json!({"status":"running", "incarnation_id":"launch-one"}),
+    ).unwrap();
+    assert!(previous.validate_claim(subject, "runtime.observed", &legacy).is_ok());
+    for workspace in [json!("/workspace/launched"), Value::Null] {
+        let mut fields = legacy.clone();
+        fields.insert("workspace".into(), workspace);
+        assert_eq!(previous.validate_claim(subject, "runtime.observed", &fields)
+            .unwrap_err().code, "unknown-claim-field");
+        assert!(fractal_schema::registry().validate_claim(
+            subject, "runtime.observed", &fields).is_ok());
+    }
+    assert_eq!(previous.validate_claim(subject, "runtime.future", &legacy)
+        .unwrap_err().code, "unknown-claim-kind");
+}
+
+#[test]
+fn unsupported_runtime_workspace_readers_refuse_signed_but_retain_envelopes() {
     for unknown_kind in [false, true] {
         for workspace in [None, Some(json!("/workspace/launched")), Some(Value::Null)] {
             // A reader lacking only the optional field still accepts its absence.
@@ -91,7 +115,8 @@ fn unsupported_runtime_workspace_readers_refuse_local_and_signed_but_retain_enve
                 expected_subject: None,
                 idempotency_key: None,
             };
-            assert_eq!(older.append_claim(&input).unwrap_err().code, code);
+            // set_claim_registry overrides replication, not this build's local
+            // validator. Previous-schema local refusal is tested separately above.
             let claim = source.append_claim(&input).unwrap();
             let exchange = source.export_replication_exchange(
                 FLEET, &older.replication_inventory().unwrap(),
