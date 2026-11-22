@@ -37,26 +37,35 @@ fn guard(relative: &Path, source: &str) {
     }
 }
 
-fn visit(root: &Path, directory: &Path) {
+fn visit(root: &Path, directory: &Path, prefix: &Path) {
     for entry in fs::read_dir(directory).expect("read workspace source directory") {
         let entry = entry.expect("read workspace source entry");
         let kind = entry.file_type().expect("read workspace source file type");
         let path = entry.path();
         if kind.is_dir() {
             if entry.file_name() != "target" && entry.file_name() != ".git" {
-                visit(root, &path);
+                visit(root, &path, prefix);
             }
         } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
-            guard(path.strip_prefix(root).unwrap(), &fs::read_to_string(&path).expect("read Rust source"));
+            guard(&prefix.join(path.strip_prefix(root).unwrap()), &fs::read_to_string(&path).expect("read Rust source"));
         }
     }
 }
 
 #[test]
 fn workspace_transaction_resolution_hooks_belong_to_the_hub() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-    let manifest: toml::Value = toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
-    for member in manifest["workspace"]["members"].as_array().unwrap() {
-        visit(root, &root.join(member.as_str().unwrap()));
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = package.parent().and_then(Path::parent).filter(|root| {
+        root.join("crates/smallclaims") == package && root.join("Cargo.toml").is_file()
+    });
+    if let Some(root) = workspace {
+        let manifest: toml::Value = toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
+        for member in manifest["workspace"]["members"].as_array().unwrap() {
+            visit(root, &root.join(member.as_str().unwrap()), Path::new(""));
+        }
+    } else {
+        // Published packages contain only this crate, not its original workspace.
+        // Keep the same owner/loss-probe allowlist while scanning every packaged source.
+        visit(package, package, Path::new("crates/smallclaims"));
     }
 }
