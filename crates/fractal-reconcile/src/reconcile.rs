@@ -2746,11 +2746,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
             .collect::<Vec<_>>();
         for registration in self.store.program_pr_watches()? {
-            let repo = registration["repo"].as_str().context("PR registration has no repository")?;
-            used_observers.insert(crate::github_watch::standing_observer(repo));
-            if registration["member"].as_str() == Some(self.host.as_str()) {
-                ensure(repo.to_owned())?;
-            }
+            self.isolate("github-watch", registration["step"].as_str().unwrap_or("program/await-pr"), || {
+                let repo = registration["repo"].as_str().context("PR registration has no repository")?;
+                used_observers.insert(crate::github_watch::standing_observer(repo));
+                if registration["member"].as_str() == Some(self.host.as_str()) {
+                    ensure(repo.to_owned())?;
+                }
+                Ok(())
+            });
         }
         for (subject, spec) in &subscriptions {
             if subject.subject.starts_with("subscription/watch/") {
@@ -2760,14 +2763,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             };
             used_observers.insert(spec.observer.clone());
-            if self
-                .store
-                .selected_desired_origin(&subject.subject)?
-                .as_deref()
-                == Some(self.host.as_str())
-            {
-                ensure(locator)?;
-            }
+            self.isolate("github-watch", &subject.subject, || {
+                if self
+                    .store
+                    .selected_desired_origin(&subject.subject)?
+                    .as_deref()
+                    == Some(self.host.as_str())
+                {
+                    ensure(locator)?;
+                }
+                Ok(())
+            });
         }
         let watches = subscriptions
             .iter()
@@ -2778,62 +2784,71 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some((thread, _)) = crate::github_watch::watch_parts(&subject.subject) else {
                 continue;
             };
-            if self.store.watch_ended(&subject.subject, &watch)?.is_some() {
+            if self.isolate("github-watch", &subject.subject, || {
+                if self.store.watch_ended(&subject.subject, &watch)?.is_some() {
+                    if self
+                        .store
+                        .selected_desired_origin(&subject.subject)?
+                        .as_deref()
+                        == Some(self.host.as_str())
+                    {
+                        self.store.stop_watch_declaration(&subject.subject)?;
+                    }
+                    return Ok(());
+                }
                 if self
                     .store
                     .selected_desired_origin(&subject.subject)?
                     .as_deref()
-                    == Some(self.host.as_str())
+                    != Some(self.host.as_str())
                 {
-                    self.store.stop_watch_declaration(&subject.subject)?;
+                    used_observers.insert(spec.observer.clone());
+                    return Ok(());
                 }
-                continue;
-            }
-            if self
-                .store
-                .selected_desired_origin(&subject.subject)?
-                .as_deref()
-                != Some(self.host.as_str())
-            {
+                if self.store.watch_seat_ended(&subject.subject, &spec.to, &watch)? {
+                    self.store.end_watch(&subject.subject, "seat-ended", None)?;
+                    return Ok(());
+                }
+                if let Some(until) = watch.until_unix_ms {
+                    if until <= now {
+                        let wake =
+                            crate::github_watch::deadline_wake(&subject.subject, &watch, &thread)?;
+                        self.store
+                            .end_watch(&subject.subject, "deadline", Some(&wake))?;
+                        return Ok(());
+                    }
+                    next_deadline = Some(next_deadline.map_or(until, |next| next.min(until)));
+                }
                 used_observers.insert(spec.observer.clone());
-                continue;
+                ensure(thread.locator())?;
+                Ok(())
+            }).is_none() {
+                // A failed watch still owns observation interest until it can be evaluated.
+                used_observers.insert(spec.observer.clone());
             }
-            if self.store.watch_seat_ended(&subject.subject, &spec.to, &watch)? {
-                self.store.end_watch(&subject.subject, "seat-ended", None)?;
-                continue;
-            }
-            if let Some(until) = watch.until_unix_ms {
-                if until <= now {
-                    let wake =
-                        crate::github_watch::deadline_wake(&subject.subject, &watch, &thread)?;
-                    self.store
-                        .end_watch(&subject.subject, "deadline", Some(&wake))?;
-                    continue;
-                }
-                next_deadline = Some(next_deadline.map_or(until, |next| next.min(until)));
-            }
-            used_observers.insert(spec.observer.clone());
-            ensure(thread.locator())?;
         }
         for observer in desired.iter().filter(|subject| {
             subject.kind == "observer"
                 && subject.owner_run.is_none()
                 && subject.subject.starts_with("observer/github/")
         }) {
-            // Only a standing repository observer is this stage's.
-            let running = crate::graph::observer_spec(&observer.desired).is_some_and(|spec| {
-                !spec.stopped && crate::github_watch::is_standing_observer(&observer.subject, &spec)
+            self.isolate("github-watch-observer", &observer.subject, || {
+                // Only a standing repository observer is this stage's.
+                let running = crate::graph::observer_spec(&observer.desired).is_some_and(|spec| {
+                    !spec.stopped && crate::github_watch::is_standing_observer(&observer.subject, &spec)
+                });
+                if running
+                    && !used_observers.contains(&observer.subject)
+                    && self
+                        .store
+                        .selected_desired_origin(&observer.subject)?
+                        .as_deref()
+                        == Some(self.host.as_str())
+                {
+                    self.store.stop_watch_declaration(&observer.subject)?;
+                }
+                Ok(())
             });
-            if running
-                && !used_observers.contains(&observer.subject)
-                && self
-                    .store
-                    .selected_desired_origin(&observer.subject)?
-                    .as_deref()
-                    == Some(self.host.as_str())
-            {
-                self.store.stop_watch_declaration(&observer.subject)?;
-            }
         }
         if let Some(next) = next_deadline {
             self.arm_restart("stage/github-watches", next.saturating_add(1));
