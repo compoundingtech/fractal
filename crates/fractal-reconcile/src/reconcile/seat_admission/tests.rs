@@ -33,20 +33,21 @@ async fn admission_refresh_does_not_schedule_pressure_polling() {
 }
 
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn daemon_sampler_observes_without_a_pass_or_native_lanes() {
     let reconciler = Arc::new(reconciler());
     assert!(reconciler.seat_admission.lanes.is_none());
     assert!(reconciler.seat_admission.config.is_none());
     assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
     let events = reconciler.event_notify.subscribe();
+    let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
+    reconciler.seat_admission.pressure_samples.set(samples).unwrap();
     let sampler = reconciler.sample_resource_pressure();
     tokio::pin!(sampler);
     if cfg!(target_os = "linux") {
         tokio::select! {
             () = &mut sampler => panic!("sampler must remain scoped to the daemon run"),
-            () = reconciler.notify.notified() => {},
-            () = tokio::time::sleep(Duration::from_secs(10)) => panic!("sampler did not observe independently"),
+            sample = sampled.recv() => { sample.unwrap(); },
         }
         assert!(reconciler.seat_admission.pressure.lock().unwrap().is_some());
         assert!(!reconciler.step_deadlines.lock().unwrap().contains_key("resource-pressure"));
@@ -61,92 +62,82 @@ async fn daemon_sampler_observes_without_a_pass_or_native_lanes() {
 }
 
 #[cfg(target_os = "linux")]
-#[tokio::test]
-async fn sampler_recovers_while_incremental_observe_holds_its_lock_past_freshness() {
+#[tokio::test(start_paused = true)]
+async fn sampler_recovers_after_120_seconds_with_a_90_second_reconcile_stall() {
     use crate::incremental::{ChangeFeed, ChangeSource};
-    use fractal_runtime::resource_pressure::{Policy, Reason, Rule, Signal, Window};
-    use std::time::Instant;
+    use fractal_runtime::resource_pressure::{ObservationCause, Policy, Reason};
+    use tokio::time::Instant;
 
-    struct StalledFeed {
-        entered: tokio::sync::mpsc::UnboundedSender<Instant>,
+    struct BlockingFeed {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
         release: std::sync::mpsc::Receiver<()>,
     }
-    impl ChangeSource for StalledFeed {
+    impl ChangeSource for BlockingFeed {
         fn changes_since(&self, _: u64, _: i64) -> Result<ChangeFeed> {
-            self.entered.send(Instant::now()).unwrap();
-            self.release.recv_timeout(Duration::from_secs(30)).unwrap();
+            self.entered.lock().unwrap().take().unwrap().send(()).unwrap();
+            self.release.recv().unwrap();
             Ok(ChangeFeed::default())
         }
     }
 
-    let mut reconciler = reconciler();
-    // Inject kernel fixtures: this cadence regression must not depend on host pressure.
+    let reconciler = reconciler();
     let root = tempfile::tempdir().unwrap();
     let memory = root.path().join("memory.pressure");
     let io = root.path().join("io");
     let meminfo = root.path().join("meminfo");
     let root_memory = root.path().join("root-memory");
     let vmstat = root.path().join("vmstat");
-    std::fs::write(&memory, "full avg10=0.00\n").unwrap();
-    std::fs::write(&io, "some avg10=0.00\n").unwrap();
+    let quiet = "some avg10=0.00 avg60=0.00\nfull avg10=0.00 avg60=0.00\n";
+    std::fs::write(&memory, "").unwrap();
+    std::fs::write(&io, quiet).unwrap();
     std::fs::write(&meminfo, "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n").unwrap();
-    std::fs::write(&root_memory, "full avg10=0.00\n").unwrap();
+    std::fs::write(&root_memory, quiet).unwrap();
     std::fs::write(&vmstat, "allocstall_normal 0\n").unwrap();
-    reconciler.seat_admission.finite_policy.psi_brake = Policy {
-        rules: vec![Rule { signal: Signal::MemoryFull, window: Window::Avg10,
-            threshold_millipercent: 100000, resume_millipercent: 99999 }],
-        sustained_ms: 1, resume_ms: 2000, freshness_ms: 1000,
-        ..Policy::default()
-    };
     *reconciler.seat_admission.pressure.lock().unwrap() =
         Some(fractal_runtime::resource_pressure::Observer::with_paths(
-            reconciler.seat_admission.finite_policy.psi_brake.clone(),
-            [memory, io, meminfo, root_memory, vmstat]).unwrap());
-    assert!(!reconciler.seat_admission.pressure_decision().unwrap().blocked);
+            Policy::default(), [memory.clone(), io, meminfo, root_memory, vmstat]).unwrap());
+    assert!(reconciler.seat_admission.sample_pressure().unwrap().blocked);
+    std::fs::write(&memory, quiet).unwrap();
     let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
     reconciler.seat_admission.pressure_samples.set(samples).unwrap();
     let reconciler = Arc::new(reconciler);
     let incremental = reconciler.incremental.clone();
-    let (entered, mut entering) = tokio::sync::mpsc::unbounded_channel();
+    let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, stalled) = std::sync::mpsc::channel();
     let observer = std::thread::spawn(move || {
-        incremental.observe(&StalledFeed { entered, release: stalled }).unwrap();
+        incremental.observe(&BlockingFeed { entered: Mutex::new(Some(entered)), release: stalled }).unwrap();
     });
-    let held_since = entering.recv().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    entering.await.unwrap();
 
     let sampler = reconciler.sample_resource_pressure();
     tokio::pin!(sampler);
-    let mut previous = None;
-    let mut count = 0;
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let (at, decision) = tokio::select! {
-                () = &mut sampler => panic!("sampler ended while the feed was stalled"),
-                sample = sampled.recv() => sample.unwrap(),
-            };
-            if let Some(previous) = previous {
-                assert!(at.duration_since(previous) <= Duration::from_millis(1000),
-                    "incremental observation stalled the independent sampling cadence");
-            }
-            previous = Some(at);
-            count += 1;
-            if count == 1 {
-                assert_eq!(decision.reason, Some(Reason::UnknownObservation));
-            } else if decision.blocked {
-                assert_eq!(decision.reason, Some(Reason::Recovering));
-            } else {
-                break;
-            }
+    let start = Instant::now();
+    let mut release = Some(release);
+    let mut observer = Some(observer);
+    for elapsed in (0..=125).step_by(5) {
+        if elapsed != 0 {
+            tokio::time::advance(Duration::from_secs(5)).await;
         }
-    }).await.expect("the real Brake did not recover while changes_since held the incremental lock");
-    assert!(count >= 10, "recovery requires continued periodic healthy observations");
-    assert!(held_since.elapsed() > Duration::from_millis(1000));
+        let (at, decision) = tokio::select! {
+            () = &mut sampler => panic!("sampler ended during reconciliation"),
+            sample = sampled.recv() => sample.unwrap(),
+        };
+        assert_eq!(at.duration_since(start), Duration::from_secs(elapsed));
+        assert!(!matches!(decision.reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::ObservationGap | ObservationCause::StaleDecision })));
+        if (5..125).contains(&elapsed) {
+            assert_eq!(decision.reason, Some(Reason::Recovering { remaining: (125 - elapsed) * 1000 }));
+        }
+        assert_eq!(reconciler.seat_admission.pressure_decision(), decision);
+        if elapsed == 90 {
+            release.take().unwrap().send(()).unwrap();
+            observer.take().unwrap().join().unwrap();
+        }
+        if elapsed == 125 {
+            assert!(!decision.blocked, "120 seconds of healthy samples must recover");
+        }
+    }
     assert!(reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
-
-    release.send(()).unwrap();
-    observer.join().unwrap();
-    // Only the next pass drains the signal and takes incremental's lock.
     reconciler.refresh_seat_admission_at(0);
     assert!(!reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
 }
