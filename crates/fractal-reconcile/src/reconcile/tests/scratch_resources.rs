@@ -7,9 +7,8 @@ fn lifecycle(outcome: &str, deadline: bool) {
     let store = Arc::new(Store::open_memory("node").unwrap());
     apply_source(&store, r#"version 2
 resource "scratch-wait" { kind "custom.st3.document-source" }
-mission "scratch-lifetime" state="ready" {
+mission "scratch-lifetime" state="ready" timeout="1h" {
  goal "Keep scratch until native final work."
- timeout "1h"
  step "work" {
   agentless
   gate "wait" { field "state" "resource/scratch-wait" is "ready" }
