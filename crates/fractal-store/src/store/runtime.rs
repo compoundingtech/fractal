@@ -1388,10 +1388,10 @@ mod schema_install_tests {
         graph_schema(&connection);
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let committed = events.clone();
-        connection.commit_hook(Some(move || {
+        smallclaims::sqlite::observe_transaction_resolution(&connection, move || {
             committed.lock().unwrap().push("commit".into());
             false
-        }));
+        }, || {}).unwrap();
         let observed = events.clone();
         connection.authorizer(Some(move |context: AuthContext<'_>| {
             let event = match context.action {
@@ -1419,7 +1419,6 @@ mod schema_install_tests {
         // authorizer must still see it, or the late-chunk guard could give false assurance.
         connection.execute_batch("BEGIN; PRAGMA foreign_keys=ON; ROLLBACK;").unwrap();
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-        connection.commit_hook(None::<fn() -> bool>);
         let events = events.lock().unwrap();
         let first = events
             .iter()
@@ -1593,10 +1592,10 @@ mod schema_install_tests {
         let counted = commits.clone();
         drop(
             crate::store::GraphStore::open_for_initialization_test(&whole, "node", Arc::new(FractalRuntime::default()), true, move |connection| {
-                connection.commit_hook(Some(move || {
+                smallclaims::sqlite::observe_transaction_resolution(connection, move || {
                     counted.fetch_add(1, Ordering::Relaxed);
                     false
-                }));
+                }, || {}).unwrap();
             })
             .unwrap(),
         );
@@ -1610,7 +1609,7 @@ mod schema_install_tests {
             let seen = Arc::new(AtomicUsize::new(0));
             // Every commit after the first `kept` rolls back, as if the process stopped there.
             let opened = crate::store::GraphStore::open_for_initialization_test(&path, "node", Arc::new(FractalRuntime::default()), true, move |connection| {
-                connection.commit_hook(Some(move || seen.fetch_add(1, Ordering::Relaxed) >= kept));
+                smallclaims::sqlite::observe_transaction_resolution(connection, move || seen.fetch_add(1, Ordering::Relaxed) >= kept, || {}).unwrap();
             });
             assert!(opened.is_err(), "the open cut after {kept} of {commits} commits still succeeded");
             drop(opened);
