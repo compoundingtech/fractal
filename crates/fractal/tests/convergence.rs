@@ -67,7 +67,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v43.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v44.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -85,7 +85,7 @@ fn keyed_only(kind: &str) -> bool {
 #[test]
 fn the_current_corpus_matches_the_registry() {
     assert_eq!(
-        include_str!("../../../fixtures/convergence/claims-v43.json"),
+        include_str!("../../../fixtures/convergence/claims-v44.json"),
         serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
         "regenerate the active corpus with the owning fractal-schema claim_corpus example"
     );
@@ -314,6 +314,26 @@ fn the_corpus_generates_valid_native_admission_inputs() {
     for id in written {
         assert!(replicated.contains_key(&id), "native admission evidence {id} must replicate");
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_work_rebound_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let kind = "work.rebound";
+    let spec = &corpus()[kind];
+    assert_eq!(serde_json::to_value(spec).unwrap(),
+        serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+    let input = world.claim_of(spec, 0).expect("generate work rebound evidence");
+    fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+    assert_eq!(input.fields["attempt"], 1);
+    assert!(input.fields["claimant"].as_str().unwrap().starts_with("agent/"));
+    assert_ne!(input.fields["from_incarnation"], input.fields["to_incarnation"]);
+    assert!(!input.fields["session_id"].as_str().unwrap().is_empty());
+    assert_eq!(input.fields["harness"], "codex");
+    let claim = world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    assert!(claims(&world.oracle).contains_key(&claim.id), "work rebound evidence must replicate");
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -1089,6 +1109,22 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == "work.rebound" {
+            let id = self.fresh("rebound");
+            return Some(ClaimInput {
+                subject: self.subject_of("step-run", index)?,
+                kind: spec.kind.clone(), actor: None,
+                fields: BTreeMap::from([
+                    ("attempt".into(), json!(1)),
+                    ("claimant".into(), json!(self.subject_of("agent", index)?)),
+                    ("from_incarnation".into(), json!(format!("{id}-before"))),
+                    ("to_incarnation".into(), json!(format!("{id}-after"))),
+                    ("session_id".into(), json!(format!("{id}-native-session"))),
+                    ("harness".into(), json!("codex")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(id),
+            });
+        }
         if spec.kind == "custom.client.observation-minute" {
             let source = "person/operator/device/phone";
             let start_ms = (self.clock(index).max(60_000) as u64 / 60_000 - 1) * 60_000;
@@ -2245,7 +2281,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 /// are historical and recorded in fixtures/convergence/README.md.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v43 seed {seed}: retired={}", outcome.trimmed);
+    eprintln!("convergence corpus v44 seed {seed}: retired={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2453,7 +2489,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v43.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v44.json"
         }))
         .unwrap(),
     )
