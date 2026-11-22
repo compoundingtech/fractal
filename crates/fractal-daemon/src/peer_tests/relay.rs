@@ -630,7 +630,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .unwrap();
         async move {
             backend
-                .receive("fern", fleet, &exchange, None, Default::default(), None)
+                .receive("fern", fleet, &exchange, None, Default::default(), None, None)
                 .await
                 .unwrap()
         }
@@ -778,7 +778,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .export_replication_exchange(fleet, &ReplicationInventory::default())
             .unwrap();
         backend
-            .receive(names[other], fleet, &exchange, None, Default::default(), None)
+            .receive(names[other], fleet, &exchange, None, Default::default(), None, None)
             .await
             .unwrap();
         assert!(
@@ -797,7 +797,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .unwrap()
             .len();
         backend
-            .receive(names[other], fleet, &exchange, None, Default::default(), None)
+            .receive(names[other], fleet, &exchange, None, Default::default(), None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -3554,6 +3554,7 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
             Some(Duration::from_millis(10)),
             smallclaims::replication::ReplicationCarrier::Fabric,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3614,7 +3615,7 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
         before + 1
     );
     backend
-        .receive("source", fleet, &exchange, None, Default::default(), None)
+        .receive("source", fleet, &exchange, None, Default::default(), None, None)
         .await
         .unwrap();
     let (success, failure) = store.replication_peer_transport("source");

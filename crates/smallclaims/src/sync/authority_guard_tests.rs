@@ -105,6 +105,7 @@ impl Backend for GuardBackend {
         _trip: Option<Duration>,
         _carrier: crate::replication::ReplicationCarrier,
         _authenticated_member_key: Option<&str>,
+        _deadline_unix_ms: Option<u128>,
     ) -> Result<ReplicationReceiveResponse> {
         unreachable!()
     }

@@ -355,6 +355,18 @@ pub struct ReplicationReceiveRequest {
     pub authenticated_member_key: Option<String>,
 }
 
+/// Local receive work checks this only before its first receipt transaction begins.
+/// Once receipt writes begin, the transaction and follow-up phases finish normally.
+pub fn check_receive_deadline(deadline_unix_ms: Option<u128>) -> Result<(), crate::error::Error> {
+    if deadline_unix_ms.is_some_and(|deadline| crate::store::now_ms() >= deadline) {
+        return Err(crate::error::Error::new(
+            "replication-overloaded",
+            "the replication receive answer deadline elapsed",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplicationReceiveResponse {
     pub receipt: ReplicationReceipt,
