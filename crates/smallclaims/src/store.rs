@@ -1005,6 +1005,17 @@ impl Store {
         self.connection.observe_commits(callback)
     }
 
+    /// Observe committed mutations of declared main-database tables. Native coverage loss
+    /// and DDL invalidate all dependencies; no-op and rolled-back loans do not evaluate the
+    /// callback. Lifetime and registration ordering match [`Self::observe_commits`].
+    pub fn observe_tables(
+        &self,
+        tables: &'static [&'static str],
+        callback: impl Fn(&Connection) + Send + Sync + 'static,
+    ) -> CommitObserver {
+        self.connection.observe_tables(tables, callback)
+    }
+
     /// Explicitly attach one bounded transaction-owned source adapter. This covers queued
     /// batches and managed lent-writer transactions before commit; it neither installs views
     /// nor certifies source coverage. See WriterConnection::install_transaction_finalizer.
