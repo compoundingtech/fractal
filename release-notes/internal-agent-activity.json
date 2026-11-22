@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose paged internal agent activity with explicit completeness evidence",
+  "replay": {"status": "none", "detail": "Activity is derived from existing agent declarations and authoritative actual runtime evidence; no new claims are written."},
+  "schema": {"status": "none", "detail": "No authoritative storage schema or client-v0 contract changes."},
+  "rules": {"status": "changed", "detail": "Inventory rows identify live incarnations using their own runtime and workspace observations, never cross-origin merged actual fields. A named end matches that incarnation; an unnamed end matches only the observing host. Different newer incarnations do not implicitly end older ones, which carry advisory superseded_by metadata. Unattributed evidence remains incomplete. No known live owner is not proof of filesystem or runtime absence."},
+  "compatibility": {"status": "changed", "detail": "The internal route and CLI return one row per live incarnation: agent id values may repeat, incarnation_id is required on complete rows, superseded_by is optional, and incomplete rows carry nullable incarnation_id and host. No client-v0 or generated client changes."},
+  "downtime": {"status": "none", "detail": "No planned downtime."},
+  "manual": {"status": "changed", "detail": "Use fractal agents activity --json with optional --limit, --cursor, --min-cut and --host. Accumulate all pages and evaluate completeness on the last page. min_cut is local store progress, not replication freshness. The page limit bounds the combined complete and incomplete row count, not encoded bytes."},
+  "recovery": {"status": "none", "detail": "The command is read-only and leaves existing agent lifecycle operations unchanged."}
+}

@@ -3044,6 +3044,27 @@ enum AgentsCommand {
     Ls(AgentsArgs),
     /// Group operational agents beneath the mission runs that own them.
     Tree(AgentsArgs),
+    /// Print one raw internal agent-incarnation activity page as a JSON envelope.
+    ///
+    /// Accumulate the entire page chain, then evaluate complete on the last response.
+    /// Cursors are opaque and unsigned: a final complete page does not prove earlier
+    /// pages were consumed. With --host, unknown-host agents remain incomplete.
+    /// Rows retain older live incarnations with an advisory superseded_by field;
+    /// absence means no known live owner, not proof of filesystem/runtime absence.
+    Activity {
+        /// Maximum total number of incarnation rows and incomplete entries (1-200).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Continue with the opaque cursor from the previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Require this local store cut; this does not guarantee replication freshness.
+        #[arg(long)]
+        min_cut: Option<u64>,
+        /// Select this exact host ID, retaining unknown-host agents as incomplete.
+        #[arg(long)]
+        host: Option<String>,
+    },
     /// Show one exact agent, including its owner and operational annotation.
     Show {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
