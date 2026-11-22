@@ -67,7 +67,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v43.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v44.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -85,7 +85,7 @@ fn keyed_only(kind: &str) -> bool {
 #[test]
 fn the_current_corpus_matches_the_registry() {
     assert_eq!(
-        include_str!("../../../fixtures/convergence/claims-v43.json"),
+        include_str!("../../../fixtures/convergence/claims-v44.json"),
         serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
         "regenerate the active corpus with the owning fractal-schema claim_corpus example"
     );
@@ -2281,7 +2281,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 /// are historical and recorded in fixtures/convergence/README.md.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v43 seed {seed}: retired={}", outcome.trimmed);
+    eprintln!("convergence corpus v44 seed {seed}: retired={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2489,7 +2489,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v43.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v44.json"
         }))
         .unwrap(),
     )
