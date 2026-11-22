@@ -273,9 +273,10 @@ fn writes_main_sequence(sql: &str) -> bool {
     let mut tokens = Tokens(sql);
     let mut depth = 0usize;
     while let Some(token) = tokens.next() {
+        if matches!(token, Cow::Owned(_)) { continue; }
         if token == "(" { depth += 1; continue; }
         if token == ")" { depth = depth.saturating_sub(1); continue; }
-        if depth != 0 || matches!(token, Cow::Owned(_)) { continue; }
+        if depth != 0 { continue; }
         let update = token.eq_ignore_ascii_case("UPDATE");
         let insert = token.eq_ignore_ascii_case("INSERT") || token.eq_ignore_ascii_case("REPLACE");
         let delete = token.eq_ignore_ascii_case("DELETE");
@@ -500,7 +501,7 @@ mod tests {
         for sql in [
             "UPDATE sqlite_sequence SET seq=seq+1 WHERE name='claims'",
             "UPDATE OR FAIL main.\"sqlite_sequence\" SET seq=seq+1 WHERE name='claims'",
-            "WITH input(v) AS(SELECT 1)UPDATE [main].[sqlite_sequence] SET seq=seq+(SELECT v FROM input) WHERE name='claims'",
+            "WITH input(v) AS(SELECT 1 WHERE '(' IS NOT NULL)UPDATE [main].[sqlite_sequence] SET seq=seq+(SELECT v FROM input) WHERE name='claims'",
         ] {
             let before = writer.committed_index.load(Ordering::Acquire);
             writer.write().execute_batch(sql).unwrap();
