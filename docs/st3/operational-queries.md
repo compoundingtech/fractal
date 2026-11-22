@@ -80,6 +80,39 @@ and `client-v0.schema.json`, so this route does not change those inputs or outpu
 Their regeneration command is `cargo run --locked -p fractal-client-codegen`;
 it also invokes `rustfmt` internally. No generator execution is needed for this route.
 
+## Internal agent activity
+
+```sh
+fractal agents activity --json [--limit N] [--cursor C] [--min-cut N] [--host ID]
+```
+
+This command reads one page from `GET /v1/internal/agents/activity` and prints its
+raw JSON envelope, including pagination and completeness metadata. It does not
+expand agent cards or follow cursors automatically. `--min-cut` sends `min_cut`;
+`--host` selects rows on that exact host plus every row whose host is unknown.
+Rows with no actual, no origin, or indeterminate authority are always included as
+incomplete under `--host`; only rows with a known, different host are excluded.
+Continue with the returned opaque cursor and unchanged selection options.
+The native page cache retains the same snapshot cut across those pages.
+
+Activity status reads actual `status` using the existing `AgentState` values:
+`desired`, `starting`, `running`, `waiting`, `down`, `stopped`, `failed`,
+`suspended`, and `retired`. Unrecognized values become `unknown` with the original
+value in `status_raw`; missing status becomes `unknown` without `status_raw`.
+These are not the harness's ready/idle/working states.
+The workspace is the actual absolute filesystem path on the owning host,
+exactly as observed: it is not a URI, a local checkout path, or a reconstructed
+path from the desired declaration.
+
+Incomplete reasons are `no-actual`, `indeterminate-authority`, `missing-workspace`,
+and `missing-host`. Missing or ambiguous evidence is not proof of inactivity.
+Page through `next_cursor` until it is null, then evaluate `complete` on that last
+page. It is true only there, when the entire cut-bound fold has no incomplete
+evidence; it certifies the whole selection at that cut, not merely the last page.
+Earlier pages always report false, even if their rows have no omissions.
+Host-filtered completeness covers that host plus unknown-host evidence, not the
+whole fleet. This is an internal read, not a client-v0 operation.
+
 ## Single-subject status reads
 
 `GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain
