@@ -72,7 +72,12 @@ test('strict agent decoders preserve optional model drift contract fields', asyn
             // Nullable fields use the shared Option codec: missing and null both encode as null.
             assert.equal(encoded.declared_model, wire.declared_model ?? null);
             if (wire.model_drift) {
-                assert.deepEqual(encoded.model_drift, wire.model_drift);
+                // Timestamp's shared UTC codec deliberately emits canonical millisecond precision.
+                assert.deepEqual(encoded.model_drift, {
+                    ...wire.model_drift,
+                    drift_since: wire.model_drift.drift_since === null ? null : new Date(wire.model_drift.drift_since).toISOString(),
+                    observed_at: wire.model_drift.observed_at === null ? null : new Date(wire.model_drift.observed_at).toISOString(),
+                });
             } else {
                 assert.equal(Object.hasOwn(encoded, 'model_drift'), false);
             }
