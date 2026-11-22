@@ -46,6 +46,7 @@ pub(crate) struct MutationState {
     missed_rows: AtomicBool,
     missed_authorizer: AtomicBool,
     ledger: Mutex<super::commit_scope::Ledger>,
+    resolution: Arc<Resolution>,
     replacing_scope: AtomicBool,
     missed_scope: AtomicBool,
     unknown_commit: AtomicBool,
@@ -91,14 +92,6 @@ struct Resolution {
 
 const RESOLUTION: &std::ffi::CStr = c"st3.transaction-resolution";
 
-fn resolution(connection: &Connection) -> Option<&Resolution> {
-    // SAFETY: this private name holds only the Arc<Resolution> transferred below.
-    // SQLite owns it until connection close; this borrow cannot outlive the connection.
-    unsafe {
-        (rusqlite::ffi::sqlite3_get_clientdata(connection.handle(), RESOLUTION.as_ptr())
-            as *const Resolution).as_ref()
-    }
-}
 
 unsafe extern "C" fn destroy_resolution(pointer: *mut std::ffi::c_void) {
     // SAFETY: SQLite releases exactly the strong reference transferred by ensure_resolution,
@@ -202,6 +195,7 @@ impl MutationState {
             missed_rows: AtomicBool::new(false),
             missed_authorizer: AtomicBool::new(false),
             ledger: Mutex::new(super::commit_scope::Ledger::default()),
+            resolution: ensure_resolution(connection)?,
             replacing_scope: AtomicBool::new(false),
             missed_scope: AtomicBool::new(false),
             unknown_commit: AtomicBool::new(false),
@@ -216,26 +210,23 @@ impl MutationState {
     fn install_scope(self: &Arc<Self>, connection: &Connection) {
         self.replacing_scope.store(true, Ordering::Relaxed);
         super::commit_scope::install_preupdate(connection, &self.ledger);
-        // Resolve registered connection-local work alongside the ledger: this slot swap
-        // replaces whatever fanout held the hooks before, and the dispatcher must not
-        // strand transaction-local hints that earlier owners installed. A failed hub
-        // keeps the ledger resolving and leaves those hints conservatively raised.
-        let resolution = ensure_resolution(connection).ok();
+        // Native slots resolve the ledger and the hub established at construction.
+        // Hook reinstalls cannot drop earlier connection-local work subscribers.
+        let commits = self.resolution.clone();
         let state = self.clone();
         let lease = ScopeLease(self.clone());
         connection.commit_hook(Some(move || {
             let _lease = &lease;
             state.ledger.lock().unwrap().committing();
-            resolution.as_ref().is_some_and(|resolution| commit_resolved(resolution))
+            commit_resolved(&commits)
         }));
         let state = self.clone();
         let lease = ScopeLease(self.clone());
+        let rollbacks = self.resolution.clone();
         connection.rollback_hook(Some(move || {
             let _lease = &lease;
             state.ledger.lock().unwrap().rollback();
-            if let Some(resolution) = resolution.as_ref() {
-                rollback_resolved(resolution);
-            }
+            rollback_resolved(&rollbacks);
         }));
         super::commit_scope::install_trace(connection, &self.ledger);
         self.replacing_scope.store(false, Ordering::Relaxed);
