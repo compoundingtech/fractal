@@ -13339,7 +13339,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|subject| subject.member.is_some() || subject.kind == "stop")
             .collect::<Vec<_>>();
         let mut live = Vec::new();
+        let scratch_pending = !run.deadline_at_unix_ms.is_some_and(|deadline| deadline <= now_ms())
+            && self.store.has_scratch_for_owner(&self.host, &run.subject, &run.generation)?;
+        let mut scratch_quiescent = true;
         for subject in &owned {
+            // Scratch destruction requires stronger confirmation than ordinary cleanup:
+            // retained seats and unknown historical/remote executions still hold custody.
+            if scratch_pending {
+                scratch_quiescent &= self.store.runtime_execution_quiescent(&subject.subject)?;
+            }
             // Historical incarnation confirmation is a supersession admission fence,
             // not a change to ordinary cleanup's observed-state lifecycle.
             let quiescent = if supersession_cleanup {
@@ -13433,6 +13441,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         if supersession_cleanup && live.is_empty() {
             self.record_fault(&run.subject, "cleanup-runtime-quiescence", Ok(()))?;
+        }
+        // Scratch has mission lifetime, not worker/Effect scope lifetime. Native finalization
+        // visits durable intents after execution quiescence, including acquisitions whose
+        // handle never reached the worker. A mission deadline deliberately skips final release;
+        // read-only inventory retains that terminal owner's evidence for operator review.
+        if scratch_pending && scratch_quiescent && live.is_empty() && shells_live.is_empty() {
+            let proof = crate::store::scratch_resources::ScratchReleaseProof::after_quiescence(
+                &run.subject, &run.generation,
+            );
+            self.finalize_mission_scratch(run, &proof)?;
+        } else if scratch_pending && !run.deadline_at_unix_ms.is_some_and(|deadline| deadline <= now_ms()) {
+            self.record_fault(&run.subject, "final-scratch-release", Err(anyhow::anyhow!(
+                "scratch final release skipped: execution quiescence unconfirmed; custody retained"
+            )))?;
         }
         let mut status = run.phase.strip_prefix("cleanup-").unwrap_or("failed");
         let mut changed = intake_stopped;

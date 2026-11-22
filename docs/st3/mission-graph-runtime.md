@@ -540,6 +540,15 @@ A run's outcome follows its normal work. A final step that fails after that work
 
 Dependencies cannot cross the normal and final phases. A final step does not make normal work optional.
 
+Mission-owned [dedicated scratch](resources.md#mission-owned-dedicated-scratch) also schedules
+native final-release work. After authored finalizers and confirmed native consumer quiescence,
+the host writer releases every acquisition intent for the exact owner generation before the
+terminal transition. Acquiring-step failure does not omit an intent whose handle was never
+returned. Release refusal retains custody and an inspectable cleanup fault; it does not replace
+the normal-work outcome. Mission deadline expiry still skips this final work. The bounded
+dry-run scratch inventory reports retained records for recovery, including deadline orphans;
+it never automatically reclaims them.
+
 Step revision protection adds to inherited mission protection. Direct agents in the step can revise that step subtree.
 
 ## Ordered queues
