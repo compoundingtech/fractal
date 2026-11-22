@@ -188,15 +188,14 @@ pub fn wrap(
                     .iter()
                     .position(|token| !matches!(token, Token::Piece(..)))
                     .map_or(tokens.len(), |offset| next + offset);
-                let word: Vec<(&str, Style, &Option<Arc<str>>, CopyRole, Option<usize>)> = tokens[next..end]
+                let word = tokens[next..end]
                     .iter()
                     .filter_map(|token| match token {
                         Token::Piece(text, style, link, role, column) => Some((text.as_str(), *style, link, *role, *column)),
                         _ => None,
-                    })
-                    .collect();
+                    });
                 next = end;
-                let word_width = word.iter().map(|(text, _, _, _, _)| self::width(text)).sum::<usize>();
+                let word_width = word.clone().map(|(text, _, _, _, _)| self::width(text)).sum::<usize>();
                 if used + word_width > width && line_has_words {
                     trim_trailing_space(&mut current, &mut used);
                     finish(&mut current, used, &mut lines, joining);
