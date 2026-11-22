@@ -570,13 +570,12 @@ pub fn link(doc: &mut Doc, prefix: &str, label: &str, subject: &str) {
         width: text::width(label) as u16,
         hit: Hit::Peek(subject.to_owned()),
     });
-    doc.line(Line::from(vec![
-        span(prefix.to_owned(), theme::dim()),
-        span(
-            label.to_owned(),
-            theme::fg(theme::BLUE).add_modifier(Modifier::UNDERLINED),
-        ),
-    ]));
+    let (first, _) = text::field_prefixes(prefix.trim_end(), text::width(prefix), theme::dim());
+    doc.lines(text::wrap(
+        &[text::run(label, theme::fg(theme::BLUE).add_modifier(Modifier::UNDERLINED))],
+        text::width(prefix) + text::width(label),
+        &first, &[], None,
+    ));
 }
 
 fn text_box(doc: &mut Doc, title: &str, drafts: &Drafts<'_>, placeholder: &str, width: usize) {
@@ -676,7 +675,7 @@ fn structured_request(
             ],
             inner,
             &[],
-            &[text::run("             ", theme::dim())],
+            &[text::decoration("             ", theme::dim())],
             None,
         ));
         card.blank();
@@ -701,7 +700,7 @@ fn structured_request(
                 &text::inline(reason, theme::text()),
                 inner,
                 &[text::run(" • ", theme::fg(theme::LAVENDER))],
-                &[text::run("   ", theme::dim())],
+                &[text::decoration("   ", theme::dim())],
                 None,
             ));
         }
@@ -720,8 +719,8 @@ fn structured_request(
                     text::run(format!("  {target}"), theme::dim()),
                 ],
                 inner,
-                &[text::run("   ", theme::dim())],
-                &[text::run("   ", theme::dim())],
+                &[text::decoration("   ", theme::dim())],
+                &[text::decoration("   ", theme::dim())],
                 None,
             ));
         }
@@ -828,7 +827,7 @@ fn structured_request(
             ],
             inner,
             &[],
-            &[text::run("            ", theme::dim())],
+            &[text::decoration("            ", theme::dim())],
             None,
         ));
         card.blank();
@@ -1066,7 +1065,7 @@ fn answer_row(
         }
     };
     let mut head = vec![
-        text::run(
+        text::decoration(
             if chosen { " ◉ " } else { " ○ " },
             fill(theme::strong(if chosen {
                 theme::ACCENT
@@ -1092,16 +1091,13 @@ fn answer_row(
         &head,
         inner,
         &[],
-        &[text::run("    ", fill(theme::dim()))],
+        &[text::decoration("    ", fill(theme::dim()))],
         None,
     );
     if chosen {
         for line in &mut wrapped {
             let used: usize = line.spans.iter().map(|span| span.width()).sum();
-            line.spans.push(Span::styled(
-                " ".repeat(inner.saturating_sub(used)),
-                Style::default().bg(theme::SURFACE0),
-            ));
+            line.spans.push(Span::decoration(" ".repeat(inner.saturating_sub(used)), Style::default().bg(theme::SURFACE0)));
         }
     }
     card.lines(wrapped);
@@ -1314,6 +1310,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     }
     // The step that waits on this ask, and what it is for: what answering lets go on.
     if let Some(blocked) = &item.blocked {
+        let (first, rest) = text::field_prefixes("waits", 9, theme::dim());
         card.lines(text::wrap(
             &[
                 text::run(blocked.step.clone(), theme::soft()),
@@ -1328,8 +1325,8 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 text::run(" — it continues once you answer", theme::dim()),
             ],
             inner,
-            &[text::run("waits    ", theme::dim())],
-            &[text::run("         ", theme::dim())],
+            &first,
+            &rest,
             None,
         ));
     }
@@ -1527,7 +1524,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                         &text::inline(goal, theme::text()),
                         inner,
                         &[run("◆ ", theme::fg(theme::LAVENDER))],
-                        &[run("  ", theme::dim())],
+                        &[text::decoration("  ", theme::dim())],
                         None,
                     ));
                 }
@@ -1634,7 +1631,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                     &[run(change.clone(), theme::fg(color))],
                     inner,
                     &[run(format!("{sign} "), theme::strong(color))],
-                    &[run("  ", theme::dim())],
+                    &[text::decoration("  ", theme::dim())],
                     None,
                 ));
             }
@@ -1828,8 +1825,8 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                         text::run(format!("  {target}"), theme::dim()),
                     ],
                     inner,
-                    &[text::run("   ", theme::dim())],
-                    &[text::run("   ", theme::dim())],
+                    &[text::decoration("   ", theme::dim())],
+                    &[text::decoration("   ", theme::dim())],
                     None,
                 ));
             }
@@ -2259,8 +2256,8 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
     let used = second.iter().map(Span::width).sum::<usize>();
     if used + text::width(actions) + 2 <= width {
         let column = width - text::width(actions);
-        second.push(span(" ".repeat(column - used), theme::dim()));
-        second.push(span(actions, theme::fg(theme::ACCENT)));
+        second.push(Span::decoration(" ".repeat(column - used), theme::dim()));
+        second.push(Span::decoration(actions, theme::fg(theme::ACCENT)));
         doc.targets.push(super::doc::Target {
             line: doc.lines.len(),
             column: column as u16,
@@ -2274,7 +2271,7 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
             &text::inline(&login_guidance(agent), theme::fg(theme::PERSON)),
             width,
             &[text::run("   ⚿ ", theme::fg(theme::PERSON))],
-            &[text::run("     ", theme::dim())],
+            &[text::decoration("     ", theme::dim())],
             None,
         ));
     }
@@ -2282,8 +2279,8 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
         doc.lines(text::wrap(
             &text::inline(progress, theme::text()),
             width,
-            &[text::run("   ", theme::dim())],
-            &[text::run("   ", theme::dim())],
+            &[text::decoration("   ", theme::dim())],
+            &[text::decoration("   ", theme::dim())],
             None,
         ));
     }
@@ -2542,7 +2539,7 @@ pub fn mission_detail(
             &text::inline(outcome, theme::text()),
             inner,
             &[run(" outcome ", theme::dim())],
-            &[run("         ", theme::dim())],
+            &[text::decoration("         ", theme::dim())],
             None,
         ));
     }
@@ -2553,7 +2550,7 @@ pub fn mission_detail(
             &text::inline(goal, theme::text()),
             inner,
             &[run("◆ ", theme::fg(theme::LAVENDER))],
-            &[run("  ", theme::dim())],
+            &[text::decoration("  ", theme::dim())],
             None,
         ));
     }
@@ -2590,6 +2587,7 @@ pub fn mission_detail(
             .collect(),
         messages: steps.messages,
         entries: steps.entries,
+        copy_blocks: steps.copy_blocks,
     };
     doc.card("steps", theme::OVERLAY1, false, steps, width);
     let mut agents = Doc::new();
@@ -2682,7 +2680,7 @@ pub fn mission_kdl(world: &World, id: Option<&str>, width: usize) -> Doc {
                 } else {
                     theme::fg(theme::SUBTEXT1)
                 };
-                doc.lines(text::wrap(&[run(line.to_owned(), style)], width, &[], &[run("    ", theme::dim())], None));
+                doc.lines(text::wrap(&[run(line.to_owned(), style)], width, &[], &[text::decoration("    ", theme::dim())], None));
             }
         }
         None => doc.wrap(
@@ -3194,7 +3192,7 @@ fn demo_banner(doc: &mut Doc, width: usize) {
             ),
             run(" ", theme::dim()),
         ],
-        &[run("            ", theme::dim())],
+        &[text::decoration("            ", theme::dim())],
         None,
     ));
     doc.blank();
@@ -3529,7 +3527,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 &[run(next.clone(), theme::text())],
                 width,
                 &[run("› ", theme::fg(theme::ACCENT))],
-                &[run("  ", theme::dim())],
+                &[text::decoration("  ", theme::dim())],
                 None,
             ),
             details.next_mission.as_ref(),
@@ -3546,7 +3544,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 &[run(item.clone(), theme::soft())],
                 width,
                 &[run("· ", theme::dim())],
-                &[run("  ", theme::dim())],
+                &[text::decoration("  ", theme::dim())],
                 None,
             ),
             details.queue_missions.get(index),
@@ -3564,7 +3562,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 &spans,
                 width,
                 &[run("· ", theme::dim())],
-                &[run("  ", theme::dim())],
+                &[text::decoration("  ", theme::dim())],
                 None,
             ));
         }
@@ -3658,7 +3656,7 @@ fn tree_listing(
             ])));
             open.push(folder.clone());
         }
-        let mut row = vec![span("  ".repeat(folders.len()), theme::dim())];
+        let mut row = vec![Span::decoration("  ".repeat(folders.len()), theme::dim())];
         row.extend(first);
         items.push(Item::Row {
             index: ids.len(),

@@ -839,6 +839,8 @@ impl WriterConnection {
             assert!(deadline_unix_ms.is_some(), "the writer thread lends its connection");
             crate::error::Error::new("replication-overloaded", "the replication receive answer deadline elapsed before writer admission")
         })?;
+        #[cfg(any(test, feature = "test-support"))]
+        work::record_writer_loan();
         drop(waiting);
         telemetry::acknowledged(enqueued.elapsed(), false);
         if let Some(operation) = &mut writer_operation {
@@ -2260,6 +2262,7 @@ pub mod work {
     static AUTOINDEX_ROWS: AtomicU64 = AtomicU64::new(0);
 
     thread_local! {
+        static WRITER_LOANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static THREAD_WORK: std::cell::Cell<SqliteWork> = const { std::cell::Cell::new(SqliteWork {
             statements:0,vm_steps:0,fullscan_steps:0,sorts:0,autoindex_rows:0,
         }) };
@@ -2286,6 +2289,16 @@ pub mod work {
         pub fn finish(self) -> SqliteWork {
             THREAD_WORK.with(std::cell::Cell::get) - self.before
         }
+    }
+
+    /// Writer loans acquired by this caller thread, including loans that execute no SQL.
+    /// Snapshot outside setup and verification queries to measure only the operation.
+    pub fn writer_loans() -> u64 {
+        WRITER_LOANS.with(std::cell::Cell::get)
+    }
+
+    pub(super) fn record_writer_loan() {
+        WRITER_LOANS.with(|count| count.set(count.get() + 1));
     }
 
     /// Everything counted so far, in every connection of this process.
