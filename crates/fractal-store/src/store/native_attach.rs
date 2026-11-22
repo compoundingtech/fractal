@@ -16,22 +16,6 @@ pub fn writer_required() -> FractalError {
     FractalError::new("native-attach-writer-required", "native attachment records require verified native attach admission")
 }
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h5d6244f528ee owner=fractal_store::store::native_attach TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS native_attach_requests ON claims(origin,json_extract(body,'$.fields.request_key'))
-         WHERE kind='custom.native-attach.prepared';
-         CREATE INDEX IF NOT EXISTS native_attach_agents ON claims(json_extract(body,'$.fields.candidate.agent'))
-         WHERE kind='custom.native-attach.committed';
-         CREATE INDEX IF NOT EXISTS native_attach_answers ON claims(json_extract(body,'$.fields.answer_id'))
-         WHERE kind='custom.native-attach.committed';
-         CREATE INDEX IF NOT EXISTS native_attach_processes ON claims(json_extract(body,'$.fields.process_key'))
-         WHERE kind='custom.native-attach.committed';
-         CREATE INDEX IF NOT EXISTS native_attach_sessions ON claims(json_extract(body,'$.fields.native_key'))
-         WHERE kind='custom.native-attach.committed';"
-    )?;
-    Ok(())
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
@@ -292,6 +276,51 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Mirror the inline lookup SQL: keeping literals at production call sites
+    // lets the large-value scanner classify each SQL sink.
+    const ONE_QUERY: &str = "SELECT id FROM claims WHERE subject=?1 AND kind=?2 AND NOT EXISTS
+        (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired') LIMIT 2";
+    const REQUEST_QUERY: &str = "SELECT id FROM claims WHERE kind='custom.native-attach.prepared' AND origin=?1 AND json_extract(body,'$.fields.request_key')=?2 LIMIT 1";
+    const AGENT_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.candidate.agent')=?1)";
+    const ANSWER_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.answer_id')=?1)";
+    const PROCESS_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.process_key')=?1)";
+    const NATIVE_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.native-attach.committed' AND json_extract(body,'$.fields.native_key')=?1)";
+
+    #[test]
+    fn opening_native_attach_store_reuses_existing_claim_indexes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        for _ in 0..2 {
+            let store = Store::open(&path, "node").unwrap();
+            let connection = store.readers.get();
+            let indexes: Vec<String> = connection.prepare(
+                "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='claims'"
+            ).unwrap().query_map([], |row| row.get(0)).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap();
+            assert!(indexes.iter().any(|name| name == "claims_kind_index"), "{indexes:?}");
+            assert!(!indexes.iter().any(|name| name.starts_with("native_attach_")), "{indexes:?}");
+
+            for query in [REQUEST_QUERY, AGENT_QUERY, ANSWER_QUERY, PROCESS_QUERY, NATIVE_QUERY] {
+                let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap();
+                let parameters = vec![None::<String>; statement.parameter_count()];
+                let plan = statement.query_map(rusqlite::params_from_iter(parameters), |row| row.get::<_, String>(3))
+                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert!(plan.iter().any(|step| step.starts_with("SEARCH claims USING INDEX ") && step.contains(" (kind=?")), "{query}: {plan:?}");
+                assert!(!plan.iter().any(|step| step.contains("SCAN claims") || step.contains("native_attach_")), "{query}: {plan:?}");
+            }
+            // Authority records already have a more selective subject-and-kind seek.
+            for kind in [PREPARED, ASK_BOUND, COMMITTED, "work.person-asked",
+                "custom.client.pairing-native-attach-answer-admitted"] {
+                let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {ONE_QUERY}")).unwrap();
+                let plan = statement.query_map(params!["custom/native-attach/test", kind], |row| row.get::<_, String>(3))
+                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert!(plan.iter().any(|step| step.starts_with("SEARCH claims USING INDEX ")
+                    && (step.contains(" (kind=?") || step.contains(" (subject=? AND kind=?"))), "{kind}: {plan:?}");
+                assert!(!plan.iter().any(|step| step.contains("SCAN claims") || step.contains("native_attach_")), "{kind}: {plan:?}");
+            }
+        }
+    }
 
     #[test]
     fn generic_append_cannot_forge_native_attach_authority() {
