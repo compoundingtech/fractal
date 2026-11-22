@@ -4947,93 +4947,6 @@
     "projection": "harnesses",
     "wakes_reconciler": false
   },
-  "harness.model-fallback.observed": {
-    "kind": "harness.model-fallback.observed",
-    "subjects": [
-      "agent"
-    ],
-    "fields": {
-      "cause": {
-        "value_type": "string",
-        "required": false,
-        "values": [
-          "transient",
-          "quota",
-          "auth",
-          "unknown"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "episode_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "from": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "incarnation_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "native_session": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "observation": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "applied",
-          "selected"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "observed_at_unix_ms": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "reason": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "native-retry-fallback",
-          "native-model-selection"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "source_event": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "to": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "same-subject-actor",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
-  },
   "harness.observed": {
     "kind": "harness.observed",
     "subjects": [
@@ -10268,12 +10181,6 @@
         "immutable": false,
         "reference": false
       },
-      "model_return_attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "operation": {
         "value_type": "string",
         "required": false,
@@ -10526,6 +10433,12 @@
         "immutable": false,
         "reference": false
       },
+      "exec_exited_at_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "exit_code": {
         "value_type": "integer",
         "required": false,
@@ -10582,6 +10495,12 @@
       },
       "shutdown_timeout_ms": {
         "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "start_operation": {
+        "value_type": "string",
         "required": false,
         "immutable": false,
         "reference": false
@@ -11803,6 +11722,86 @@
     "write_policy": "system-only",
     "cardinality": "state-transition",
     "projection": "step-runs",
+    "wakes_reconciler": true,
+    "source_kdl": [
+      "step"
+    ]
+  },
+  "step.execution-phase": {
+    "kind": "step.execution-phase",
+    "subjects": [
+      "step-run"
+    ],
+    "fields": {
+      "at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "attempt": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "exec": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "host": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "incarnation_id": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "phase": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "dispatched",
+          "received",
+          "admitted",
+          "exec-started",
+          "exec-exited",
+          "result-replicated",
+          "dispatch-stalled",
+          "execution-timeout"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "reason": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "start_operation": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "timeout_extension_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
     "wakes_reconciler": true,
     "source_kdl": [
       "step"

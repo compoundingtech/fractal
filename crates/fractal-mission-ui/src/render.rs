@@ -156,8 +156,8 @@ pub fn flow<'a>(
     text::wrap(
         &runs,
         width,
-        &[run("  ", palette.dim())],
-        &[run("  ", palette.dim())],
+        &[text::decoration("  ", palette.dim())],
+        &[text::decoration("  ", palette.dim())],
         None,
     )
 }
@@ -261,8 +261,12 @@ pub fn steps(
             None => NOBODY.into(),
         };
         let owner_padding = owner_column.saturating_sub(text::width(&owner));
+        let name = text::truncate(&step.name, name_width);
+        let name_padding = name_width.saturating_sub(name.chars().count());
+        let word_padding = 11usize.saturating_sub(word.chars().count());
+        let owner_style = if step.owner.is_some() { palette.soft() } else { fg(palette.waiting) };
         steps.line(Line::from(vec![
-            span(
+            Span::decoration(
                 if open {
                     glyphs.expanded
                 } else {
@@ -271,31 +275,20 @@ pub fn steps(
                 palette.dim(),
             ),
             span(format!("{glyph} "), strong(color)),
-            span(
-                format!(
-                    "{:<w$} ",
-                    text::truncate(&step.name, name_width),
-                    w = name_width
-                ),
-                palette.text(),
-            ),
-            span(format!("{:<11}", word), fg(color)),
-            span(
-                format!("{owner}{:owner_padding$} ", ""),
-                if step.owner.is_some() {
-                    palette.soft()
-                } else {
-                    fg(palette.waiting)
-                },
-            ),
+            span(format!("{name} "), palette.text()),
+            Span::decoration(" ".repeat(name_padding), palette.text()),
+            span(format!("{word}{}", if word_padding > 0 { " " } else { "" }), fg(color)),
+            Span::decoration(" ".repeat(word_padding.saturating_sub(1)), fg(color)),
+            span(format!("{owner} "), owner_style),
+            Span::decoration(" ".repeat(owner_padding), owner_style),
             span(step.age.clone(), palette.dim()),
         ]));
         if let Some(note) = &step.note {
             steps.lines(text::wrap(
                 &text::inline(note, palette.dim(), text_theme),
                 inner,
-                &[run("      ", palette.dim())],
-                &[run("      ", palette.dim())],
+                &[text::decoration("      ", palette.dim())],
+                &[text::decoration("      ", palette.dim())],
                 None,
             ));
         }
@@ -309,8 +302,8 @@ pub fn steps(
             steps.lines(text::wrap(
                 &text::inline(progress, palette.text(), text_theme),
                 inner,
-                &[run("      ", palette.dim())],
-                &[run("      ", palette.dim())],
+                &[text::decoration("      ", palette.dim())],
+                &[text::decoration("      ", palette.dim())],
                 None,
             ));
         }
@@ -322,7 +315,7 @@ pub fn steps(
                 .and_then(|metadata| metadata.nudged.as_deref())
         {
             steps.line(Line::from(vec![
-                span("      ", palette.dim()),
+                Span::decoration("      ", palette.dim()),
                 span(
                     format!("nudged {nudged} ago: idle holding it, nothing set to wake it"),
                     palette.soft(),
@@ -333,16 +326,17 @@ pub fn steps(
             let pad = "      ";
             let mut field = |label: &str, values: &[String], style: Style| {
                 for (index, value) in values.iter().enumerate() {
-                    let head = if index == 0 {
-                        format!("{pad}{label:<12}")
-                    } else {
-                        format!("{pad}{:<12}", "")
-                    };
+                    let (mut first, rest) = text::field_prefixes(
+                        if index == 0 { label } else { "" }, 12, palette.dim(),
+                    );
+                    first.insert(0, text::decoration(pad, palette.dim()));
+                    let [rest] = rest;
+                    let rest = [text::decoration(pad, palette.dim()), rest];
                     steps.lines(text::wrap(
                         &text::inline(value, style, text_theme),
                         inner,
-                        &[run(head, palette.dim())],
-                        &[run(format!("{pad}{:<12}", ""), palette.dim())],
+                        &first,
+                        &rest,
                         None,
                     ));
                 }
@@ -358,7 +352,7 @@ pub fn steps(
             steps.blank();
         }
     }
-    steps.line(Line::from(span("click a step to open it", palette.dim())));
+    steps.line(Line::from(span("click a step to open it", palette.dim())).decoration());
     steps
 }
 
