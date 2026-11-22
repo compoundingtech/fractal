@@ -593,3 +593,18 @@ report is a system-only once-per-run fact; neither its retention nor its schema 
 authority. Local-trim convergence, retained claim equality, oracle reader comparisons,
 person-authored claim preservation, and invalid/pending-record checks remain unchanged.
 
+## Native-session work lease continuity
+
+`claims-v42.json` adds the durable `work.rebound` evidence kind to main's v41
+registry. Versions 1 through 41 remain frozen. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v42.
+Rebound inputs identify an agent claimant, a positive attempt, distinct old and new harness
+incarnations, and the native session resumed by the new incarnation. The focused
+`the_corpus_generates_valid_work_rebound_inputs` regression checks the specification against
+the live registry, validates and admits the generated input, and replicates it to the oracle.
+Main's local-trim semantics remain unchanged: no shared checkpoint agreement, old-build
+excusal continuation, or historical never-trim expectations are reintroduced. Retained claim
+equality, oracle reader comparisons, person-authored claim preservation, invalid/pending-record
+checks, and retired-ledger sabotage coverage remain enforced.
+
