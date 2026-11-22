@@ -83,13 +83,12 @@ fn keyed_only(kind: &str) -> bool {
 }
 
 #[test]
-fn the_corpus_includes_every_registry_kind() {
-    for kind in fractal_schema::registry().claims.keys() {
-        assert!(
-            corpus().contains_key(kind),
-            "add {kind} to a versioned corpus"
-        );
-    }
+fn the_current_corpus_matches_the_registry() {
+    assert_eq!(
+        include_str!("../../../fixtures/convergence/claims-v42.json"),
+        serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
+        "regenerate the active corpus with the owning fractal-schema claim_corpus example"
+    );
 }
 
 #[test]
@@ -2258,8 +2257,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs retired a claim");
 }
 
-/// One fixed seed converges. Prior corpus characterizations are recorded in
-/// fixtures/convergence/README.md; the seeds' schedules are those of corpus v42.
+/// One fixed seed converges under member-local trim. Prior corpus characterizations
+/// are historical and recorded in fixtures/convergence/README.md.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
     eprintln!("convergence corpus v42 seed {seed}: retired={}", outcome.trimmed);
