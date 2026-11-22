@@ -80,6 +80,35 @@ and `client-v0.schema.json`, so this route does not change those inputs or outpu
 Their regeneration command is `cargo run --locked -p fractal-client-codegen`;
 it also invokes `rustfmt` internally. No generator execution is needed for this route.
 
+## Internal agent activity
+
+```sh
+fractal agents activity --json [--limit N] [--cursor C] [--min-cut N] [--host ID]
+```
+
+This command reads one page from `GET /v1/internal/agents/activity` and prints its
+raw JSON envelope, including pagination and completeness metadata. It does not
+expand agent cards or follow cursors automatically. `--min-cut` sends `min_cut`;
+`--host` restricts both the results and completeness to that exact host ID.
+Continue with the returned opaque cursor and unchanged selection options.
+The native page cache retains the same snapshot cut across those pages.
+
+Activity status reads actual `status` using the existing `AgentState` values:
+`desired`, `starting`, `running`, `waiting`, `down`, `stopped`, `failed`,
+`suspended`, and `retired`. Unrecognized values become `unknown` with the original
+value in `status_raw`; missing status becomes `unknown` without `status_raw`.
+These are not the harness's ready/idle/working states.
+The workspace is the actual absolute filesystem path on the owning host,
+exactly as observed: it is not a URI, a local checkout path, or a reconstructed
+path from the desired declaration.
+
+Incomplete reasons are `no-actual`, `indeterminate-authority`, `missing-workspace`,
+and `missing-host`. Missing or ambiguous evidence is not proof of inactivity.
+`complete` is true only on the final page when no page in that traversal has
+incomplete evidence; an earlier page with no local omissions is not a complete
+answer. Host-filtered completeness applies only to the selected host, not the
+whole fleet. This is an internal read, not a client-v0 operation.
+
 ## Single-subject status reads
 
 `GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain

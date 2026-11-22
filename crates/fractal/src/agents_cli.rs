@@ -1471,6 +1471,25 @@ async fn run_agent_inspection(
     let (args, tree) = match command {
         AgentsCommand::Ls(args) => (args, false),
         AgentsCommand::Tree(args) => (args, true),
+        AgentsCommand::Activity { limit, cursor, min_cut, host } => {
+            let mut query = Vec::new();
+            if let Some(limit) = limit {
+                query.push(format!("limit={limit}"));
+            }
+            if let Some(cursor) = cursor {
+                query.push(format!("cursor={}", urlencoding::encode(&cursor)));
+            }
+            if let Some(min_cut) = min_cut {
+                query.push(format!("min_cut={min_cut}"));
+            }
+            if let Some(host) = host {
+                query.push(format!("host={}", urlencoding::encode(&host)));
+            }
+            let response: Value = cli_client(endpoint)
+                .get(&format!("/v1/internal/agents/activity?{}", query.join("&")))
+                .await?;
+            return print_value(&response, true);
+        }
         AgentsCommand::Show { subject, all } => {
             let subject = normalize_agent_subject(&subject);
             let response = generated_client(endpoint, None)?
