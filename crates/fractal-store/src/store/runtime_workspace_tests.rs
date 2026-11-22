@@ -91,7 +91,7 @@ fn unsupported_runtime_workspace_readers_refuse_signed_but_retain_envelopes() {
             let (_, source, readers) = fleet(&[("older", &older_key), ("signed", &signed_key)]);
             let older = &readers[0];
             let signed_reader = &readers[1];
-            // The first append by an agent also publishes its key.granted delegation
+            // The first append by an agent publishes a principal.key-granted delegation
             // in a separate envelope. Establish that supported evidence first, so the
             // exchange below contains only the deliberately unsupported observation.
             source.ensure_principal_key("agent/a.worker").unwrap();
@@ -141,8 +141,22 @@ fn unsupported_runtime_workspace_readers_refuse_signed_but_retain_envelopes() {
             };
 
             // Use real released, individually signed claims, not a legacy admission shim.
+            // Release deliberately keeps the newest envelope (globally and per writer).
+            // Seal a later supported observation on the source only; do not include it in
+            // the already captured exchange used to exercise the older reader below.
+            started(&source, json!({"runtime_workspace":1}));
+            source.replication_snapshot().unwrap();
             while !source.sign_own_claims().unwrap().done {}
-            while !source.release_envelopes(0).unwrap().done {}
+            let mut released = 0;
+            loop {
+                let report = source.release_envelopes(0).unwrap();
+                assert!(report.waiting.is_none(), "{report:?}");
+                released += report.released;
+                if report.done {
+                    break;
+                }
+            }
+            assert_eq!(released, 1);
             let signed = source.signed_envelopes(&[identity]).unwrap();
             assert_eq!(signed.len(), 1);
             assert_eq!(signed[0].claims.len(), 1);
