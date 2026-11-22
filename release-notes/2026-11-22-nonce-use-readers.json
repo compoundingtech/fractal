@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "Replay rules are unchanged. A nonce use counts only for a claim the store still holds, as before: a forgotten claim lost its use row, and its link, which stays until the link sweep, is not counted. Measured on a copy of a real member: 3,227,325 use rows and 3,227,325 nonce links, equal pair for pair. recheck_claim_verdicts keeps nonce links when it judges every claim again, since from version 29 they may be the only copy of a use."
+    "detail": "Replay rules are unchanged. A nonce use counts only for a claim the store still holds, as before: a forgotten claim lost its use row, and its link, which stays until the link sweep, is not counted. Measured on a copy of a real member: 3,227,325 use rows and 3,227,325 nonce links, equal pair for pair. recheck_claim_verdicts keeps nonce links when it judges every claim again, since from version 29 they may be the only copy of a use. A held claim's nonce link with no use row now counts as a use, as the replay rule intends. Such a link would mean a signature stored before its claim, which no path does today (signatures are stored in their claim's own transaction): on the member copy there were none."
   },
   "compatibility": {
     "status": "none",

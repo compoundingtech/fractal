@@ -226,15 +226,18 @@ mod tests {
         std::mem::take(&mut *CAPTURED.lock().unwrap())
     }
 
-    /// The plan lines that walk all of claim_verdict_links, for each statement that names it.
+    /// The plan lines that walk all of the links, for each statement that names them, directly or
+    /// through the view that adds the interned edges (the nonce use readers read that).
     fn link_scans(store: &Store, statements: &[String]) -> Vec<String> {
         let reader = store.readers.get();
         let mut scans = Vec::new();
-        for sql in statements.iter().filter(|sql| sql.contains("claim_verdict_links")) {
+        let links = |sql: &&String| sql.contains("claim_verdict_links") || sql.contains("claim_verdict_dependency_links");
+        for sql in statements.iter().filter(links) {
             let Ok(mut plan) = reader.prepare(&format!("EXPLAIN QUERY PLAN {sql}")) else { continue };
             let lines = plan.query_map([], |row| row.get::<_, String>(3)).unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            scans.extend(lines.into_iter().filter(|line| line.starts_with("SCAN claim_verdict_links"))
+            scans.extend(lines.into_iter()
+                .filter(|line| line.starts_with("SCAN claim_verdict_links") || line.starts_with("SCAN claim_verdict_dependency_edges"))
                 .map(|line| format!("{line}  <=  {sql}")));
         }
         scans
