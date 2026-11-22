@@ -434,6 +434,21 @@ Blocked memberships retain a tagged pressure reason (signal/value/threshold, rec
 remaining, or unknown-observation cause). The existing `fractal resources show` reason and admission
 journal include its details without changing the client-v0 schema.
 
+Memory and I/O PSI are the maximum per signal/window over protected cgroups, not host PSI
+and not a sum. `psiBrake.protectedCgroups` configures cgroup-root-relative absolute paths;
+the empty default discovers the daemon's own cgroup, `system.slice`, and its user manager's
+interactive `app.slice`. `psiBrake.excludedCgroups` defaults to `app-lanes.slice` and
+`gate.slice`; basename exclusions match child cgroup names, and absolute exclusions identify
+specific cgroup-root-relative paths. Native jobs therefore cannot trip the brake solely by
+throttling themselves. The independent host `memoryAvailableFloorBytes` signal remains enabled.
+
+PSI aggregates descendants. When a protected ancestor contains excluded jobs, each sample
+re-enumerates its immediate non-job children rather than reading the contaminated ancestor.
+Enumeration is bounded to one level and 256 entries; an unrepresentable deeper exclusion or
+exceeded bound closes admission with a named reason. A child proven to have disappeared
+between enumeration and reading is skipped. Other unreadable protected pressure files close
+admission and retain the failing path. Pressure reasons identify the source cgroup and value.
+
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start
 claim), and its reason shows where admission reasons show (`fractal agents show`'s `ADMISSION` line, the
