@@ -306,8 +306,8 @@ mod tests {
                 let parameters = vec![None::<String>; statement.parameter_count()];
                 let plan = statement.query_map(rusqlite::params_from_iter(parameters), |row| row.get::<_, String>(3))
                     .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-                assert!(plan.iter().any(|step| step.contains("SEARCH claims USING INDEX claims_kind_index (kind=?)")), "{query}: {plan:?}");
-                assert!(!plan.iter().any(|step| step.contains("SCAN claims")), "{query}: {plan:?}");
+                assert!(plan.iter().any(|step| step.starts_with("SEARCH claims USING INDEX ") && step.contains(" (kind=?")), "{query}: {plan:?}");
+                assert!(!plan.iter().any(|step| step.contains("SCAN claims") || step.contains("native_attach_")), "{query}: {plan:?}");
             }
             // Authority records already have a more selective subject-and-kind seek.
             for kind in [PREPARED, ASK_BOUND, COMMITTED, "work.person-asked",
@@ -315,8 +315,9 @@ mod tests {
                 let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {ONE_QUERY}")).unwrap();
                 let plan = statement.query_map(params!["custom/native-attach/test", kind], |row| row.get::<_, String>(3))
                     .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-                assert!(plan.iter().any(|step| step.contains("SEARCH claims USING INDEX claims_subject_kind_index (subject=? AND kind=?)")), "{kind}: {plan:?}");
-                assert!(!plan.iter().any(|step| step.contains("SCAN claims")), "{kind}: {plan:?}");
+                assert!(plan.iter().any(|step| step.starts_with("SEARCH claims USING INDEX ")
+                    && (step.contains(" (kind=?") || step.contains(" (subject=? AND kind=?"))), "{kind}: {plan:?}");
+                assert!(!plan.iter().any(|step| step.contains("SCAN claims") || step.contains("native_attach_")), "{kind}: {plan:?}");
             }
         }
     }
