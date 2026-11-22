@@ -600,6 +600,11 @@ impl Slot {
     pub fn get(&self) -> Option<&Arc<GraphStore>> {
         self.0.get()
     }
+
+    pub(super) fn set(&self, shard: Arc<GraphStore>) -> anyhow::Result<()> {
+        self.0.set(shard)
+            .map_err(|_| anyhow::anyhow!("the graph already has a messages shard"))
+    }
 }
 
 /// The messages shard the graph opened, if it opened one.
@@ -643,11 +648,7 @@ pub fn open(graph: &Arc<super::Store>, root: &Path) -> anyhow::Result<Arc<GraphS
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     shard.set_member_key(key)?;
-    graph
-        .extension::<Slot>()
-        .0
-        .set(shard.clone())
-        .map_err(|_| anyhow::anyhow!("the graph already has a messages shard"))?;
+    graph.extension::<Slot>().set(shard.clone())?;
     graph.fractal.mail_objective_inputs.invalidate();
     Ok(shard)
 }
