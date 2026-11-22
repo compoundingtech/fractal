@@ -78,10 +78,20 @@ Receipts retain the evidence and learning decision. Estimates use per-key p95 wi
 maximum; host `profileReadiness` attestations (`nixPerBuildCgroups`, `ioAccounting`,
 `diskMeasurement`) must all be true before learning can lower declared seeds.
 
-On Linux, `psiBrake` observes every five seconds: memory `full avg60 >= 1%` or IO
-`some avg60 >= 25%` sustained for 60 seconds pauses new admissions without killing holders.
-Resume requires both memory below 0.5% and IO below 10% for 120 seconds. Missing, malformed or
-stale observations hold admission rather than count as healthy. Darwin admission is unchanged.
+On Linux, `psiBrake` samples every quarter of `freshnessMs` (2.5 seconds by default).
+Memory PSI comes from the user manager's aggregate `app.slice/app-lanes.slice`, which contains
+finite executions and laned seats, not host-wide memory PSI. This avoids blocking unrelated
+work when a capped service stalls against its own `memory.high`; no scan of other services or
+inference from their `memory.events` is needed. IO PSI remains host-wide.
+Lane memory `full avg60 >= 1%` **or** host `MemAvailable < memoryAvailableFloorBytes`
+sustained for 60 seconds pauses new admissions without killing holders. The optional floor
+defaults to the absolute value **2147483648 bytes (2 GiB)**, not a percentage.
+IO `some avg60 >= 25%` independently trips after the same sustained interval.
+Resume requires lane memory below 0.5%, `MemAvailable >= memoryAvailableFloorBytes`, and IO
+below 10% continuously for 120 seconds. Missing, malformed or stale required lane PSI,
+meminfo or IO observations hold admission rather than count as healthy, including a missing
+lane cgroup. Existing policies remain valid; signal/window thresholds and timers remain
+configurable. Darwin admission is unchanged.
 
 `recovery` requires an operator-declared `recoveryCapable` profile and a measured filesystem
 observation. At most one recovery execution holds the host recovery slot. It bypasses only
