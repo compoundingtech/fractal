@@ -101,6 +101,17 @@ impl Store {
         output: &mut impl Write,
         bodies: Option<&crate::message_body::Bodies>,
     ) -> Result<Header> {
+        self.write_backup_with_snapshot(output, bodies, |_, _| Ok(()))
+    }
+
+    /// Inspect the exact pinned connections before reading archive data. Streaming
+    /// callers use this to guard all attached database WALs through backpressure.
+    pub fn write_backup_with_snapshot(
+        &self,
+        output: &mut impl Write,
+        bodies: Option<&crate::message_body::Bodies>,
+        mut pinned: impl FnMut(&Connection, Option<&Connection>) -> Result<()>,
+    ) -> Result<Header> {
         // The bodies this member owns that its claims name, checked once here so the header can
         // say whether the archive carries any, and written again below inside the snapshot.
         let mut owned: Vec<(String, String, String)> = Vec::new();
@@ -170,9 +181,13 @@ impl Store {
                         if max_batch_rowid(&shard.readers.get())? > seeded_through {
                             return Ok(None);
                         }
+                        pinned(&self.readers.get(), Some(&shard.readers.get()))?;
                         self.write_pinned_backup(output, bodies, &owned, Some(&**shard)).map(Some)
                     }),
-                    _ => self.write_pinned_backup(output, bodies, &owned, None).map(Some),
+                    _ => {
+                        pinned(&self.readers.get(), None)?;
+                        self.write_pinned_backup(output, bodies, &owned, None).map(Some)
+                    }
                 }
             })?;
             if let Some(header) = result {

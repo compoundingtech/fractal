@@ -82,9 +82,11 @@ match the archive header; no new archive version is required. `writer_id` identi
 the source's persisted writer/member identity, not a physical database UUID, and
 `max_store_index` identifies the snapshot's highest local store index. Start and finish
 times are UTC timestamps; WAL growth is measured in bytes. `peak_wal_growth` is
-the maximum sampled sum of growth across the graph and messages-shard WALs.
+the maximum sampled sum of growth across all database WALs pinned by the export.
 `peak_wal_growth_by_file` reports each WAL's individual peak under logical keys
-`graph` and `shards/messages` (only opened shards are listed).
+`graph`, `graph/blob_file`, `shards/messages` and `shards/messages/blob_file`.
+Other attached databases use their SQLite attachment names under the store prefix.
+Only opened databases are listed; aliases of the same physical file are counted once.
 
 Live stdout mode requests `/v1/backup?stream=true&max_wal_growth=4294967296`.
 The daemon sends records through a bounded channel without an archive tempfile.
@@ -94,9 +96,10 @@ query and prepare a temporary archive instead. Offline stdout export is unaffect
 Unlike file mode, a slow consumer keeps the source snapshot pinned; concurrent writes
 can grow the WALs until the consumer finishes. `--max-wal-growth BYTES` limits
 the **sum** of nonnegative growth relative to the starting sizes of every pinned
-database's WAL (graph and opened messages shard), default `4294967296` (4 GiB).
-The guard uses the opened graph and shard paths, including when `store_dir` differs
-from the product state directory; an unopened shard contributes no WAL.
+database's WAL, including graph/shard blob attachments, default `4294967296` (4 GiB).
+The guard enumerates `PRAGMA database_list` on the exact pinned graph and shard
+connections before reading archive data. This respects relocated `store_dir` paths
+and every attached database, rather than reconstructing filenames from product state.
 Sizes are sampled once per second and before the end record; this is not a hard
 filesystem quota. Exceeding the limit aborts export, leaving no successful receipt.
 Cancellation releases the snapshot and the single live-export slot after

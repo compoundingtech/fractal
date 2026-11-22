@@ -471,10 +471,9 @@ pub async fn backup_export(
     if query.stream {
         return Ok(backup_export::direct_response(
             permit,
-            backup_export::database_paths(&state.store),
             query.max_wal_growth.unwrap_or(4 * 1024 * 1024 * 1024),
-            move |mut output| {
-                state.store.write_backup_with_bodies(&mut output, Some(&bodies))?;
+            move |mut output, pinned| {
+                state.store.write_backup_with_snapshot(&mut output, Some(&bodies), pinned)?;
                 Ok(())
             },
         ));
