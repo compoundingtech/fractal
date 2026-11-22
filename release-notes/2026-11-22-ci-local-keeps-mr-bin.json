@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the dev shell's pinned FRACTAL_MR_BIN through ci-local's environment scrub, so a locally signed run compiles the worktree lease's mr path in and its lease tests pass as they do in CI.",
+  "replay": {"status": "none", "detail": "No runtime changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Local test runner only."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}
