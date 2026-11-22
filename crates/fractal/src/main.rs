@@ -15572,16 +15572,16 @@ fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
 
 fn agent_model_line(agent: &fractal_client::Agent) -> String {
     use std::fmt::Write as _;
-    let drift = agent.extra.get("model_drift");
-    let declared = agent.extra.get("declared_model").and_then(Value::as_str).unwrap_or("unknown");
-    let state = drift.and_then(|value| value.get("state")).and_then(Value::as_str).unwrap_or("unknown");
+    let drift = agent.model_drift.as_ref();
+    let declared = agent.declared_model.as_deref().unwrap_or("unknown");
+    let state = drift.map(|value| value.state.as_str()).unwrap_or("unknown");
     let mut line = format!("declared {declared} · live {} · {state}", agent.live_model.as_deref().unwrap_or("unknown"));
-    if let Some(since) = drift.and_then(|value| value.get("drift_since")).and_then(Value::as_str) {
+    if let Some(since) = drift.and_then(|value| value.drift_since.as_deref()) {
         let _ = write!(line, " · since {since}");
     }
-    let reason = drift.and_then(|value| value.get("fallback_reason")).and_then(Value::as_str).unwrap_or("unknown");
+    let reason = drift.and_then(|value| value.fallback_reason.as_deref()).unwrap_or("unknown");
     let _ = write!(line, " · fallback {reason} · returns ");
-    match drift.and_then(|value| value.get("return_attempts")).and_then(Value::as_u64) {
+    match drift.and_then(|value| value.return_attempts) {
         Some(attempts) => { let _ = write!(line, "{attempts}"); }
         None => line.push_str("unknown"),
     }

@@ -2875,7 +2875,7 @@ fn a_delivery_report_names_the_process_and_its_channel() {
 }
 
 #[test]
-fn agent_model_observation_survives_the_client_extension_map() {
+fn agent_model_observation_survives_the_typed_client_contract() {
     let mut agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
         "kind":"agent", "id":"agent/worker", "revision":"one",
         "updated_at":"2026-10-03T09:00:00Z", "name":"Worker",
@@ -2890,7 +2890,7 @@ fn agent_model_observation_survives_the_client_extension_map() {
     assert!(line.contains("declared anthropic/claude-opus-5-5 · live gpt-6.1-sol · drifted"));
     assert!(line.contains("since 2026-10-03T08:00:00Z · fallback transient · returns 2"));
     assert!(render_client_agent(&agent, &[], 0).contains(&line));
-    agent.extra.remove("model_drift");
+    agent.model_drift = None;
     assert!(agent_model_line(&agent).ends_with("unknown · fallback unknown · returns unknown"));
 }
 

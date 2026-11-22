@@ -69,7 +69,8 @@ test('strict agent decoders preserve optional model drift contract fields', asyn
             assert.equal(decoded.id, base.id);
             const encoded = Schema.encodeSync(schema.Agent)(decoded);
             assert.equal(encoded.live_model, base.live_model);
-            assert.equal(encoded.declared_model, wire.declared_model);
+            // Nullable fields use the shared Option codec: missing and null both encode as null.
+            assert.equal(encoded.declared_model, wire.declared_model ?? null);
             if (wire.model_drift) {
                 assert.deepEqual(encoded.model_drift, wire.model_drift);
             } else {
