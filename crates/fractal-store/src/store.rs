@@ -80,6 +80,8 @@ mod observation_trim_tests;
 pub mod availability;
 pub mod directive_notes;
 mod declared_admission;
+#[cfg(test)]
+mod runtime_workspace_tests;
 mod agent_charter;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
@@ -3131,6 +3133,22 @@ impl Store {
     /// Snapshot the local writers used by usage folds; stored evidence is configuration-independent.
     pub fn usage_limits_writers(&self) -> BTreeSet<String> {
         self.fractal.usage_limits_writers.lock().unwrap().clone()
+    }
+
+    /// Whether every active signed fleet incarnation can read runtime launch workspaces.
+    /// Missing, ambiguous, unsigned, or unsupported membership evidence fails closed.
+    pub fn runtime_workspace_publication_ready(&self) -> Result<bool, FractalError> {
+        let connection = self.readers.get();
+        let transaction = connection.unchecked_transaction().map_err(internal)?;
+        match declared_admission::validate_fleet(
+            &transaction,
+            &self.origin,
+            &declared_admission::RUNTIME_WORKSPACE,
+        ) {
+            Ok(()) => Ok(true),
+            Err(error) if error.code == declared_admission::RUNTIME_WORKSPACE.code => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -13521,6 +13539,11 @@ pub enum IncarnationRuntime {
     Unknown,
 }
 
+/// Runtime statuses that prove an incarnation ended, not administrative lifecycle states.
+pub fn is_incarnation_end_status(status: &str) -> bool {
+    matches!(status, "exited" | "vanished" | "stopped" | "absent" | "failed")
+}
+
 /// What `subject`'s `runtime.observed` records say about `incarnation`, newest first. A `running`
 /// record decides: this incarnation runs, or another replaced it. An end that names this
 /// incarnation ends it, whichever host recorded it. An end of another incarnation counts only
@@ -13559,7 +13582,7 @@ pub fn runtime_incarnation_state(
                     });
                 }
             }
-            Some("exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
+            Some(status) if is_incarnation_end_status(status) => match observed {
                 Some(ended) if ended == incarnation => return Ok(IncarnationRuntime::Ended),
                 Some(_) => other_ended = true,
                 None => {

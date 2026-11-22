@@ -35,6 +35,12 @@ const MISSION_ESCALATION: FleetFeature = FleetFeature {
     carries: "mission escalation",
 };
 
+pub(super) const RUNTIME_WORKSPACE: FleetFeature = FleetFeature {
+    keys: &["runtime_workspace"],
+    code: "runtime-workspace-feature-barrier",
+    carries: "runtime launch workspace",
+};
+
 fn mission_escalates(mission: &MissionSpec) -> bool {
     !mission.escalation.is_inherit() || mission.steps.values().any(|step| {
         !step.escalation.is_inherit()
