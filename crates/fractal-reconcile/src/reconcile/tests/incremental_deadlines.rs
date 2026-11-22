@@ -1749,6 +1749,9 @@ fn an_existing_workspace_renders_and_publishes_with_exactly_one_lease() {
     let reconciler = Reconciler::new(
         store.clone(), runtime, "node".into(), Arc::new(Notify::new()),
     );
+    // Synchronous test dispatch adopts through reconcile_start_jobs(), which does not
+    // invoke completion_hook. Exercise the real signalled-result adoption lane instead.
+    reconciler.wait_for_test_starts.store(false, Ordering::Release);
     let owner = repository.clone();
     let lease_store = root.path().join("mr-store");
     let published = store.clone();
@@ -1770,6 +1773,14 @@ fn an_existing_workspace_renders_and_publishes_with_exactly_one_lease() {
         marker.store(true, Ordering::SeqCst);
     }));
     reconciler.reconcile_once().unwrap();
+    let (live, changed) = &*reconciler.start_jobs.live;
+    let mut live = live.lock().unwrap();
+    while !live.is_empty() {
+        live = changed.wait(live).unwrap();
+    }
+    drop(live);
+    let operation = store.runtime_start_for("agent/node.worker").unwrap().unwrap();
+    assert!(reconciler.apply_start_result(&operation.id, "agent/node.worker").unwrap());
     assert!(checked.load(Ordering::SeqCst), "completion publication must be exercised");
     assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
     assert!(!store.observations_for("agent/node.worker", "runtime.action.succeeded").unwrap().is_empty());
