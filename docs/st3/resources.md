@@ -83,11 +83,15 @@ Memory PSI comes from the user manager's aggregate `app.slice/app-lanes.slice`, 
 enforced finite executions and laned seats. A second memory signal protects against host
 reclaim outside those lanes: root memory `full` PSI qualifies while the last observed increase
 in the sum of `/proc/vmstat` `allocstall_*` counters is no older than that rule's PSI window
-(10, 60 or 300 seconds, inclusive). An event counts entry into reclaim, not time spent stalled:
-retaining its evidence through the PSI window lets bursty events and long stalls sustain the
-brake timer. The first sample and a counter reset deliberately give lane-only readings,
-healthy unless lane pressure or the independent floor says otherwise. Missing, malformed,
-duplicate or truncated allocator-counter observations remain unknown.
+(10, 60 or 300 seconds) **plus `sustainedMs`**, inclusive. An event counts entry into
+reclaim, not time spent stalled. This bounded retention lets pressure crossing its threshold
+within the PSI window complete the sustained interval on a later sample, even when
+`sustainedMs` exceeds the window. It needs no separate pressure-episode state.
+The first sample and a counter reset clear corroboration and give lane-only readings,
+healthy unless lane pressure or the independent floor says otherwise. After a reset,
+root corroboration waits for the next observed counter increment; an unchanged counter
+does not restore it. Missing, malformed, duplicate or truncated allocator-counter
+observations remain unknown.
 
 `memory.high` reclaim uses `try_to_free_mem_cgroup_pages`. In Linux v6.18,
 [`do_try_to_free_pages` accounts ALLOCSTALL only when `!cgroup_reclaim(sc)`](https://github.com/torvalds/linux/blob/v6.18/mm/vmscan.c#L6393-L6394),
@@ -106,7 +110,7 @@ the same per-sample check remains as a fail-closed backstop. IO PSI remains host
 same sustained interval.
 
 Resume requires lane memory below 0.5%, qualifying root memory below 0.5% (or allocator-event
-evidence older than its PSI window), `MemAvailable >= memoryAvailableFloorBytes` when enabled, and root IO
+evidence older than its PSI window plus `sustainedMs`), `MemAvailable >= memoryAvailableFloorBytes` when enabled, and root IO
 below 10%, continuously for 120 seconds. Configured memory windows also apply to root `full`.
 The runtime creates the lane slice hierarchy only when enforced work launches; an absent
 lane slice means zero lane pressure. With `LogicalOnly` coverage, memory protection comes
