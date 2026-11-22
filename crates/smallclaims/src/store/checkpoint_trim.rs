@@ -447,6 +447,20 @@ impl Store {
         }
     }
 
+    /// Flush what a chunk committed without fsync (`WriterGuard::commit_without_fsync`), outside
+    /// the writer: left to the next ordinary commit, the flush would hold every write waiting on
+    /// it. A failed flush only leaves it to that commit.
+    pub(crate) fn flush_trim_wal(&self) {
+        if self.shared_memory {
+            return;
+        }
+        let mut wal = self.path.as_os_str().to_owned();
+        wal.push("-wal");
+        if let Ok(file) = std::fs::File::open(&wal) {
+            let _ = file.sync_data();
+        }
+    }
+
     fn pause_trim_chunk(&self, held: std::time::Duration) {
         std::thread::sleep(self.trim_pause_duration(held));
     }
@@ -944,6 +958,7 @@ impl Store {
             drop(connection);
             chunks += 1;
             self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
+            self.flush_trim_wal();
             self.pause_trim_chunk(held);
         }
         {
@@ -1164,6 +1179,7 @@ impl Store {
                 hook(chunks);
             }
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
+            self.flush_trim_wal();
             pause(self.trim_pause_duration(held));
         }
         drop(delete);

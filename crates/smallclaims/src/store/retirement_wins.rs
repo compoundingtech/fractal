@@ -296,6 +296,8 @@ impl Store {
                 }
             }
             transaction.commit()?;
+            drop(connection);
+            self.flush_trim_wal();
         }
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
