@@ -30007,6 +30007,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .find(|subject| subject.subject == "agent/node.worker")
             .unwrap();
         let member = desired.member.as_ref().unwrap().clone();
+        mark_harness_ready(&store, &desired.subject, &member, "omp", "worker-one");
         let notify = Arc::new(Notify::new());
         let reconciler = Reconciler::new(
             store.clone(),
@@ -30027,6 +30028,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("model".into(), Value::String(model.into())),
                         ("semantics".into(), Value::String("context_occupancy".into())),
                         ("incarnation_id".into(), Value::String("worker-one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -30083,14 +30085,21 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         report("gpt-6.1-sol", "drift-usage-fallback-again");
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         let first = drift().expect("drift fault raised again");
-        let since = first.detail.rsplit("[drift-since-ms:").next().unwrap().split(']').next().unwrap().to_owned();
-        // The live model moves to another undeclared model while drifted: the fault names
-        // the new model and keeps its `since`, and the next pass is quiet again.
+        let first_since = crate::store::model_drift::ModelDrift::parse(&first.detail).unwrap().since_ms;
+        // A different model pair starts a new fenced drift clock; it must not borrow
+        // the prior fallback pair's elapsed duration.
         report("gpt-6-luna", "drift-usage-second-rung");
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         let moved = drift().expect("drift fault follows the live model");
         assert!(moved.detail.contains("running on gpt-6-luna"), "{}", moved.detail);
-        assert!(moved.detail.contains(&format!("[drift-since-ms:{since}]")), "{}", moved.detail);
+        let moved_since = store.model_drift_since(
+            &desired.subject, "worker-one", "anthropic/claude-opus-5-5", "gpt-6-luna",
+        ).unwrap().expect("the new model pair has a fenced clock");
+        assert!(moved_since >= first_since);
+        assert_eq!(store.model_drift_since(
+            &desired.subject, "worker-one", "anthropic/claude-opus-5-5", "gpt-6.1-sol",
+        ).unwrap(), None);
+        assert!(moved.detail.contains(&format!("[drift-since-ms:{moved_since}]")), "{}", moved.detail);
         assert!(woke());
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         assert_eq!(drift().unwrap().detail, moved.detail);
@@ -30116,9 +30125,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         // previous incarnation's readings never count for it.
         reconciler.reconcile_model_drift(&desired, "worker-two").unwrap();
         assert!(drift().is_none());
-        assert_eq!(store.latest_usage_model("agent/node.worker", "worker-two").unwrap(), None);
+        assert_eq!(store.latest_usage_model_observation("agent/node.worker", "worker-two").unwrap(), None);
         assert_eq!(
-            store.latest_usage_model("agent/node.worker", "worker-one").unwrap().as_deref(),
+            store.latest_usage_model_observation("agent/node.worker", "worker-one").unwrap().as_ref().map(|observation| observation.model.as_str()),
             Some("gpt-6.1-sol")
         );
         drop(member);
@@ -30164,6 +30173,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("semantics".into(), Value::String(semantics.into())),
                         ("total_tokens".into(), Value::from(1)),
                         ("incarnation_id".into(), Value::String("one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -30185,7 +30195,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         reconciler.reconcile_model_drift(&desired("agent/node.parent"), "one").unwrap();
         assert!(drift("agent/node.parent").is_none());
         assert_eq!(
-            store.latest_usage_model("agent/node.parent", "one").unwrap().as_deref(),
+            store.latest_usage_model_observation("agent/node.parent", "one").unwrap().as_ref().map(|observation| observation.model.as_str()),
             Some("claude-opus-5-5")
         );
         // A declared Claude alias matches its family's full API ID, and only that family.
@@ -30236,6 +30246,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("model".into(), Value::String(model.into())),
                         ("semantics".into(), Value::String("context_occupancy".into())),
                         ("incarnation_id".into(), Value::String("one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,

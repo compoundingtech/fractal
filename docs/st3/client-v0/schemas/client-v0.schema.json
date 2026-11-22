@@ -2893,6 +2893,8 @@
             "next_work": { "oneOf": [{ "$ref": "#/$defs/WorkLabel" }, { "type": "null" }] },
             "upcoming_work": { "type": "array", "items": { "$ref": "#/$defs/WorkLabel" } },
             "live_model": { "type": ["string", "null"], "description": "The model the seat actually runs on: the model its own session last reported (harness.usage context_occupancy or session_cumulative) for the card's incarnation, or null when it reported none. Response spend, which includes subagents' models, never counts. Differs from the declaration while the harness silently fell back to another model." },
+            "declared_model": { "type": ["string", "null"], "description": "Model selected by the agent's current harness declaration; null when undeclared. Independent of the observed live_model and omitted by older daemons." },
+            "model_drift": { "$ref": "#/$defs/AgentModelDrift", "description": "Current-incarnation model comparison and positive native fallback evidence. Missing or stale evidence never establishes drift or fallback. Omitted by older daemons." },
             "usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] },
             "under": { "type": "array", "items": { "$ref": "#/$defs/AgentRelationship" } },
             "delivery": { "oneOf": [{ "$ref": "#/$defs/AgentDelivery" }, { "type": "null" }], "description": "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." },
@@ -2908,6 +2910,19 @@
           }
         }
       ]
+    },
+    "AgentModelDrift": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "drift_since", "drift_age_seconds", "observed_at", "fallback_reason", "return_attempts"],
+      "properties": {
+        "state": { "enum": ["at-declared", "drifted", "unknown", "stale", "uncomparable"], "description": "Fresh comparable evidence distinguishes at-declared from drifted. Missing, stale, and uncomparable observations remain separate states." },
+        "drift_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Start of the durable drift episode for this incarnation and model pair; null without a matching episode." },
+        "drift_age_seconds": { "type": ["integer", "null"], "minimum": 0, "description": "Age of the matching current drift episode; null when the state is not drifted or its start is unknown." },
+        "observed_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Timestamp of the current incarnation's own model observation, never subagent response spend; null when unknown." },
+        "fallback_reason": { "oneOf": [{ "enum": ["transient", "quota", "auth", "unknown"] }, { "type": "null" }], "description": "Sanitized cause from native fallback evidence fenced to this session, incarnation, and model selection; null means no matching positive fallback evidence. A model mismatch alone is not fallback." },
+        "return_attempts": { "type": ["integer", "null"], "minimum": 0, "description": "Durably admitted model-return attempts for this incarnation; null when the incarnation is unknown. Zero is a known empty count." }
+      }
     },
     "AgentMailCustody": { "type": "object", "additionalProperties": false, "required": ["successor", "state"], "properties": { "successor": { "$ref": "#/$defs/AgentId" }, "state": { "const": "pending" } } },
     "AgentCheckout": { "type": "object", "additionalProperties": false, "required": ["repository", "base", "branch"], "properties": { "repository": { "type": "string" }, "base": { "type": "string" }, "branch": { "type": "string" } } },

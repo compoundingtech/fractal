@@ -600,7 +600,7 @@ reset-period observations and explicit unsupported account gaps to the complete
 merged registry. Versions 1 through 41 remain frozen, including main's native-turn
 v41 corpus. Generate v42 with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
-The current simulation loader and audit report select v42. Existing producers may
+The simulation loader and audit report selected v42. Existing producers may
 omit the new optional fields, but omission cannot assert source completeness.
 The existing usage draw deliberately exercises that legacy-compatible shape;
 authenticated source chains, reordered replay, native owner bindings and period
@@ -618,8 +618,8 @@ main's spend-source registry. Versions 1 through 42 remain frozen, including
 main's native-turn v41 and spend-source v42 snapshots. Generate the complete
 merged registry with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v43.json`.
-The simulation, diagnostics and audit reports select v43. The active-corpus
-freshness regression compares the complete generated registry byte-for-byte;
+The execution-phase simulation, diagnostics and audit reports select v43. The
+active-corpus freshness regression compares the complete generated registry byte-for-byte;
 the focused execution-phase regression also validates a generated phase input.
 Main's local-trim convergence and oracle checks remain unchanged; obsolete shared
 checkpoint agreement and its historical never-trim characterizations are not restored.
@@ -627,4 +627,15 @@ checkpoint agreement and its historical never-trim characterizations are not res
 Native execution wait accounting is shared through
 `fractal_kernel::step_execution::execution_wait`; both the store's timing fold
 and the reconciler's executor attestation use that leaf helper after the crate split.
+
+## Native model fallback evidence
+
+The native fallback input generator supplies bounded session, incarnation,
+source-event and episode provenance for `harness.model-fallback.observed`, an
+explicit sanitized cause, and the same-subject agent actor. Model mismatch alone
+does not establish fallback. `runtime.action.requested.model_return_attempt`
+records the durably admitted return attempt.
+
+Member-local trim convergence, retained claim equality, oracle reader comparisons,
+person-authored claim preservation, and invalid/pending-record checks remain unchanged.
 
