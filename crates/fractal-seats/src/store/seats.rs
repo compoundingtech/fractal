@@ -1107,10 +1107,7 @@ impl SeatsStore for Store {
                 if previous.local != local {
                     let connection = self.readers.get();
                     let mut statement = connection.prepare_cached(
-                        "SELECT DISTINCT subject FROM local_observations WHERE id>?1 AND id<=?2
-                         AND after_store_index<=?3 AND subject LIKE 'agent/%'
-                         AND (kind='harness.timeline' OR (kind='harness.usage'
-                           AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')))",
+                        /* sqlite-large-value: allow-for-now lv-h49951ea678c3 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS,
                     )?;
                     changed.extend(statement.query_map(params![previous.local, local, index],
                         |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<BTreeSet<_>>>()?);

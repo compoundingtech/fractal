@@ -302,10 +302,20 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         "{plan:?}"
     );
     assert!(
-        plan.iter().any(|step| step.contains("local_observations_roster_model_frontier_index")),
+        plan.iter().any(|step| step.contains("SEARCH s USING INDEX sqlite_autoindex_local_latest_slots_1")),
         "{plan:?}"
     );
     assert!(plan.iter().all(|step| !step.contains("TEMP B-TREE")), "{plan:?}");
+    assert!(plan.iter().all(|step| !step.contains("SCAN local_observations")), "{plan:?}");
+    let delta_plan = query_plan(&store, ROSTER_LOCAL_CHANGED_SUBJECTS, params![0, 100, cut]);
+    assert!(
+        delta_plan.iter().any(|step| step.contains("local_observations_roster_frontier_index")),
+        "{delta_plan:?}"
+    );
+    assert!(
+        delta_plan.iter().all(|step| !step.contains("SCAN local_observations") && !step.contains("SCAN o")),
+        "{delta_plan:?}"
+    );
 
     let pre_followup = "SELECT COALESCE((SELECT id FROM local_observations
              WHERE after_store_index<=?1 ORDER BY id DESC LIMIT 1), 0)";
