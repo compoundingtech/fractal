@@ -141,7 +141,17 @@ impl Windows {
         let observed_store = store_key.clone();
         // Register before any snapshot. The callback does no SQL or publication; a shared
         // snapshot reader weighs bounded kind metadata once for all equivalent sockets.
-        let observer = store.observe_commits(move |_| {
+        let observer = store.observe_tables(&[
+            "claims", "claim_positions", "batches", "replica_records", "desired",
+            "identity_names", "identity_heads", "meta", "local_observations",
+            "mission_definitions", "mission_runs", "run_generations", "step_runs",
+            "planning_sessions", "revision_proposals", "read_positions",
+            "arrangements", "arrangement_registers", "ivm_heads", "ivm_contributions",
+            "local_agent_harness_rows", "projection_digest_repaired_claims",
+            "operations", "card_actual_revisions", "projection_health", "documents", "blobs",
+            "custom_sources", "local_host_holds", "local_latest_slots", "local_stop_deferral_backfill",
+            "mission_run_after", "mission_run_deadlines", "ordered_reassignments", "stop_deferral_claims",
+        ], move |_| {
             if let Some(windows) = weak.upgrade() {
                 let mut observed = windows
                     .observed
