@@ -3044,6 +3044,21 @@ enum AgentsCommand {
     Ls(AgentsArgs),
     /// Group operational agents beneath the mission runs that own them.
     Tree(AgentsArgs),
+    /// Print one raw internal agent activity page as a JSON envelope.
+    Activity {
+        /// Maximum number of agents in this page.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Continue with the opaque cursor from the previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Require the projection to have reached this claim cut.
+        #[arg(long)]
+        min_cut: Option<u64>,
+        /// Restrict activity and completeness to this exact host ID.
+        #[arg(long)]
+        host: Option<String>,
+    },
     /// Show one exact agent, including its owner and operational annotation.
     Show {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
