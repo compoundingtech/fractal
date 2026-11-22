@@ -80,6 +80,94 @@ and `client-v0.schema.json`, so this route does not change those inputs or outpu
 Their regeneration command is `cargo run --locked -p fractal-client-codegen`;
 it also invokes `rustfmt` internally. No generator execution is needed for this route.
 
+## Internal agent activity
+
+```sh
+fractal agents activity --json [--limit N] [--cursor C] [--min-cut N] [--host ID]
+```
+
+This command reads one page from `GET /v1/internal/agents/activity` and prints its
+raw JSON envelope, including pagination and completeness metadata. It does not
+expand agent cards or follow cursors automatically. `--min-cut` sends `min_cut`;
+`--host` selects rows on that exact host plus every row whose host is unknown.
+Rows with no actual, no origin, or indeterminate authority are always included as
+incomplete under `--host`; only rows with a known, different host are excluded.
+Continue with the returned opaque cursor and unchanged selection options.
+The native page cache retains the same snapshot cut across those pages.
+`min_cut` guarantees only that this answering store has reached that local index;
+it does not establish replication freshness or that remote observations are current.
+
+There is one row per known live incarnation, origin and witnessed workspace path,
+not one row per agent. The `id` may repeat; use `(id, incarnation_id, host, workspace)`
+as the complete-row identity. Every witnessed path is retained until matching end
+evidence, rather than silently replaced by a newer path. If the same incarnation ID
+resurrects after an end, its earlier paths are conservatively retained again.
+An incarnation remains live once it has `running` evidence, until a matching named
+end or an unnamed end from the same observing host. A newer different incarnation
+does not implicitly end it. Instead, an older retained row has the advisory
+`superseded_by: <newer incarnation ID>` field, explaining likely stale/crashed ownership.
+Both complete and incomplete rows carry `layer: current|historical`; presentation
+history, terminal owning runs and superseded generations do not prove runtime death.
+An agent is omitted only when all its known incarnations are proven ended and no
+unattributed evidence remains.
+Runtime end evidence is `stopped`, `failed`, `exited`, `vanished`, or `absent`,
+matching the runtime-incarnation reader. Administrative or unfamiliar statuses
+alone are not end evidence.
+
+The first page reads with `history=true` and is proportional to every retained
+agent subject and its runtime observations. This work is cooperatively
+cancellable under the request's read deadline and budget.
+
+Activity status reads that incarnation's own runtime `status` using the existing `AgentState` values:
+`desired`, `starting`, `running`, `waiting`, `down`, `stopped`, `failed`,
+`suspended`, and `retired`. Unrecognized values become `unknown` with the original
+value in `status_raw`; missing status becomes `unknown` without `status_raw`.
+These are not the harness's ready/idle/working states.
+The host is the observing runtime claim's origin. Its workspace comes only from
+`runtime.observed.workspace` attributed to that same incarnation and origin, never
+from `workspace.observed`, a cross-origin merged fold, or a declaration. It is an
+absolute filesystem path on that host, exactly as observed: not a URI, a local
+checkout path, or a reconstructed desired path.
+
+This release is reader-first phase 1: the registry accepts the optional nullable
+runtime workspace field, and the daemon advertises reader capability
+`runtime_workspace=1`, but **no runtime producer emits the field**. Healthy legacy
+agents therefore remain safely incomplete. Temporal proximity to a desired checkout
+observation never fills the gap.
+
+Phase 2 is tracked in [fractal#7013](https://github.com/compoundingtech/fractal/issues/7013).
+It may enable emission only when both the signed fleet capability barrier confirms
+every active reader advertises `runtime_workspace=1` and the roll templates' rollback
+target is at or after the phase-1 build. Rolling back below phase 1 after emission is
+unsupported: older readers retain new-field observations as unknown rather than
+projecting their critical runtime state.
+
+Phase-2 producers must resolve the physical workspace directory **before launch**
+and launch in exactly that resolved directory, then publish that same path for the
+proven incarnation. Canonicalizing an authored alias after launch is not evidence:
+the alias may already point elsewhere while the original directory remains in use.
+The route becomes useful after phase 2 records these authoritative physical paths.
+
+Incomplete reasons are `no-actual`, `indeterminate-authority`, `missing-workspace`,
+`missing-host`, `missing-incarnation`, and `unresolved-liveness`. Incomplete entries
+have nullable `incarnation_id` and `host`; unknown-host gaps remain under every host
+filter. Missing or ambiguous evidence is not proof of inactivity.
+Page through `next_cursor` until it is null, then evaluate `complete` on that last
+page. It is true only there, when the entire cut-bound fold has no incomplete
+evidence; it certifies the whole selection at that cut, not merely the last page.
+Earlier pages always report false, even if their rows have no omissions.
+The cursors are opaque but unsigned. Consumers must accumulate the full page chain
+from the first page; a final `complete: true` does not prove earlier pages were read.
+The limit (default and maximum 200) bounds `agents.length + incomplete.length`,
+not each list separately. There is no separate response-byte ceiling for this
+internal envelope: exact workspace paths and identifiers make encoded row sizes variable.
+Host-filtered completeness covers that host plus unknown-host evidence, not the
+whole fleet. This is an internal read, not a client-v0 operation.
+`complete: true` covers retained claim evidence only. It does not cover subjects
+without retained claims or workspaces that exist only on the filesystem. After
+accumulating the whole chain, absence means **no known live owner**, not proof that
+a workspace or an unobserved runtime does not exist.
+
 ## Single-subject status reads
 
 `GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain

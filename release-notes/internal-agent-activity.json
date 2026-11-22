@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose paged internal agent activity with explicit completeness evidence",
+  "replay": {"status": "none", "detail": "Existing legacy observations remain incomplete until runtime producers record authoritative launch paths; no historical workspace attribution is inferred."},
+  "schema": {"status": "changed", "detail": "Reader-first phase 1 accepts optional nullable runtime.observed.workspace and advertises runtime_workspace=1. No producer emits the field. No new persisted state or client-v0 contract changes."},
+  "rules": {"status": "changed", "detail": "Inventory rows retain every witnessed runtime workspace per incarnation and origin until matching end evidence, including paths retained across same-identifier resurrection. Named ends match that incarnation; unnamed ends match only the observing host. Newer incarnations do not implicitly end older ones, which carry advisory superseded_by metadata. Desired checkout observations never establish ownership. Missing evidence remains incomplete; absence is not proof of filesystem or runtime absence."},
+  "compatibility": {"status": "changed", "detail": "Complete rows are identified by agent id, incarnation_id, host and workspace. Incomplete rows carry nullable incarnation_id and host. Phase 2 in fractal#7013 requires both the signed runtime_workspace capability barrier and a roll-template rollback target at or after phase 1. Rolling back below phase 1 after emission is unsupported. No client-v0 or generated client changes."},
+  "downtime": {"status": "none", "detail": "No planned downtime."},
+  "manual": {"status": "changed", "detail": "Use fractal agents activity --json with optional --limit, --cursor, --min-cut and --host. Accumulate all pages and evaluate completeness on the last page. min_cut is local store progress, not replication freshness. The page limit bounds the combined complete and incomplete row count, not encoded bytes."},
+  "recovery": {"status": "none", "detail": "This phase emits no runtime workspace field. Phase 2 must resolve the physical directory before launch, launch in that exact resolved directory and publish the same path; never canonicalize an authored alias after launch."}
+}

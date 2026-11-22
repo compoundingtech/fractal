@@ -191,6 +191,7 @@ mod legacy_handler_guard_tests;
 // Route families: each file holds the handlers of one group of routes; the router below names
 // them as family::handler.
 mod agents;
+mod agents_activity;
 pub mod client_reads;
 pub mod fleet;
 pub mod launches;
@@ -727,6 +728,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/internal/agents/activity", get(agents_activity::list))
         .route("/v1/internal/resources", get(resources::list))
         .route("/v1/internal/resources/exec", post(resources::submit))
         .route("/v1/internal/resources/{id}", get(resources::show))
