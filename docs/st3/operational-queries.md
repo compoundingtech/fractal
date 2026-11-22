@@ -80,6 +80,58 @@ and `client-v0.schema.json`, so this route does not change those inputs or outpu
 Their regeneration command is `cargo run --locked -p fractal-client-codegen`;
 it also invokes `rustfmt` internally. No generator execution is needed for this route.
 
+## Runtime workspace reader compatibility
+
+This release is reader-first phase 1 for agent activity. The claim registry accepts
+optional nullable `runtime.observed.workspace`, and `daemon.started` advertises
+reader capability `runtime_workspace=1`. **No producer emits the field, and no
+agent-activity daemon route or CLI command is available in this release.**
+Existing `agents ls` behavior is unchanged.
+
+Unsupported readers retain unknown fields and kinds without projecting them.
+Unknown runtime authority evidence can make a subject indeterminate, suppress
+exported projection digests and remain eligible for admission retry; individual
+signed-claim admission refuses unknown claims. This is not harmless ignore-on-read.
+
+Phase 2 is tracked in [fractal#7013](https://github.com/compoundingtech/fractal/issues/7013).
+It must maintain an incarnation/workspace projection before exposing the activity
+read surface: request-time replay of all retained runtime history is not acceptable.
+Emission may begin only when both the signed fleet capability barrier confirms
+every active reader advertises `runtime_workspace=1` and the roll templates' rollback
+target is at or after the phase-1 build. Rolling back below phase 1 after emission
+is unsupported.
+
+Phase-2 producers must resolve the physical workspace directory **before launch**,
+launch in exactly that resolved directory and publish that same path for the
+proven incarnation. Canonicalizing an authored alias after launch is not evidence:
+the alias may already point elsewhere while the original directory remains in use.
+Desired checkout observations, temporal proximity and merged presentation fields
+must never establish runtime workspace ownership.
+
+The pure Rust contract in `fractal_api_core::activity_contract` retains the agreed
+future envelope: `snapshot`, `agents`, `incomplete`, `next_cursor`, and `complete`.
+The snapshot reuses `ClientSnapshot` and adds the answering daemon's `local_host_id`.
+Complete rows identify `(id, incarnation_id, host, workspace)` and may repeat an agent
+or incarnation ID. Workspace is an absolute filesystem path on `host`, not a URI.
+Optional `superseded_by` explains a newer different incarnation without proving
+that an older incarnation ended. Rows also carry `layer: current|historical`;
+presentation history or a terminal owning run does not prove runtime death.
+
+The closed status set is `desired`, `starting`, `running`, `waiting`, `down`,
+`stopped`, `failed`, `suspended`, `retired`, and `unknown`. Unknown observed strings
+map to `unknown` plus `status_raw`; missing status maps to `unknown` without raw text.
+Incomplete reasons are `no-actual`, `indeterminate-authority`, `missing-workspace`,
+`missing-host`, `missing-incarnation`, and `unresolved-liveness`, with nullable
+incarnation and host. Missing evidence is never proof of inactivity.
+
+The future projection must retain every witnessed path until matching end evidence,
+including conservative retention across same-identifier resurrection. A newer start
+does not implicitly end another incarnation. Named ends match that incarnation;
+unnamed ends match only the observing origin. A paginated consumer must accumulate
+the whole page chain. `complete` may be true only on its final page if no page
+contained incomplete evidence, for the same cut and selection. It describes retained
+evidence, not filesystem absence or global replication freshness.
+
 ## Single-subject status reads
 
 `GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain
