@@ -12798,17 +12798,19 @@ fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     assert_eq!(card()["declared_model"], "anthropic/claude-opus-5-5");
     assert_eq!(card()["model_drift"]["state"], "unknown");
     assert_eq!(card()["model_drift"]["return_attempts"], 0);
-    assert_eq!(typed.declared_model.as_deref(), Some("anthropic/claude-opus-5-5"));
-    assert_eq!(typed.model_drift.as_ref().unwrap().state, "unknown");
-    assert_eq!(typed.model_drift.as_ref().unwrap().return_attempts, Some(0));
+    let roundtrip = serde_json::to_value(&typed).unwrap();
+    assert_eq!(roundtrip["declared_model"], "anthropic/claude-opus-5-5");
+    assert_eq!(roundtrip["model_drift"]["state"], "unknown");
+    assert_eq!(roundtrip["model_drift"]["return_attempts"], 0);
     let mut legacy = card();
     legacy.as_object_mut().unwrap().remove("declared_model");
     legacy.as_object_mut().unwrap().remove("model_drift");
     let legacy: fractal_client::Agent = serde_json::from_value(legacy).unwrap();
     assert_eq!(legacy.header.id, typed.header.id);
     assert!(legacy.live_model.is_none());
-    assert!(legacy.declared_model.is_none());
-    assert!(legacy.model_drift.is_none());
+    let legacy = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy.get("declared_model").is_none());
+    assert!(legacy.get("model_drift").is_none());
     // Usage on another incarnation does not leak into this card.
     append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "zero", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
     assert!(card()["live_model"].is_null());
