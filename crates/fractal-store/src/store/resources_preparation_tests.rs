@@ -1380,6 +1380,62 @@ fn a_staged_rebuild_preserves_its_prefix_when_a_later_claim_arrives() {
     assert_eq!(current_rows(&store.readers.get()), whole_rebuilt_rows(&store));
 }
 
+/// A trim that deletes a claim a staged walk already folded restarts the walk, a step at a time.
+/// Left staged, the finished walk counted more claims than the subject had, and the drain rebuilt
+/// the whole subject in one writer turn (100 ms for a pull request's 1,300 claims on a copy of a
+/// real member).
+#[test]
+fn a_trim_behind_a_staged_walk_restarts_it_in_steps() {
+    let store = Store::open_memory("example-staged-trim").unwrap();
+    let observation = |phase: usize| json!({"fields":{"kind":"custom.example","facts":{"phase":phase}}});
+    let ids: Vec<_> = (0..6).map(|phase| append_wire(&store, SUBJECTS[0], &(10 + phase).to_string(), "resource.observed", observation(phase))).collect();
+    let step = || {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        let more = super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap();
+        let state = (more, staged(&transaction), queued(&transaction, "deferred"));
+        transaction.commit().unwrap();
+        state
+    };
+    // Through the trim's own hook, as its chunks delete.
+    let trim = |id: &str| {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        let claim = ClaimTombstone {
+            id: id.to_owned(),
+            writer: "example-writer".into(),
+            sequence: 1,
+            envelope_hash: "example-hash".into(),
+            subject: SUBJECTS[0].into(),
+            kind: "resource.observed".into(),
+            actor: None,
+            predecessors: Vec::new(),
+            operation_id: None,
+            request_digest: None,
+            accepted_at_unix_ms: 0,
+        };
+        super::delete_trimmed_tx(&transaction, &[claim], &mut || {
+            tombstone(&transaction, id);
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h8deeb7e7a0e2 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [id])?;
+            Ok(())
+        })
+        .unwrap();
+        flush(&transaction).unwrap();
+        let state = (staged(&transaction), queued(&transaction, "deferred"));
+        transaction.commit().unwrap();
+        state
+    };
+    assert_eq!(trim(&ids[4]), (false, true), "a trim's delete defers the subject");
+    assert_eq!(step(), (true, true, true), "one claim folded, staged");
+    assert_eq!(step(), (true, true, true), "two folded");
+    assert_eq!(trim(&ids[5]), (true, true), "a claim still ahead of the cursor keeps the stage");
+    assert_eq!(trim(&ids[0]), (false, true), "a claim the walk folded drops the stage");
+    assert_eq!(step(), (true, true, true), "the walk starts again a step at a time");
+    while step().0 {}
+    assert_eq!(step(), (false, false, false), "the complete fold was published");
+    assert_eq!(current_rows(&store.readers.get()), whole_rebuilt_rows(&store));
+}
+
 /// Earlier arrivals may invalidate one prefix, but cannot starve another subject.
 #[test]
 fn repeated_earlier_insertions_do_not_starve_other_deferred_subjects() {
@@ -1448,7 +1504,7 @@ fn opening_the_store_drops_a_stage_and_the_walk_starts_again() {
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     tombstone(&transaction, &middle);
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h8deeb7e7a0e2 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h5520c75fb611 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
     flush(&transaction).unwrap();
     assert!(super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap());
     assert!(staged(&transaction));
@@ -1470,7 +1526,7 @@ fn a_walk_that_misses_a_claim_rebuilds_the_subject_whole() {
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     tombstone(&transaction, &middle);
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h5520c75fb611 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hb18243c01269 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
     flush(&transaction).unwrap();
     let newest: String = transaction
         .query_row("SELECT claim_id FROM local_resource_preparation_claims WHERE subject=?1 ORDER BY sort_key DESC LIMIT 1", [SUBJECTS[0]], |row| row.get(0))

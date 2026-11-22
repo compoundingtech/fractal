@@ -355,6 +355,7 @@ pub(super) fn delete_trimmed_tx(
     claims: &[ClaimTombstone],
     delete: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
+    preparation::restart_stages_behind_trimmed_tx(transaction, claims)?;
     let mut subjects = BTreeMap::<&str, (bool, Vec<&str>)>::new();
     for claim in claims {
         let unchanged = match claim.kind.as_str() {
