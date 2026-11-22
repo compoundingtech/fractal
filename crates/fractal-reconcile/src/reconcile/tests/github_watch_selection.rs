@@ -167,7 +167,7 @@ fn a_watch_stage_keeps_and_evaluates_its_clock_only_deadline() {
 fn a_retired_recipient_ends_an_expired_watch_without_a_wake_or_fault() {
     let clock = Clock::at(START);
     let (fixture, reconciler) = fixture();
-    apply_source(&fixture.store, &SEATS.replace("\"away\"", "\"node\""), "seats");
+    apply_source(&fixture.store, &SEATS.replace("\"away\"", "\"node\""), "local-retirement-seat");
     let agent = "agent/example.planner";
     let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
     fixture.store.declare_watch(&thread, agent, Some(START + 1_000)).unwrap();
