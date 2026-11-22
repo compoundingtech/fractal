@@ -42,7 +42,7 @@ test "$(subject_count "$pre_head..HEAD" 3)" -eq 1
 test "$(subject_count "$pre_head..HEAD" 4)" -eq 1
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-restart="$(st3 subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/restart" --json)"
+restart="$(fractal subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/restart" --json)"
 jq -e \
   --arg old "$old_incarnation" \
   --arg new "$new_incarnation" \

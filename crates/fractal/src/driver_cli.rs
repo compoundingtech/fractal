@@ -132,7 +132,7 @@ mod managed_declaration_tests {
     }
 }
 
-/// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
+/// `fractal driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
 pub(super) fn run_driver_hook() -> ExitCode {
     fractal_client::set_client_name(format!(
         "fractal-driver-hook {}",
@@ -141,7 +141,7 @@ pub(super) fn run_driver_hook() -> ExitCode {
     let arguments = std::env::args().skip(2).collect::<Vec<_>>();
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
-            "usage: st {} NAME [ARGS]; NAME is one of {}",
+            "usage: fractal {} NAME [ARGS]; NAME is one of {}",
             fractal_daemon::driver_hook::SUBCOMMAND,
             fractal_daemon::driver_hook::HOOKS.join(", ")
         );
@@ -262,7 +262,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         .as_deref()
         .context("the driver has no subject")?;
     if fractal_daemon::skill::HARNESSES.contains(&args.driver.as_str()) {
-        // A seat starts idle: a declaration stored before st dropped the startup prompt still
+        // A seat starts idle: a declaration stored before fractal dropped the startup prompt still
         // carries it, and it would start a turn nobody asked for.
         let mut argv = args.argv;
         fractal_daemon::boot::strip_legacy_prompt(&args.driver, &mut argv);
@@ -272,13 +272,13 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             let _ = write_driver_log(
                 subject,
                 &format!(
-                    "could not install the st skill for {}: {error:#}",
+                    "could not install the fractal skill for {}: {error:#}",
                     args.driver
                 ),
             );
         }
         // Harness-session state (OpenCode delivery ledgers, Claude resume bindings) stays beneath
-        // st3's driver directory, never st2's; the seat's hooks choose the same root.
+        // fractal's driver directory, never st2's; the seat's hooks choose the same root.
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
@@ -537,6 +537,7 @@ async fn run_st2_native_driver(
     let loop_state = NativeLoopState {
         paths: Some(paths.resolved()),
         predecessor_harness_record: fs::read(&harness_state_path).ok(),
+        provider_started_at_ms: fractal_drivers::subagents::now_ms(),
         ..NativeLoopState::default()
     };
     let task = spawn_st3_provider(
@@ -712,7 +713,7 @@ async fn resume_native_driver(
     let _ = write_driver_log(
         subject,
         &format!(
-            "the {driver} driver resumed in {} after its st binary was replaced; the provider kept running",
+            "the {driver} driver resumed in {} after its fractal binary was replaced; the provider kept running",
             fractal_drivers::reexec::installed_binary()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "a replacement binary".into())
@@ -882,7 +883,7 @@ async fn drive_st2_native_loop(
             driver,
             &incarnation,
             &agent_dir,
-            fractal_drivers::subagents::now_ms(),
+            loop_state.provider_started_at_ms,
         )
     });
     let mut completion_announced = false;
@@ -1219,7 +1220,7 @@ async fn drive_st2_native_loop(
                                 loop_state.ready = true;
                             }
                             publish_harness_activity(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 if driver == "claude" {
@@ -1256,7 +1257,7 @@ async fn drive_st2_native_loop(
                             if let Some(context) = fractal_drivers::harness_context::read(
                                 &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 &incarnation,
@@ -1265,7 +1266,7 @@ async fn drive_st2_native_loop(
                             )
                             .await?;
                             publish_harness_limits(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 &incarnation,
@@ -1420,7 +1421,7 @@ async fn publish_harness_timeline(
         // fields here; the client projection joins the exact desired owner run/generation/step at
         // its snapshot index and overwrites attribution on every explicit usage entry.
         let claim = native_timeline_claim(client, subject, incarnation, operation).await?;
-        let _: ClaimRecord = ObservationClient { client, event: None }
+        let _: ClaimRecord = ObservationClient { client, event: None, source_runtime: None }
             .post(
                 "/v1/claims",
                 &claim,
@@ -1692,7 +1693,7 @@ async fn run_pi_channel(
         Some(state) => {
             let _ = write_driver_log(
                 subject,
-                &format!("the {driver} channel resumed after its st binary was replaced"),
+                &format!("the {driver} channel resumed after its fractal binary was replaced"),
             );
             state
         }
@@ -2171,7 +2172,7 @@ async fn run_pi_channel(
                     let _ = write_driver_log(
                         subject,
                         &format!(
-                            "the st binary at {} was replaced; the {driver} channel re-executes into it",
+                            "the fractal binary at {} was replaced; the {driver} channel re-executes into it",
                             binary.display()
                         ),
                     );
@@ -2616,6 +2617,9 @@ async fn drive_codex_native_loop(
     ))
         .then(|| codex_continued_thread(&argv))
         .flatten();
+    if matches!(start, ProviderStart::Launch(..)) {
+        loop_state.provider_started_at_ms = fractal_drivers::subagents::now_ms();
+    }
     let task = task.insert(spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start));
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
@@ -2624,7 +2628,7 @@ async fn drive_codex_native_loop(
         "codex",
         &incarnation,
         &agent_dir,
-        fractal_drivers::subagents::now_ms(),
+        loop_state.provider_started_at_ms,
     );
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2887,7 +2891,7 @@ async fn drive_codex_native_loop(
                         .flatten()
                     {
                         publish_harness_activity(
-                            &ObservationClient { client, event: None },
+                            &ObservationClient { client, event: None, source_runtime: None },
                             subject,
                             "codex",
                             "app-server",
@@ -2923,7 +2927,7 @@ async fn drive_codex_native_loop(
                     if let Some(context) = fractal_drivers::harness_context::read(
                         &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
-                        &ObservationClient { client, event: None },
+                        &ObservationClient { client, event: None, source_runtime: None },
                         subject,
                         "codex",
                         &incarnation,
@@ -2932,7 +2936,7 @@ async fn drive_codex_native_loop(
                     )
                     .await?;
                     publish_harness_limits(
-                        &ObservationClient { client, event: None },
+                        &ObservationClient { client, event: None, source_runtime: None },
                         subject,
                         "codex",
                         &incarnation,
@@ -2942,7 +2946,7 @@ async fn drive_codex_native_loop(
                     .await?;
                     }
                     // The Codex runtime stamps its timeline with its own incarnation, which
-                    // outlives st's runtime incarnation when a resident Codex is adopted.
+                    // outlives fractal's runtime incarnation when a resident Codex is adopted.
                     let codex_incarnation = fractal_drivers::codex_app_server::current_runtime_incarnation(
                         &state_dir,
                         &identity,

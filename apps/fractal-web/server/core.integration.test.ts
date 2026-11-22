@@ -37,6 +37,7 @@ const fixture = async (
   responseHeaders: OutgoingHttpHeaders = { 'content-type': 'application/json' },
   tagCredential: string = tagAuthorization,
   responseStatus = 200,
+  pairing = false,
 ) => {
   const root = await mkdtemp(join(tmpdir(), 'fractal-server-test-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
@@ -70,6 +71,7 @@ const fixture = async (
   const spans: Tracer.Span[] = []
   const tracer = Tracer.make({ span: (options) => { const span = new Tracer.NativeSpan(options); spans.push(span); return span } })
   const app: FractalWebServer = createFractalWebServer({ dist, host: '127.0.0.1', port: 0, admit, tracer,
+    ...(pairing ? { pairing: { admit: () => true } } : {}),
     gateway: { socketPath, host: 'paired-gateway', authorization: gatewayAuthorization, tagAuthorization: tagCredential, timeoutMs: 1000 },
     identity: { deploymentId: 'fixture-build', buildIdentity: { baseVersion: '1.0.0', displayVersion: '1.0.0-test', machineVersion: '1.0.0+test', sourceKind: 'local', dirty: false } },
   })
@@ -140,6 +142,16 @@ it.each(['write.notes', 'control.messages', 'control.pairing', 'terminal.read', 
     authorization: gatewayAuthorization, tagAuthorization, deploymentId: 'fixture' })).rejects.toThrow(/read\.\* scopes only/)
   expect(setup.received[0]?.auth).toBe(tagAuthorization)
   expect(setup.received[0]?.path).toBe('/v1/client/capabilities')
+})
+
+it.each(['write.notes', 'control.pairing', 'terminal.read'])('refuses startup with a publisher credential granting %s', async scope => {
+  const setup = await fixture(undefined, JSON.stringify({ api_version: 'st3.client.v0', value: { kind: 'capabilities', capabilities: [
+    { id: 'read.projections', state: 'granted' }, { id: scope, state: 'granted' },
+  ] } }))
+  await expect(startHost({ dist: setup.root, host: '127.0.0.1', port: 0, origin: 'https://preview.example',
+    logins: ['robin@example.com'], tags: [], socketPath: setup.socketPath,
+    authorization: gatewayAuthorization, tagAuthorization: undefined, deploymentId: 'fixture' })).rejects.toThrow(/Publisher credential must grant read\.\* scopes only/)
+  expect(setup.received).toEqual([expect.objectContaining({ auth: gatewayAuthorization, path: '/v1/client/capabilities' })])
 })
 
 it('introspects read-only tag scopes with the dedicated credential', async () => {
@@ -260,16 +272,24 @@ it('proxies only the paired client API, streams bodies and injects trusted crede
 })
 
 it.each([undefined, 'other=private', `other=private; fractal_device=${'a'.repeat(43)}; another=private`, 'fractal_device=invalid', `fractal_device=${'a'.repeat(43)}; fractal_device=${'b'.repeat(43)}`])('selects only the browser credential for HTTP and WebSocket (%s)', async cookie => {
-  const setup = await fixture()
+  const setup = await fixture(undefined, undefined, undefined, undefined, undefined, true)
   const headers = cookie === undefined ? {} : { cookie }
-  await fetch(`${setup.base}/v1/client/capabilities`, { headers })
-  expect(await openUpgrade(setup.port, '/v1/client/stream', headers)).toContain('101')
-  const expected = cookie?.startsWith('other=private; fractal_device=') === true ? `Bearer ${'a'.repeat(43)}` : gatewayAuthorization
-  expect(setup.received).toHaveLength(2)
+  const paired = cookie?.startsWith('other=private; fractal_device=') === true
+  expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(paired ? 200 : 401)
+  expect(await openUpgrade(setup.port, '/v1/client/stream', headers)).toContain(paired ? '101' : '401 Unauthorized')
+  expect(setup.received).toHaveLength(paired ? 2 : 0)
   for (const request of setup.received) {
-    expect(request.auth).toBe(expected)
+    expect(request.auth).toBe(`Bearer ${'a'.repeat(43)}`)
     expect(request.cookie).toBeUndefined()
   }
+})
+
+it('retains preview credentials for HTTP and WebSocket only without browser pairing', async () => {
+  const setup = await fixture()
+  expect((await fetch(`${setup.base}/v1/client/capabilities`)).status).toBe(200)
+  expect(await openUpgrade(setup.port, '/v1/client/collections/stream')).toContain('101')
+  expect(setup.received).toHaveLength(2)
+  for (const request of setup.received) expect(request.auth).toBe(gatewayAuthorization)
 })
 
 it.each([

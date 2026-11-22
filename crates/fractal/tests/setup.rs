@@ -161,7 +161,7 @@ list-units)
     printf '%s\n' '[{"unit":"st3.service","load":"loaded","active":"inactive","sub":"dead"}]'
     ;;
 show)
-    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup ]; then
+    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup ]; then
         echo 'unexpected property request' >&2
         exit 9
     fi
@@ -171,7 +171,7 @@ show)
             echo 'must not query an unloaded service' >&2
             exit 9
         fi
-        printf 'Id=%s\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n\n' "$name"
+        printf 'Id=%s\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nUnitFileState=disabled\nMainPID=0\nControlGroup=\n\n' "$name"
     done
     ;;
 *)
@@ -225,7 +225,7 @@ fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() 
     assert!(calls.lines().any(|line| line.starts_with("--user list-units ")), "{calls}");
     assert!(calls.lines().all(|line| {
         line.starts_with("--user list-units ")
-            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup st3.service"
+            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup st3.service"
     }), "{calls}");
 }
 
@@ -278,7 +278,7 @@ fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
     assert!(calls.lines().any(|line| line.starts_with("--user list-units ")), "{calls}");
     assert!(calls.lines().all(|line| {
         line.starts_with("--user list-units ")
-            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup st3.service"
+            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup st3.service"
     }), "{calls}");
 }
 
@@ -343,7 +343,7 @@ fn erase(fixture: &Fixture, name: Option<&str>) -> Output {
         .unwrap()
 }
 
-/// An instance whose person declined the service runs a plain `st3 up`. Uninstall stops that
+/// An instance whose person declined the service runs a plain `fractal up`. Uninstall stops that
 /// daemon itself, and only it; the same situation in the default install is still refused.
 #[cfg(target_os = "linux")]
 #[test]
@@ -1041,7 +1041,7 @@ fn setup_preserves_managed_app_style_executables_and_links() {
     };
     let bytes = digest(&app);
     let link_inode = fs::symlink_metadata(bin.join("fractal")).unwrap().ino();
-    // The captured login PATH cannot find this app; its st is a different image.
+    // The captured login PATH cannot find this app; its fractal is a different image.
     symlink(fixture.path("archive/fractal"), fixture.path("bin/st")).unwrap();
     let inode = fs::metadata(&app).unwrap().ino();
     let output = fixture.command(&bin.join("fractal"))
@@ -1092,7 +1092,7 @@ list-units)
     exit 0
     ;;
 show)
-    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup ]; then
+    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup ]; then
         echo 'unexpected property request' >&2
         exit 9
     fi
@@ -1102,7 +1102,7 @@ show)
             echo 'must not query an unloaded service' >&2
             exit 9
         fi
-        printf 'Id=%s\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=0\nControlGroup=\n\n' "$name"
+        printf 'Id=%s\nLoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=0\nControlGroup=\n\n' "$name"
     done
     exit 0
     ;;
@@ -1147,7 +1147,8 @@ esac
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("replication unit denied"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("replication unit denied"), "{stderr}");
         assert_eq!(unit.exists(), file_present);
         let calls = fs::read_to_string(&log).unwrap();
         assert!(!calls.contains("daemon-reload"), "{calls}");
@@ -1506,7 +1507,7 @@ fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
     while child.0.try_wait().unwrap().is_none() {
         assert!(
             Instant::now() < deadline,
-            "plain st did not quit after Ctrl+Q"
+            "plain fractal did not quit after Ctrl+Q"
         );
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -2027,7 +2028,7 @@ fn the_setup_screen_sets_up_each_agent_on_its_own_and_stores_an_unticked_codex_b
     let mut fixture = Fixture::new();
     fixture.unpack_archive();
     // Codex has never been signed in: its own login writes the file setup looks for. Pi starts but
-    // keeps its sign-in where st cannot read it. Omp is installed and broken.
+    // keeps its sign-in where fractal cannot read it. Omp is installed and broken.
     // The fake programs run with only the fixture's PATH, so they use shell built-ins alone.
     fs::create_dir_all(fixture.path("home/.codex")).unwrap();
     fake(

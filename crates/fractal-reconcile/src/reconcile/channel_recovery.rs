@@ -112,7 +112,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 incarnation_id: Some(incarnation.into()),
             }),
             None,
-        )
+        ).map(|outcome| outcome != RequestedRestart::Continue)
     }
     /// The driver rechecks attachment every second. After its detection window, allow another
     /// backoff window for a late MCP initialization before replacing the exact blocked runtime.

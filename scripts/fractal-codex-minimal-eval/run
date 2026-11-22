@@ -6,7 +6,7 @@
 #
 # Usage: run BIN_DIR OUT [MODEL]
 #
-# BIN_DIR holds the st3 binary under test. OUT receives start.json, status.json, history.jsonl,
+# BIN_DIR holds the Fractal binary under test. OUT receives start.json, status.json, history.jsonl,
 # the seat's transcript, its provider argv (codex-argv.txt) and verdict.txt.
 set -Eeuo pipefail
 
@@ -119,6 +119,6 @@ cp "$root/daemon.log" "$out/"
   grep -q 'tools.web__run\|"web_search_call"' "$out/transcript.jsonl" 2>/dev/null && echo "web search call: yes" || echo "web search call: NO"
   grep -q 'Read-only file system' "$out/transcript.jsonl" 2>/dev/null && echo "refusal observed: yes" || echo "refusal observed: NO"
   echo "escalations requested: $(grep -o 'sandbox_permissions[^,]*require_escalated' "$out/transcript.jsonl" 2>/dev/null | wc -l)"
-  grep -q 'st-minimal-outside' "$out/transcript.jsonl" 2>/dev/null && ! grep 'st-minimal-outside' "$out/transcript.jsonl" | grep -q require_escalated && echo "outside write escalated: no" || echo "outside write escalated: CHECK"
+  grep -q 'fractal-minimal-outside' "$out/transcript.jsonl" 2>/dev/null && ! grep 'fractal-minimal-outside' "$out/transcript.jsonl" | grep -q require_escalated && echo "outside write escalated: no" || echo "outside write escalated: CHECK"
   jq -r '.checks[]? | select(.name=="harness-access-mode") | "doctor: " + .message' "$out/doctor.json" 2>/dev/null | cut -c1-120
 } | tee "$out/verdict.txt"

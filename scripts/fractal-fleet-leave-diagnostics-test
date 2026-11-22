@@ -10,6 +10,9 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 
+sys.path.insert(0, str(HERE))
+from fractal_test_process import namespace_holders
+
 
 @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux guardian proof")
 class DiagnosticsTests(unittest.TestCase):
@@ -36,7 +39,8 @@ child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],
 (root / 'a').mkdir()
 (root / 'a/daemon.stderr.log').write_text('retained daemon trace\\n')
 (root / 'phase.txt').write_text('fleet leave CLI on b')
-(root / 'pids.json').write_text(json.dumps([os.getpid(), child.pid]))
+(root / 'pids.json').write_text(json.dumps({'pids': [os.getpid(), child.pid],
+                                            'namespace': os.readlink('/proc/self/ns/pid')}))
 time.sleep(600)
 '''
             result = self.run_fixture(root, code)
@@ -45,9 +49,16 @@ time.sleep(600)
             self.assertIn("fleet leave CLI on b", result.stderr)
             self.assertIn("retained daemon trace", result.stderr)
             self.assertIn("owned process tree (before cleanup)", result.stderr)
-            for pid in json.loads((root / "pids.json").read_text()):
+            owned = json.loads((root / "pids.json").read_text())
+            for pid in owned["pids"]:
                 self.assertIn(f'"pid": {pid}', result.stderr)
-                self.assertFalse(Path(f"/proc/{pid}").exists(), f"owned child {pid} leaked")
+            if owned["namespace"] == os.readlink("/proc/self/ns/pid"):
+                for pid in owned["pids"]:
+                    self.assertFalse(Path(f"/proc/{pid}").exists(), f"owned child {pid} leaked")
+            else:
+                # The guardian ran in its own PID namespace: those PIDs are its, and nothing
+                # may be left in it.
+                self.assertEqual(namespace_holders(owned["namespace"]), [], "owned children leaked")
 
     def test_success_and_ordinary_failure_keep_the_child_status(self):
         with tempfile.TemporaryDirectory() as directory:

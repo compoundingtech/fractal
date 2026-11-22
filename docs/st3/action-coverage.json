@@ -1641,7 +1641,7 @@
       "description": "Admit a finite shell payload and forward its actual outcome after custody retirement",
       "tests": [
         "crates/fractal/src/resources_cli.rs::exec_requires_resources_and_preserves_payload_argv",
-        "crates/fractal/src/resources_cli.rs::platform_refusal_precedes_daemon_contact_and_capacity_acquisition",
+        "crates/fractal/src/resources_cli.rs::darwin_exec_requires_a_known_lane_and_authorized_helper",
         "crates/fractal/src/resources_cli.rs::payload_exit_code_is_passed_through_and_result_is_durable",
         "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard",
         "crates/fractal-api-core/src/api/resources.rs::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials"
@@ -1663,6 +1663,32 @@
         "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard"
       ],
       "verification": "HTTP router through the native transport guard; exact execution ownership and credential redaction"
+    },
+    {
+      "command": "st resources cancel",
+      "description": "Cancel an exact execution or owner-scoped request and optionally await retirement",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::cancel_selects_exact_execution_identity",
+        "crates/fractal-api-core/src/api/resources.rs::absent_request_cancel_returns_confirmed_owner_scoped_tombstone"
+      ],
+      "verification": "real Clap execution/request selectors and authenticated durable cancellation tombstones"
+    },
+    {
+      "command": "st resources member-scope",
+      "description": "Inspect the authenticated execution's exact enforced member cgroup",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::member_scope_requires_exact_execution_selector",
+        "crates/fractal-api-core/src/api/resources.rs::nested_member_scope_keeps_current_generation_separate_from_verified_root"
+      ],
+      "verification": "real Clap exact-execution selector and nested generation/root custody checks"
+    },
+    {
+      "command": "st resources in-member",
+      "description": "Inspect local kernel member placement without granting execution authority",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::offline_membership_requires_explicit_owner_uid"
+      ],
+      "verification": "real Clap parsing requires an explicit owner UID for offline inspection"
     },
     {
       "command": "st resources hold",
@@ -2185,36 +2211,12 @@
       "verification": "real CLI dispatch over a private disk-backed fixture with an unusable endpoint; both analysis-only windows are published without daemon discovery, source bytes stay unchanged, missing inputs and acknowledgement publish nothing"
     },
     {
-      "command": "st replication checkpoint excuse",
-      "description": "Stop waiting for an unreachable writer. It fences nothing: what the writer wrote while away still replicates when it returns, and its next seal ends the excusal",
-      "tests": [
-        "crates/fractal/tests/fleet.rs::action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts"
-      ],
-      "verification": "existing CLI integration"
-    },
-    {
-      "command": "st replication checkpoint plan",
-      "description": "Show what a checkpoint would drop from this node's store, proved on a copy. Changes nothing",
-      "tests": [
-        "crates/fractal/tests/fleet.rs::action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts"
-      ],
-      "verification": "existing CLI integration"
-    },
-    {
       "command": "st replication checkpoint resume",
-      "description": "Go on with checkpoints after a trim stopped because deleting would change the graph. The rows stay as they are; the next checkpoint proceeds",
+      "description": "Go on trimming after a trim stopped because deleting would change the graph. The rows stay as they are; the next day's cut proceeds",
       "tests": [
         "crates/fractal/tests/fleet.rs::action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts"
       ],
       "verification": "existing CLI integration"
-    },
-    {
-      "command": "st replication checkpoint status",
-      "description": "Show the newest stable checkpoint and who has sealed or verified the one being agreed",
-      "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
-      ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
       "command": "st replication diff",
@@ -2644,12 +2646,28 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st slo ingest-roll",
+      "description": "Admit one existing signed graph roll receipt claim",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_native_roll_receipts_and_intent_proof_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; authenticated source admission, immutable pinned native intent, rejected missing claims and replay after disk-backed restart"
+    },
+    {
       "command": "st slo ls",
       "description": "List every objective and budget: target, current value, window and what is left",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo roll-intent",
+      "description": "Resolve immutable native creation time and pinned revision for one enrolled roll intent",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_native_roll_receipts_and_intent_proof_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; authenticated source admission, immutable pinned native intent, rejected missing claims and replay after disk-backed restart"
     },
     {
       "command": "st setup",
@@ -2709,6 +2727,14 @@
         "crates/fractal/tests/action_coverage.rs::cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated"
       ],
       "verification": "real offline CLI on a private store; cross-process daemon and SQLite writer locks refused, startup SQL byte-identical, second run byte-identical, invalid schema exits nonzero"
+    },
+    {
+      "command": "st store restore-blob-bytes",
+      "description": "Restore moved blob bytes to the store offline so a previous release can open it; stop the daemon first",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_rollback"
+      ],
+      "verification": "real offline CLI between fleet-member versions; previous release refuses the moved store and opens it after restoration (requires ST3_COMPAT_BIN)"
     },
     {
       "command": "st subject basis",

@@ -2,7 +2,7 @@
 """Turn a finished Workspace CI run into signed evidence notes, then publish them.
 
 Runs in the `Evidence observe` workflow on the signing runners, never on a pull request's
-code. It does not run any check: it asks the protected observer (`st3 evidence observe-ci`,
+code. It does not run any check: it asks the protected observer (`fractal evidence observe-ci`,
 behind a sekrets grant) to record what the run already did, imports the returned object
 pack into a scratch repository, verifies every full-trust record with scripts/evidence-verify
 against the accepted key list, and only then creates and pushes refs/tags/evidence/<tree>/<id> and, while gates on

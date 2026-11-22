@@ -32,7 +32,6 @@ listed wait. No concurrency assumption about callers is needed.
 | `/v1/client/actions` importing a native session | Wait for the exact predecessor process to stop | `blocking_external` runs termination without writer capacity. The parsed/fenced takeover still orders stop, declaration and start. |
 | `/v1/sessions/input/{*subject}`, `/v1/sessions/{subject}/context/clear`, `/v1/sessions/{subject}/signal`, and the corresponding client actions | PTY/provider or exec control effect | `blocking_external` runs only the effect. The durable request receipt precedes it; the result receipt follows in another admitted poll. |
 | `/v1/sets/preview`, `/v1/sets/apply`, `/v1/intent/mission`, `/v1/intent/apply`, `/v1/work/mission/{*subject}`, and launch/create paths calling `publication_refusals` | Workspace/git publication preflight | The non-writing preflight runs via `blocking_external`; the parent poll returns admission while awaiting it. Publication writes remain admitted. |
-| `/v1/checkpoint/plan` | Planning and proving on a scratch copy | Live sealing/capture is admitted. Planning and scratch-copy proof run via `blocking_external`, with no live writer capacity retained. The same disk-staged set, staged planner/proof, response fields and outer allocator-completion boundary are used. Dry-run staging keeps main's separate `checkpoint/plan` directory and cleanup on proof success/error. |
 | `/v1/gate-checks` | Environment/filesystem/process startup | Gate startup runs via `blocking_external`. The handler returns the initial check; it never waits for exec gates to finish. |
 | `/v1/sekrets/attest` | Process/scope and ancestry inspection | Attestation runs via `blocking_external`, without writer capacity; its live-store access is read-only. |
 | `/v1/internal/client-read/forward` forwarding terminal control | Owner/control relay | Async relay waits return pending without capacity. Forwarded read variants already have a read budget and retain their separate read path. |
@@ -44,7 +43,7 @@ a mission/step to finish or a receipt from a future mutation. Agent restart, rol
 suspend/resume and launch endpoints record requests and notify the reconciler; their
 HTTP handlers do not wait for the requested lifecycle transition. Mailbox bind/receipts
 and harness-event publication commit their local result instead of awaiting delivery.
-Replication receive, heal and checkpoint-adopt handlers perform local store work and
+Replication receive and heal handlers perform local store work and
 return its receipt; they do not await a peer, replication convergence or a later
 writer mutation. Replication export is already on the budgeted read path (its artificial
 delay exists only under `test-support`) and takes no writer admission permit.

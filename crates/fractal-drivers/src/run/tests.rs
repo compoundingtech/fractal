@@ -32,7 +32,7 @@ fn session_socket_overage_is_derived_from_the_resolved_root() {
 
 #[test]
 fn effective_pty_root_prefers_an_exported_ambient_root_else_catalog_pty() {
-    let cat = std::path::Path::new("/deep/sandbox/st-root");
+    let cat = std::path::Path::new("/deep/sandbox/fractal-root");
     // No ambient PTY_ROOT → the rendered default `<catalog>/pty`.
     assert_eq!(effective_pty_root_from(cat, None), cat.join("pty"));
     assert_eq!(

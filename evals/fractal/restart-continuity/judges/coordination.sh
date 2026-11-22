@@ -43,7 +43,7 @@ test "$(jq 'length' <<<"$confirmations")" -eq 1
 
 duplicate_subject="$(jq -r '.[0].subject' <<<"$duplicates")"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-restart_subject="$(st3 subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/restart" --json \
+restart_subject="$(fractal subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/restart" --json \
   | jq -r '.status.subjects[0].actual | (.fields // .) | .duplicate_message')"
 test "$duplicate_subject" = "$restart_subject"
 

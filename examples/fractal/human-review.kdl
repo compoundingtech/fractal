@@ -8,16 +8,16 @@ version 2
 //
 // The review appears in the person's attention inbox with the exact commands to decide it:
 //
-//   st attention ls --as person/operator
-//   st attention approve step-run/GENERATION/approve \
+//   fractal attention ls --as person/operator
+//   fractal attention approve step-run/GENERATION/approve \
 //     --as person/operator --reason "the release notes are accurate"
 //
 // Use the exact step-run subject that `attention ls` prints; GENERATION is a placeholder. A
 // rejection fails the gate. Republishing the mission cannot forge a decision.
 //
-//   st apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator
-//   st apply examples/fractal/human-review.kdl --as person/operator
-//   st missions start example/release --id example/release/1.4.0 \
+//   fractal apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator
+//   fractal apply examples/fractal/human-review.kdl --as person/operator
+//   fractal missions start example/release --id example/release/1.4.0 \
 //     --workspace /srv/example/app --as person/operator
 
 mission "example/release" state="ready" {

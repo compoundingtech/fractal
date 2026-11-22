@@ -11,4 +11,4 @@ resource_index="$(fractal subject show "$resource" --json | jq '[.recent_claims[
 message_index="$(fractal subject show "$message" --json | jq '[.recent_claims[] | select(.kind == "message.delivered")][0].store_index')"
 test "$resource_index" -lt "$message_index"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-test "$(st3 conversations ls "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}/worker" --json | jq --arg message "$message" '[.[] | select(.subject == $message and .status == "delivered" and .content == "work://eval/cold-start is ready")] | length')" -eq 1
+test "$(fractal conversations ls "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}/worker" --json | jq --arg message "$message" '[.[] | select(.subject == $message and .status == "delivered" and .content == "work://eval/cold-start is ready")] | length')" -eq 1

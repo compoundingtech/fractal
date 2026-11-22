@@ -219,7 +219,7 @@ pub async fn run(exporter: OtlpExporter, windows: fn() -> Value) {
             Err(error) => {
                 if !failing {
                     failing = true;
-                    eprintln!("st3: reading the SLO windows for OpenTelemetry export failed: {error}");
+                    eprintln!("fractal: reading the SLO windows for OpenTelemetry export failed: {error}");
                 }
                 continue;
             }
@@ -231,7 +231,7 @@ pub async fn run(exporter: OtlpExporter, windows: fn() -> Value) {
             Ok(_) => failing = false,
             Err(error) if !failing => {
                 failing = true;
-                eprintln!("st3: OpenTelemetry export of the SLO windows failed: {error:#}");
+                eprintln!("fractal: OpenTelemetry export of the SLO windows failed: {error:#}");
             }
             Err(_) => {}
         }

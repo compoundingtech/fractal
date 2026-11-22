@@ -66,13 +66,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         match self.runtime.resize_lane(&member.runtime_id, wanted) {
             Ok(changed) => {
                 if changed {
-                    eprintln!("st3: {agent}'s lane is now {wanted} for the steps it holds");
+                    eprintln!("fractal: {agent}'s lane is now {wanted} for the steps it holds");
                 }
                 status.state().lane_applied.insert(agent.to_owned(), (incarnation.to_owned(), wanted));
             }
             // The seat's wakes go on; the next pass tries the lane again.
             Err(error) => {
-                eprintln!("st3: WARN resizing {agent}'s lane to {wanted}: {error:#}");
+                eprintln!("fractal: WARN resizing {agent}'s lane to {wanted}: {error:#}");
                 smallclaims::touched::note_due(now_ms() + 30_000);
             }
         }

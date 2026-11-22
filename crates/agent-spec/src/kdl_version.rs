@@ -45,7 +45,7 @@ pub fn ensure_kdl_schema_version(document: &KdlDocument) -> Result<u32> {
     let version = document_version(document)?;
     ensure!(
         version == KDL_SCHEMA_VERSION,
-        "st3 requires KDL version 2, but this document uses version {version}"
+        "Fractal requires KDL version 2, but this document uses version {version}"
     );
     Ok(version)
 }

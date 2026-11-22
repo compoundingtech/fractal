@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "End GitHub watches silently for retired recipients and isolate watch maintenance failures",
+  "replay": {"status": "none", "detail": "No replay changes. Watch maintenance uses existing terminal recipient admission to end a retired recipient's watch without sending a deadline wake."},
+  "schema": {"status": "none", "detail": "No schema, generated client, or store version changes. Retired recipients use the existing seat-ended reason."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "Existing watch declarations and ended records remain compatible. Item faults remain visible while other watches and observer cleanup continue."},
+  "downtime": {"status": "none", "detail": "No expected interruption or additional startup work."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes required."},
+  "recovery": {"status": "none", "detail": "No persistent state migration or new rollback restrictions."}
+}

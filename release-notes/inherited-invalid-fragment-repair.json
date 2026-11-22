@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow an inherited schema-invalid release note to be repaired into a valid note while preserving immutability of valid notes and requiring a fresh PR classification.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No database schema or storage version changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule or fleet coordination changes."},
+  "compatibility": {"status": "changed", "detail": "The PR upgrade-impact checker permits modification only when the fragment inherited from each integrated member's first parent fails the existing JSON or fragment schema validation and its replacement passes that same validation. A note repaired by one queue member is immutable for later members. Valid existing fragments remain immutable; deletion and renaming remain forbidden. Repairs do not replace the required fresh PR fragment or bypass coverage and version-transition checks. The inherited subject activity summary now uses the supported changed compatibility status rather than additive, retaining its impact details."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No operator action required. Future corrections to already valid release notes still require a new fragment."},
+  "recovery": {"status": "none", "detail": "No runtime or stored-data changes to recover."}
+}
