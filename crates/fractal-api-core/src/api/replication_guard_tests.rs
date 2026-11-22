@@ -1,4 +1,5 @@
 use super::*;
+use super::replication::replication_revision;
 use smallclaims::claim::ReplicaEnvelopeId;
 use smallclaims::replication::ReplicationInventory;
 use smallclaims::sync::Backend as _;
