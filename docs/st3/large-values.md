@@ -1238,3 +1238,11 @@ writers to mission or shell history. Their remaining representation work is
 to preserve these exact interruption and uncertainty cases through the owning
 bounded fixture/native-store APIs, not to generalize the test registrations
 into permission for new unbounded production writes.
+
+The `fractal_store::store::scratch_resources` maintainer also owns the fixed
+non-Linux owner fixture `lv-h80ef1a553e5e`. The
+`fractal_reconcile::reconcile::tests::scratch_consumer_custody` maintainer owns
+`lv-h1fbf8fba44aa`, which rewrites one existing bounded fixture membership to
+remove or mismatch its process-generation evidence. These test-only producers
+exercise unknown retention; their remaining work is migration to bounded
+fixture/native-store APIs, not permission for production history growth.

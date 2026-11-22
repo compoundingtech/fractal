@@ -181,7 +181,7 @@ fn retire_quarantined(
         quarantine.identity = Some(fd_identity(&directory)?);
         quarantine.phase = "prepared".into();
         // Both identities precede the first rename, including on interruption.
-        anyhow::ensure!(record.object == Some(fd_identity(&object)?), "allocation receipt changed");
+        anyhow::ensure!(record.object == Some(fd_identity(object)?), "allocation receipt changed");
         write(connection, record)?;
     }
     let quarantine = record.quarantine.as_ref().expect("reserved quarantine").clone();
@@ -538,7 +538,7 @@ fn unsupported_physical_retirement_retains_custody() {
     let root = fs::canonicalize(directory.path()).unwrap().join("dedicated");
     let store = Store::open_memory("host-a").unwrap();
     store.start_resource_authority("host-a", "epoch-a").unwrap();
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h40d4f40c9604 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h80ef1a553e5e owner=fractal_store::store::scratch_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
         (id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
         VALUES('owner','mission/test','revision','generation-a','revision','owner','workspace/test','person/test','{}','once','running','normal','1','1')", []).unwrap();
     let request = ScratchRequest { id: "scratch/platform".into(), host: "host-a".into(),

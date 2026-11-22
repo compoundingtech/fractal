@@ -251,7 +251,7 @@ fn missing_or_mismatched_native_process_generation_retains_scratch() {
             identity.insert("startToken".into(), serde_json::json!(token.wrapping_add(1)));
         }
         fixture.store.connection.write().execute(
-            "UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h1fbf8fba44aa owner=fractal_reconcile::reconcile::tests::scratch_consumer_custody TODO=bound-or-reference-values-and-reclamation */ "UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
             rusqlite::params![request.id, serde_json::to_string(&body).unwrap()]).unwrap();
         assert!(!fixture.release(), "missing or mismatched process generation cannot prove exclusion");
         assert_eq!(fixture.store.scratch_inventory("node", None, 10).unwrap()[0].consumer_observation,
