@@ -226,7 +226,7 @@ fn mail_subject_deltas_are_retained_coalesced_and_non_destructive() {
     let initial = *receiver.borrow();
     for message in ["message/first", "message/second"] {
         store.connection.write().execute(
-            "INSERT INTO local_mail_delivery_source_v1(message,recipient,sent_ms,fields) VALUES(?1,'agent/test',1,'{\"sent_clock_valid\":1}')",
+            /* sqlite-large-value: allow-for-now lv-h629a7a0b19ba owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_delivery_source_v1(message,recipient,sent_ms,fields) VALUES(?1,'agent/test',1,'{\"sent_clock_valid\":1}')",
             [message]).unwrap();
     }
     let (cut, delta) = store.mail_objective_changes_since(initial);
@@ -240,11 +240,11 @@ fn mail_subject_deltas_are_retained_coalesced_and_non_destructive() {
     assert_eq!(store.mail_objective_changes_since(cut), (cut, Some((BTreeSet::new(), BTreeSet::new()))));
 
     store.connection.write().execute(
-        "INSERT INTO local_mail_acceptance_frontier_v1 VALUES('agent/test','incarnation/test',2,2)", []).unwrap();
+        /* sqlite-large-value: allow-for-now lv-hacac0eab3efb owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_acceptance_frontier_v1 VALUES('agent/test','incarnation/test',2,2)", []).unwrap();
     let (next, delta) = store.mail_objective_changes_since(cut);
     assert_eq!(delta, Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
     store.connection.write().execute(
-        "UPDATE local_mail_acceptance_frontier_v1 SET observed_through_unix_ms=3 WHERE recipient='agent/test'", []).unwrap();
+        /* sqlite-large-value: allow-for-now lv-hb05bdfc424a1 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mail_acceptance_frontier_v1 SET observed_through_unix_ms=3 WHERE recipient='agent/test'", []).unwrap();
     assert_eq!(store.mail_objective_changes_since(next).1,
         Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
 }
@@ -254,15 +254,15 @@ fn mail_subject_key_updates_invalidate_both_old_and_new_messages() {
     let store = Store::open_memory("local").unwrap();
     let receiver = store.subscribe_mail_objective_inputs();
     store.connection.write().execute(
-        "INSERT INTO local_mail_delivery_source_v1 VALUES('message/old','agent/test',1,'{\"sent_clock_valid\":1}')", []).unwrap();
+        /* sqlite-large-value: allow-for-now lv-h3f11a802a5cd owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_delivery_source_v1 VALUES('message/old','agent/test',1,'{\"sent_clock_valid\":1}')", []).unwrap();
     let generation = *receiver.borrow();
     store.connection.write().execute(
-        "UPDATE local_mail_delivery_source_v1 SET message='message/new' WHERE message='message/old'", []).unwrap();
+        /* sqlite-large-value: allow-for-now lv-h1eaca37fa635 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mail_delivery_source_v1 SET message='message/new' WHERE message='message/old'", []).unwrap();
     assert_eq!(store.mail_objective_changes_since(generation).1,
         Some((BTreeSet::from(["message/old".to_owned(), "message/new".to_owned()]), BTreeSet::new())));
     let generation = *receiver.borrow();
     store.connection.write().execute(
-        "DELETE FROM local_mail_delivery_source_v1 WHERE message='message/new'", []).unwrap();
+        /* sqlite-large-value: allow-for-now lv-h063d26028ca7 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mail_delivery_source_v1 WHERE message='message/new'", []).unwrap();
     assert!(store.mail_objective_changes_since(generation).1.is_none(), "deleted routing keys fail closed");
 }
 
@@ -278,7 +278,7 @@ fn mail_subject_journal_rollover_and_projection_reset_require_a_full_rebuild() {
         }
     }
     store.connection.write().execute(
-        "INSERT INTO local_mail_delivery_source_v1 VALUES('message/overflow','agent/test',1,'{\"sent_clock_valid\":1}')", []).unwrap();
+        /* sqlite-large-value: allow-for-now lv-h28cf46bbeff5 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_delivery_source_v1 VALUES('message/overflow','agent/test',1,'{\"sent_clock_valid\":1}')", []).unwrap();
     assert!(store.mail_objective_changes_since(initial).1.is_none());
     let generation = *receiver.borrow();
     store.fractal.mail_objective_inputs.invalidate();

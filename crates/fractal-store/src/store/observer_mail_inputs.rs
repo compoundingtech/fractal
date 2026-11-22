@@ -10,6 +10,9 @@ use smallclaims::sqlite::WriterObserver;
 
 const PENDING_LIMIT: usize = 8192;
 
+/// A changed-subject cut: (changed message subjects, changed recipient subjects).
+pub type ChangedMailInputs = (BTreeSet<String>, BTreeSet<String>);
+
 #[cfg(test)]
 #[path = "observer_mail_inputs_tests.rs"]
 mod tests;
@@ -28,14 +31,14 @@ impl Store {
 
     /// Non-destructive changed-subject cut. `None` requires a full population rebuild:
     /// startup, identity/schema changes, lost routing keys or bounded journal rollover.
-    pub fn mail_objective_changes_since(&self, generation: u64) -> (u64, Option<(BTreeSet<String>, BTreeSet<String>)>) {
+    pub fn mail_objective_changes_since(&self, generation: u64) -> (u64, Option<ChangedMailInputs>) {
         let state = self.fractal.mail_objective_inputs.0.lock().unwrap_or_else(PoisonError::into_inner);
         let current = *state.generation.borrow();
         if generation < state.full_generation || current == u64::MAX {
             return (current, None);
         }
         let messages = state.messages.iter().filter(|(_, at)| **at > generation)
-            .map(|(subject, _)| subject.clone()).collect();
+            .map(|(subject, _)| subject.clone()).collect::<BTreeSet<_>>();
         let recipients = state.recipients.iter().filter(|(_, at)| **at > generation)
             .map(|(subject, _)| subject.clone()).collect();
         (current, Some((messages, recipients)))
@@ -156,8 +159,10 @@ impl WriterObserver for Observer {
             return;
         }
         if table.starts_with("local_mail") && action == rusqlite::hooks::Action::SQLITE_UPDATE
-            && !state.routing.contains_key(&(table, rowid)) {
+            && !state.routing.contains_key(&(table, rowid))
+            && !state.pending.contains(&(table, rowid)) {
             // The first update of a pre-existing row has no retained old routing key.
+            // An insert already pending in this transaction has no old published key.
             state.dirty = true;
         }
         if action == rusqlite::hooks::Action::SQLITE_DELETE { state.routing.remove(&(table, rowid)); }
@@ -234,7 +239,7 @@ impl WriterObserver for Observer {
                         ("subject", &mut recipients)
                     } else { ("message", &mut messages) };
                     let column = if table == "local_mail_acceptance_frontier_v1" { "recipient" } else { column };
-                    let subject = connection.query_row(&format!("SELECT {column} FROM {table} WHERE rowid=?1"),
+                    let subject = connection.query_row(/* sqlite-large-value: allow-for-now lv-h62abcfe1465d owner=fractal_store::store::observer_mail_inputs TODO=trace-statement-and-value-representation */ &format!("SELECT {column} FROM {table} WHERE rowid=?1"),
                         [rowid], |row| row.get::<_, String>(0)).optional()?;
                     if let Some(subject) = subject {
                         if state.routing.len() >= PENDING_LIMIT && !state.routing.contains_key(&(table, rowid)) {

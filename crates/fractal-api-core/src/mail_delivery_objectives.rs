@@ -475,7 +475,7 @@ fn capture_message(store: &Store, now: u64, message: Option<&str>, facts: Option
             if sent < cutoff && !connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM local_mail_delivery_pending_v1 WHERE message=?1 AND recipient=?2)",
                 rusqlite::params![message, recipient], |row| row.get::<_, bool>(0))? { continue; }
-            let recipient = canonical(&connection, &mut identities, &recipient)?;
+            let recipient = canonical(&connection, &mut identities, recipient)?;
             if !recipient.starts_with("agent/") { continue; }
             recipients.insert(recipient.clone());
             covered_from_ms = covered_from_ms.min(sent);
@@ -507,7 +507,7 @@ fn capture_message(store: &Store, now: u64, message: Option<&str>, facts: Option
                     _ => { unknown += 1; uncovered_recipients.insert(recipient.clone()); }
                 }
             }
-            let fields: Value = serde_json::from_str(&fields)?;
+            let fields: Value = serde_json::from_str(fields)?;
             match source.entry((message.clone(), recipient)) {
                 std::collections::btree_map::Entry::Vacant(entry) => { entry.insert((sent, fields)); }
                 std::collections::btree_map::Entry::Occupied(mut entry) if sent < entry.get().0 => {
@@ -537,7 +537,7 @@ fn capture_message(store: &Store, now: u64, message: Option<&str>, facts: Option
             #[cfg(test)]
             { source_work[1] += raw.len(); }
             for (recipient, at) in raw {
-                let key = (message.clone(), canonical(&connection, &mut identities, &recipient)?);
+                let key = (message.clone(), canonical(&connection, &mut identities, recipient)?);
                 accepted.entry(key).and_modify(|first| *first = (*first).min(*at)).or_insert(*at);
             }
             if !facts.steps.contains_key(message) {
@@ -554,7 +554,7 @@ fn capture_message(store: &Store, now: u64, message: Option<&str>, facts: Option
                 // before any harness handoff; its actor is not the target input consumer.
                 let consumer = if consumer.is_empty() || matches!(kind.as_str(), "message.closed" | "message.expired") {
                     String::new()
-                } else { canonical(&connection, &mut identities, &consumer)? };
+                } else { canonical(&connection, &mut identities, consumer)? };
                 steps.entry((message.clone(), consumer)).or_default().entry(kind.clone())
                     .and_modify(|first| *first = (*first).min(*at)).or_insert(*at);
             }

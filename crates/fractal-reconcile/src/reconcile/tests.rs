@@ -3925,6 +3925,7 @@ version 2
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, r#"
 version 2
+resource "elsewhere" { kind "custom.st3.document-source" }
 mission "counted" state="ready" {
   goal "Wait for an explicitly named seat."
   concurrent-runs
