@@ -582,6 +582,18 @@ fn replication_shard(state: &AppState, shard: &str) -> Result<Arc<smallclaims::s
         .ok_or_else(|| ApiError::not_found(format!("this daemon holds no shard `{shard}`")))
 }
 
+/// Follow admitted advertisement/membership changes, independently of envelope receipt.
+pub async fn shard_replication_peers_revision(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(after): Json<Option<smallclaims::sync::revision::StoreRevision>>,
+) -> Result<Json<smallclaims::sync::revision::StoreRevision>, ApiError> {
+    replication_shard(&state, &shard)?;
+    crate::store::messages_shard::wait_advertising_revision(&state.store, after)
+        .await.map(Json)
+        .map_err(|error| ApiError::bad(FractalError::new("internal", error.to_string())))
+}
+
 /// The members to dial for a shard: those whose current daemon advertises holding it.
 pub async fn shard_replication_peers(
     State(state): State<AppState>,

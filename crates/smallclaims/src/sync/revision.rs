@@ -65,6 +65,8 @@ impl Store {
             let authority = Arc::downgrade(revisions);
             vec![
                 self.observe_tables(&[
+                    // A local append is a batch/claim until the next snapshot seals it.
+                    "batches", "claims",
                     "replica_envelopes", "replica_envelope_signatures", "checkpoint_envelopes",
                     "released_envelopes", "retired_envelopes", "checkpoints",
                 ], move |_| {
@@ -282,5 +284,24 @@ mod tests {
         }).await.unwrap();
         assert_eq!(resumed.epoch, snapshot.epoch);
         assert!(resumed.generation > snapshot.generation);
+    }
+
+    #[tokio::test]
+    async fn unsealed_local_append_completes_pending_authority_wait_before_any_export() {
+        let store = store();
+        let before = store.replication_revision_snapshot(RevisionKind::Authority).unwrap();
+        let wait = store.wait_replication_revision(RevisionRequest {
+            kind: RevisionKind::Authority, after: Some(before.clone()),
+        });
+        tokio::pin!(wait);
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        append(&store);
+        let next = match futures_util::poll!(&mut wait) {
+            std::task::Poll::Ready(Ok(next)) => next,
+            other => panic!("unsealed source append did not wake authority: {other:?}"),
+        };
+        assert!(next.generation > before.generation);
+        let after = store.replication_revision_snapshot(RevisionKind::Authority).unwrap();
+        assert_ne!(after.authority_root, before.authority_root);
     }
 }
