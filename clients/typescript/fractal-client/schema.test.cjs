@@ -42,6 +42,36 @@ test('full and read entrypoints share validators and strict unknown-case trackin
     assert.equal(read.decodeUnknownSync(read.ReadCollectionCommand)(conversation).collection, 'conversation');
 });
 
+test('strict agent decoders accept optional model drift extension fields without regeneration', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const read = await import('./ReadSchema.generated.ts');
+    const base = {
+        id: 'agent/example/worker', kind: 'agent', revision: 'claim/example',
+        updated_at: '2026-11-19T00:00:00Z', name: 'Worker', state: 'running',
+        reachability: 'local', runtime_ids: [], live_model: 'openai/gpt-5',
+    };
+    const extension = {
+        declared_model: 'anthropic/claude-sonnet-4-5',
+        model_drift: {
+            state: 'drifted', drift_since: '2026-11-18T23:00:00Z',
+            drift_age_seconds: 3600, observed_at: '2026-11-19T00:00:00Z',
+            fallback_reason: 'transient', return_attempts: 1,
+        },
+    };
+    for (const schema of [Rich, read]) {
+        const decode = schema.decodeUnknownSync(schema.Agent, 'strict');
+        for (const wire of [base, { ...base, ...extension },
+            { ...base, declared_model: null, model_drift: {
+                state: 'unknown', drift_since: null, drift_age_seconds: null,
+                observed_at: null, fallback_reason: null, return_attempts: null,
+            } }]) {
+            const decoded = decode(wire);
+            assert.equal(decoded.id, base.id);
+            assert.equal(Schema.encodeSync(schema.Agent)(decoded).live_model, base.live_model);
+        }
+    }
+});
+
 test('human-gate attention read schema accepts the source step-run Id, never its bare path', async () => {
     const read = await import('./ReadSchema.generated.ts');
     const decode = read.decodeUnknownSync(read.Attention, 'strict');
