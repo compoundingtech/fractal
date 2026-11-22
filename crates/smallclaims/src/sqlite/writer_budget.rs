@@ -841,12 +841,19 @@ mod tests {
         let clock = Arc::new(AtomicU64::new(0));
         let advance = clock.clone();
         let connection = connection(None);
-        // This real SQLite hook runs after the explicit pre-COMMIT check. The controlled
-        // clock avoids shared-runner timing as an oracle; the SQL commit/row proof is real.
-        connection.commit_hook(Some(move || {
-            advance.store(5_000_000, Ordering::Relaxed);
-            false
-        }));
+        // This owned resolution subscriber runs at the native commit, after the explicit
+        // pre-COMMIT check; the dispatcher fans the slot out instead of replacing it.
+        // The controlled clock avoids shared-runner timing as an oracle; the SQL
+        // commit/row proof is real.
+        crate::sqlite::observe_transaction_resolution(
+            &connection,
+            move || {
+                advance.store(5_000_000, Ordering::Relaxed);
+                false
+            },
+            || {},
+        )
+        .unwrap();
         let writer = WriterConnection::new_with_handler_policy(
             connection,
             Arc::new(AtomicU64::new(0)),
