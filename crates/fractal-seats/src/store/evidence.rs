@@ -39,12 +39,22 @@ impl EvidenceSeatsStore for Store {
         let local = crate::performance::task("roster/frontier-read", || {
             roster_local_frontier(&self.readers.get(), index)
         })?;
-        let cache = self.fractal.agent_resources_cache.lock()
+        let mut cache = self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned");
-        let hit = cache.iter().rev()
-            .find(|entry| entry.index == index && entry.local == local && entry.history == history)
-            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, selected))
-            .map(|entry| (Arc::clone(&entry.items), entry.published_at_unix_ms));
+        let entry = cache.iter_mut().rev()
+            .find(|entry| entry.index == index && entry.local <= local && entry.history == history)
+            .filter(|entry| agent_resources_entry_hits(entry, now, index, entry.local, history, selected));
+        let hit = if let Some(entry) = entry {
+            if roster_local_unchanged(&self.readers.get(), entry.local, local, index)? {
+                // Remember the checked interval without republishing or copying the rows.
+                entry.local = local;
+                Some((Arc::clone(&entry.items), entry.published_at_unix_ms))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         drop(cache);
         Ok(hit.map(|hit| crate::performance::task("roster/cache-hit", || {
             crate::otel::record_roster("hit", hit.0.len());
