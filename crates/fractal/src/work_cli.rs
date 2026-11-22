@@ -394,6 +394,9 @@ pub(super) async fn run_work(
                 };
                 let driver_held = claim_has_driver(client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
                 print!("{}", render_client_work_detail(work, driver_held));
+                if !matches!(endpoint, Endpoint::Fabric(_)) {
+                    write_execution_phases(client, &normalized, work.attempt, &mut cli_output::stdout()).await?;
+                }
                 if work.claim_expires_at_unix_ms.is_some() {
                     print!("{}", render_wait_lease(
                         &work.header.id, work.claimant.as_deref(), work.claim_incarnation.as_deref(),
@@ -594,6 +597,42 @@ pub(super) async fn run_work(
             print_value(&response, json_output)
         }
         WorkCommand::Revision { command } => run_work_revision(client, command, json_output).await,
+    }
+}
+
+/// Internal evidence stays on the native claims surface, outside the frozen Work resource.
+async fn write_execution_phases(
+    client: &Client,
+    subject: &str,
+    attempt: u64,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
+    let mut after = None;
+    let mut shown_heading = false;
+    loop {
+        let mut path = format!(
+            "/v1/claims?subject={}&kind=step.execution-phase&order=asc&limit=500",
+            urlencoding::encode(subject),
+        );
+        if let Some(cursor) = after {
+            path.push_str(&format!("&after_index={cursor}"));
+        }
+        let page: ClaimsPage = client.get(&path).await?;
+        for claim in &page.claims {
+            let fields = claim.body.get("fields").unwrap_or(&claim.body);
+            if fields.get("attempt").and_then(Value::as_u64) != Some(attempt) {
+                continue;
+            }
+            if !shown_heading {
+                writeln!(output, "Execution phases (attempt {attempt}):")?;
+                shown_heading = true;
+            }
+            write_trace_claim(output, claim)?;
+        }
+        match page.next_cursor {
+            Some(cursor) => after = Some(cursor),
+            None => return Ok(()),
+        }
     }
 }
 
@@ -913,6 +952,53 @@ fn mission_revision_intent(
 mod wait_lease_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn phase_detail_reads_all_pages_and_only_shows_current_attempt() {
+        use axum::{Json, Router, http::Uri};
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("phases.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let app = Router::new().fallback(|uri: Uri| async move {
+            assert_eq!(uri.path(), "/v1/claims");
+            let query = uri.query().unwrap();
+            assert!(query.contains("subject=step-run%2Ftest%2Fwork"));
+            assert!(query.contains("kind=step.execution-phase"));
+            assert!(query.contains("order=asc"));
+            let second = query.contains("after_index=7");
+            Json(json!({
+                "api_version": "st3.v1",
+                "value": {
+                    "claims": [{
+                        "id": if second { "claim-current" } else { "claim-old" },
+                        "store_index": if second { 8 } else { 7 }, "batch_id": "batch-test",
+                        "subject": "step-run/test/work", "kind": "step.execution-phase",
+                        "origin": "test", "actor": null, "predecessors": [],
+                        "accepted_at_unix_ms": 2000,
+                        "body": {"fields": {
+                            "attempt": if second { 2 } else { 1 },
+                            "phase": if second { "exec-started" } else { "dispatched" },
+                            "exec": "exec/test", "host": "host/test", "at_unix_ms": 1000
+                        }}
+                    }],
+                    "next_cursor": if second { None } else { Some(7) },
+                },
+            }))
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(Endpoint::Unix(socket));
+        let mut output = Vec::new();
+        let result = write_execution_phases(&client, "step-run/test/work", 2, &mut output).await;
+        server.abort();
+        let _ = server.await;
+        result.unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("Execution phases (attempt 2):\n"));
+        assert!(output.contains("phase=exec-started"));
+        assert!(output.contains("at_unix_ms=1970-01-01T00:00:01.000Z"));
+        assert!(!output.contains("phase=dispatched"));
+        assert_eq!(output.lines().count(), 2);
+    }
+
     #[test]
     fn wait_and_show_report_separate_wait_budget_and_lease_deadline() {
         let step: StepRunView = serde_json::from_value(json!({
@@ -936,7 +1022,7 @@ mod wait_lease_tests {
     }
 
     #[tokio::test]
-    async fn held_work_show_uses_only_the_client_resource_on_a_client_only_endpoint() {
+    async fn held_work_show_uses_client_resource_and_native_phase_evidence() {
         use axum::{Json, Router, http::{StatusCode, Uri}};
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("client.sock");
@@ -946,6 +1032,12 @@ mod wait_lease_tests {
         let app = Router::new().fallback(move |uri: Uri| {
             recorded.lock().unwrap().push(uri.path().to_owned());
             async move {
+                if uri.path() == "/v1/claims" {
+                    return (StatusCode::OK, Json(json!({
+                        "api_version": "st3.v1",
+                        "value": {"claims": [], "next_cursor": null}
+                    })));
+                }
                 if fractal_client::fabric::FabricEndpoint::validate_path(uri.path()).is_err() {
                     return (StatusCode::FORBIDDEN, Json(json!({"error": "client routes only"})));
                 }
@@ -977,6 +1069,7 @@ mod wait_lease_tests {
         result.unwrap();
         let requests = requests.lock().unwrap();
         assert!(requests.iter().any(|path| path.starts_with("/v1/client/")));
+        assert!(requests.iter().any(|path| path == "/v1/claims"));
         assert!(!requests.iter().any(|path| path.starts_with("/v1/work-items/")));
     }
 }
