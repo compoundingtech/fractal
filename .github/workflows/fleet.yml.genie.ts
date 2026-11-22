@@ -638,6 +638,18 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
       'runs-on': testBuildRunsOn,
       'timeout-minutes': 120,
       ...testArchiveProducer,
+      steps: [
+        ...testArchiveProducer.steps,
+        nixDevelopStep({
+          name: 'List the complete storage-version nextest inventory',
+          command: ['bash', '-euc', 'mkdir -p target; cargo nextest list --locked -p fractal-storage-version --message-format json > target/buck2-storage-version-nextest.json'],
+        }),
+        nixDevelopStep({
+          name: 'Run native Buck Rust tests and prove nextest inventory parity',
+          flake: '.#web',
+          command: ['bash', '-euc', 'python3 scripts/ci-buck2-rust-parity-test; buck2 test //crates/fractal-storage-version:unit-tests //crates/fractal-storage-version:integration-tests; python3 scripts/ci-buck2-rust-parity --nextest-json target/buck2-storage-version-nextest.json'],
+        }),
+      ],
     },
     // Four merge partitions (two for other events) reuse the one producer archive.
     // `linux-gate` below is the single required check that collects them.

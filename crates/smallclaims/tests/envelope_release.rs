@@ -162,7 +162,9 @@ fn own_claim_of_released_envelope(store: &Store) -> String {
 
 #[test]
 fn the_daemon_releases_envelopes() {
-    assert!(ENVELOPE_RELEASE, "a peer that takes signed claims is served a released envelope's claims; release waits for one that does not");
+    const {
+        assert!(ENVELOPE_RELEASE, "a peer that takes signed claims is served a released envelope's claims; release waits for one that does not");
+    }
 }
 
 #[test]

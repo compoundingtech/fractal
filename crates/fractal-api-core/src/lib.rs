@@ -14,6 +14,7 @@ pub use fractal_reconcile::*;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod activity_contract;
 pub mod api;
 pub mod claude_channel;
 pub mod creation;

@@ -15,6 +15,43 @@ pub struct Phase {
     _profile: Option<smallclaims::profile::Span>,
     span: Option<opentelemetry::global::BoxedSpan>,
     members: Option<[MemberTotals; 2]>,
+    cost: Option<StageCost>,
+}
+
+thread_local! {
+    static CHILD_COST: std::cell::Cell<(std::time::Duration, std::time::Duration)> =
+        const { std::cell::Cell::new((std::time::Duration::ZERO, std::time::Duration::ZERO)) };
+}
+
+struct StageCost {
+    name: &'static str,
+    started: Instant,
+    cpu: Option<std::time::Duration>,
+    parent: (std::time::Duration, std::time::Duration),
+    // Phase is synchronous: no thread clock or TLS guard may migrate across an await.
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+static STAGE_COSTS: LazyLock<(Counter<f64>, Counter<f64>)> = LazyLock::new(|| {
+    let meter = opentelemetry::global::meter("st3");
+    (
+        meter.f64_counter("st.reconcile.stage.cpu_time").with_unit("s").build(),
+        meter.f64_counter("st.reconcile.stage.duration").with_unit("s").build(),
+    )
+});
+
+impl Drop for StageCost {
+    fn drop(&mut self) {
+        let duration = self.started.elapsed();
+        let cpu = self.cpu.zip(smallclaims::task_cpu::thread_cpu())
+            .and_then(|(start, end)| end.checked_sub(start)).unwrap_or_default();
+        let children = CHILD_COST.with(|cost| cost.replace((
+            self.parent.0 + cpu, self.parent.1 + duration,
+        )));
+        let attributes = [KeyValue::new("stage", self.name)];
+        STAGE_COSTS.0.add(cpu.saturating_sub(children.0).as_secs_f64(), &attributes);
+        STAGE_COSTS.1.add(duration.saturating_sub(children.1).as_secs_f64(), &attributes);
+    }
 }
 
 #[derive(Default)]
@@ -68,7 +105,7 @@ pub fn phase(scope: &str) -> Phase {
         "stage/subagents" => "st.reconcile.stage.subagents",
         "fault_snapshot" => "st.reconcile.fault_snapshot",
         // Per-item scopes, such as one member's turn: no stage span and no I/O counters.
-        _ => return Phase { _profile: smallclaims::profile::span(scope), span: None, members: None },
+        _ => return Phase { _profile: smallclaims::profile::span(scope), span: None, members: None, cost: None },
     };
     // A stage also counts its reads, from disk and in all, which a profile minute reports per span.
     let profile = smallclaims::profile::span_with_io(scope);
@@ -79,7 +116,14 @@ pub fn phase(scope: &str) -> Phase {
             .start_with_context(&tracer, &tracing::Span::current().context())
     });
     let members = (scope == "pass/members" && span.is_some()).then(Default::default);
-    Phase { _profile: profile, span, members }
+    let cost = crate::otel::metrics_enabled().then(|| StageCost {
+        name: name.strip_prefix("st.reconcile.").unwrap_or(name),
+        started: Instant::now(),
+        cpu: smallclaims::task_cpu::thread_cpu(),
+        parent: CHILD_COST.with(|cost| cost.replace(Default::default())),
+        _thread: std::marker::PhantomData,
+    });
+    Phase { _profile: profile, span, members, cost }
 }
 
 impl Phase {
@@ -100,6 +144,7 @@ impl Phase {
 impl Drop for Phase {
     fn drop(&mut self) {
         use opentelemetry::trace::Span as _;
+        drop(self.cost.take());
         if let Some(span) = &mut self.span {
             if let Some(members) = &self.members {
                 for (totals, keys) in members.iter().zip([
@@ -362,7 +407,7 @@ mod tests {
 
     #[test]
     fn member_timings_aggregate_without_member_spans() {
-        let mut phase = Phase { _profile: None, span: None, members: Some(Default::default()) };
+        let mut phase = Phase { _profile: None, span: None, members: Some(Default::default()), cost: None };
         drop(phase.member(true));
         drop(phase.member(false));
         drop(phase.member(false));
@@ -372,6 +417,62 @@ mod tests {
         assert_eq!(members[0].total, members[0].max);
         assert!(members[1].total >= members[1].max);
         assert!(phase.span.is_none());
+    }
+
+    #[test]
+    fn stage_names_exclude_dynamic_scopes() {
+        for scope in ["agent/example", "stage/unregistered", "pass/member live", "pass/member stop"] {
+            assert!(phase(scope).cost.is_none());
+        }
+    }
+
+    #[test]
+    fn nested_stage_costs_are_exclusive() {
+        const CHILD: &str = "ST_RECONCILE_STAGE_COST_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "reconcile_telemetry::tests::nested_stage_costs_are_exclusive"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let stage = |name| StageCost {
+            name,
+            started: Instant::now(),
+            cpu: smallclaims::task_cpu::thread_cpu(),
+            parent: CHILD_COST.with(|cost| cost.replace(Default::default())),
+            _thread: std::marker::PhantomData,
+        };
+        let start = smallclaims::task_cpu::thread_cpu().unwrap();
+        let outer = stage("members");
+        let inner = stage("fault_snapshot");
+        let busy = smallclaims::task_cpu::thread_cpu().unwrap();
+        while smallclaims::task_cpu::thread_cpu().unwrap().saturating_sub(busy)
+            < std::time::Duration::from_millis(10) {
+            std::hint::spin_loop();
+        }
+        drop(inner);
+        drop(outer);
+        let total = smallclaims::task_cpu::thread_cpu().unwrap().saturating_sub(start).as_secs_f64();
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        let cpu = exported.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "st.reconcile.stage.cpu_time")
+            .and_then(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Sum(sum)) => Some(sum),
+                _ => None,
+            }).unwrap();
+        assert_eq!(cpu.data_points().count(), 2);
+        let charged = cpu.data_points().map(|point| point.value()).sum::<f64>();
+        assert!(charged >= 0.01);
+        assert!(charged <= total, "nested stage CPU must be charged only once");
     }
 
     #[test]

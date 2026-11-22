@@ -6,6 +6,10 @@ use super::invocation_receipts::{append_receipt_tx, InvocationPhase, InvocationR
 
 pub const TAG_PREFIX: &str = "fractal-invocation:";
 
+pub(super) fn mission_run_id(run: &str) -> &str {
+    run.strip_prefix("mission-run/").unwrap_or(run)
+}
+
 fn operation_id(run: &str, step: &str, attempt: u32, epoch: u32, agent: &str,
     incarnation: &str, prior_claim: Option<&str>) -> String {
     let identity = json!([run, step, attempt, epoch, agent, incarnation, prior_claim]);
@@ -34,7 +38,8 @@ fn receipt_tx(tx: &Transaction<'_>, run: &str, step: &str, attempt: u32, epoch: 
         params![agent, format!("invocation/{operation}")], |row| row.get(0)).optional()?;
     Ok(serde_json::from_value(json!({
         "invocation_id":format!("invocation/{operation}"), "operation_id":operation,
-        "phase":"observed", "agent":agent, "owner_run":run, "owner_step":step,
+        // Wake views carry the prefix; claims read raw SQL IDs. Keep operation identity unchanged.
+        "phase":"observed", "agent":agent, "owner_run":format!("mission-run/{}", mission_run_id(run)), "owner_step":step,
         "owner_attempt":attempt, "incarnation":incarnation, "parent_invocation_id":parent,
         "trace_context":trace.map(|trace| serde_json::from_str::<Value>(&trace)).transpose()?,
         "freshness":{"source":"native-work-turn"}

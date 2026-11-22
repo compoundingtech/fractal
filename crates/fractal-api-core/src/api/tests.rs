@@ -16,6 +16,17 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[test]
+fn worker_authorization_warning_is_process_wide_and_rate_limited() {
+    let now = std::time::Instant::now();
+    let mut last = None;
+    assert!(worker_warning_due(&mut last, now));
+    assert!(!worker_warning_due(&mut last, now));
+    assert!(!worker_warning_due(&mut last, now + std::time::Duration::from_secs(59)));
+    assert!(worker_warning_due(&mut last, now + std::time::Duration::from_secs(60)));
+    assert!(!worker_warning_due(&mut last, now + std::time::Duration::from_secs(61)));
+}
+
 #[tokio::test]
 async fn health_reports_read_only_systemd_failure_and_recovery() {
     // No manager access: both production routers share the health handler, and
@@ -597,7 +608,7 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
         };
         let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
         let authority: Option<WorkerAuthority> = worker.then(|| {
-            Arc::new(|| Ok(std::process::id())) as WorkerAuthority
+            WorkerAuthority::new("test-replication.service", || Ok(std::process::id()))
         });
         let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
             reserved, app, Some(state.store), authority, lookup,
@@ -619,6 +630,10 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             ("GET", "/v1/client/session", true, "{}", true),
             ("POST", "/v1/internal/replication-wake", false, "{}", true),
             ("GET", "/v1/internal/fleet/membership", false, "{}", true),
+            ("GET", "/v1/internal/fleet/leave-state", false, "{}", false),
+            ("HEAD", "/v1/internal/fleet/leave-state", false, "{}", false),
+            ("POST", "/v1/internal/fleet/leave-state", false, "{}", true),
+            ("GET", "/v1/internal/fleet/leave-state", true, "{}", true),
             ("GET", "/v1/client/capabilities", true, "{}", true),
             ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
             ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
@@ -633,6 +648,60 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
         }
         server.abort();
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn leave_state_read_admits_unreadable_ancestor_without_granting_actor_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let socket = root.path().join("companion.sock");
+    let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
+        reserved, router(state.clone()), Some(state.store), None,
+        |_, _| with_process_fixture(
+            std::process::Command::new("sh").args(["-c", "echo $$; read answer"]),
+            |pid| {
+                let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+                let process = local_harness_process(pid).unwrap();
+                let ancestor = pid + 1;
+                let result = walk_harness_ancestry(pid, Some(&peer), |_| {
+                    let mut current = process.clone();
+                    current.generation.as_mut().unwrap().0 = ancestor;
+                    Ok(current)
+                }, |candidate| {
+                    if candidate == pid {
+                        Ok(HarnessAncestry::Person)
+                    } else {
+                        Err(AncestryUnavailableReason::ProcessReadFailed {
+                            operation: "proc-environ-read", os_error: Some(libc::EACCES),
+                            error: "Permission denied".into(),
+                        })
+                    }
+                });
+                assert!(matches!(&result, Err(cause) if cause.pid == Some(ancestor)));
+                result
+            },
+        ),
+        move || { let _ = ready.send(()); },
+    ));
+    waiting.await.unwrap();
+    let client = crate::client::Client::unix(&socket);
+    let snapshot: Value = client.get("/v1/internal/fleet/leave-state").await.unwrap();
+    assert!(snapshot["fleet_id"].is_null());
+    assert_eq!(snapshot["members"], json!([]));
+    assert!(snapshot["persistence_error"].is_null());
+    for path in ["/v1/backup", "/v1/internal/fleet/membership"] {
+        let result: anyhow::Result<Value> = client.get(path).await;
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("foreign-agent-actor"), "{path}: {error}");
+    }
+    let result: anyhow::Result<Value> = client.post("/v1/intent/apply",
+        &json!({"actor": "agent/fixture/companion"})).await;
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("foreign-agent-actor"), "{error}");
+    server.abort();
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -661,7 +730,7 @@ async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person()
     let root = tempfile::tempdir().unwrap();
     let store = state(root.path()).store;
     for verified in [false, true] {
-        let authority: WorkerAuthority = Arc::new(move || Ok(if verified { pid } else { 0 }));
+        let authority = WorkerAuthority::new("test-replication.service", move || Ok(if verified { pid } else { 0 }));
         let app = Router::new().fallback(|| async { "accepted" })
             .layer(from_fn_with_state((store.clone(), Some(authority)), guard_bound_actor));
         for (method, path, header) in [
@@ -11491,6 +11560,50 @@ async fn trim_completion_retains_initial_head_and_complete_roster_publications()
             ).await.expect("a graph-preserving trim must not withdraw the published roster");
             assert_eq!(before_cut.store_index, after_cut.store_index);
             assert_eq!(before.items, after.items);
+        }
+    }
+}
+
+#[tokio::test]
+async fn retired_identity_activation_preserves_a_successful_roster_barrier() {
+    assert!(crate::config::TrimConfig::default().local);
+    for populated in [false, true] {
+        for complete in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = state(root.path());
+            state.store = Arc::new(if populated {
+                roster_followup_store()
+            } else {
+                Store::open_memory("node").unwrap()
+            });
+            let store = &state.store;
+            // Startup enables local trimming before its paced retirement import finishes.
+            store.trim_locally(true).unwrap();
+            let _wake = store.start_agent_roster_refresher().unwrap();
+            if complete {
+                refresh_agent_roster(store, false).unwrap();
+            } else {
+                agent_roster_snapshot(store, |index| client_agent_roster_head(store, index)).unwrap();
+            }
+            let (Extension(before_cut), Json(before)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Query(ClientListQuery { min_cut: Some(0), ..ClientListQuery::default() }),
+            ).await.expect("the fixture's read-after-publication barrier succeeds");
+            let revision = store.agent_roster_revision();
+
+            // Complete the exact background startup transition after that barrier, without
+            // allowing the refresher to republish and conceal an availability regression.
+            store.import_retired_identities_paced(|_| {}).unwrap();
+            assert!(store.retired_identity_import_done().unwrap());
+            let (Extension(after_cut), Json(after)) = client_agents(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Query(ClientListQuery::default()),
+            ).await.expect("an ordinary read after the barrier must remain ready");
+            assert_eq!(after_cut.store_index, before_cut.store_index);
+            assert_eq!(after_cut.published_at, before_cut.published_at);
+            assert_eq!(after.items, before.items);
+            assert_eq!(store.agent_roster_revision(), revision,
+                "retirement authority changes replication inventory, not roster inputs");
         }
     }
 }

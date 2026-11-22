@@ -21,8 +21,7 @@ struct Publication {
     incarnation: Mutex<Option<String>>,
     #[cfg(test)]
     captures: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    captured: tokio::sync::Notify,
+
 }
 #[derive(Debug)]
 struct Snapshot {
@@ -44,23 +43,23 @@ fn now() -> u64 {
         .map_or(0, |duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
 }
 
-/// One subscription owns source capture. Changes coalesce during a minimum rest after each
-/// capture. Timers renew the producer heartbeat and wake the objective evaluator at actual
-/// lifecycle/budget boundaries without continuously recomputing retained history.
+/// One source-specific subscription owns capture. Changes coalesce while capture runs;
+/// unrelated API wakes never recapture. Timers only renew the producer heartbeat or
+/// evaluate actual lifecycle/budget boundaries, including retained-source expiry.
 pub fn start(state: &crate::api::AppState) {
     let publication = state.store.extension::<Publication>();
     if publication.started.swap(true, Ordering::AcqRel) { return; }
     *publication.incarnation.lock().unwrap_or_else(PoisonError::into_inner) = Some(crate::model::new_request_id());
     let state = state.clone();
-    let mut changed = state.event_notify.subscribe();
+    let mut changed = state.store.subscribe_mail_objective_inputs();
     *publication.changed.lock().unwrap_or_else(PoisonError::into_inner) = Some(changed.clone());
     tokio::spawn(async move {
         loop {
             let generation = *changed.borrow_and_update();
+            #[cfg(test)]
+            publication.captures.fetch_add(1, Ordering::AcqRel);
             let store = state.store.clone();
             let captured = tokio::task::spawn_blocking(move || capture(&store, now())).await;
-            let recapture_after = tokio::time::Instant::now()
-                + std::time::Duration::from_millis(FRESHNESS / 2);
             let mut snapshot = match captured {
                 Ok(Ok(snapshot)) => snapshot,
                 error => Snapshot { observed_ms: now(), generation, samples: Vec::new(), held: 0, unknown: 1,
@@ -71,11 +70,6 @@ pub fn start(state: &crate::api::AppState) {
             };
             snapshot.generation = generation;
             *publication.snapshot.lock().unwrap_or_else(PoisonError::into_inner) = Some(snapshot);
-            #[cfg(test)]
-            {
-                publication.captures.fetch_add(1, Ordering::SeqCst);
-                publication.captured.notify_one();
-            }
             let store = state.store.clone();
             let state_dir = state.state_dir.clone();
             let reported = tokio::task::spawn_blocking(move || {
@@ -98,9 +92,6 @@ pub fn start(state: &crate::api::AppState) {
                 tokio::select! {
                     result = changed.changed() => {
                         if result.is_err() { return; }
-                        // Rest after capture ENDS, not after it starts. The next
-                        // borrow_and_update coalesces all changes during this interval.
-                        tokio::time::sleep_until(recapture_after).await;
                         break;
                     }
                     () = tokio::time::sleep(std::time::Duration::from_millis(delay.max(1))) => {
@@ -110,6 +101,12 @@ pub fn start(state: &crate::api::AppState) {
                             snapshot.observed_ms = now();
                         }
                         if boundary.is_some_and(|deadline| deadline <= now()) {
+                            // Retained-source expiry needs a new population; budget boundaries
+                            // only rerender the same samples. Neither depends on broad API wakes.
+                            let recapture = publication.snapshot.lock().unwrap_or_else(PoisonError::into_inner)
+                                .as_ref().and_then(|snapshot| snapshot.recapture_at_ms)
+                                .is_some_and(|deadline| deadline <= now());
+                            if recapture { break; }
                             crate::api::signal_local_change(&state);
                         }
                     }
@@ -141,6 +138,7 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
         .as_ref().map(|changed| *changed.borrow());
     let known = snapshot.is_some_and(|snapshot| snapshot.error.is_none() && snapshot.unknown == 0
         && generation == Some(snapshot.generation)
+        && !store.mail_objective_input_coverage_failed()
         && now.saturating_sub(snapshot.observed_ms) <= FRESHNESS
         && now.saturating_sub(snapshot.source_through_ms) <= FRESHNESS);
     let samples = snapshot.map_or(&[][..], |snapshot| snapshot.samples.as_slice());
@@ -251,6 +249,8 @@ fn source_rows(store: &Store, cutoff: u64, progress: &mut impl FnMut()) -> anyho
 }
 
 fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) -> anyhow::Result<Snapshot> {
+        let changed = store.subscribe_mail_objective_inputs();
+        let generation = *changed.borrow();
         let source_cut = store.index()?;
         let owners = store.desired_subjects()?.into_iter().filter(|subject| subject.kind == "agent")
             .map(|subject| (subject.subject, subject.member.map(|member| member.host)))
@@ -267,8 +267,8 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
         let mut source_through_ms = now;
         let mut checked_recipients = std::collections::BTreeSet::new();
         let mut uncovered_recipients = std::collections::BTreeSet::new();
-        // Resolve each distinct reference once per capture. Concurrent graph changes
-        // invalidate the publication below, including any cached identity mapping.
+        // Resolve each distinct reference once per capture. Concurrent relevant input
+        // changes invalidate the publication below, including its identity mappings.
         let mut identities = BTreeMap::new();
         for (message, recipient, sent, fields) in raw {
             let recipient = canonical(&connection, &mut identities, &recipient)?;
@@ -396,9 +396,18 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
                 samples.push(LifecycleSample { onset_ms: onset, terminal });
             }
         }
-        // Paged reads deliberately do not share a snapshot. A concurrent graph write
-        // makes this publication unknown until the next coalesced change is captured.
-        if store.index()? != source_cut { unknown += 1; }
+        // Paged reads do not share a SQLite snapshot. Only a relevant input advance
+        // fences this cut; unrelated graph claims cannot change these source facts.
+        // A writer publishes native generations when its loan ends, after COMMIT.
+        // Resolve every loan that could have committed between pages before certifying.
+        // All statements have been consumed; no SQLite read transaction is held here.
+        if let Some(shard) = crate::store::messages_shard::shard(store) {
+            drop(shard.connection.write());
+        }
+        drop(store.connection.write());
+        if *changed.borrow() != generation || store.mail_objective_input_coverage_failed() {
+            unknown += 1;
+        }
         Ok(Snapshot { observed_ms: now, generation: 0, covered_from_ms, source_through_ms, recapture_at_ms,
             #[cfg(test)]
             source_work,

@@ -248,13 +248,17 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
             }
         }
     }));
-    let task = tokio::spawn(reconciler.clone().run());
+    // Count only broad-pass continuation. `run()` also starts result adoption and the host
+    // pressure sampler: adoption can race the counted pass, and the sampler can dirty admission
+    // and make that pass publish a host-layout diagnostic. Neither is fixture traffic.
+    // Concurrent result adoption is covered separately in start_preemption.rs.
+    let task = tokio::spawn(reconciler.clone().run_passes());
     let first = receive(&mut wake_rx).await;
     let mut counts = vec![first];
     if traffic == QuiescenceTraffic::StartCompletion {
         // Admission wakes the loop before launch completion. Hold the next dispatch until the
-        // helper has both finished the worker and applied its result: leaving `live` alone does
-        // not order the independent completion consumer's writes against the measured passes.
+        // helper has both finished the worker and applied its result, so every completion write
+        // precedes the measured passes rather than racing their before/after readings.
         let (dispatched, helper_done) = std::sync::mpsc::channel();
         *reconciler.background_dispatch_hook.lock().unwrap() = Some(Box::new({
             move || helper_done.recv_timeout(Duration::from_secs(30)).unwrap()
@@ -267,8 +271,8 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
             let prior_succeeded = reconciler.store.observations_for(
                 &subject.subject, "runtime.action.succeeded",
             ).unwrap();
-            // Use the existing single-start fixture barrier, not just the worker's `live` set.
-            // This also serializes with a completion consumer that already took the result.
+            // Use the single-start fixture barrier to await the worker and apply its result
+            // before releasing the broad-pass dispatch.
             reconciler.wait_for_test_starts.store(true, Ordering::Release);
             // Complete only after the initial pass rests. This real start path's
             // signal_changed must supply the next wake; the test never calls notify.
