@@ -375,10 +375,10 @@ pub(super) fn install_trace(connection: &Connection, ledger: &Mutex<Ledger>) {
     // sqlite3_trace_v2 replaces the trace callback but leaves the legacy xProfile
     // pointer installed. This dispatcher records PROFILE itself; retaining both
     // callbacks would double-count every writer statement and its elapsed time.
-    connection.profile(None);
     // SAFETY: MutationState owns this mutex and is retained by the connection's installed
     // hooks until SQLite closes. The callback never executes SQL or retains SQLite pointers.
     unsafe {
+        ffi::sqlite3_profile(connection.handle(), None, std::ptr::null_mut());
         ffi::sqlite3_trace_v2(connection.handle(), (ffi::SQLITE_TRACE_STMT | ffi::SQLITE_TRACE_PROFILE) as c_uint,
             Some(traced), std::ptr::from_ref(ledger).cast_mut().cast());
     }
