@@ -258,6 +258,23 @@ export const AgentMailCustody = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentMailCustody = typeof AgentMailCustody.Type
 export type AgentMailCustodyEncoded = typeof AgentMailCustody.Encoded
 
+export const AgentModelDrift = /*#__PURE__*/ (() => Schema.Struct({
+  /** Age of the matching current drift episode; null when the state is not drifted or its start is unknown. */
+  "drift_age_seconds": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Age of the matching current drift episode; null when the state is not drifted or its start is unknown." }),
+  /** Start of the durable drift episode for this incarnation and model pair; null without a matching episode. */
+  "drift_since": Schema.OptionFromNullOr(Timestamp).annotate({ description: "Start of the durable drift episode for this incarnation and model pair; null without a matching episode." }),
+  /** Sanitized cause from native fallback evidence fenced to this session, incarnation, and model selection; null means no matching positive fallback evidence. A model mismatch alone is not fallback. */
+  "fallback_reason": Schema.OptionFromNullOr(Schema.Literals(["transient","quota","auth","unknown"])).annotate({ description: "Sanitized cause from native fallback evidence fenced to this session, incarnation, and model selection; null means no matching positive fallback evidence. A model mismatch alone is not fallback." }),
+  /** Timestamp of the current incarnation's own model observation, never subagent response spend; null when unknown. */
+  "observed_at": Schema.OptionFromNullOr(Timestamp).annotate({ description: "Timestamp of the current incarnation's own model observation, never subagent response spend; null when unknown." }),
+  /** Durably admitted model-return attempts for this incarnation; null when the incarnation is unknown. Zero is a known empty count. */
+  "return_attempts": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Durably admitted model-return attempts for this incarnation; null when the incarnation is unknown. Zero is a known empty count." }),
+  /** Fresh comparable evidence distinguishes at-declared from drifted. Missing, stale, and uncomparable observations remain separate states. */
+  "state": Schema.Literals(["at-declared","drifted","unknown","stale","uncomparable"]).annotate({ description: "Fresh comparable evidence distinguishes at-declared from drifted. Missing, stale, and uncomparable observations remain separate states." })
+}).annotate({ identifier: "AgentModelDrift" }))()
+export type AgentModelDrift = typeof AgentModelDrift.Type
+export type AgentModelDriftEncoded = typeof AgentModelDrift.Encoded
+
 export const StepRunId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:step-run)/[^\\s]+$", "u"), "step-run").annotate({ identifier: "StepRunId" }))()
 export type StepRunId = typeof StepRunId.Type
 export type StepRunIdEncoded = typeof StepRunId.Encoded
@@ -621,6 +638,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "current_work": optionalKey(Schema.Array(WorkLabel)).annotate({ description: "current_work_ids named for display, in the same order." }),
   "current_work_ids": optionalKey(Schema.Array(StepRunId)),
   "declared_admission": optionalKey(DeclaredAdmission),
+  /** Model selected by the agent's current harness declaration; null when undeclared. Independent of the observed live_model and omitted by older daemons. */
+  "declared_model": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Model selected by the agent's current harness declaration; null when undeclared. Independent of the observed live_model and omitted by older daemons." }),
   /** Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`. */
   "delivery": Schema.OptionFromOptionalNullOr(AgentDelivery, NULL_NONE).annotate({ description: "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." }),
   /** When a `down` seat began waiting for a session; null in every other state. */
@@ -651,6 +670,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "live_model": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The model the seat actually runs on: the model its own session last reported (harness.usage context_occupancy or session_cumulative) for the card's incarnation, or null when it reported none. Response spend, which includes subagents' models, never counts. Differs from the declaration while the harness silently fell back to another model." }),
   /** Pending mail held for the named successor; omitted without custody. */
   "mail_custody": optionalKey(AgentMailCustody),
+  /** Current-incarnation model comparison and positive native fallback evidence. Missing or stale evidence never establishes drift or fallback. Omitted by older daemons. */
+  "model_drift": optionalKey(AgentModelDrift),
   "name": Schema.String,
   "next_work": Schema.OptionFromOptionalNullOr(WorkLabel, NULL_NONE),
   "next_work_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
