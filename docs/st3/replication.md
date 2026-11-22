@@ -918,12 +918,35 @@ detects PID reuse on Linux; other platforms retain the runtime's PID-based token
 The check also detects a daemon-only upgrade while the reporting worker keeps running.
 
 A local graph change writes `replication.wake`. The worker watches only this file, not the SQLite files.
+Filesystem events are coalesced **before** shared fan-out to graph, messages-shard and
+membership followers: the leading wake is immediate, followed by at most one broadcast
+per second while events continue. The final event is retained for the trailing broadcast.
+Authority guard reads also have a one-second minimum gap, including re-entry caused by
+inbound or route notifications. A local wake is announced at most one second after its
+write. Scheduling delay can approach two seconds: the one-second pacer plus the existing
+one-second no-movement window, followed by the round's execution time. Movement still
+drains immediately and failure/overload scheduling is unchanged.
+`st.replication.wakes{stage="raw"}` counts filesystem events and `stage="paced"` counts
+shared broadcasts, exposing wake amplification separately from completed round rates.
 
 The worker coalesces wake bursts for one second, so new authority, such as a mission publish, reaches every peer within seconds. An exchange that stored new envelopes on either side runs again at once until a backlog drains. An exchange that stored nothing new waits for the next wake, even if it carried envelopes the other side already held.
 
-The worker also runs a 30-second anti-entropy exchange. A recent inbound exchange suppresses
-a redundant connection in the opposite direction; local graph changes still request a prompt
-push. Failed attempts back off exponentially from one second through minutes to one hour, with 20 percent
+The worker's anti-entropy interval starts at 30 seconds and doubles after consecutive
+`in_sync` rounds, up to 10 minutes, independently for each store, peer and shard dialer.
+Movement resets it and drains the backlog immediately. A local wake, a new inbound exchange
+from that peer, changed routes or local connectivity also resets the idle sequence.
+`ST3_REPLICATION_IDLE_MAX_MS` raises or lowers the ceiling (30,000–3,600,000 ms;
+default 600,000). `ST3_WORKER_INTERVAL_MS` retains its cap-only meaning and can shorten
+these waits. Worker status reports the next idle deadline; `st.replication.rounds` retains
+its `peer` and `outcome` labels for comparing `in_sync` and `moved` round rates.
+A remote-only change, or a change whose notification is missed, can now wait up to the
+idle maximum: 600 seconds by default, or 3,600 seconds when raised, versus 30 seconds
+previously. This increased anti-entropy latency is an accepted tradeoff for reducing idle I/O.
+On worker return the filesystem watcher is dropped and the pacer is awaited, retaining
+the trailing generation without depending on an external process restart.
+A recent inbound exchange suppresses a redundant connection in the opposite direction;
+local graph changes still request a prompt push. Failed attempts back off exponentially
+from one second through minutes to one hour, with 20 percent
 jitter. Graph wakes do not reset failure backoff. An authenticated inbound request, a successful
 peer request, a change to the member's routes, or a local connectivity change interrupts it
 immediately, including activity received while an outbound request is still failing. Peer
