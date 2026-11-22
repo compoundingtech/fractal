@@ -10,6 +10,17 @@ use std::time::{Duration, Instant};
 const EMPTY_RETENTION: Duration = Duration::from_secs(600);
 const REFRESH_PAUSE: Duration = Duration::from_secs(30);
 type Population = BTreeMap<Bucket, u64>;
+// Canonical card/attention producers plus their directly read local projections. In
+// particular, outbox, idempotency and replication bookkeeping are not population inputs.
+const INPUT_TABLES: &[&str] = &[
+    "claims", "claim_positions", "batches", "replica_records", "replica_envelopes",
+    "released_envelopes", "desired", "identity_names", "identity_heads", "meta",
+    "local_observations", "ivm_heads", "ivm_contributions", "local_agent_harness_rows",
+    "mission_runs", "run_generations", "step_runs", "mission_definitions",
+    "planning_sessions", "revision_proposals",
+    "operations", "card_actual_revisions", "projection_health",
+    "projection_digest_repaired_claims", "documents", "blobs",
+];
 type Attention = super::population_attention::Counts;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -273,9 +284,9 @@ fn start_with_meter(
     let meter = meter();
     let wake = Arc::new(tokio::sync::Notify::new());
     let commits = Arc::clone(&wake);
-    // The same writer notification used by published-list refreshers: never read
-    // from the commit callback, and subscribe before the initial snapshot.
-    let observer = store.observe_commits(move |_| commits.notify_one());
+    // Subscribe to the fold's sources before its initial snapshot. Never read from
+    // the callback or wake the fold for unrelated writer activity.
+    let observer = store.observe_tables(INPUT_TABLES, move |_| commits.notify_one());
     #[cfg(test)]
     let attempts = store.extension::<RefreshAttempts>();
     let store = Arc::downgrade(store);
@@ -367,6 +378,48 @@ mod tests {
     use super::*;
     use crate::SeatsStoreCore as _;
     use serde_json::json;
+
+    #[test]
+    fn population_observer_counts_only_committed_input_work() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+             CREATE TABLE unrelated(id INTEGER PRIMARY KEY);",
+        ).unwrap();
+        for table in INPUT_TABLES.iter().filter(|table| **table != "claims") {
+            connection.execute_batch(&format!("CREATE TABLE \"{table}\"(id INTEGER PRIMARY KEY)")).unwrap();
+        }
+        let writer = smallclaims::sqlite::WriterConnection::new(
+            connection, Arc::new(AtomicU64::new(0)),
+        );
+        let evaluations = Arc::new(AtomicU64::new(0));
+        let observed = evaluations.clone();
+        let _population = writer.observe_tables(INPUT_TABLES, move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+        let unrelated = Arc::new(AtomicU64::new(0));
+        let observed = unrelated.clone();
+        let _other = writer.observe_tables(&["unrelated"], move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+        drop(writer.write());
+        writer.write().execute("INSERT INTO unrelated VALUES (1)", []).unwrap();
+        writer.write().execute("UPDATE unrelated SET id=id WHERE id=2", []).unwrap();
+        {
+            let mut loan = writer.write();
+            let transaction = loan.transaction().unwrap();
+            transaction.execute("INSERT INTO claims DEFAULT VALUES", []).unwrap();
+            transaction.rollback().unwrap();
+        }
+        assert_eq!(evaluations.load(Ordering::Relaxed), 0);
+        assert_eq!(unrelated.load(Ordering::Relaxed), 1);
+        for (index, table) in INPUT_TABLES.iter().enumerate() {
+            writer.write().execute(&format!("INSERT INTO \"{table}\" DEFAULT VALUES"), []).unwrap();
+            assert_eq!(evaluations.load(Ordering::Relaxed), index as u64 + 1, "{table}");
+            assert_eq!(unrelated.load(Ordering::Relaxed), 1, "{table}");
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn population_metrics_deployment_switch_controls_real_worker_and_registration() {
@@ -778,9 +831,29 @@ mod membership_tests {
             store.ask_person(&request).unwrap();
         }
         let before = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
-        let (_, attention) = fold(&store, &[]).unwrap();
+        let read_tables = Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+        let (_, attention) = store.read_snapshot(|_| {
+            use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+            let connection = store.readers.get();
+            connection.flush_prepared_statement_cache();
+            let observed = read_tables.clone();
+            connection.authorizer(Some(move |context: AuthContext<'_>| {
+                if let AuthAction::Read { table_name, .. } = context.action {
+                    observed.lock().unwrap().insert(table_name.to_owned());
+                }
+                Authorization::Allow
+            }));
+            let result = fold(&store, &[]);
+            connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+            result
+        }).unwrap();
         let statements = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before;
         assert_eq!(attention.iter().map(|(_, count)| count).sum::<u64>(), 50);
+        let undeclared: Vec<_> = read_tables.lock().unwrap().iter()
+            .filter(|table| !table.starts_with("sqlite_") && table.as_str() != "json_each"
+                && !INPUT_TABLES.contains(&table.as_str()))
+            .cloned().collect();
+        assert!(undeclared.is_empty(), "population read dependencies lack a scope: {undeclared:?}");
         eprintln!("population refresh query inventory: 47 declared members, 50 open agent requests, {statements} SQL statements");
     }
 

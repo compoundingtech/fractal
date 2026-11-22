@@ -25,7 +25,7 @@ fn notices(
     tokio::sync::watch::Receiver<()>,
 ) {
     let (sender, receiver) = tokio::sync::watch::channel(());
-    let observer = store.observe_commits(move |_| {
+    let observer = store.connection.observe_tables(RESPONSE_EXPIRY_TABLES, move |_| {
         sender.send_replace(());
     });
     (observer, receiver)
