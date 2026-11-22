@@ -1776,3 +1776,49 @@ fn an_existing_workspace_renders_and_publishes_with_exactly_one_lease() {
     assert!(crate::checkout::activation_lease(&repository, &repository).is_ok(),
         "the completed pass must release admission");
 }
+
+#[test]
+fn a_workspace_reclaimed_after_observation_is_leased_but_never_rendered_or_recreated() {
+    // Cover both declared checkouts and Git workspaces discovered during observation.
+    for declared_checkout in [false, true] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "--quiet", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        let checkout = if declared_checkout {
+            format!("checkout {:?} base=\"origin/main\" branch=\"worker\";",
+                repository.to_str().unwrap())
+        } else {
+            String::new()
+        };
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?} create=#true; {checkout} command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+            workspace.to_str().unwrap(),
+        ), "reclaimed-before-render");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        ).tolerating_faults();
+        let removed = workspace.clone();
+        let observed = store.clone();
+        let source_repository = repository.clone();
+        *reconciler.before_workspace_render.lock().unwrap() = Some(Box::new(move || {
+            assert_eq!(crate::checkout::test_support::lease_count(&source_repository), 0,
+                "observation must remain unleased");
+            assert!(!observed.observations_for("agent/node.worker", "workspace.observed")
+                .unwrap().is_empty(), "reclamation must happen after workspace observation");
+            std::fs::remove_dir_all(&removed).unwrap();
+        }));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1,
+            "render admission must retain the observed repository after Git pointers disappear");
+        assert!(!workspace.exists(), "render must not replace the checkout with a plain directory");
+        assert!(store.observations_for("agent/node.worker", "render.applied").unwrap().is_empty());
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert!(store.member_reconcile_fault("agent/node.worker", None).unwrap().unwrap()
+            .contains("workspace reclaimed before render"));
+    }
+}

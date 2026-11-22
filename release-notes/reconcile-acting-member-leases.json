@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No claim or replay changes."},
   "schema": {"status": "none", "detail": "No storage, client schema or code generation changes."},
   "rules": {"status": "none", "detail": "Graph rules are unchanged."},
-  "compatibility": {"status": "changed", "detail": "Existing workspaces acquire deletion-barrier admission only when the pass renders or starts them, not during validation and observation alone. Creation, rendering, runtime initialization and completion publication retain their shared lease, including reused workspaces and detached starts. Rendering remains pass-wide, so restart and full-render passes can still lease every renderable worktree."},
+  "compatibility": {"status": "changed", "detail": "Existing workspaces acquire deletion-barrier admission only when the pass renders or starts them, not during validation and observation alone. Observed Git identities survive reclamation between observation and admission; workspace existence and checkout validity are checked again under admission before rendering. A reclaimed workspace is blocked for this pass rather than recreated as a plain directory by rendering. Creation, rendering, runtime initialization and completion publication retain their shared lease, including reused workspaces and detached starts. Rendering remains pass-wide, so restart and full-render passes can still lease every renderable worktree."},
   "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
   "manual": {"status": "none", "detail": "No manual steps required."},
   "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
