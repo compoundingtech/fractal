@@ -68,7 +68,7 @@ struct Record {
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     // Every input is bounded before serialization; the serialized record has a hard SQL cap.
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS scratch_resources_v1 (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc855c0885bb7 owner=fractal_store::store::scratch_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS scratch_resources_v1 (
         id TEXT PRIMARY KEY CHECK(length(id)<=4096),
         host TEXT NOT NULL CHECK(length(host)<=4096),
         body TEXT NOT NULL CHECK(length(CAST(body AS BLOB))<=32768));
@@ -83,7 +83,7 @@ fn read(connection: &Connection, id: &str) -> Result<Option<Record>> {
 }
 
 fn write(connection: &Connection, record: &Record) -> Result<()> {
-    connection.execute("INSERT INTO scratch_resources_v1(id,host,body) VALUES(?1,?2,?3)
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hef0a8dd0d560 owner=fractal_store::store::scratch_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO scratch_resources_v1(id,host,body) VALUES(?1,?2,?3)
         ON CONFLICT(id) DO UPDATE SET body=excluded.body",
         params![record.request.id, record.request.host, serde_json::to_string(record)?])?;
     Ok(())

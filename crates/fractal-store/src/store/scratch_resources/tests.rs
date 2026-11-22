@@ -28,10 +28,10 @@ fn save(store: &Store, record: &Record) {
 
 fn owner(store: &Store, status: &str, phase: &str, generation: &str) {
     let connection = store.connection.write();
-    let updated = connection.execute("UPDATE mission_runs SET current_generation_id=?1,status=?2,phase=?3 WHERE id='owner'",
+    let updated = connection.execute(/* sqlite-large-value: allow-for-now lv-he0bc37451fe9 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET current_generation_id=?1,status=?2,phase=?3 WHERE id='owner'",
         params![generation, status, phase]).unwrap();
     if updated == 0 {
-        connection.execute("INSERT INTO mission_runs
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h40d4f40c9604 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
             (id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
             VALUES('owner','mission/test','revision',?1,'revision','owner','workspace/test','person/test','{}','once',?2,?3,'1','1')",
             params![generation, status, phase]).unwrap();
@@ -127,13 +127,13 @@ fn live_and_unknown_consumers_retain_custody() {
     let handle = store.acquire_scratch(&request).unwrap();
     for state in ["running", "uncertain"] {
         let body = json!({"state":state,"command":{"cwd":handle.path}}).to_string();
-        store.connection.write().execute("INSERT INTO shell_resources_v1(id,host,state,body) VALUES('consumer','host-a',?1,?2)
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hedc321694261 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES('consumer','host-a',?1,?2)
             ON CONFLICT(id) DO UPDATE SET state=excluded.state,body=excluded.body", params![state, body]).unwrap();
         assert!(!release(&store, &handle).unwrap());
         assert!(Path::new(&handle.path).is_dir());
         assert_ne!(store.scratch_inventory("host-a", None, 1).unwrap()[0].consumer_observation, OwnerObservation::Terminal);
     }
-    store.connection.write().execute("UPDATE shell_resources_v1 SET state='completed' WHERE id='consumer'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb652bf2a21a3 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET state='completed' WHERE id='consumer'", []).unwrap();
     assert!(release(&store, &handle).unwrap());
 }
 
@@ -173,7 +173,7 @@ fn missing_held_object_is_not_recreated() {
 fn inventory_is_bounded_read_only_and_owner_evidence_is_positive() {
     let (store, _directory, request) = fixture();
     let handle = store.acquire_scratch(&request).unwrap();
-    store.connection.write().execute("DELETE FROM mission_runs WHERE id='owner'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-ha2b4809b35ad owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='owner'", []).unwrap();
     assert!(!release(&store, &handle).unwrap());
     assert!(Path::new(&handle.path).is_dir());
     assert_eq!(store.scratch_inventory("host-a", None, 1).unwrap()[0].owner_observation, OwnerObservation::Unknown);
@@ -224,10 +224,10 @@ fn late_acquire_refuses_terminal_missing_successor_and_expired_owner() {
     assert!(store.acquire_scratch(&request).is_err());
     owner(&store, "running", "normal", "successor");
     assert!(store.acquire_scratch(&request).is_err());
-    store.connection.write().execute("DELETE FROM mission_runs WHERE id='owner'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h1bbc5325cd30 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='owner'", []).unwrap();
     assert!(store.acquire_scratch(&request).is_err());
     owner(&store, "running", "normal", "generation-a");
-    store.connection.write().execute("INSERT INTO mission_run_deadlines(run_id,timeout_ms,deadline_at_unix_ms) VALUES('owner',1,'1')", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h5eee83bba1b5 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_deadlines(run_id,timeout_ms,deadline_at_unix_ms) VALUES('owner',1,'1')", []).unwrap();
     assert!(store.acquire_scratch(&request).is_err());
     assert!(store.scratch_inventory("host-a", None, 1).unwrap().is_empty());
 }
