@@ -11650,18 +11650,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         use crate::invocation_artifacts as artifacts;
         use crate::external_sessions::find_bound_pi_family_transcript;
         use crate::external_sessions::ExternalDriver;
-        self.store.record_invocation_runtime_end(observation)?;
+        // The end fold is subject-indexed and reused for unchanged observations. A periodic
+        // full stop pass still verifies physical runtime/producer closure, native bindings and
+        // artifact availability below; it does not need to deserialize immutable receipts again.
+        let Some(invocations) = self.store.invocations_for_runtime_end(observation)? else { return Ok(()); };
         let fields = &observation.body["fields"];
         if !matches!(fields["status"].as_str(), Some("stopped" | "exited")) {
             return Ok(());
         }
         let Some(incarnation) = fields["incarnation_id"].as_str() else { return Ok(()); };
-        let mut invocations = BTreeMap::new();
-        for receipt in self.store.agent_invocation_receipts(&observation.subject)? {
-            if receipt.incarnation.as_deref() == Some(incarnation) {
-                invocations.insert(receipt.invocation_id.clone(), receipt);
-            }
-        }
         if invocations.is_empty() { return Ok(()); }
         let Some(state) = self.driver_state_dir.parent() else { return Ok(()); };
         let mut stopped_launches = BTreeMap::new();
@@ -11762,7 +11759,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             if kind == "runtime.observed" {
                 self.record_runtime_observation_admission(subject, false)?;
                 if let Some(previous) = previous {
-                    self.store.record_invocation_runtime_end(previous)?;
                     self.retain_stopped_invocation_transcripts(previous)?;
                 }
             }
@@ -11785,7 +11781,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(());
             };
             self.record_runtime_observation_admission(subject, false)?;
-            self.store.record_invocation_runtime_end(&record)?;
             record
         } else {
             self.store.append_claim(&input)?

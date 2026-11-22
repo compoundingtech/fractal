@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stopped-member reconciliation reads invocation receipts through the existing subject index and reuses unchanged runtime-end folds instead of reconstructing fleet receipt history repeatedly.",
+  "replay": {"status": "none", "detail": "Receipt identities, ordering and exact-incarnation end evidence are unchanged."},
+  "schema": {"status": "none", "detail": "Uses the existing subject-kind index; no new index, table, migration or storage-version change."},
+  "rules": {"status": "none", "detail": "No authority or admission changes."},
+  "compatibility": {"status": "none", "detail": "Periodic full stop passes still verify physical runtime state, producer closure, native bindings and transcript availability. A new receipt for the subject invalidates the end fold; unrelated subjects do not."},
+  "downtime": {"status": "none", "detail": "Normal binary deployment only; no offline preparation is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Memoized folds are process-local and rebuilt from durable receipts after restart."}
+}
