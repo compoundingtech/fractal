@@ -15,6 +15,34 @@ use std::sync::Mutex;
 use anyhow::Result;
 use serde_json::Value;
 
+/// Cumulative work, not coalesced wake permits or CPU time.
+pub mod file_watch_work {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static EVENTS: AtomicU64 = AtomicU64::new(0);
+    static DELIVERIES: AtomicU64 = AtomicU64::new(0);
+    static COVERAGE: AtomicU64 = AtomicU64::new(0);
+    static SCOPED: AtomicU64 = AtomicU64::new(0);
+    static GLOBAL: AtomicU64 = AtomicU64::new(0);
+    pub fn event() { EVENTS.fetch_add(1, Ordering::Relaxed); }
+    pub fn delivery(coverage: bool) {
+        let counter = if coverage { &COVERAGE } else { &DELIVERIES };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn notification(global: bool) {
+        let counter = if global { &GLOBAL } else { &SCOPED };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn snapshot() -> serde_json::Value {
+        serde_json::json!({
+            "events": EVENTS.load(Ordering::Relaxed),
+            "event_deliveries": DELIVERIES.load(Ordering::Relaxed),
+            "coverage_deliveries": COVERAGE.load(Ordering::Relaxed),
+            "scoped_notifications": SCOPED.load(Ordering::Relaxed),
+            "global_notifications": GLOBAL.load(Ordering::Relaxed),
+        })
+    }
+}
+
 /// One new claim or local observation.
 #[derive(Clone, Debug)]
 pub struct Change {
@@ -254,11 +282,18 @@ impl Incremental {
 
     /// Mark the items that read `key`, for a change that is not a claim, such as a watched file.
     pub fn touch(&self, key: &str) {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::mark_locked(&mut state, key);
+    }
+
+    /// Mark and return only the items that read an external input.
+    pub fn touch_readers(&self, key: &str) -> Vec<String> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::mark_locked(&mut state, key);
+        state.readers.get(key).map(|readers| readers.iter().cloned().collect()).unwrap_or_default()
     }
 
     /// Whether this pass must evaluate every item of `section`: the first since a start, or the
