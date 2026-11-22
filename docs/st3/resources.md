@@ -111,6 +111,11 @@ below 10%, continuously for 120 seconds. Configured memory windows also apply to
 The runtime creates the lane slice hierarchy only when enforced work launches; an absent
 lane slice means zero lane pressure. With `LogicalOnly` coverage, memory protection comes
 from the independent floor and qualified root pressure, not from unrelated capped seats.
+If the daemon's cgroup layout has no recognizable user manager (for example a system service
+or container), the lane signal is **not applicable**, not unknown: qualified root PSI and
+the independent memory floor still protect admission. The reader logs the observed cgroup
+placement once per observer lifetime, rather than warning on every sample. This does not
+relax required file reads or parsing in a recognized user-manager hierarchy.
 Missing, unreadable or malformed PSI in an existing lane cgroup, unavailable containing
 hierarchy, missing/malformed required meminfo, root PSI, vmstat or IO, and stale observations
 hold admission. Existing policies remain valid; thresholds and timers remain configurable.

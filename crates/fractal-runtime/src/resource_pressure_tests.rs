@@ -163,14 +163,16 @@ fn host_reader_parses_real_files_without_substituting_missing_or_stale_data() {
         "some avg10=2.07 avg60=1.42 avg300=3.52 total=36086872246\nfull avg10=0.00 avg60=0.13 avg300=2.89 total=34379897790\n").unwrap();
     let policy = Policy::default();
     let mut reader = Reader::default();
-    let observed = reader.read_paths(&policy, 123, &memory, &io, &meminfo, &memory, &vmstat).unwrap();
+    let paths = KernelPaths { memory_path: Some(&memory), io_path: &io,
+        meminfo_path: &meminfo, root_memory_path: &memory, vmstat_path: &vmstat };
+    let observed = reader.read_paths(&policy, 123, paths).unwrap();
     assert_eq!(observed, &readings(123, 3140, 1420));
     std::fs::remove_file(&io).unwrap();
-    assert!(reader.read_paths(&policy, 124, &memory, &io, &meminfo, &memory, &vmstat).is_err());
+    assert!(reader.read_paths(&policy, 124, paths).is_err());
     std::fs::write(&io, "full avg60=0.00\n").unwrap();
-    assert!(reader.read_paths(&policy, 125, &memory, &io, &meminfo, &memory, &vmstat).is_err());
+    assert!(reader.read_paths(&policy, 125, paths).is_err());
     std::fs::write(&io, "some avg60=1.00\nsome avg60=2.00\n").unwrap();
-    assert!(reader.read_paths(&policy, 126, &memory, &io, &meminfo, &memory, &vmstat).is_err());
+    assert!(reader.read_paths(&policy, 126, paths).is_err());
 }
 
 #[test]
@@ -229,10 +231,26 @@ impl PressureFixture {
 
     fn observe(&mut self, now: u64) -> Decision {
         let root = self.root.path();
-        match self.reader.read_paths(&self.policy, now,
-            &root.join("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure"),
-            &root.join("proc/pressure/io"), &root.join("proc/meminfo"),
-            &root.join("proc/pressure/memory"), &root.join("proc/vmstat"))
+        match self.reader.read_paths(&self.policy, now, KernelPaths {
+            memory_path: Some(&root.join("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure")),
+            io_path: &root.join("proc/pressure/io"), meminfo_path: &root.join("proc/meminfo"),
+            root_memory_path: &root.join("proc/pressure/memory"), vmstat_path: &root.join("proc/vmstat"),
+        }) {
+            Ok(readings) => self.brake.observe(readings, now),
+            Err(_) => self.brake.observe(&[], now),
+        }
+    }
+
+    fn observe_layout(&mut self, now: u64, placement: &str) -> Decision {
+        let root = self.root.path();
+        std::fs::create_dir_all(root.join("proc/self")).unwrap();
+        self.write("proc/self/cgroup", placement);
+        match self.reader.read_layout(&self.policy, now, &root.join("proc/self/cgroup"),
+            &root.join("sys/fs/cgroup"), KernelPaths {
+                memory_path: None, io_path: &root.join("proc/pressure/io"),
+                meminfo_path: &root.join("proc/meminfo"),
+                root_memory_path: &root.join("proc/pressure/memory"), vmstat_path: &root.join("proc/vmstat"),
+            })
         {
             Ok(readings) => self.brake.observe(readings, now),
             Err(_) => self.brake.observe(&[], now),
@@ -463,4 +481,65 @@ fn one_allocator_event_qualifies_a_long_stall_for_exactly_the_psi_window() {
         fixture.observe(10000 + window.duration_ms());
         assert_eq!(fixture.reader.readings[0].millipercent, 0);
     }
+}
+
+struct WarningLog(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for WarningLog {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool { *metadata.level() == tracing::Level::WARN }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id { tracing::span::Id::from_u64(1) }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write as _;
+                write!(&mut self.0, "{}={value:?} ", field.name()).unwrap();
+            }
+        }
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        self.0.lock().unwrap().push(fields.0);
+    }
+}
+
+#[test]
+fn unrecognized_layout_uses_host_signals_and_warns_only_once_with_the_placement() {
+    let mut fixture = PressureFixture::new();
+    let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let placement = "0::/system.slice/example-daemon.service\n";
+    tracing::subscriber::with_default(WarningLog(warnings.clone()), || {
+        for now in (0..=65000).step_by(2500) {
+            assert!(!fixture.observe_layout(now, placement).blocked);
+        }
+    });
+    let warnings = warnings.lock().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("/system.slice/example-daemon.service"));
+    assert!(warnings[0].contains("not applicable"));
+    fixture.available(1 << 30);
+    for now in (67500..127500).step_by(2500) {
+        assert!(!fixture.observe_layout(now, placement).blocked);
+    }
+    assert_eq!(fixture.observe_layout(127500, placement).reason,
+        Some(Reason::Pressure(Signal::MemoryFull)));
+}
+
+#[test]
+fn recognized_layout_with_unreadable_or_missing_lane_psi_fails_closed() {
+    let mut fixture = PressureFixture::new();
+    let placement = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/example.service\n";
+    let pressure = fixture.root.path().join(
+        "sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/memory.pressure");
+    // A directory cannot be read as a PSI file, even when tests run as root.
+    std::fs::create_dir_all(&pressure).unwrap();
+    assert_eq!(fixture.observe_layout(0, placement).reason, Some(Reason::UnknownObservation));
+    assert!(!fixture.reader.warned_lane_layout);
+    std::fs::remove_dir(&pressure).unwrap();
+    assert_eq!(fixture.observe_layout(2500, placement).reason, Some(Reason::UnknownObservation));
+    std::fs::write(&pressure, "full avg60=NaN\n").unwrap();
+    assert_eq!(fixture.observe_layout(5000, placement).reason, Some(Reason::UnknownObservation));
 }

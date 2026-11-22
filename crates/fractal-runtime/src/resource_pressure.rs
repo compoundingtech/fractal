@@ -282,6 +282,16 @@ fn signal_pressure(source: &str, name: &str, window: Window) -> Result<u32> {
     parse_millipercent(line, window)
 }
 
+#[derive(Clone, Copy)]
+struct KernelPaths<'a> {
+    /// None means lane placement is not applicable in this cgroup layout.
+    memory_path: Option<&'a std::path::Path>,
+    io_path: &'a std::path::Path,
+    meminfo_path: &'a std::path::Path,
+    root_memory_path: &'a std::path::Path,
+    vmstat_path: &'a std::path::Path,
+}
+
 /// Reuse the small kernel-file and parsed-reading buffers across host observations.
 #[derive(Default, Debug)]
 pub struct Reader {
@@ -290,6 +300,8 @@ pub struct Reader {
     meminfo: String,
     root_memory: String,
     vmstat: String,
+    own_cgroup: String,
+    warned_lane_layout: bool,
     previous_allocstall: Option<u64>,
     last_allocstall_at_ms: Option<u64>,
     readings: Vec<Reading>,
@@ -307,38 +319,65 @@ impl Reader {
     }
 
     pub fn read(&mut self, policy: &Policy, now_ms: u64) -> Result<&[Reading]> {
-        let lane = if policy.rules.iter().any(|rule|
-            matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull))
-        {
-            crate::lane::app_slice_cgroup()
-                .ok_or_else(|| anyhow::anyhow!("missing lane cgroup"))?
-                .join(crate::lane::LANES_SLICE)
-        } else { std::path::PathBuf::new() };
-        self.read_paths(policy, now_ms, &lane.join("memory.pressure"),
-            std::path::Path::new("/proc/pressure/io"),
-            std::path::Path::new("/proc/meminfo"),
-            std::path::Path::new("/proc/pressure/memory"),
-            std::path::Path::new("/proc/vmstat"))
+        self.read_layout(policy, now_ms, std::path::Path::new("/proc/self/cgroup"),
+            std::path::Path::new("/sys/fs/cgroup"), KernelPaths {
+            memory_path: None,
+            io_path: std::path::Path::new("/proc/pressure/io"),
+            meminfo_path: std::path::Path::new("/proc/meminfo"),
+            root_memory_path: std::path::Path::new("/proc/pressure/memory"),
+            vmstat_path: std::path::Path::new("/proc/vmstat"),
+        })
+    }
+
+    fn read_layout(
+        &mut self,
+        policy: &Policy,
+        now_ms: u64,
+        placement_path: &std::path::Path,
+        cgroup_root: &std::path::Path,
+        paths: KernelPaths<'_>,
+    ) -> Result<&[Reading]> {
+        use std::io::Read as _;
+        let mut lane = None;
+        if policy.rules.iter().any(|rule| matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull)) {
+            self.own_cgroup.clear();
+            std::fs::File::open(placement_path)?.read_to_string(&mut self.own_cgroup)?;
+            ensure!(!self.own_cgroup.trim().is_empty(), "empty cgroup placement");
+            let mut unified = self.own_cgroup.lines().filter_map(|line| line.strip_prefix("0::"));
+            let placement = unified.next();
+            ensure!(unified.next().is_none(), "duplicate unified cgroup placement");
+            if let Some(placement) = placement {
+                let path = std::path::Path::new(placement);
+                ensure!(path.is_absolute() && path.components().all(|part|
+                    matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))),
+                    "malformed unified cgroup placement");
+                lane = crate::lane::user_manager_cgroup_in(placement, cgroup_root)
+                    .map(|manager| manager.join("app.slice").join(crate::lane::LANES_SLICE).join("memory.pressure"));
+            }
+            if lane.is_none() && !self.warned_lane_layout {
+                self.warned_lane_layout = true;
+                tracing::warn!(cgroup = %self.own_cgroup.trim(),
+                    "finite lane PSI is not applicable to this cgroup layout; using qualified root PSI and the memory floor");
+            }
+        }
+        self.read_paths(policy, now_ms, KernelPaths { memory_path: lane.as_deref(), ..paths })
     }
 
     fn read_paths(
         &mut self,
         policy: &Policy,
         now_ms: u64,
-        memory_path: &std::path::Path,
-        io_path: &std::path::Path,
-        meminfo_path: &std::path::Path,
-        root_memory_path: &std::path::Path,
-        vmstat_path: &std::path::Path,
+        paths: KernelPaths<'_>,
     ) -> Result<&[Reading]> {
         use std::io::Read as _;
+        let KernelPaths { memory_path, io_path, meminfo_path, root_memory_path, vmstat_path } = paths;
         self.readings.clear();
         let needs_memory = policy.rules.iter().any(|rule|
             matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull));
         let needs_io = policy.rules.iter().any(|rule|
             matches!(rule.signal, Signal::IoSome | Signal::IoFull));
         let mut shortage = false;
-        let mut lane_absent = false;
+        let mut lane_absent = memory_path.is_none();
         if policy.memory_available_floor_bytes > 0 {
             self.meminfo.clear();
             std::fs::File::open(meminfo_path)?.read_to_string(&mut self.meminfo)?;
@@ -347,23 +386,23 @@ impl Reader {
         }
         if needs_memory {
             self.memory.clear();
-            match std::fs::File::open(memory_path) {
-                Ok(mut file) => { file.read_to_string(&mut self.memory)?; }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    let cgroup = memory_path.parent().ok_or_else(|| anyhow::anyhow!("missing lane path"))?;
-                    match std::fs::metadata(cgroup) {
-                        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
-                            // The runtime creates this slice only when enforced work launches.
-                            // Require its containing hierarchy: an unavailable mount/manager
-                            // is not evidence that the lane alone is absent.
-                            let parent = cgroup.parent().ok_or_else(|| anyhow::anyhow!("missing lane parent"))?;
-                            ensure!(std::fs::metadata(parent)?.is_dir(), "missing lane hierarchy");
-                            lane_absent = true;
+            if let Some(memory_path) = memory_path {
+                match std::fs::File::open(memory_path) {
+                    Ok(mut file) => { file.read_to_string(&mut self.memory)?; }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let cgroup = memory_path.parent().ok_or_else(|| anyhow::anyhow!("missing lane path"))?;
+                        match std::fs::metadata(cgroup) {
+                            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                                // Only the lane itself may be absent, not its containing hierarchy.
+                                let parent = cgroup.parent().ok_or_else(|| anyhow::anyhow!("missing lane parent"))?;
+                                ensure!(std::fs::metadata(parent)?.is_dir(), "missing lane hierarchy");
+                                lane_absent = true;
+                            }
+                            _ => return Err(error.into()),
                         }
-                        _ => return Err(error.into()),
                     }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
             }
             self.root_memory.clear();
             std::fs::File::open(root_memory_path)?.read_to_string(&mut self.root_memory)?;
@@ -460,7 +499,10 @@ impl Observer {
             self.sampled_at = Some(now);
             let readings = match &self.paths {
                 Some([memory, io, meminfo, root_memory, vmstat]) =>
-                    self.reader.read_paths(&self.policy, now, memory, io, meminfo, root_memory, vmstat),
+                    self.reader.read_paths(&self.policy, now, KernelPaths {
+                        memory_path: Some(memory), io_path: io, meminfo_path: meminfo,
+                        root_memory_path: root_memory, vmstat_path: vmstat,
+                    }),
                 None => self.reader.read(&self.policy, now),
             };
             return Ok(match readings {
