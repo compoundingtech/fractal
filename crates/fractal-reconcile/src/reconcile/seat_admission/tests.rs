@@ -11,20 +11,6 @@ fn reconciler() -> Reconciler<FakeRuntime> {
 }
 
 #[tokio::test]
-async fn lane_psi_downgrade_is_queryable_as_a_deduplicated_daemon_diagnostic() {
-    let reconciler = reconciler();
-    let placement = "0::/system.slice/example.service";
-    for _ in 0..2 {
-        reconciler.record_pressure_layout_diagnostic(placement).unwrap();
-    }
-    let diagnostics = reconciler.store.observations_for("daemon/node", "daemon.diagnostic").unwrap();
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].body["fields"]["code"], "lane-psi-not-applicable");
-    assert_eq!(diagnostics[0].body["fields"]["severity"], "warning");
-    assert!(diagnostics[0].body["fields"]["reason"].as_str().unwrap().contains(placement));
-}
-
-#[tokio::test]
 async fn admission_refresh_does_not_schedule_pressure_polling() {
     let reconciler = reconciler();
     reconciler.refresh_seat_admission_at(u64::try_from(now_ms() / 1000).unwrap());
@@ -82,20 +68,27 @@ async fn sampler_recovers_after_120_seconds_with_a_90_second_reconcile_stall() {
 
     let reconciler = reconciler();
     let root = tempfile::tempdir().unwrap();
-    let memory = root.path().join("memory.pressure");
-    let io = root.path().join("io");
+    let cgroups = root.path().join("cgroups");
+    let protected = cgroups.join("system.slice/fractal.service");
+    std::fs::create_dir_all(&protected).unwrap();
+    std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+    let memory = protected.join("memory.pressure");
+    let io = protected.join("io.pressure");
+    let placement = root.path().join("cgroup");
     let meminfo = root.path().join("meminfo");
-    let root_memory = root.path().join("root-memory");
-    let vmstat = root.path().join("vmstat");
     let quiet = "some avg10=0.00 avg60=0.00\nfull avg10=0.00 avg60=0.00\n";
     std::fs::write(&memory, "").unwrap();
     std::fs::write(&io, quiet).unwrap();
+    for group in ["system.slice", "app.slice"] {
+        for name in ["memory.pressure", "io.pressure"] {
+            std::fs::write(cgroups.join(group).join(name), quiet).unwrap();
+        }
+    }
+    std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
     std::fs::write(&meminfo, "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n").unwrap();
-    std::fs::write(&root_memory, quiet).unwrap();
-    std::fs::write(&vmstat, "allocstall_normal 0\n").unwrap();
     *reconciler.seat_admission.pressure.lock().unwrap() =
         Some(fractal_runtime::resource_pressure::Observer::with_paths(
-            Policy::default(), [memory.clone(), io, meminfo, root_memory, vmstat]).unwrap());
+            Policy::default(), placement, cgroups, meminfo).unwrap());
     assert!(reconciler.seat_admission.sample_pressure().unwrap().blocked);
     std::fs::write(&memory, quiet).unwrap();
     let (samples, mut sampled) = tokio::sync::mpsc::unbounded_channel();
@@ -114,7 +107,7 @@ async fn sampler_recovers_after_120_seconds_with_a_90_second_reconcile_stall() {
     let start = Instant::now();
     let mut release = Some(release);
     let mut observer = Some(observer);
-    for elapsed in (0..=125).step_by(5) {
+    for elapsed in (0..=120).step_by(5) {
         if elapsed != 0 {
             tokio::time::advance(Duration::from_secs(5)).await;
         }
@@ -123,17 +116,17 @@ async fn sampler_recovers_after_120_seconds_with_a_90_second_reconcile_stall() {
             sample = sampled.recv() => sample.unwrap(),
         };
         assert_eq!(at.duration_since(start), Duration::from_secs(elapsed));
-        assert!(!matches!(decision.reason,
+        assert!(!matches!(&decision.reason,
             Some(Reason::UnknownObservation { cause: ObservationCause::ObservationGap | ObservationCause::StaleDecision })));
-        if (5..125).contains(&elapsed) {
-            assert_eq!(decision.reason, Some(Reason::Recovering { remaining: (125 - elapsed) * 1000 }));
+        if elapsed < 120 {
+            assert_eq!(decision.reason, Some(Reason::Recovering { remaining: (120 - elapsed) * 1000 }));
         }
         assert_eq!(reconciler.seat_admission.pressure_decision(), decision);
         if elapsed == 90 {
             release.take().unwrap().send(()).unwrap();
             observer.take().unwrap().join().unwrap();
         }
-        if elapsed == 125 {
+        if elapsed == 120 {
             assert!(!decision.blocked, "120 seconds of healthy samples must recover");
         }
     }

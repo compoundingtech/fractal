@@ -305,19 +305,22 @@ mod tests {
     /// Keep the directory alive for the test so sampling never reaches the actual host.
     fn quiet_pressure<R: RuntimeControl>(reconciler: &Reconciler<R>) -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
-        let memory = directory.path().join("memory.pressure");
-        let io = directory.path().join("io");
+        let cgroups = directory.path().join("cgroups");
+        let protected = cgroups.join("system.slice/fractal.service");
+        std::fs::create_dir_all(&protected).unwrap();
+        std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+        let placement = directory.path().join("cgroup");
         let meminfo = directory.path().join("meminfo");
-        let root_memory = directory.path().join("root-memory");
-        let vmstat = directory.path().join("vmstat");
         let quiet = "some avg10=0.00 avg60=0.00 avg300=0.00\nfull avg10=0.00 avg60=0.00 avg300=0.00\n";
-        for path in [&memory, &io, &root_memory] { std::fs::write(path, quiet).unwrap(); }
+        for group in [protected, cgroups.join("system.slice"), cgroups.join("app.slice")] {
+            for name in ["memory.pressure", "io.pressure"] { std::fs::write(group.join(name), quiet).unwrap(); }
+        }
+        std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
         std::fs::write(&meminfo, "MemTotal: 134217728 kB\nMemAvailable: 125829120 kB\n").unwrap();
-        std::fs::write(&vmstat, "allocstall_normal 0\n").unwrap();
+        let policy = reconciler.seat_admission.finite_policy.psi_brake.clone();
         *reconciler.seat_admission.pressure.lock().unwrap() =
             Some(fractal_runtime::resource_pressure::Observer::with_paths(
-                reconciler.seat_admission.finite_policy.psi_brake.clone(),
-                [memory, io, meminfo, root_memory, vmstat]).unwrap());
+                policy, placement, cgroups, meminfo).unwrap());
         assert!(!reconciler.seat_admission.sample_pressure().unwrap().blocked);
         directory
     }
