@@ -11206,6 +11206,7 @@ async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
             observed.state = if reason % 2 == 0 { harness_state::Activity::Active } else { harness_state::Activity::Idle };
             let publisher = ObservationClient {
                 client: &client,
+                source_runtime: Some(runtime),
                 event: Some((runtime, event.sequence, root.path(), None)),
             };
             if reason == 1 {
@@ -11224,7 +11225,7 @@ async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
     let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
     observed.channel_ready = Some(true);
     observed.state = harness_state::Activity::Idle;
-    let publisher = ObservationClient { client: &client, event: None };
+    let publisher = ObservationClient { client: &client, event: None, source_runtime: None };
     let activity_count = store.claims_for(subject, Some("harness.observed")).unwrap().len();
     let mut last_fingerprint = None;
     for _ in 0..2 {
@@ -11233,5 +11234,91 @@ async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
     }
     assert_eq!(diagnostic_count(), 6);
     assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().len(), activity_count + 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn omp_successor_drains_predecessor_readiness_and_preparation_failure() {
+    use axum::{Json, Router, routing::post};
+    use std::sync::Arc;
+    use fractal_drivers::{harness_events, harness_state};
+
+    let root = tempfile::tempdir().unwrap();
+    for (runtime, provider) in [("runtime-a", "provider-a"), ("runtime-b", "provider-b")] {
+        harness_events::enable(root.path(), runtime).unwrap();
+        let ownership = harness_state::claim(root.path(), "example/seat", "omp", provider).unwrap();
+        let mut writer = harness_state::Writer::new(root.path(), "example/seat", "omp", Some("omp-channel".into()))
+            .with_ownership(provider, ownership);
+        let mut observation = harness_state::Observation::new(
+            harness_state::Activity::Idle, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+        );
+        observation.channel_ready = Some(true);
+        writer.observe(observation).unwrap();
+    }
+    let store = Arc::new(Store::open_memory("amber").unwrap());
+    let app = Router::new().route("/v1/claims", post({
+        let store = store.clone();
+        move |Json(claim): Json<ClaimInput>| {
+            let store = store.clone();
+            async move {
+                let record = store.append_claim(&claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    })).route("/v1/harness-events", post({
+        let store = store.clone();
+        move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
+            let store = store.clone();
+            async move {
+                // The successor owns the publication envelope, even for predecessor events.
+                assert_eq!(request.runtime_incarnation, "runtime-b");
+                let record = store.append_claim(&request.claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
+    let subject = "agent/example/seat";
+    let mut observations = NativeObservations::start(root.path(), "runtime-b").unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    for runtime in ["runtime-a", "runtime-b"] {
+        assert!(diagnostics.iter().any(|claim|
+            claim.body["fields"]["incarnation_id"] == runtime && claim.body["fields"]["code"] == "omp-channel-ready"
+        ));
+        assert!(store.claims_for(subject, Some("harness.observed")).unwrap().iter()
+            .any(|claim| claim.body["fields"]["incarnation_id"] == runtime));
+    }
+    let connection = rusqlite::Connection::open(harness_events::database_path(root.path())).unwrap();
+    // Fail-open could otherwise mask incorrect provenance: both fences must be prepared.
+    assert_eq!(connection.query_row(
+        "SELECT count(*) FROM metadata WHERE key IN ('omp-channel-readiness:runtime-a','omp-channel-readiness:runtime-b')",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap(), 2);
+    // A real local preparation write failure must fail open, not park the outbox head.
+    connection.execute_batch(
+        "CREATE TRIGGER refuse_readiness BEFORE INSERT ON prepared
+         WHEN NEW.slot='omp-channel-readiness' BEGIN SELECT RAISE(ABORT,'readiness preparation refused'); END;",
+    ).unwrap();
+    let ownership = harness_state::claim(root.path(), "example/seat", "omp", "provider-next").unwrap();
+    let mut writer = harness_state::Writer::new(root.path(), "example/seat", "omp", Some("omp-channel".into()))
+        .with_ownership("provider-next", ownership);
+    let mut observation = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    observation.channel_ready = Some(false);
+    writer.observe(observation).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    assert!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().iter().any(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b" && claim.body["fields"]["code"] == "omp-channel-unready"
+    ));
+    assert!(store.claims_for(subject, Some("harness.observed")).unwrap().iter().any(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b" && claim.body["fields"]["state"] == "working"
+    ));
     server.abort();
 }

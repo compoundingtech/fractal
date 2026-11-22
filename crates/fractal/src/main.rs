@@ -18038,6 +18038,7 @@ impl NativeObservations {
             let publisher = ObservationClient {
                 client,
                 event: Some((&self.runtime, event.sequence, &self.dir, account_ref.as_ref().and_then(Value::as_str))),
+                source_runtime: Some(&event.runtime_incarnation),
             };
             let raw = serde_json::to_vec(&event.payload)?;
             let source_driver = event.payload["harness"]
@@ -18273,6 +18274,7 @@ impl NativeObservations {
 struct ObservationClient<'a> {
     client: &'a Client,
     event: Option<(&'a str, u64, &'a Path, Option<&'a str>)>,
+    source_runtime: Option<&'a str>,
 }
 impl std::ops::Deref for ObservationClient<'_> {
     type Target = Client;
@@ -18465,16 +18467,31 @@ async fn publish_harness_activity(
     {
         // Idle suspension consumes the latest incarnation edge, not a heartbeat.
         // Freeze durable decisions so retries and re-exec cannot lose an edge.
-        let key = match client.event {
-            Some((runtime, sequence, dir, _)) => {
-                fractal_drivers::harness_events::prepare_channel_readiness(
+        let legacy_key = || {
+            let episode = match client.event {
+                Some((runtime, sequence, _, _)) => format!("{runtime}:{sequence}"),
+                None => format!("{}:{}:{}", observed.evidence_incarnation.as_deref().unwrap_or(""),
+                    observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0)),
+            };
+            format!("native-channel:{subject}:{incarnation}:{episode}:{ready}:{fingerprint}")
+        };
+        let key = match (client.event, client.source_runtime) {
+            // The publication envelope can belong to a successor wrapper. Readiness is
+            // prepared against the retained event's own runtime, never that successor.
+            (Some((_, sequence, dir, _)), Some(runtime)) => {
+                match fractal_drivers::harness_events::prepare_channel_readiness(
                     dir, sequence, runtime, incarnation, ready,
-                )?.then(|| format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}"))
+                ) {
+                    Ok(emit) => emit.then(|| format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}")),
+                    Err(error) => {
+                        tracing::warn!(%error, "preparing channel readiness failed; publishing without coalescing");
+                        Some(legacy_key())
+                    }
+                }
             }
-            // Without an outbox, retain the original fail-open publication and episode key.
-            None => Some(format!("native-channel:{subject}:{incarnation}:{}:{}:{}:{ready}:{fingerprint}",
-                observed.evidence_incarnation.as_deref().unwrap_or(""),
-                observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0))),
+            // Non-durable callers and failed preparation must not lose the readiness edge
+            // or prevent subsequent activity publication and outbox acknowledgement.
+            _ => Some(legacy_key()),
         };
         if let Some(key) = key {
             let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
