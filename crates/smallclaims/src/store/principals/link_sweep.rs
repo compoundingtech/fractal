@@ -254,7 +254,7 @@ mod tests {
                 store.advance_signature_judgment().unwrap();
             }
         }));
-        ran.extend(statements(|| sweep(&store, 1)));
+        ran.extend(statements(|| { sweep(&store, 1); }));
         assert!(ran.iter().any(|sql| sql.contains("claim_verdict_links")), "the traced work touched the links");
         assert_eq!(link_scans(&store, &ran), Vec::<String>::new());
     }
