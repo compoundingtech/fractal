@@ -806,8 +806,9 @@ mod tests {
         resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Started);
         resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
         let key = uuid::Uuid::now_v7();
-        cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+        let Json(cancelled) = cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
             AxumPath(key.to_string())).await.unwrap();
+        assert!(cancelled.tombstone);
         resource_agent_receipt(&state, agent, "a", None, InvocationPhase::Observed);
         assert_eq!(state.store.shell_resource_agent_owners(agent).unwrap()[0].invocation.as_deref(), Some("invocation/a"));
         let error = submit(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
@@ -827,8 +828,9 @@ mod tests {
         observe_resource_agent(&state, agent, "exact");
         resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Started);
         let key = uuid::Uuid::now_v7();
-        cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+        let Json(cancelled) = cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
             AxumPath(key.to_string())).await.unwrap();
+        assert!(cancelled.tombstone);
         resource_agent_receipt(&state, agent, "c", None, InvocationPhase::Started);
         let error = submit(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
             Json(resource_agent_command(&state, key))).await.unwrap_err();
@@ -852,8 +854,9 @@ mod tests {
         command.id = crate::store::shell_resources::request_execution_id(&request_scope(&state, Some(&caller)), key).unwrap();
         command.lane.owner = caller.owner;
         resource_agent_receipt(&state, agent, "b", None, InvocationPhase::Ended);
-        cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+        let Json(cancelled) = cancel_request(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
             AxumPath(key.to_string())).await.unwrap();
+        assert!(cancelled.tombstone);
         let error = state.store.submit_shell_resource(command, u64::try_from(client_now_ms()).unwrap()).unwrap_err();
         assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "resource-request-cancelled");
     }
