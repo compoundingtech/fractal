@@ -78,10 +78,38 @@ Receipts retain the evidence and learning decision. Estimates use per-key p95 wi
 maximum; host `profileReadiness` attestations (`nixPerBuildCgroups`, `ioAccounting`,
 `diskMeasurement`) must all be true before learning can lower declared seeds.
 
-On Linux, `psiBrake` observes every five seconds: memory `full avg60 >= 1%` or IO
-`some avg60 >= 25%` sustained for 60 seconds pauses new admissions without killing holders.
-Resume requires both memory below 0.5% and IO below 10% for 120 seconds. Missing, malformed or
-stale observations hold admission rather than count as healthy. Darwin admission is unchanged.
+On Linux, `psiBrake` samples every quarter of `freshnessMs` (2.5 seconds by default).
+Memory PSI comes from the user manager's aggregate `app.slice/app-lanes.slice`, which contains
+enforced finite executions and laned seats. A second memory signal protects against host
+reclaim outside those lanes: root memory `full` PSI qualifies only in intervals where the
+sum of `/proc/vmstat` `allocstall_*` counters increases. The first counter sample and a
+counter reset provide no reclaim evidence; missing or malformed counters are unknown.
+
+`memory.high` reclaim uses `try_to_free_mem_cgroup_pages`. In Linux v6.18,
+[`do_try_to_free_pages` accounts ALLOCSTALL only when `!cgroup_reclaim(sc)`](https://github.com/torvalds/linux/blob/v6.18/mm/vmscan.c#L6393-L6394),
+distinguishing global reclaim from this memcg path. This accounting site was checked against
+the v6.18 tag, not the v6.18.51 point source. Do not use `pgscan_direct`: it includes memcg
+reclaim. Do not use `pgscan_kswapd`: background page-cache and ZFS ARC churn can wake kswapd
+without allocator distress, so any scan delta would reintroduce false positives.
+
+By default, lane memory `full avg60 >= 1%`, qualifying root memory `full avg60 >= 1%`,
+or host `MemAvailable < memoryAvailableFloorBytes` sustained for 60 seconds pauses new
+admissions without killing holders. The independent floor applies even to IO-only policies;
+it defaults to **2147483648 bytes (2 GiB)**, an absolute value, not a percentage. **0 disables
+the floor**. A positive floor at or above `MemTotal` is a configuration error, not a permanent
+pressure trip. IO PSI remains host-wide: `some avg60 >= 25%` independently trips after the
+same sustained interval.
+
+Resume requires lane memory below 0.5%, qualifying root memory below 0.5% (or no new allocator
+stall), `MemAvailable >= memoryAvailableFloorBytes` when the floor is enabled, and root IO
+below 10%, continuously for 120 seconds. Configured memory windows also apply to root `full`.
+The runtime creates the lane slice hierarchy only when enforced work launches; an absent
+lane slice means zero lane pressure. With `LogicalOnly` coverage, memory protection comes
+from the independent floor and qualified root pressure, not from unrelated capped seats.
+Missing, unreadable or malformed PSI in an existing lane cgroup, unavailable containing
+hierarchy, missing/malformed required meminfo, root PSI, vmstat or IO, and stale observations
+hold admission. Existing policies remain valid; thresholds and timers remain configurable.
+Darwin admission is unchanged.
 
 `recovery` requires an operator-declared `recoveryCapable` profile and a measured filesystem
 observation. At most one recovery execution holds the host recovery slot. It bypasses only
