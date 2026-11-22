@@ -380,8 +380,9 @@ mod tests {
             round_trip: Option<Duration>,
             carrier: crate::replication::ReplicationCarrier,
             authenticated_member_key: Option<&str>,
+            deadline_unix_ms: Option<u128>,
         ) -> Result<crate::replication::ReplicationReceiveResponse> {
-            self.0.receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key).await
+            self.0.receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key, deadline_unix_ms).await
         }
 
         async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {

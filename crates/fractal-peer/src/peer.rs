@@ -1809,6 +1809,11 @@ impl MainBackend {
             failure.code = code.to_owned();
             failure.http_status = Some(status);
         }
+        if phase == smallclaims::replication::ReplicationFailurePhase::LocalReceive
+            && crate::client::daemon_deadline_exceeded(&error)
+        {
+            failure.code = "replication-overloaded".to_owned();
+        }
         let display = error.to_string();
         error.context(failure).context(display)
     }
@@ -1937,10 +1942,11 @@ impl Backend for MainBackend {
         round_trip: Option<Duration>,
         carrier: smallclaims::replication::ReplicationCarrier,
         authenticated_member_key: Option<&str>,
+        deadline_unix_ms: Option<u128>,
     ) -> Result<ReplicationReceiveResponse> {
         let started = std::time::Instant::now();
         self.client
-            .post(
+            .post_receive_before(
                 &self.replication_path("receive"),
                 &ReplicationReceiveRequest {
                     peer: peer.to_owned(),
@@ -1950,6 +1956,7 @@ impl Backend for MainBackend {
                     carrier,
                     authenticated_member_key: authenticated_member_key.map(str::to_owned),
                 },
+                deadline_unix_ms,
             )
             .await.map_err(|error| Self::exchange_error(
                 error, smallclaims::replication::ReplicationFailurePhase::LocalReceive, started,
@@ -2257,6 +2264,35 @@ async fn follow_shard_peers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn only_local_receive_maps_the_daemon_ceiling_to_overloaded() {
+        use smallclaims::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
+        use tokio::io::AsyncReadExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("ceiling.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        for phase in [ReplicationFailurePhase::LocalReceive, ReplicationFailurePhase::LocalExport] {
+            let client = Client::unix(socket.clone());
+            let request = tokio::spawn(async move {
+                client.post::<_, Value>("/v1/internal/replication/receive", &serde_json::json!({})).await
+            });
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+            }
+            tokio::time::advance(Duration::from_secs(121)).await;
+            let error = request.await.unwrap().unwrap_err();
+            assert!(crate::client::daemon_deadline_exceeded(&error));
+            let error = MainBackend::exchange_error(error, phase, std::time::Instant::now());
+            let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+            assert_eq!(failure.phase, phase);
+            assert_eq!(failure.code == "replication-overloaded", phase == ReplicationFailurePhase::LocalReceive);
+            assert_eq!(failure.http_status, None);
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn worker_failure_closes_raw_producer_and_awaits_the_trailing_wake() {
