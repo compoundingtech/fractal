@@ -1,4 +1,4 @@
-mission/fleet/atlas/store-move width=40 open=false sha256=241affab63c0e4a945686a99b301f67eced19a821629580f01124954394592b0
+mission/fleet/atlas/store-move width=40 open=false sha256=72e71cb127a9e64bf99e21fa76d762a2fe471f7b34e5dac065d1dd59d5c3ddc5
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -32,7 +32,7 @@ mission/fleet/atlas/store-move width=40 open=false sha256=241affab63c0e4a945686a
 │ ~/src/atlas--store-move  on harbor   │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/store-move width=40 open=true sha256=69907997dc3a37feb80923b9664a211b5bc01dd9b79ec16dae4085bf455e4dbc
+mission/fleet/atlas/store-move width=40 open=true sha256=fc9dcbdd7477007add3aba1d90ee6e60a638c803216477d033d812049ffadcb4
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -116,7 +116,7 @@ mission/fleet/atlas/store-move width=40 open=true sha256=69907997dc3a37feb80923b
 │ ~/src/atlas--store-move  on harbor   │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/store-move width=80 open=false sha256=5ab3a7989e5d156da463ad71898de7f5d64153a3a33bd2a58dba97a0a86e7d44
+mission/fleet/atlas/store-move width=80 open=false sha256=f62d5cbc6958c74112a36177bae56bd9244617001355f4fa63b2f9918416df69
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -146,7 +146,7 @@ mission/fleet/atlas/store-move width=80 open=false sha256=5ab3a7989e5d156da463ad
 │ ~/src/atlas--store-move  on harbor                                           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/store-move width=80 open=true sha256=b1598ad53bea212ddf6488f71f3a487db591887bfc59da042017eca555cb3efa
+mission/fleet/atlas/store-move width=80 open=true sha256=e208bb20b8fef9a67fbe5eb1fab56d400a050d93f54f45b94103c9bfdc7255ba
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -204,7 +204,7 @@ mission/fleet/atlas/store-move width=80 open=true sha256=b1598ad53bea212ddf6488f
 │ ~/src/atlas--store-move  on harbor                                           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/store-move width=120 open=false sha256=148f7940817330d14a933eb62efb40599fac9455cda6afd9a8048cd90000ff74
+mission/fleet/atlas/store-move width=120 open=false sha256=8aa8f1089e856450003903354cbabe197c515829507d7dd42c0cefaa4e6eed46
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -234,7 +234,7 @@ mission/fleet/atlas/store-move width=120 open=false sha256=148f7940817330d14a933
 │ ~/src/atlas--store-move  on harbor                                                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/store-move width=120 open=true sha256=2fca827ad070aabfcffdd9f3e347880f6196018d364b81bce2ea902b2cc1d2be
+mission/fleet/atlas/store-move width=120 open=true sha256=d6f5a838264dbb57c5a8c6b2003a68a1fde8ccf0566a9d3c39f430f405df2e3e
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -290,7 +290,7 @@ mission/fleet/atlas/store-move width=120 open=true sha256=2fca827ad070aabfcffdd9
 │ ~/src/atlas--store-move  on harbor                                                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/site/pricing-page width=40 open=false sha256=12f3c11423d40e18f0fac198269fc5ef2b957130fa5942f8c999b7c086ee14df
+mission/fleet/site/pricing-page width=40 open=false sha256=f88e366fc0e9f2d9dfd5a71277328cab551d97afa1aab81a7a4687dc03c3447a
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -314,7 +314,7 @@ mission/fleet/site/pricing-page width=40 open=false sha256=12f3c11423d40e18f0fac
 │ ~/src/site--pricing  on harbor       │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/site/pricing-page width=40 open=true sha256=62a62c8e069733fffde39df202d6eedff88a82dfc0fb1a116a0dc123f9fa4a61
+mission/fleet/site/pricing-page width=40 open=true sha256=6dc5bef70fc88500ae9f51fd3ddb12474c226563d0e50f56fb349031455f183b
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -353,7 +353,7 @@ mission/fleet/site/pricing-page width=40 open=true sha256=62a62c8e069733fffde39d
 │ ~/src/site--pricing  on harbor       │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/site/pricing-page width=80 open=false sha256=ef4f036acf2f63ab0c1681bb49175fcb3690871590f489a20060ce3d136bcbfa
+mission/fleet/site/pricing-page width=80 open=false sha256=2e287beb7e8144962e4a1946f2498c4548e389cd4f95ada6f5483b1039b6e77d
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -376,7 +376,7 @@ mission/fleet/site/pricing-page width=80 open=false sha256=ef4f036acf2f63ab0c168
 │ ~/src/site--pricing  on harbor                                               │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/site/pricing-page width=80 open=true sha256=fac88a97e469dc2cd8460e04c222ec46b641d31e03eaca75adbbb9286c18c494
+mission/fleet/site/pricing-page width=80 open=true sha256=83706b69db61422d2eeb2273896df78d7be71ca8f282e377615e174870af9cac
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -408,7 +408,7 @@ mission/fleet/site/pricing-page width=80 open=true sha256=fac88a97e469dc2cd8460e
 │ ~/src/site--pricing  on harbor                                               │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/site/pricing-page width=120 open=false sha256=0fa8ad7573f84ad8faf3f526f376b23dd7db2a538d5f2a8999aeecf1d1e89548
+mission/fleet/site/pricing-page width=120 open=false sha256=bf529aceebb801aa098ed4ef3471a49f1ce18554dd8cd2dc351b59d09e73eea0
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -431,7 +431,7 @@ mission/fleet/site/pricing-page width=120 open=false sha256=0fa8ad7573f84ad8faf3
 │ ~/src/site--pricing  on harbor                                                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/site/pricing-page width=120 open=true sha256=6fdf717a85a7f600f44da608555bcff30bc92e2095a38ae4374d8e8d6e250baa
+mission/fleet/site/pricing-page width=120 open=true sha256=e82da31479e3d74e660b452037902002be687c39b4e39310d40bcd8731e58383
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -463,7 +463,7 @@ mission/fleet/site/pricing-page width=120 open=true sha256=6fdf717a85a7f600f44da
 │ ~/src/site--pricing  on harbor                                                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/release/weekly width=40 open=false sha256=a36dd149808bd81d2af87aa9ffc77abf535960bd7f86423d21bc65ba95ffc802
+mission/fleet/release/weekly width=40 open=false sha256=bbc1f313802a4c465af470dd9b04cc4a4a194720983fb602e09c0607ec3d2a08
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -501,7 +501,7 @@ mission/fleet/release/weekly width=40 open=false sha256=a36dd149808bd81d2af87aa9
 │ ~/src/atlas  on harbor               │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/release/weekly width=40 open=true sha256=90489d72c2d9c558c74be92d808f88a3df06534fa35dd114c07804f0a0ef7a96
+mission/fleet/release/weekly width=40 open=true sha256=006804fe52e31c46fc25e54a82787790f942a68ce6f1315400bd815b01ff59cd
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -567,7 +567,7 @@ mission/fleet/release/weekly width=40 open=true sha256=90489d72c2d9c558c74be92d8
 │ ~/src/atlas  on harbor               │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/release/weekly width=80 open=false sha256=3808d029c9494893213d334a619b34b1928105295d698c72a5ca002299c51394
+mission/fleet/release/weekly width=80 open=false sha256=376589cb15acfd910067b1057a9dfcab2e3aaf42ae4c7d7c65a50c68eb118315
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -602,7 +602,7 @@ mission/fleet/release/weekly width=80 open=false sha256=3808d029c9494893213d334a
 │ ~/src/atlas  on harbor                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/release/weekly width=80 open=true sha256=4a13864cfdff9b8b46686f79000ed92f20e4d2d33ad58dc124e6511239a25916
+mission/fleet/release/weekly width=80 open=true sha256=96417497c50e2f0d80100af2754e8e83ec57ce20be75b22b674db29cfc524c12
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -652,7 +652,7 @@ mission/fleet/release/weekly width=80 open=true sha256=4a13864cfdff9b8b46686f790
 │ ~/src/atlas  on harbor                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/release/weekly width=120 open=false sha256=65c71c6cba3d7827d45357e32f1fb59505bdc6805d1655d0e0247b2b08f295a6
+mission/fleet/release/weekly width=120 open=false sha256=561e31e486cc15b70c322dc079a13371640639c7afd8143be96a01e3f21a4b1d
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -687,7 +687,7 @@ mission/fleet/release/weekly width=120 open=false sha256=65c71c6cba3d7827d45357e
 │ ~/src/atlas  on harbor                                                                                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/release/weekly width=120 open=true sha256=3bf5fd58b21886f3e945422b8d1fca16d36b2e1780fa9ce65e422d1653168a08
+mission/fleet/release/weekly width=120 open=true sha256=313916241c94c44f1c41b4742e0afa505aee8020b0cabe2e225deffa3c7f8219
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -737,7 +737,7 @@ mission/fleet/release/weekly width=120 open=true sha256=3bf5fd58b21886f3e945422b
 │ ~/src/atlas  on harbor                                                                                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/harbor/pull-request-review width=40 open=false sha256=ebcd49dca1a60f216d26a613ef0d0ed5cc3472131c4afd789639ea13797a0608
+mission/fleet/harbor/pull-request-review width=40 open=false sha256=095a6557719eb7f415bbd3392a208e4b5f6a357fe0a6ed4859bca0b0f4204e00
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an assigned agent is doing a step now
 
@@ -760,7 +760,7 @@ mission/fleet/harbor/pull-request-review width=40 open=false sha256=ebcd49dca1a6
 │ ~/src/harbor--review-218  on harbor  │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/harbor/pull-request-review width=40 open=true sha256=bd2b87f95049b682fe82d5608803ec3362a5368fb0b05123da9457919ba100b2
+mission/fleet/harbor/pull-request-review width=40 open=true sha256=af60c005cd34e51fc5ca814c91ff36b591573bda94e6577ed4c743f53e77b6d0
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an assigned agent is doing a step now
 
@@ -798,7 +798,7 @@ mission/fleet/harbor/pull-request-review width=40 open=true sha256=bd2b87f95049b
 │ ~/src/harbor--review-218  on harbor  │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/harbor/pull-request-review width=80 open=false sha256=f9f0e45197b0e1f6f665cf8ad22a6995e0b7e759af8e575d31e5bb878f7b17dc
+mission/fleet/harbor/pull-request-review width=80 open=false sha256=cf7720654f8d7299748da3eb8961c7c35ce9938f5d104422b2da65166c189d6b
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an assigned agent is doing a step now
 
@@ -820,7 +820,7 @@ mission/fleet/harbor/pull-request-review width=80 open=false sha256=f9f0e45197b0
 │ ~/src/harbor--review-218  on harbor                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/harbor/pull-request-review width=80 open=true sha256=46bbff297f4557c1254ed4d4bc830a8c5acfb9abd68c2840c7bbc419e96600b6
+mission/fleet/harbor/pull-request-review width=80 open=true sha256=17a09574f8884e5b38e6b8951fb6b3fb90f1b071a8346f3cdf4b4c32f5803c6f
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an assigned agent is doing a step now
 
@@ -851,7 +851,7 @@ mission/fleet/harbor/pull-request-review width=80 open=true sha256=46bbff297f455
 │ ~/src/harbor--review-218  on harbor                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/harbor/pull-request-review width=120 open=false sha256=25742685ed1dfc12e613f02c60f74fd1851a347a6934b4ed684d37512f6112b5
+mission/fleet/harbor/pull-request-review width=120 open=false sha256=813b376392473a4c089db5a73927ce59ab06905b23b18a331ec8d07126acb4ef
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an assigned agent is doing a step now
 
@@ -873,7 +873,7 @@ mission/fleet/harbor/pull-request-review width=120 open=false sha256=25742685ed1
 │ ~/src/harbor--review-218  on harbor                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/harbor/pull-request-review width=120 open=true sha256=1b314049abb06b0fe2de47a46ac3850bb8a51b527dd10e420a6cbb0306481e99
+mission/fleet/harbor/pull-request-review width=120 open=true sha256=f95d62b2a69bbb4d2d5c017394a3e0a7e69d28d9936eeb73d59be01c49f03401
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an assigned agent is doing a step now
 
@@ -904,7 +904,7 @@ mission/fleet/harbor/pull-request-review width=120 open=true sha256=1b314049abb0
 │ ~/src/harbor--review-218  on harbor                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/rekey width=40 open=false sha256=6fe2cfecbf3a856151987c14aeb8db7b884fe0e4fc40a26db8fb05e15021829e
+mission/fleet/rekey width=40 open=false sha256=cc8d0f4c92f811ed23b909337cd46c62226ebf013654657ec7d89506372c2e26
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -939,7 +939,7 @@ mission/fleet/rekey width=40 open=false sha256=6fe2cfecbf3a856151987c14aeb8db7b8
 │ ~/src/harbor  on harbor              │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/rekey width=40 open=true sha256=8cebc0c06dcf2bcbbd3aa4b7ddded3d4fb021afb8bda3d2902bb87961a85a3bd
+mission/fleet/rekey width=40 open=true sha256=35646721f0d90e550dba73576fa598091a28442d5824975c838bd59820848708
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -998,7 +998,7 @@ mission/fleet/rekey width=40 open=true sha256=8cebc0c06dcf2bcbbd3aa4b7ddded3d4fb
 │ ~/src/harbor  on harbor              │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/rekey width=80 open=false sha256=6d436cbcde45fdd03c872a461df189d301cf77ce0e7c851a270bbfebecf7f47b
+mission/fleet/rekey width=80 open=false sha256=db2af3ddaf0aa38a540869b1c88f788c3bbafddc4491c109e5af7bb39520e398
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -1029,7 +1029,7 @@ mission/fleet/rekey width=80 open=false sha256=6d436cbcde45fdd03c872a461df189d30
 │ ~/src/harbor  on harbor                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/rekey width=80 open=true sha256=33104cd394ae269f6042dc23a5063bee826843ad3e5f8b922fdd19bdd0919005
+mission/fleet/rekey width=80 open=true sha256=c7dae5fe11c191b064442921dd562cc4ef803e73c3636dd0298e6cc1df26b37c
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -1074,7 +1074,7 @@ mission/fleet/rekey width=80 open=true sha256=33104cd394ae269f6042dc23a5063bee82
 │ ~/src/harbor  on harbor                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/rekey width=120 open=false sha256=b99e6ebae5c0b2fd5d20832c7d3f36b66ec82281167fa5b751090e1321c9fa79
+mission/fleet/rekey width=120 open=false sha256=b0b8932102cd9bcabdff70caca5b22f1aa58ee16c85ad232dbfacb027845e90c
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -1105,7 +1105,7 @@ mission/fleet/rekey width=120 open=false sha256=b99e6ebae5c0b2fd5d20832c7d3f36b6
 │ ~/src/harbor  on harbor                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/rekey width=120 open=true sha256=39045edbf2f6730252d9ba8ee58a6e4ef8d400abb0ba173eefe353db88522d42
+mission/fleet/rekey width=120 open=true sha256=7a5526fb5b90c40d6f040f09ec0ea8b7c4fd2050e2f1007c28194601210050a9
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -1150,7 +1150,7 @@ mission/fleet/rekey width=120 open=true sha256=39045edbf2f6730252d9ba8ee58a6e4ef
 │ ~/src/harbor  on harbor                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/docs/handbook width=40 open=false sha256=a88755ab8651f0d944da5628ec716d5d5ed230dd9cb48e47e8fc0300f9bad9ea
+mission/fleet/docs/handbook width=40 open=false sha256=5c5140b6c797f17e2467c1ec4d93c12432cdbed5563c8b14620c4275f50ebbad
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1170,7 +1170,7 @@ mission/fleet/docs/handbook width=40 open=false sha256=a88755ab8651f0d944da5628e
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/docs/handbook width=40 open=true sha256=1edef492e1636d2fd7b5ba0d985c9269187e0643966d31eea4241d76a5b7b137
+mission/fleet/docs/handbook width=40 open=true sha256=9d485c85217cc16d6b97ccd22883bc7c3d2f8b7db32e956b57cd8ad0c4851979
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1197,7 +1197,7 @@ mission/fleet/docs/handbook width=40 open=true sha256=1edef492e1636d2fd7b5ba0d98
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/docs/handbook width=80 open=false sha256=9eab006099007be7661cefe29e9c41a06d36efde95630b78640f94192801eb54
+mission/fleet/docs/handbook width=80 open=false sha256=55f147fe1a29e86638f50dee2c640614227fd98c97f0c8696e49345d311a5aa4
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1215,7 +1215,7 @@ mission/fleet/docs/handbook width=80 open=false sha256=9eab006099007be7661cefe29
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/docs/handbook width=80 open=true sha256=247e7f4df6ead6b0669aed38a8b5e25ae7999b6604856ddfa8755cde7571ff4e
+mission/fleet/docs/handbook width=80 open=true sha256=38bff9e64e61467dfbde6b0508fb4681d175948cde30a6f8b260472bbcbfa80c
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1237,7 +1237,7 @@ mission/fleet/docs/handbook width=80 open=true sha256=247e7f4df6ead6b0669aed38a8
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/docs/handbook width=120 open=false sha256=5f6b33bcf69653f61de1cf9a57a5f3319fde4edbd7b22e6f72953215a8079a7c
+mission/fleet/docs/handbook width=120 open=false sha256=c08581133d05be254bec3d3ed0db1814b2bc5e5b707a2de39e1252f102a26cd9
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1255,7 +1255,7 @@ mission/fleet/docs/handbook width=120 open=false sha256=5f6b33bcf69653f61de1cf9a
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/docs/handbook width=120 open=true sha256=69203966250a523a2567d677bf4afd804b30197ddd392fd9f7834357822bf049
+mission/fleet/docs/handbook width=120 open=true sha256=ec2f9ea5d18d66785a5a040ccf097cba3a8a7f680363d3cfd1fc97358bbaf818
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1277,7 +1277,7 @@ mission/fleet/docs/handbook width=120 open=true sha256=69203966250a523a2567d677b
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/nightly width=40 open=false sha256=925e1845d2731661b477429cbdeaf9b55e02cf4b3cee278f9bb3e1ef808277fd
+mission/fleet/atlas/nightly width=40 open=false sha256=73b8fd7c11cc26b2d3a4ebca7459dd2bf15dd532fa7b17c90f6515af445e8a3c
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1296,7 +1296,7 @@ mission/fleet/atlas/nightly width=40 open=false sha256=925e1845d2731661b477429cb
 │ No agents right now.                 │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/nightly width=40 open=true sha256=8a1ea51385bfc8209b8614495ad5df0c282983833c87f8322b98e325f7d3983c
+mission/fleet/atlas/nightly width=40 open=true sha256=9e01ae04299db9aa8a6445c454e87459fc1c2d3787143e4a1660844c79b70959
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1330,7 +1330,7 @@ mission/fleet/atlas/nightly width=40 open=true sha256=8a1ea51385bfc8209b8614495a
 │ No agents right now.                 │
 ╰──────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/nightly width=80 open=false sha256=017265425569afdce3669d722d6f985eb35d2e9b3f2b132dbc7b5e63fee9f210
+mission/fleet/atlas/nightly width=80 open=false sha256=45507b4d8458eff6cb2688424b617d9fdcc197c2bb8a95ef21a25b32927159af
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1349,7 +1349,7 @@ mission/fleet/atlas/nightly width=80 open=false sha256=017265425569afdce3669d722
 │ No agents right now.                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/nightly width=80 open=true sha256=02262d917944a873ade5b00c081f52e71ce7d0aa38b55faecb44abb3464d6777
+mission/fleet/atlas/nightly width=80 open=true sha256=26f5656f494a1bc84e6ebf828dfe40d437c7a049c564ed36dd9f2764427cf94c
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1377,7 +1377,7 @@ mission/fleet/atlas/nightly width=80 open=true sha256=02262d917944a873ade5b00c08
 │ No agents right now.                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/nightly width=120 open=false sha256=f9a6331ef8c11f0afc936d5301a28849f75917f84fb3fd97a730075939965aed
+mission/fleet/atlas/nightly width=120 open=false sha256=05c91dbfffb5d50dccef9e2a047ee27afef2a16ea066c36514bff637e54d4435
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1396,7 +1396,7 @@ mission/fleet/atlas/nightly width=120 open=false sha256=f9a6331ef8c11f0afc936d53
 │ No agents right now.                                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k  The whole declaration 
-mission/fleet/atlas/nightly width=120 open=true sha256=19defc7872fbf98262f3b4bf607775fa0f913473bb288c54d2a0e9b56ced549b
+mission/fleet/atlas/nightly width=120 open=true sha256=242f9068cba00a97e29cfe0d89fd95c27bc28a548ec49d6772adee7b92b29f0a
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
