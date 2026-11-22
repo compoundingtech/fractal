@@ -4545,6 +4545,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_signal", integer()),
             ("exit_evidence", object()),
             ("incarnation_id", string()),
+            ("workspace", FieldSpec { nullable: true, ..string() }),
             ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),
@@ -5784,8 +5785,9 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        current.claims.get_mut("runtime.observed").unwrap()
-            .fields.remove("exit_evidence").unwrap();
+        for field in ["exit_evidence", "workspace"] {
+            current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
+        }
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }
