@@ -169,6 +169,7 @@ async fn unrelated_wakes_make_zero_guard_and_membership_requests() {
     assert_eq!(backend.views.load(Ordering::Relaxed), 0);
     assert_eq!(backend.exports.load(Ordering::Relaxed), 0);
     backend.store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h7603ea57fd62 owner=smallclaims::sync::authority_guard_tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE fleet_generation SET value=value+1 WHERE id=1", [],
     ).unwrap();
     assert!(futures_util::poll!(&mut membership).is_pending());

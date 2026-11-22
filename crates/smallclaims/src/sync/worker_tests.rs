@@ -161,6 +161,7 @@ async fn idle_dialer_backs_off_and_wake_inbound_and_movement_restart_the_sequenc
     broadcasts.borrow_and_update();
     for _ in 0..100 {
         local.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h3ed4d61d1aec owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO meta(key,value) VALUES('worker_test_progress','1')
              ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", [],
         ).unwrap();
@@ -719,13 +720,25 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
                     !query.inventory.digest.is_empty(),
                     "a request keeps its digest"
                 );
-                observed.lock().unwrap().push((
+                let shape = (
                     query.inventory.buckets.is_empty(),
                     query.inventory.envelopes.len(),
                     query.envelopes.len(),
-                ));
-                next.run(Request::from_parts(parts, Body::from(bytes)))
-                    .await
+                );
+                let response = next.run(Request::from_parts(parts, Body::from(bytes))).await;
+                let (parts, body) = response.into_parts();
+                let bytes = to_bytes(body, MAX_EXCHANGE_BYTES).await.unwrap();
+                let decoded = if deflated(&parts.headers) {
+                    inflate(&bytes, "test response").unwrap()
+                } else {
+                    bytes.to_vec()
+                };
+                let answer: PeerResponse<ReplicationExchange> = serde_json::from_slice(&decoded).unwrap();
+                let answer = answer.value;
+                assert!(answer.inventory.envelopes.len() <= 512, "bounded response listing");
+                assert!(!answer.inventory.buckets.is_empty(), "mismatch answers carry proofs");
+                observed.lock().unwrap().push(shape);
+                Response::from_parts(parts, Body::from(bytes))
             }
         },
     ));
@@ -748,16 +761,17 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
     );
     {
         let requests = requests.lock().unwrap();
-        assert!(
-            requests.len() <= 2,
-            "one compact round, never a full-inventory round or an unbounded retry"
+        assert_eq!(
+            requests.len(), 2,
+            "one scalar probe and one compact push/pull, never a full-inventory round or retry"
         );
-        assert!(
-            requests
-                .iter()
-                .all(|(bare, listed, _)| !bare && *listed <= 512),
-            "every request carries range digests and a bounded listing: {requests:?}"
+        assert_eq!(
+            requests[0], (true, 0, 0),
+            "the first request stays scalar even with checkpoint divergence"
         );
+        let (bare, listed, pushed) = requests[1];
+        assert!(!bare && listed > 0 && listed <= 512, "bounded complete range listings: {requests:?}");
+        assert!(pushed > 0, "the second request already pushes the reverse difference");
     }
     for store in [&left, &right] {
         store.validate_replication_backlog().unwrap();

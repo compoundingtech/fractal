@@ -169,36 +169,76 @@ fn unchanged_root_exchanges_construct_no_full_summaries() {
 }
 
 #[test]
-fn mismatching_root_probes_negotiate_proofs_then_converge() {
+fn mismatching_root_probes_converge_bidirectionally_in_one_compact_round() {
     let left = node("alder");
     let right = node("birch");
-    let before = answers();
-    for _ in 0..8 {
-        let probe = left.export_replication_root_summary(FLEET).unwrap();
-        let response = right.export_replication_exchange_answering(
-            FLEET, &probe.inventory, &probe.signature_requests,
-        ).unwrap();
-        if response.inventory.digest == probe.inventory.digest {
-            assert!(response.inventory.can(ROOT_SUMMARY));
-            break;
-        }
-        assert!(!response.inventory.can(ROOT_SUMMARY));
-        assert!(!response.inventory.buckets.is_empty());
-        assert!(response.inventory.envelopes.is_empty(), "negotiate proofs, not a full inventory");
-        let push = left.export_replication_exchange_answering(
-            FLEET, &response.inventory, &response.signature_requests,
-        ).unwrap();
-        right.receive_replication_exchange("alder", FLEET, &push).unwrap();
-        let pull = right.export_replication_exchange_answering(
-            FLEET, &push.inventory, &push.signature_requests,
-        ).unwrap();
-        left.receive_replication_exchange("birch", FLEET, &pull).unwrap();
+    // Both writers already occupy a shared range. Proofs without complete bounded
+    // listings cannot identify either writer's later gap in the reverse direction.
+    for (from, to) in [(&left, &right), (&right, &left)] {
+        let shared = from.export_replication_exchange(FLEET, &ReplicationInventory::default()).unwrap();
+        to.receive_replication_exchange(&from.origin, FLEET, &shared).unwrap();
     }
+    for store in [&left, &right] {
+        store.append_claim(&ClaimInput {
+            subject: format!("note/{}-later", store.origin),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    let before = answers();
+    let probe = left.export_replication_root_summary(FLEET).unwrap();
+    let response = right.export_replication_exchange_answering(
+        FLEET, &probe.inventory, &probe.signature_requests,
+    ).unwrap();
+    assert_ne!(response.inventory.digest, probe.inventory.digest);
+    assert!(!response.inventory.can(ROOT_SUMMARY));
+    assert!(!response.inventory.buckets.is_empty());
+    assert!(!response.inventory.envelopes.is_empty(), "prove the reverse difference now");
+    assert!(response.inventory.envelopes.len() <= REPLICATION_EXCHANGE_ENVELOPE_LIMIT);
+    assert!(response.envelopes.is_empty(), "omitted proofs do not prove missing envelopes");
+    let push = left.export_replication_exchange_answering(
+        FLEET, &response.inventory, &response.signature_requests,
+    ).unwrap();
+    assert!(!push.envelopes.is_empty(), "the second request must already push the later gap");
+    assert!(!push.inventory.buckets.is_empty());
+    assert!(push.inventory.envelopes.len() <= REPLICATION_EXCHANGE_ENVELOPE_LIMIT);
+    right.receive_replication_exchange("alder", FLEET, &push).unwrap();
+    let pull = right.export_replication_exchange_answering(
+        FLEET, &push.inventory, &push.signature_requests,
+    ).unwrap();
+    assert!(!pull.envelopes.is_empty(), "the second answer must pull the other later gap");
+    left.receive_replication_exchange("birch", FLEET, &pull).unwrap();
     assert_eq!(
         left.export_replication_root_summary(FLEET).unwrap().inventory.digest,
         right.export_replication_root_summary(FLEET).unwrap().inventory.digest,
     );
     assert_eq!(answers(), before, "root mismatch must not request a full inventory");
+}
+
+#[test]
+fn an_empty_modern_peer_never_requests_a_full_identity_inventory() {
+    let empty = Store::open_memory("birch", Arc::new(Plain)).unwrap();
+    empty.bind_fleet(FLEET).unwrap();
+    let store = source();
+    let before = answers();
+    let probe = store.export_replication_root_summary(FLEET).unwrap();
+    let response = empty.export_replication_exchange(FLEET, &probe.inventory).unwrap();
+    assert!(response.inventory.buckets.is_empty());
+    assert!(!response.inventory.can(ROOT_SUMMARY), "empty proofs are complete, not omitted");
+    let push = store.export_replication_exchange(FLEET, &response.inventory).unwrap();
+    assert!(!push.envelopes.is_empty());
+    assert!(!push.inventory.buckets.is_empty());
+    assert!(push.inventory.envelopes.is_empty(), "absent ranges need payloads, not a full listing");
+    empty.receive_replication_exchange("alder", FLEET, &push).unwrap();
+    assert_eq!(
+        empty.export_replication_root_summary(FLEET).unwrap().inventory.digest,
+        store.export_replication_root_summary(FLEET).unwrap().inventory.digest,
+    );
+    assert_eq!(answers(), before);
 }
 
 #[test]
