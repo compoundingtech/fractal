@@ -88,10 +88,15 @@ sustained for 60 seconds pauses new admissions without killing holders. The opti
 defaults to the absolute value **2147483648 bytes (2 GiB)**, not a percentage.
 IO `some avg60 >= 25%` independently trips after the same sustained interval.
 Resume requires lane memory below 0.5%, `MemAvailable >= memoryAvailableFloorBytes`, and IO
-below 10% continuously for 120 seconds. Missing, malformed or stale required lane PSI,
-meminfo or IO observations hold admission rather than count as healthy, including a missing
-lane cgroup. Existing policies remain valid; signal/window thresholds and timers remain
-configurable. Darwin admission is unchanged.
+below 10% continuously for 120 seconds. The runtime creates the lane slice hierarchy only
+when enforced work launches; an absent lane slice means zero lane pressure, not an unknown
+observation. With `LogicalOnly` coverage there is no lane placement, so memory protection
+comes from the MemAvailable floor alone. Real host shortage still trips through that floor;
+unrelated cgroups throttled at their own limits no longer trip the memory brake.
+Missing, unreadable or malformed PSI in an existing lane cgroup, unavailable containing
+hierarchy, missing/malformed meminfo or IO, and stale observations still hold admission.
+Existing policies remain valid; thresholds and timers remain configurable. Darwin admission
+is unchanged.
 
 `recovery` requires an operator-declared `recoveryCapable` profile and a measured filesystem
 observation. At most one recovery execution holds the host recovery slot. It bypasses only

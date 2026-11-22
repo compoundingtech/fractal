@@ -287,3 +287,43 @@ fn missing_malformed_and_stale_fixture_observations_fail_closed() {
         Some(Reason::UnknownObservation));
     assert_eq!(fixture.observe(12500).reason, Some(Reason::Recovering));
 }
+
+#[test]
+fn absent_lane_slice_is_quiet_but_host_memory_and_io_still_protect_admission() {
+    for shortage in [None, Some(Signal::MemoryFull), Some(Signal::IoSome)] {
+        let mut fixture = PressureFixture::new();
+        std::fs::remove_dir_all(fixture.root.path()
+            .join("sys/fs/cgroup/app.slice/app-lanes.slice")).unwrap();
+        match shortage {
+            Some(Signal::MemoryFull) => fixture.available(1 << 30),
+            Some(Signal::IoSome) => fixture.write("proc/pressure/io", "some avg60=25.0\n"),
+            None => {},
+            _ => unreachable!(),
+        }
+        for now in (0..60000).step_by(2500) {
+            assert!(!fixture.observe(now).blocked);
+        }
+        let decision = fixture.observe(60000);
+        assert_eq!(decision.blocked, shortage.is_some());
+        assert_eq!(decision.reason, shortage.map(Reason::Pressure));
+    }
+}
+
+#[test]
+fn absent_lane_does_not_substitute_for_missing_host_or_existing_lane_observations() {
+    for path in ["proc/meminfo", "proc/pressure/io", "sys/fs/cgroup/app.slice"] {
+        let mut fixture = PressureFixture::new();
+        std::fs::remove_dir_all(fixture.root.path()
+            .join("sys/fs/cgroup/app.slice/app-lanes.slice")).unwrap();
+        if path.ends_with("app.slice") {
+            std::fs::remove_dir(fixture.root.path().join(path)).unwrap();
+        } else {
+            std::fs::remove_file(fixture.root.path().join(path)).unwrap();
+        }
+        assert_eq!(fixture.observe(0).reason, Some(Reason::UnknownObservation));
+    }
+    let mut fixture = PressureFixture::new();
+    fixture.write("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure",
+        "some avg60=0.0\nfull avg60=NaN\n");
+    assert_eq!(fixture.observe(0).reason, Some(Reason::UnknownObservation));
+}

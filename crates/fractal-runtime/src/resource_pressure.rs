@@ -243,9 +243,27 @@ impl Reader {
         let needs_io = policy.rules.iter().any(|rule|
             matches!(rule.signal, Signal::IoSome | Signal::IoFull));
         let mut shortage = false;
+        let mut lane_absent = false;
         if needs_memory {
             self.memory.clear();
-            std::fs::File::open(memory_path)?.read_to_string(&mut self.memory)?;
+            match std::fs::File::open(memory_path) {
+                Ok(mut file) => { file.read_to_string(&mut self.memory)?; }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let cgroup = memory_path.parent().ok_or_else(|| anyhow::anyhow!("missing lane path"))?;
+                    match std::fs::metadata(cgroup) {
+                        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                            // The runtime creates this slice only when enforced work launches.
+                            // Require its containing hierarchy: an unavailable mount/manager
+                            // is not evidence that the lane alone is absent.
+                            let parent = cgroup.parent().ok_or_else(|| anyhow::anyhow!("missing lane parent"))?;
+                            ensure!(std::fs::metadata(parent)?.is_dir(), "missing lane hierarchy");
+                            lane_absent = true;
+                        }
+                        _ => return Err(error.into()),
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
             self.meminfo.clear();
             std::fs::File::open(meminfo_path)?.read_to_string(&mut self.meminfo)?;
             let mut available = self.meminfo.lines().filter_map(|line|
@@ -269,14 +287,19 @@ impl Reader {
                 Signal::IoFull => (&self.io, "full"),
                 Signal::IoSome => (&self.io, "some"),
             };
-            let mut matching = source.lines().filter(|line|
-                line.split_ascii_whitespace().next() == Some(name));
-            let line = matching.next().ok_or_else(|| anyhow::anyhow!("missing PSI signal"))?;
-            ensure!(matching.next().is_none(), "duplicate PSI signal");
-            let pressure = parse_millipercent(line, rule.window)?;
+            let memory_rule = matches!(rule.signal, Signal::MemoryFull | Signal::MemorySome);
+            let pressure = if lane_absent && memory_rule {
+                0
+            } else {
+                let mut matching = source.lines().filter(|line|
+                    line.split_ascii_whitespace().next() == Some(name));
+                let line = matching.next().ok_or_else(|| anyhow::anyhow!("missing PSI signal"))?;
+                ensure!(matching.next().is_none(), "duplicate PSI signal");
+                parse_millipercent(line, rule.window)?
+            };
             // A real host shortage must trip even when the lane has no current holders.
-            // Still parse lane PSI above: shortage never substitutes for missing observations.
-            let pressure = if shortage && matches!(rule.signal, Signal::MemoryFull | Signal::MemorySome) {
+            // An existing lane's PSI must still parse, even during host shortage.
+            let pressure = if shortage && memory_rule {
                 100000
             } else { pressure };
             self.readings.push(Reading {
