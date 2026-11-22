@@ -12,7 +12,7 @@ use tower::ServiceExt as _;
 use super::*;
 use crate::claim::{ClaimInput, ReplicaEnvelopeId};
 use crate::fleet::handshake::JoinRequest;
-use crate::replication::{ReplicationExportResponse, ReplicationReceiveResponse};
+use crate::replication::{ReceiveOptions, ReplicationExportResponse, ReplicationReceiveResponse};
 use crate::store::runtime::Plain;
 use crate::store::{Runtime as _, Store};
 use crate::sync::Local;
@@ -3154,9 +3154,10 @@ async fn withheld_receipt_expires_after_restart_without_confirming_the_sender() 
         "b",
         fixture.leaving_auth.fleet_id(),
         &replay,
-        None,
-        Default::default(),
-        Some(fixture.key.public()),
+        ReceiveOptions {
+            authenticated_member_key: Some(fixture.key.public()),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -3256,9 +3257,10 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
         "b",
         fixture.leaving_auth.fleet_id(),
         &ordinary,
-        None,
-        Default::default(),
-        Some(&key),
+        ReceiveOptions {
+            authenticated_member_key: Some(&key),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -3383,9 +3385,10 @@ async fn interrupted_leave_admission_keeps_first_receive_bound_and_denies_failed
             "b",
             fixture.leaving_auth.fleet_id(),
             &exchange,
-            None,
-            Default::default(),
-            Some(fixture.key.public()),
+            ReceiveOptions {
+                authenticated_member_key: Some(fixture.key.public()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -4945,6 +4948,7 @@ struct SlowExport {
     local: Local<Store>,
     slow: Arc<std::sync::atomic::AtomicBool>,
     fail_next: Arc<std::sync::atomic::AtomicBool>,
+    expire_next_receive: Arc<std::sync::atomic::AtomicBool>,
     receives: Arc<std::sync::atomic::AtomicUsize>,
     pause_after_receipt: Option<Arc<ReceiptBarrier>>,
 }
@@ -4981,10 +4985,19 @@ impl Backend for SlowExport {
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: crate::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
+        options: ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
+        let ReceiveOptions {
+            round_trip,
+            carrier,
+            authenticated_member_key,
+            deadline_unix_ms,
+        } = options;
+        let deadline_unix_ms = if self.expire_next_receive.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            Some(0)
+        } else {
+            deadline_unix_ms
+        };
         if let Some(received) = &self.pause_after_receipt {
             // Stop at the real durable page boundary, before Local admits or projects it.
             self.local.0.receive_replication_exchange_via(
@@ -5001,7 +5014,17 @@ impl Backend for SlowExport {
         }
         let result = self
             .local
-            .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key)
+            .receive(
+                peer,
+                fleet_id,
+                exchange,
+                ReceiveOptions {
+                    round_trip,
+                    carrier,
+                    authenticated_member_key,
+                    deadline_unix_ms,
+                },
+            )
             .await?;
         self.receives
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -5027,6 +5050,59 @@ impl Backend for SlowExport {
         self.local.record_failure(peer, status, error, carrier, failure)
             .await
     }
+}
+
+#[tokio::test]
+async fn expired_receive_returns_signed_overload_then_identical_retry_applies_once() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let auth = FleetAuth::test("receive-deadline-test", &[7; 32]);
+    let source = plain_memory("birch").unwrap();
+    let target = Arc::new(plain_memory("cedar").unwrap());
+    for store in [&source, target.as_ref()] {
+        store.bind_fleet(auth.fleet_id()).unwrap();
+    }
+    source.append_claim(&ClaimInput {
+        subject: "note/deadline".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::from([("text".into(), Value::String("once".into()))]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let query = source.export_replication_exchange(
+        auth.fleet_id(), &ReplicationInventory::default(),
+    ).unwrap();
+    let body = Bytes::from(serde_json::to_vec(&query).unwrap());
+    let digest = FleetAuth::body_digest(&body);
+    let backend = SlowExport {
+        local: Local(target.clone()),
+        slow: Arc::new(AtomicBool::new(false)),
+        fail_next: Arc::new(AtomicBool::new(false)),
+        expire_next_receive: Arc::new(AtomicBool::new(true)),
+        receives: Arc::new(AtomicUsize::new(0)),
+        pause_after_receipt: None,
+    };
+    let state = PeerState::new(backend.clone(), "cedar".into(), auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["birch".into()])));
+    let before = target.index().unwrap();
+    for expected in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK, StatusCode::OK] {
+        let response = receive_exchange(None, State(state.clone()),
+            auth.request_headers("birch", &body).unwrap(), body.clone()).await;
+        assert_eq!(response.status(), expected);
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), MAX_EXCHANGE_BYTES).await.unwrap();
+        auth.verify_sender(&headers, "RESPONSE", EXCHANGE_PATH, &bytes,
+            Some("cedar"), Some(&digest)).unwrap();
+        let answer: PeerResponse<Value> = serde_json::from_slice(&bytes).unwrap();
+        if expected == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(answer.value["code"], "replication-overloaded");
+            assert_eq!(answer.value["retry_after_ms"], 5000);
+            assert_eq!(target.index().unwrap(), before);
+            assert_eq!(backend.receives.load(Ordering::Relaxed), 0);
+        }
+    }
+    assert_eq!(target.claims_for("note/deadline", Some("example.note")).unwrap().len(), 1);
 }
 
 /// Isolated two-node proof: a cancelled response leaves admitted envelopes intact;
@@ -5058,6 +5134,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         local: Local(right.clone()),
         slow: Arc::new(AtomicBool::new(true)),
         fail_next: Arc::new(AtomicBool::new(false)),
+        expire_next_receive: Arc::new(AtomicBool::new(false)),
         receives: Arc::new(AtomicUsize::new(0)),
         pause_after_receipt: None,
     };
@@ -5179,7 +5256,15 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     );
     assert_eq!(backend.receives.load(Ordering::Relaxed), 1);
     Local(left.clone())
-        .receive("cedar", fleet_id, &answer, None, Default::default(), authenticated_member_key.as_deref())
+        .receive(
+            "cedar",
+            fleet_id,
+            &answer,
+            ReceiveOptions {
+                authenticated_member_key: authenticated_member_key.as_deref(),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     for store in [&left, &right] {
@@ -5285,6 +5370,7 @@ async fn interrupted_exchange_reopens_pending_page_and_resumes_without_duplicate
             local: Local(left.clone()),
             slow: Arc::new(AtomicBool::new(false)),
             fail_next: Arc::new(AtomicBool::new(false)),
+            expire_next_receive: Arc::new(AtomicBool::new(false)),
             receives: Arc::new(AtomicUsize::new(0)),
             pause_after_receipt: Some(received.clone()),
         };
@@ -5323,7 +5409,7 @@ async fn interrupted_exchange_reopens_pending_page_and_resumes_without_duplicate
     let right = Arc::new(plain_open(&right_path, "cedar").unwrap());
     assert_eq!(pending(&left), page.envelopes.len(), "receipt survives reopen before projection");
     let replay = Local(left.clone())
-        .receive("cedar", fleet_id, &page, None, Default::default(), None)
+        .receive("cedar", fleet_id, &page, ReceiveOptions::default())
         .await.unwrap();
     assert_eq!(replay.receipt.received, 0, "replay cannot insert a second envelope");
     assert_eq!(replay.receipt.duplicate, page.envelopes.len());
@@ -5648,6 +5734,7 @@ async fn failed_export_job_is_removed_and_identical_retry_preserves_receipt() {
         local: Local(right.clone()),
         slow: Arc::new(AtomicBool::new(false)),
         fail_next: Arc::new(AtomicBool::new(true)),
+        expire_next_receive: Arc::new(AtomicBool::new(false)),
         receives: Arc::new(AtomicUsize::new(0)),
         pause_after_receipt: None,
     };
@@ -5712,6 +5799,7 @@ async fn responder_failed_export_emits_failure_answer_diagnostic() {
         local: Local(store),
         slow: Arc::new(AtomicBool::new(false)),
         fail_next: Arc::new(AtomicBool::new(true)),
+        expire_next_receive: Arc::new(AtomicBool::new(false)),
         receives: Arc::new(AtomicUsize::new(0)),
         pause_after_receipt: None,
     };
@@ -5937,6 +6025,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
             local: Local(store.clone()),
             slow: Arc::new(AtomicBool::new(true)),
             fail_next: Arc::new(AtomicBool::new(false)),
+            expire_next_receive: Arc::new(AtomicBool::new(false)),
             receives: received.clone(),
             pause_after_receipt: None,
         };
