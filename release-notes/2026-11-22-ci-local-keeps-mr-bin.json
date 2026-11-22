@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "summary": "Keep the dev shell's pinned FRACTAL_MR_BIN through ci-local's environment scrub, so a locally signed run compiles the worktree lease's mr path in and its lease tests pass as they do in CI.",
+  "summary": "Make a local sign of main pass again: ci-local keeps the dev shell's pinned FRACTAL_MR_BIN, so the worktree lease tests build with their mr path; the codex sandbox tests keep their sockets out of /dev, which the sandbox remounts; and linux-fleet-compat's inputs and lane cover crates/fractal-mac-custody, which it now reads.",
   "replay": {"status": "none", "detail": "No runtime changes."},
   "schema": {"status": "none", "detail": "No schema changes."},
   "rules": {"status": "none", "detail": "No rule changes."},
-  "compatibility": {"status": "none", "detail": "Local test runner only."},
+  "compatibility": {"status": "none", "detail": "Local test runner, a test fixture and evidence inputs only."},
   "downtime": {"status": "none", "detail": "No downtime."},
   "manual": {"status": "none", "detail": "No operator steps."},
   "recovery": {"status": "none", "detail": "No recovery changes."}
