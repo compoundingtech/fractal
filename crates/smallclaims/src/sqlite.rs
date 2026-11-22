@@ -449,6 +449,7 @@ pub enum WriterJob {
         holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
+        deadline_unix_ms: Option<u128>,
     },
     /// Hands the connection to a caller until its guard gives it back.
     Lend {
@@ -458,6 +459,7 @@ pub enum WriterJob {
         holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
+        deadline_unix_ms: Option<u128>,
     },
 }
 
@@ -747,7 +749,8 @@ impl WriterConnection {
     /// A panic rolls back its open transaction while its guard returns the connection.
     #[track_caller]
     pub fn write(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Foreground)
+        self.lend_writer(writer_queue::LoanClass::Foreground, None)
+            .expect("unbounded writer admission cannot expire")
     }
 
     /// Borrow the same writer for one bounded maintenance/publication page. Pending foreground
@@ -757,16 +760,33 @@ impl WriterConnection {
     /// authority and prepared CAS evidence after acquisition. No operator work belongs here.
     #[track_caller]
     pub fn write_background(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Background)
+        self.lend_writer(writer_queue::LoanClass::Background, None)
+            .expect("unbounded writer admission cannot expire")
+    }
+
+    /// Refuse expired local replication work before lending the connection. A live
+    /// loan is never preempted: its transaction retains the normal commit/rollback boundary.
+    #[track_caller]
+    pub fn write_background_before(
+        &self,
+        deadline_unix_ms: Option<u128>,
+    ) -> Result<WriterGuard<'_>, crate::error::Error> {
+        self.lend_writer(writer_queue::LoanClass::Background, deadline_unix_ms)
     }
 
     #[track_caller]
     fn write_fence(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Fence)
+        self.lend_writer(writer_queue::LoanClass::Fence, None)
+            .expect("unbounded writer admission cannot expire")
     }
 
     #[track_caller]
-    fn lend_writer(&self, class: writer_queue::LoanClass) -> WriterGuard<'_> {
+    fn lend_writer(
+        &self,
+        class: writer_queue::LoanClass,
+        deadline_unix_ms: Option<u128>,
+    ) -> Result<WriterGuard<'_>, crate::error::Error> {
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
         debug_assert_no_pinned_read();
         let wait = crate::profile::writer_waiting();
         let holder = crate::windows::holds::Holder::current();
@@ -780,9 +800,9 @@ impl WriterConnection {
             "write.lend",
         );
         match class {
-            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin }),
+            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }),
             writer_queue::LoanClass::Background => {
-                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued, origin });
+                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms });
             }
             writer_queue::LoanClass::Fence => {
                 // Hold the admission lock while recording the barrier and enqueueing it.
@@ -794,7 +814,7 @@ impl WriterConnection {
                     .get()
                     .map_or(0, |queue| queue.watermark());
                 let job = if through == 0 {
-                    WriterJob::Lend { lent, returned, holder, enqueued, origin }
+                    WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }
                 } else {
                     WriterJob::FenceLend {
                         through,
@@ -803,6 +823,7 @@ impl WriterConnection {
                         holder,
                         enqueued,
                         origin,
+                        deadline_unix_ms,
                     }
                 };
                 self.fifo.send_at(enqueued, || jobs.as_ref()
@@ -811,15 +832,18 @@ impl WriterConnection {
                     .expect("the writer thread runs while the store is open");
             }
         }
-        let connection = lent_here
-            .recv()
-            .expect("the writer thread lends its connection");
+        let connection = lent_here.recv().map_err(|_| {
+            assert!(deadline_unix_ms.is_some(), "the writer thread lends its connection");
+            crate::error::Error::new("replication-overloaded", "the replication receive answer deadline elapsed before writer admission")
+        })?;
+        #[cfg(any(test, feature = "test-support"))]
+        work::record_writer_loan();
         drop(waiting);
         telemetry::acknowledged(enqueued.elapsed(), false);
         if let Some(operation) = &mut writer_operation {
             operation.acquired(enqueued.elapsed());
         }
-        WriterGuard {
+        let guard = WriterGuard {
             changes_at_lend: connection.total_changes(),
             connection: Some(connection),
             give_back,
@@ -832,7 +856,11 @@ impl WriterConnection {
             writer_operation,
             receive_hold: crate::receive_metrics::capture().as_ref().map(|context|
                 crate::receive_metrics::WriterSample::start(context, enqueued.elapsed())),
-        }
+        };
+        // The deadline may cross while the channel handoff runs. Return the untouched
+        // connection before opening any transaction in that case.
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
+        Ok(guard)
     }
 
     fn enqueue_background(&self, job: WriterJob) {
@@ -1043,10 +1071,15 @@ fn write_queue(
             },
         };
         match job {
-            WriterJob::Lend { lent, returned, holder, enqueued, origin }
-            | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, .. } => {
+            WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }
+            | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, deadline_unix_ms, .. } => {
                 fifo.dequeued_at(enqueued);
                 telemetry::queued(enqueued.elapsed(), origin.as_ref());
+                if crate::replication::check_receive_deadline(deadline_unix_ms).is_err() {
+                    // Dropping the unanswered loan tells its borrower to return overload.
+                    // No connection was handed out and no write transaction was opened.
+                    continue;
+                }
                 let _hold = crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Lend, &holder);
                 let _holder = callbacks.3.map(|writer| writer.holding(origin));
                 if let Err(std::sync::mpsc::SendError(back)) = lent.send(connection) {
@@ -1468,9 +1501,9 @@ pub struct ReadGuard<'a> {
     pub connection: Option<ReadConnection>,
     /// The connection `Store::read_snapshot` pinned for this thread, shared by every read in it.
     pub pinned: Option<Rc<ReadConnection>>,
-    /// Declared last, so it ends after the connection is returned. `None` for a read inside a
-    /// pinned snapshot, which `Store::read_snapshot` already registers.
-    _live: Option<LiveReadToken>,
+    /// Declared last, so it ends after the connection is returned. Borrowing an existing
+    /// snapshot or request loan creates no second physical-loan token.
+    pub(crate) _live: Option<LiveReadToken>,
 }
 
 thread_local! {
@@ -1596,6 +1629,9 @@ pub struct PinnedRead<'a> {
     pub registered: bool,
     /// Times the read transaction until it ends, and names who held one past its target.
     pub transaction: Option<crate::windows::holds::ReadHold>,
+    /// An owned checkout follows its connection through pin cleanup. Borrowed request
+    /// readers retain their token in the enclosing loan instead.
+    pub(crate) _live: Option<LiveReadToken>,
 }
 
 impl Drop for PinnedRead<'_> {
@@ -2199,6 +2235,7 @@ pub mod work {
     static AUTOINDEX_ROWS: AtomicU64 = AtomicU64::new(0);
 
     thread_local! {
+        static WRITER_LOANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static THREAD_WORK: std::cell::Cell<SqliteWork> = const { std::cell::Cell::new(SqliteWork {
             statements:0,vm_steps:0,fullscan_steps:0,sorts:0,autoindex_rows:0,
         }) };
@@ -2225,6 +2262,16 @@ pub mod work {
         pub fn finish(self) -> SqliteWork {
             THREAD_WORK.with(std::cell::Cell::get) - self.before
         }
+    }
+
+    /// Writer loans acquired by this caller thread, including loans that execute no SQL.
+    /// Snapshot outside setup and verification queries to measure only the operation.
+    pub fn writer_loans() -> u64 {
+        WRITER_LOANS.with(std::cell::Cell::get)
+    }
+
+    pub(super) fn record_writer_loan() {
+        WRITER_LOANS.with(|count| count.set(count.get() + 1));
     }
 
     /// Everything counted so far, in every connection of this process.
@@ -3077,6 +3124,7 @@ mod tests {
         let pool = ReadPool::new(&path, false).unwrap();
         let mut guard = pool.get();
         let connection = Rc::new(guard.connection.take().unwrap());
+        let live = guard._live.take();
         drop(guard);
         let escaped = connection.clone();
         drop(PinnedRead {
@@ -3084,6 +3132,7 @@ mod tests {
             connection: Some(connection),
             registered: false,
             transaction: None,
+            _live: live,
         });
         assert_eq!((pool.usage().open, pool.usage().idle), (1, 0));
         drop(escaped);

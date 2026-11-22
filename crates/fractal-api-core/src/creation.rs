@@ -360,13 +360,10 @@ mod tests {
         let intent = crate::graph::parse_intent(&source, "example").unwrap();
         let checkout =
             Checkout::from_desired(&intent.subjects.values().next().unwrap().desired).unwrap();
-        assert!(
-            checkout
-                .create(&workspace)
-                .unwrap_err()
-                .to_string()
-                .contains("failed")
-        );
+        let error = checkout.create(&workspace).unwrap_err().to_string();
+        assert!(error.contains(&checkout.repository.display().to_string()), "{error}");
+        assert!(error.contains("store repository missing or unidentifiable"), "{error}");
+        assert!(error.contains("mr refused the activation lease"), "{error}");
         assert!(!workspace.exists());
         let plain = fractal_client::AgentCreateParameters {
             repo: None,

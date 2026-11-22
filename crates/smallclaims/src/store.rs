@@ -1573,6 +1573,10 @@ pub struct PeerSyncProgress {
     pub worker: Option<crate::replication::ReplicationWorkerStatus>,
     pub last_successful_exchange: Option<crate::replication::ReplicationExchangeTransport>,
     pub last_failed_exchange: Option<crate::replication::ReplicationExchangeTransport>,
+    /// Latest successful receipt, including write-free heartbeats.
+    pub last_received_at_unix_ms: Option<u128>,
+    /// Durable timestamp this process-local receipt extends. A changed row invalidates it.
+    pub receipt_checkpoint_at_unix_ms: Option<u128>,
     /// How many envelopes this node held when it took the last measurement.
     pub measured_inventory_envelopes: u64,
     /// What the open window's measurements were compared against.
@@ -1613,6 +1617,16 @@ impl InventoryBasis {
 }
 
 impl PeerSyncProgress {
+    /// Receives can finish after a later receipt has already published its liveness.
+    /// A newer durable checkpoint takes precedence; within it, keep the latest observation.
+    fn record_receipt(&mut self, checkpoint_at: u128, received_at: u128) {
+        let receipt = (Some(checkpoint_at), Some(received_at));
+        if receipt > (self.receipt_checkpoint_at_unix_ms, self.last_received_at_unix_ms) {
+            self.receipt_checkpoint_at_unix_ms = Some(checkpoint_at);
+            self.last_received_at_unix_ms = Some(received_at);
+        }
+    }
+
     /// Record a comparable exchange for the bounded schedule-admission fallback.
     /// An unhealthy exchange, restart, incarnation/basis change, clock regression or quiet
     /// gap breaks the streak. Re-reading one measurement can never advance it.
@@ -6888,6 +6902,7 @@ impl Store {
                 None => guard.pinned.take().expect("a request loan holds its connection"),
             }),
             transaction: Some(crate::windows::holds::ReadHold::start()),
+            _live: guard._live.take(),
         };
         drop(guard);
         let connection = pinned
@@ -8246,7 +8261,7 @@ impl Store {
         Ok(receipt)
     }
 
-    pub /* sqlite-large-value-flow: allow-for-now flow-h7818827323a6 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_via(
+    pub fn receive_replication_exchange_via(
         &self,
         relay: &str,
         fleet_id: &str,
@@ -8255,6 +8270,29 @@ impl Store {
         carrier: crate::replication::ReplicationCarrier,
         authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceipt, FractalError> {
+        self.receive_replication_exchange_before(
+            relay, fleet_id, input, asks, crate::replication::ReceiveOptions {
+                carrier,
+                authenticated_member_key,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// The local connector's optional answer deadline. Admission may refuse the page;
+    /// once its receipt transaction starts, it commits atomically without cancellation.
+    pub /* sqlite-large-value-flow: allow-for-now flow-h9e43d13e01a3 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_before(
+        &self,
+        relay: &str,
+        fleet_id: &str,
+        input: &ReplicationExchange,
+        asks: bool,
+        options: crate::replication::ReceiveOptions<'_>,
+    ) -> Result<ReplicationReceipt, FractalError> {
+        let crate::replication::ReceiveOptions {
+            carrier, authenticated_member_key, deadline_unix_ms, ..
+        } = options;
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
         if input.peer != relay {
             return Err(FractalError::new(
                 "peer-label-mismatch",
@@ -8311,8 +8349,59 @@ impl Store {
         // prepare/finalize/commit boundary, but lets queued foreground requests go first.
         // Immutable signature verification stays outside the writer. The guard returns before
         // any receipt counters, snapshot work or acknowledgement can observe success.
-        let (received, duplicate, signatures, received_at) = {
-            let mut connection = self.connection.write_background();
+        let projection_digests = serde_json::to_string(&input.projection_digests).map_err(internal)?;
+        let projection_versions = serde_json::to_string(&input.projection_versions).map_err(internal)?;
+        let projection_registry = input.projection_registry_digest.as_ref().unwrap_or(&input.schema_digest);
+        let digests_key = format!("peer_projection_digests:{relay}");
+        let versions_key = format!("peer_projection_versions:{relay}");
+        let registry_key = format!("peer_projection_registry:{relay}");
+        let inventory_key = format!("peer_projection_inventory:{relay}");
+        let unchanged_checkpoint = |connection: &Connection, received_at: u128| -> Result<Option<i64>, FractalError> {
+            if !input.envelopes.is_empty() || !input.signatures.is_empty() {
+                return Ok(None);
+            }
+            connection.prepare_cached(
+                "SELECT CAST(last_success_at_unix_ms AS INTEGER) FROM replication_peers
+                 WHERE peer=?1 AND status='up' AND last_error IS NULL
+                   AND schema_digest IS ?2 AND authority_digest IS ?3 AND graph_digest IS ?4
+                   AND CAST(last_success_at_unix_ms AS INTEGER)>?5
+                   AND CAST(last_success_at_unix_ms AS INTEGER)<=?6
+                 AND (SELECT value FROM meta WHERE key=?7) IS ?8
+                 AND (SELECT value FROM meta WHERE key=?9) IS ?10
+                 AND (SELECT value FROM meta WHERE key=?11) IS ?12
+                 AND (SELECT value FROM meta WHERE key=?13) IS ?14
+                 AND (NOT ?15 OR NOT EXISTS(SELECT 1 FROM replication_refusals WHERE peer=?1))",
+                ).map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h608c8f9f249f owner=smallclaims::store TODO=trace-statement-and-value-representation */
+                params![relay, input.schema_digest, input.authority_digest, input.graph_digest,
+                    i64::try_from(received_at.saturating_sub(PEER_QUIET_EXCHANGE_MS / 2)).map_err(internal)?,
+                    i64::try_from(received_at).map_err(internal)?,
+                    &digests_key, &projection_digests,
+                    &versions_key, &projection_versions,
+                    &registry_key, projection_registry,
+                    &inventory_key, input.inventory.digest, asks],
+                |row| row.get(0),
+            ).optional().map_err(internal)
+        };
+        let (received, duplicate, signatures, received_at, checkpoint_at) = 'receipt: {
+            let received_at = now_ms();
+            // An unchanged receipt linearizes at this committed reader snapshot. Concurrent
+            // changes stay durable and are checked by the next exchange or freshness refresh;
+            // latest_peer_receipt accepts local last-seen only for its matching checkpoint.
+            // Changed state is rechecked under the writer before deciding whether to commit.
+            if let Some(checkpoint_at) = unchanged_checkpoint(&self.readers.get(), received_at)? {
+                crate::replication::check_receive_deadline(deadline_unix_ms)?;
+                break 'receipt (0, 0, 0, received_at, checkpoint_at as u128);
+            }
+            let mut connection = self.connection.write_background_before(deadline_unix_ms)?;
+            let received_at = now_ms();
+            let checkpoint_at = unchanged_checkpoint(&connection, received_at)?;
+            if let Some(checkpoint_at) = checkpoint_at {
+                break 'receipt (0, 0, 0, received_at, checkpoint_at as u128);
+            }
+            // This is the last cancellable boundary. Once receipt writes begin, complete
+            // the atomic receipt and its follow-up phases so duplicate retries stay cheap.
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;
@@ -8320,7 +8409,6 @@ impl Store {
                 let mut received = 0;
                 let mut duplicate = 0;
                 let mut signatures = 0;
-                let received_at = now_ms();
                 let now = received_at.to_string();
                 for (envelope, verified) in input.envelopes.iter().zip(&envelope_signatures) {
                     // A checkpoint dropped this envelope here, or this member deleted it. Its
@@ -8393,22 +8481,22 @@ impl Store {
                     .map_err(internal)?;
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h53cc4b4e8c5e owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
-                    params![format!("peer_projection_digests:{relay}"),
-                        serde_json::to_string(&input.projection_digests).map_err(internal)?],
+                    params![&digests_key,
+                        &projection_digests],
                 ).map_err(internal)?;
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h7b01d2bde73b owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
-                    params![format!("peer_projection_versions:{relay}"),
-                        serde_json::to_string(&input.projection_versions).map_err(internal)?],
+                    params![&versions_key,
+                        &projection_versions],
                 ).map_err(internal)?;
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h7821b58b8774 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
-                    params![format!("peer_projection_registry:{relay}"),
-                        input.projection_registry_digest.as_ref().unwrap_or(&input.schema_digest)],
+                    params![&registry_key,
+                        projection_registry],
                 ).map_err(internal)?;
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h5e1e6fd8e43d owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
-                    params![format!("peer_projection_inventory:{relay}"), input.inventory.digest],
+                    params![&inventory_key, input.inventory.digest],
                 ).map_err(internal)?;
                 // A response to our own dial proves the outbound grants now permit it.
                 // Incoming exchanges only prove the reverse route.
@@ -8418,7 +8506,7 @@ impl Store {
                 Ok((received, duplicate, signatures, received_at))
             })(&transaction)?;
             transaction.commit().map_err(internal)?;
-            counts
+            (counts.0, counts.1, counts.2, counts.3, received_at)
         };
         // Only a response to our own dial is carrier evidence for a locally initiated
         // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
@@ -8538,6 +8626,7 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
+        progress.record_receipt(checkpoint_at, received_at);
         if let Some(comparison) = &claim_ranges {
             progress.compare_claims(comparison.same, now);
         }
@@ -10297,11 +10386,11 @@ impl Store {
             .optional()?)
     }
 
-    /// When this replica last exchanged records with `peer`. The peer row records every
-    /// success, while an unchanged up claim is refreshed only at its bounded interval.
+    /// Latest exchange with `peer`. Timestamp-only receipts are checkpointed at half the
+    /// 35-second quiet deadline; live liveness decisions use the exact process-local receipt.
     pub fn replication_peer_last_success(&self, peer: &str) -> Result<Option<u128>> {
         let connection = self.readers.get();
-        Ok(connection
+        let persisted = connection
             .query_row(
                 "SELECT last_success_at_unix_ms FROM replication_peers WHERE peer=?1",
                 [peer],
@@ -10309,7 +10398,20 @@ impl Store {
             )
             .optional()?
             .flatten()
-            .and_then(|value| value.parse().ok()))
+            .and_then(|value| value.parse().ok());
+        Ok(self.latest_peer_receipt(peer, persisted))
+    }
+
+    fn latest_peer_receipt(&self, peer: &str, persisted: Option<u128>) -> Option<u128> {
+        let mut progress = self.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(progress) = progress.get_mut(peer) else { return persisted };
+        if persisted.is_some() && progress.receipt_checkpoint_at_unix_ms == persisted {
+            progress.last_received_at_unix_ms.max(persisted)
+        } else {
+            progress.last_received_at_unix_ms = None;
+            progress.receipt_checkpoint_at_unix_ms = None;
+            persisted
+        }
     }
 
     /// Whether `peer` counts as up now (see [`peer_up`]), and when it last exchanged.
@@ -10325,6 +10427,7 @@ impl Store {
             .optional()?
             .unwrap_or_default();
         let last_success = last_success.and_then(|value| value.parse().ok());
+        let last_success = self.latest_peer_receipt(peer, last_success);
         Ok((peer_up(last_success, failed_since, now_ms()), last_success))
     }
 
@@ -10781,6 +10884,8 @@ impl Store {
                     },
                     None,
                 ));
+            status.last_success_at_unix_ms =
+                self.latest_peer_receipt(peer, status.last_success_at_unix_ms);
             if matches!(
                 status.status.as_str(),
                 "up" | "unknown" | "down" | "last-seen"

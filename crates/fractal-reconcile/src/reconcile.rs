@@ -1604,6 +1604,11 @@ impl RestartWake {
     }
 }
 
+struct ObserverInterest {
+    fields: Vec<String>,
+    await_prs: Vec<crate::resource::AwaitPrTarget>,
+}
+
 pub struct Reconciler<R = NativeRuntime> {
     pub store: Arc<Store>,
     runtime: Arc<R>,
@@ -1676,9 +1681,9 @@ pub struct Reconciler<R = NativeRuntime> {
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// Quiet standing-watch cadence by observer/revision; not part of the provider cache.
     observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
-    /// The fields the latest arm of each observer/revision requests, so an arm that requests
-    /// more polls at once rather than keeping a deadline set by a poll that read less.
-    observer_fields: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Fields and native PR targets captured by each observer/revision's latest arm. New
+    /// interest observes immediately rather than keeping a deadline for an older input set.
+    observer_fields: Arc<Mutex<HashMap<String, ObserverInterest>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// By observer: held from a look reading its cursor until the look publishes the cursor it
     /// kept, so an arm that retired another waits for that look rather than polling from the
@@ -2444,7 +2449,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         // reuses its durable queue; cancellation never leaves an orphan consumer.
         tokio::select! {
             () = self.clone().run_passes() => {},
-            () = self.consume_start_results() => {},
+            () = self.clone().consume_start_results() => {},
+            () = self.sample_resource_pressure() => {},
         }
     }
 
@@ -2712,6 +2718,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub fn reconcile_github_watches(&self, desired: &[DesiredSubject]) -> Result<()> {
+        use crate::watches::ProgramPrWatchesStore as _;
         let now = now_ms();
         let mut next_deadline: Option<u128> = None;
         let mut used_observers = BTreeSet::new();
@@ -2738,6 +2745,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                 (!spec.stopped).then_some((subject, spec))
             })
             .collect::<Vec<_>>();
+        for registration in self.store.program_pr_watches()? {
+            self.isolate("github-watch", registration["step"].as_str().unwrap_or("program/await-pr"), || {
+                let repo = registration["repo"].as_str().context("PR registration has no repository")?;
+                used_observers.insert(crate::github_watch::standing_observer(repo));
+                if registration["member"].as_str() == Some(self.host.as_str()) {
+                    ensure(repo.to_owned())?;
+                }
+                Ok(())
+            });
+        }
         for (subject, spec) in &subscriptions {
             if subject.subject.starts_with("subscription/watch/") {
                 continue;
@@ -2746,14 +2763,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             };
             used_observers.insert(spec.observer.clone());
-            if self
-                .store
-                .selected_desired_origin(&subject.subject)?
-                .as_deref()
-                == Some(self.host.as_str())
-            {
-                ensure(locator)?;
-            }
+            self.isolate("github-watch", &subject.subject, || {
+                if self
+                    .store
+                    .selected_desired_origin(&subject.subject)?
+                    .as_deref()
+                    == Some(self.host.as_str())
+                {
+                    ensure(locator)?;
+                }
+                Ok(())
+            });
         }
         let watches = subscriptions
             .iter()
@@ -2764,62 +2784,71 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some((thread, _)) = crate::github_watch::watch_parts(&subject.subject) else {
                 continue;
             };
-            if self.store.watch_ended(&subject.subject, &watch)?.is_some() {
+            if self.isolate("github-watch", &subject.subject, || {
+                if self.store.watch_ended(&subject.subject, &watch)?.is_some() {
+                    if self
+                        .store
+                        .selected_desired_origin(&subject.subject)?
+                        .as_deref()
+                        == Some(self.host.as_str())
+                    {
+                        self.store.stop_watch_declaration(&subject.subject)?;
+                    }
+                    return Ok(());
+                }
                 if self
                     .store
                     .selected_desired_origin(&subject.subject)?
                     .as_deref()
-                    == Some(self.host.as_str())
+                    != Some(self.host.as_str())
                 {
-                    self.store.stop_watch_declaration(&subject.subject)?;
+                    used_observers.insert(spec.observer.clone());
+                    return Ok(());
                 }
-                continue;
-            }
-            if self
-                .store
-                .selected_desired_origin(&subject.subject)?
-                .as_deref()
-                != Some(self.host.as_str())
-            {
+                if self.store.watch_seat_ended(&subject.subject, &spec.to, &watch)? {
+                    self.store.end_watch(&subject.subject, "seat-ended", None)?;
+                    return Ok(());
+                }
+                if let Some(until) = watch.until_unix_ms {
+                    if until <= now {
+                        let wake =
+                            crate::github_watch::deadline_wake(&subject.subject, &watch, &thread)?;
+                        self.store
+                            .end_watch(&subject.subject, "deadline", Some(&wake))?;
+                        return Ok(());
+                    }
+                    next_deadline = Some(next_deadline.map_or(until, |next| next.min(until)));
+                }
                 used_observers.insert(spec.observer.clone());
-                continue;
+                ensure(thread.locator())?;
+                Ok(())
+            }).is_none() {
+                // A failed watch still owns observation interest until it can be evaluated.
+                used_observers.insert(spec.observer.clone());
             }
-            if self.store.watch_seat_ended(&subject.subject, &spec.to, &watch)? {
-                self.store.end_watch(&subject.subject, "seat-ended", None)?;
-                continue;
-            }
-            if let Some(until) = watch.until_unix_ms {
-                if until <= now {
-                    let wake =
-                        crate::github_watch::deadline_wake(&subject.subject, &watch, &thread)?;
-                    self.store
-                        .end_watch(&subject.subject, "deadline", Some(&wake))?;
-                    continue;
-                }
-                next_deadline = Some(next_deadline.map_or(until, |next| next.min(until)));
-            }
-            used_observers.insert(spec.observer.clone());
-            ensure(thread.locator())?;
         }
         for observer in desired.iter().filter(|subject| {
             subject.kind == "observer"
                 && subject.owner_run.is_none()
                 && subject.subject.starts_with("observer/github/")
         }) {
-            // Only a standing repository observer is this stage's.
-            let running = crate::graph::observer_spec(&observer.desired).is_some_and(|spec| {
-                !spec.stopped && crate::github_watch::is_standing_observer(&observer.subject, &spec)
+            self.isolate("github-watch-observer", &observer.subject, || {
+                // Only a standing repository observer is this stage's.
+                let running = crate::graph::observer_spec(&observer.desired).is_some_and(|spec| {
+                    !spec.stopped && crate::github_watch::is_standing_observer(&observer.subject, &spec)
+                });
+                if running
+                    && !used_observers.contains(&observer.subject)
+                    && self
+                        .store
+                        .selected_desired_origin(&observer.subject)?
+                        .as_deref()
+                        == Some(self.host.as_str())
+                {
+                    self.store.stop_watch_declaration(&observer.subject)?;
+                }
+                Ok(())
             });
-            if running
-                && !used_observers.contains(&observer.subject)
-                && self
-                    .store
-                    .selected_desired_origin(&observer.subject)?
-                    .as_deref()
-                    == Some(self.host.as_str())
-            {
-                self.store.stop_watch_declaration(&observer.subject)?;
-            }
         }
         if let Some(next) = next_deadline {
             self.arm_restart("stage/github-watches", next.saturating_add(1));
@@ -3764,6 +3793,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
         );
         let mut member_errors = BTreeMap::new();
+        // Keep every prepared worktree fenced through rendering, runtime initialization and
+        // publication later in this pass, including reuse of an existing checkout.
+        let mut activation_leases = BTreeMap::new();
         for subject in &active {
             if subject.kind == "stop" {
                 continue;
@@ -3803,6 +3835,29 @@ impl<R: RuntimeControl> Reconciler<R> {
             let checkout = (subject.kind == "agent")
                 .then(|| Checkout::from_desired(&subject.desired))
                 .flatten();
+            let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
+                .or_else(|| crate::repositories::workspace_repository(workspace));
+            let lease_owner = match fractal_runtime::store_worktree_lease::canonical_owner(
+                &crate::checkout::workspace_worktree(workspace).unwrap_or_else(|| workspace.to_path_buf()),
+            ) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    member_errors.insert(subject.subject.clone(), error);
+                    continue;
+                }
+            };
+            if let Some(repository) = repository
+                && !activation_leases.contains_key(&lease_owner)
+            {
+                let lease = self.worktree_activation_lease(&lease_owner, &repository);
+                match lease {
+                    Ok(lease) => { activation_leases.insert(lease_owner.clone(), lease); }
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        continue;
+                    }
+                }
+            }
             if workspace.is_dir() {
                 if let Some(checkout) = &checkout
                     && let Err(error) = checkout.validate_workspace(workspace)
@@ -3816,7 +3871,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             let result = if let Some(checkout) = checkout {
-                self.create_checkout(&subject.subject, &checkout, workspace)
+                self.create_checkout(
+                    &subject.subject, &checkout, workspace,
+                    &activation_leases[&lease_owner],
+                )
                     .and_then(|failure| match failure {
                         Some(reason) => Err(anyhow::anyhow!(reason)),
                         None => Ok(()),
@@ -3835,7 +3893,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.observe_agent_workspace(&subject.subject, member)?;
             }
         }
-        let renderable = active
+        let mut renderable = active
             .iter()
             .copied()
             .filter(|subject| {
@@ -3866,6 +3924,38 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .incremental
                         .needs(&format!("member:{}", subject.subject), now_ms())
             });
+        if render_needed {
+            renderable.retain(|subject| {
+                let member = subject.member.as_ref().expect("renderable member");
+                let workspace = Path::new(&member.workspace);
+                let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
+                    &crate::checkout::workspace_worktree(workspace).unwrap_or_else(|| workspace.to_path_buf()),
+                ) {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        return false;
+                    }
+                };
+                if activation_leases.contains_key(&owner) {
+                    return true;
+                }
+                let Some(repository) = crate::repositories::workspace_repository(workspace) else {
+                    return true;
+                };
+                let lease = self.worktree_activation_lease(&owner, &repository);
+                match lease {
+                    Ok(lease) => {
+                        activation_leases.insert(owner, lease);
+                        true
+                    }
+                    Err(error) => {
+                        member_errors.insert(subject.subject.clone(), error);
+                        false
+                    }
+                }
+            });
+        }
         // A render panic faults this host's members; stops never render, so they still run.
         let mut render_span = crate::reconcile_telemetry::phase("pass/render");
         render_span.items(renderable.len());
@@ -7738,6 +7828,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         checkout: &Checkout,
         workspace: &Path,
+        lease: &fractal_runtime::store_worktree_lease::StoreWorktreeLease,
     ) -> Result<Option<String>> {
         let declaration = self.store.newest_claim_index(subject, "intent.desired")?;
         {
@@ -7766,7 +7857,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(Some(failure.clone()));
         }
-        match checkout.create(workspace) {
+        match checkout.create_leased(workspace, lease) {
             Ok(warnings) => {
                 self.checkout_retries
                     .lock()
@@ -8537,6 +8628,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             )?;
             self.signal_changed();
         }
+        let _activation_lease = self.member_activation_lease(member)?;
         let workspace = Path::new(&member.workspace);
         if workspace.exists() {
             anyhow::ensure!(
@@ -16008,6 +16100,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             changed |= match &request.wait {
                 program::Wait::Run { mission, input } => self.settle_program_child(engine, run, &request, mission, input)?,
                 program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
+                program::Wait::AwaitPr { repo, pr, head } =>
+                    program::await_pr::settle(&self.store, engine, &request, repo, *pr, head)?,
                 program::Wait::Resource { operation, payload, cancelled } =>
                     self.settle_program_resource(engine, run, &request, operation, payload, *cancelled)?,
             };
@@ -19300,6 +19394,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
         spec.fields.sort();
         spec.fields.dedup();
+        let await_prs = if spec.provider == "github.repository" {
+            use crate::watches::ProgramPrWatchesStore as _;
+            let targets = program::await_pr::targets(self.store.program_pr_watches()?, &spec.locator)?;
+            if !targets.is_empty() {
+                spec.fields.extend(crate::github_watch::WATCH_FIELDS.into_iter().map(str::to_owned));
+                spec.fields.sort();
+                spec.fields.dedup();
+            }
+            targets
+        } else { Vec::new() };
         // A live subscription is a watch of this ref. Keep explicit faster intervals,
         // and use conditional reads every thirty seconds while anyone watches it.
         let watched_ref = spec.provider == "github.ref" && selected.iter().any(|(_, subscription)|
@@ -19353,8 +19457,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         // adds were never read, as when a watch's subscription reaches the standing observer
         // after its first poll (#4470), so poll now instead of waiting out that cadence.
         let previous_fields = self.observer_fields.lock().unwrap_or_else(PoisonError::into_inner)
-            .insert(deadline_key.clone(), spec.fields.clone());
-        if previous_fields.is_some_and(|previous| spec.fields.iter().any(|field| !previous.contains(field))) {
+            .insert(deadline_key.clone(), ObserverInterest {
+                fields: spec.fields.clone(),
+                await_prs: await_prs.clone(),
+            });
+        if previous_fields.as_ref().is_some_and(|previous| {
+            spec.fields.iter().any(|field| !previous.fields.contains(field))
+                || await_prs.iter().any(|target| previous.await_prs.iter().find(|previous| previous.pr == target.pr)
+                    .is_none_or(|previous| target.registrations.iter().any(|token| !previous.registrations.contains(token))))
+        }) || previous_fields.is_none() && !await_prs.is_empty() {
             next_check = next_check.min(now_ms());
         }
         // A changed cadence retires the old sleeping poll; its result cannot overwrite
@@ -19384,7 +19495,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             &[]
         };
-        let snapshot = smallclaims::hash::canonical_hash(&(&spec, &selected, opener_workspaces))?;
+        let snapshot = smallclaims::hash::canonical_hash(&(&spec, &selected, opener_workspaces, &await_prs))?;
         let snapshot_prefix = format!("{operation_prefix}{snapshot}:");
         // A refresh or revision replacement also retires the scheduled arm.
         let operation = {
@@ -19554,6 +19665,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     provider: spec.provider.clone(),
                     locator: spec.locator.clone(),
                     fields: spec.fields.iter().cloned().collect(),
+                    await_prs: await_prs.clone(),
                     cursor: cursor.clone(),
                     previous_facts: previous_facts.clone(),
                     every_ms: spec.every_ms,
@@ -19852,6 +19964,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                         } else {
                             "unreachable"
                         };
+                        let failure_evidence = if condition.code() == "github-repository-not-found" {
+                            await_prs.iter().flat_map(|target| target.registrations.iter().cloned())
+                                .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
+                        } else { Vec::new() };
+                        let evidence_recorded = failure_evidence.is_empty()
+                            || store.latest_observation(&observer_subject, "observer.state").ok().flatten()
+                                .is_some_and(|claim| claim.body["evidence"].as_array().is_some_and(|evidence| {
+                                    failure_evidence.iter().all(|token| evidence.iter().any(|value| value.as_str() == Some(token.as_str())))
+                                }));
                         let unchanged_failure = previous.as_ref().is_some_and(|actual| {
                             actual.get("state").and_then(Value::as_str) == Some(state)
                                 && actual.get("reason").and_then(Value::as_str)
@@ -19859,7 +19980,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 && (refusal_deadline.is_none()
                                     || actual.get("next_check_unix_ms").and_then(Value::as_str)
                                         .and_then(|value| value.parse::<u128>().ok()) == Some(retry_at))
-                        });
+                        }) && evidence_recorded;
                         if !unchanged_failure || refresh_attempt.is_some() {
                             let failure_hash = hex::encode(sha2::Sha256::digest(
                                 format!(
@@ -19891,7 +20012,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 kind: "observer.state".into(),
                                 actor: None,
                                 fields,
-                                evidence: Vec::new(),
+                                evidence: failure_evidence,
                                 expected_subject: None,
                                 idempotency_key: Some(format!(
                                     "observer-failure:{}",
@@ -21769,6 +21890,7 @@ async fn refill_mirror(
         provider: spec.provider.clone(),
         locator: spec.locator.clone(),
         fields: spec.fields.iter().cloned().collect(),
+        await_prs: Vec::new(),
         cursor: None,
         previous_facts: None,
         every_ms: spec.every_ms,

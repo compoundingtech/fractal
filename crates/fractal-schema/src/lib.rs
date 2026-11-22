@@ -1466,6 +1466,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("head", reference()),
                 ("state", string()),
                 ("pull_requests", array()),
+                ("await_prs_not_found", array()),
                 ("issues", array()),
                 ("repository_id", integer()),
                 ("main_performance_failures", array()),
@@ -1523,6 +1524,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("author", string()),
                 ("head", reference()),
                 ("head_sha", string()),
+                ("await_pr_observation", object()),
                 ("branch", string()),
                 ("opened_by", reference()),
                 ("opened_by_run", reference()),
@@ -4543,6 +4545,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_signal", integer()),
             ("exit_evidence", object()),
             ("incarnation_id", string()),
+            ("workspace", FieldSpec { nullable: true, ..string() }),
             ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),
@@ -5782,8 +5785,9 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        current.claims.get_mut("runtime.observed").unwrap()
-            .fields.remove("exit_evidence").unwrap();
+        for field in ["exit_evidence", "workspace"] {
+            current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
+        }
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }
@@ -5796,6 +5800,8 @@ mod tests {
         for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
             current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
+        current.resources.get_mut("vcs.repository").unwrap().fields.remove("await_prs_not_found").unwrap();
+        current.resources.get_mut("vcs.pull-request").unwrap().fields.remove("await_pr_observation").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
@@ -6253,6 +6259,32 @@ mod tests {
         registry()
             .validate_claim("gate-operation/run/step/gate", "gate.result", &fields)
             .unwrap();
+    }
+
+    #[test]
+    fn native_pr_wait_observation_proofs_are_registered_resource_facts() {
+        for (kind, name, value) in [
+            ("vcs.repository", "await_prs_not_found", serde_json::json!([])),
+            (
+                "vcs.repository",
+                "await_prs_not_found",
+                serde_json::json!([{"pr": 42, "registrations": ["registration"]}]),
+            ),
+            (
+                "vcs.pull-request",
+                "await_pr_observation",
+                serde_json::json!({
+                    "registrations": ["registration"],
+                    "head": "exact-head",
+                    "merged": true,
+                    "merge_commit_sha": "merge-commit",
+                }),
+            ),
+        ] {
+            registry()
+                .validate_resource_facts(kind, &BTreeMap::from([(name.into(), value)]))
+                .unwrap();
+        }
     }
 
     #[test]

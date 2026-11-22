@@ -31,7 +31,7 @@ use crate::fleet::transport::{
     parse_route, resolve_tool, routes_from_endpoints, tailscale_addresses,
 };
 use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
-use crate::replication::{ReplicationExchange, ReplicationInventory};
+use crate::replication::{ReceiveOptions, ReplicationExchange, ReplicationInventory};
 use crate::replication_diagnostics::{FAILURE_DIAGNOSTICS, FailureDiagnostics, FailureKind};
 
 const REPLICATION_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -271,6 +271,19 @@ struct ExchangeShard {
 }
 
 const REPLICATION_WAKE_COALESCE: Duration = Duration::from_secs(1);
+
+/// Coalesce filesystem events before graph, shard and membership followers see them.
+/// The first event is immediate; events during the next second produce one trailing wake.
+pub async fn coalesce_replication_wakes(
+    mut raw: watch::Receiver<u64>,
+    paced: watch::Sender<u64>,
+) {
+    while raw.changed().await.is_ok() {
+        paced.send_modify(|generation| *generation = generation.saturating_add(1));
+        super::telemetry::record_wake(super::telemetry::WakeStage::Paced);
+        tokio::time::sleep(REPLICATION_WAKE_COALESCE).await;
+    }
+}
 const PEER_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -1353,7 +1366,15 @@ async fn select_leave_confirmer<B: Backend>(
     backend: &B,
     fleet: &FleetContext,
     peer: &str,
+    exchange: &ReplicationExchange,
 ) -> Result<()> {
+    // Shards carry no fleet claims. An empty graph response cannot carry a leave
+    // either, so neither needs a fresh membership fold to select a confirmer.
+    if exchange.shard_id.is_some()
+        || (exchange.envelopes.is_empty() && exchange.signatures.is_empty())
+    {
+        return Ok(());
+    }
     let Some(own) = &fleet.own_key else {
         return Ok(());
     };
@@ -1419,11 +1440,20 @@ async fn receive_from_peer<B: Backend>(
     peer: &str,
     fleet_id: &str,
     exchange: &ReplicationExchange,
-    round_trip: Option<Duration>,
-    carrier: crate::replication::ReplicationCarrier,
-    authenticated_member_key: Option<&str>,
+    options: ReceiveOptions<'_>,
 ) -> Result<crate::replication::ReplicationReceiveResponse> {
+    // Match the inbound shard path: admission remains authoritative in the daemon,
+    // but graph membership and leave bookkeeping do not apply to shard payloads.
+    if exchange.shard_id.is_some() {
+        crate::replication::check_receive_deadline(options.deadline_unix_ms)?;
+        let received = backend.receive(peer, fleet_id, exchange, options).await?;
+        if received.changed {
+            backend.changed().await;
+        }
+        return Ok(received);
+    }
     let _refresh = fleet.view_refresh.lock().await;
+    crate::replication::check_receive_deadline(options.deadline_unix_ms)?;
     let before = backend.fleet_view().await?;
     let protect = before
         .members
@@ -1448,7 +1478,7 @@ async fn receive_from_peer<B: Backend>(
         *leave = updated;
     }
     let received = backend
-        .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key)
+        .receive(peer, fleet_id, exchange, options)
         .await?;
     if received.changed {
         backend.changed().await;
@@ -1738,10 +1768,15 @@ async fn dial_peer<B: Backend>(
     // Retain the connection pool across both phases and later wakeups for this peer.
     let mut http = replication_http_client();
     let mut backoff = PeerBackoff::default();
+    let mut idle = IdleBackoff::default();
+    let idle_max = super::replication_idle_max();
     let mut inbound_changes = fleet.inbound_changed.subscribe();
     let mut activity_changes = fleet.activity_changed.subscribe();
     let mut connectivity = fleet.connectivity_changed.subscribe();
     let mut must_send = false;
+    let mut guard_not_before = tokio::time::Instant::now();
+    let mut guard_wake = None;
+    let mut guard_in_sync_at = None;
     // The last exchange moved envelopes, so more may wait on either side: exchange again at
     // once, even though the peer dialed in recently.
     let mut moving = false;
@@ -1757,6 +1792,9 @@ async fn dial_peer<B: Backend>(
     // set changes. A refused preferred route is never held: see the refusal below.
     let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
     loop {
+        if notify.has_changed().unwrap_or(false) {
+            idle.reset();
+        }
         // A removed node stops dialing; `fractal doctor` says what to do next.
         if fleet.is_removed() {
             tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
@@ -1768,6 +1806,7 @@ async fn dial_peer<B: Backend>(
             connectivity.borrow_and_update();
             backoff = PeerBackoff::default();
             must_send = true;
+            idle.reset();
         }
         if fleet
             .online
@@ -1778,6 +1817,7 @@ async fn dial_peer<B: Backend>(
         {
             backoff = PeerBackoff::default();
             must_send = true;
+            idle.reset();
         }
         let inbound_at = fleet
             .inbound
@@ -1785,26 +1825,34 @@ async fn dial_peer<B: Backend>(
             .expect("inbound lock poisoned")
             .get(&name)
             .copied();
+        idle.observe_inbound(inbound_at);
         let continuing = std::mem::take(&mut moving);
         if let Some(at) = inbound_at.filter(|_| !continuing) {
             if must_send && at.elapsed() < worker_interval(Duration::from_secs(30)) {
-                let offered = fleet
-                    .inbound_authority
-                    .read()
-                    .expect("inbound inventory lock poisoned")
-                    .get(&name)
-                    .cloned();
-                if let Some(offered) = offered
-                    && let Ok(current) = backend
-                        .authority_digest(auth.fleet_id())
-                        .await
-                {
-                    // The other side already knows this inventory and is draining both
-                    // queues. Notifications from that exchange must not trigger a reverse
-                    // connection. A genuinely new local envelope still requests a push.
-                    if !current.is_empty() && current == offered {
-                        must_send = false;
+                // A matching witness remains valid only for this paced generation
+                // and inbound cut. Other notifications must not repeat the guard read.
+                let wake = *notify.borrow();
+                let now = tokio::time::Instant::now();
+                if guard_wake != Some(wake) && now >= guard_not_before {
+                    let offered = fleet
+                        .inbound_authority
+                        .read()
+                        .expect("inbound inventory lock poisoned")
+                        .get(&name)
+                        .cloned();
+                    if let Some(offered) = offered {
+                        guard_not_before = now + REPLICATION_WAKE_COALESCE;
+                        guard_wake = Some(wake);
+                        guard_in_sync_at = None;
+                        if let Ok(current) = backend.authority_digest(auth.fleet_id()).await
+                            && !current.is_empty() && current == offered
+                        {
+                            guard_in_sync_at = Some(at);
+                        }
                     }
+                }
+                if guard_wake == Some(wake) && guard_in_sync_at == Some(at) {
+                    must_send = false;
                 }
             }
             let window = if must_send {
@@ -1815,10 +1863,10 @@ async fn dial_peer<B: Backend>(
             if at.elapsed() < window {
                 tokio::select! {
                     _ = tokio::time::sleep_until(at + window) => {}
-                    _ = notify.changed() => { must_send = true; }
-                    _ = routes.changed() => { must_send = true; }
+                    _ = notify.changed() => { idle.reset(); must_send = true; }
+                    _ = routes.changed() => { idle.reset(); must_send = true; }
                     _ = inbound_changes.changed() => {}
-                    _ = connectivity.changed() => { backoff = PeerBackoff::default(); must_send = true; }
+                    _ = connectivity.changed() => { idle.reset(); backoff = PeerBackoff::default(); must_send = true; }
                 }
                 continue;
             }
@@ -1919,12 +1967,13 @@ async fn dial_peer<B: Backend>(
                 early_spent.remove(&peer.url);
                 backoff = PeerBackoff::default();
                 must_send = false;
+                let idle_delay = idle.round(moved, idle_max).map(worker_interval);
                 record_worker(
                     &backend,
                     &name,
                     "idle",
                     attempt_unix_ms,
-                    None,
+                    idle_delay,
                     preferred_route.map(|preferred| (preferred, preferred_retry)),
                 )
                 .await;
@@ -1939,20 +1988,21 @@ async fn dial_peer<B: Backend>(
                     answers_check::check_answers(&http, &backend, &node, &peer, &auth, &fleet).await;
                     // A busy harness can write several observations while one exchange is in
                     // flight. Keep the first exchange immediate, then coalesce the resulting
-                    // wake burst without disabling the 30-second retry path. The window stays
+                    // wake burst without disabling the bounded idle retry path. The window stays
                     // short so a publish is startable on every peer within seconds.
                     let not_before = tokio::time::Instant::now() + REPLICATION_WAKE_COALESCE;
                     tokio::select! {
-                        _ = notify.changed() => { must_send = true; }
-                        _ = routes.changed() => { must_send = true; }
+                        _ = notify.changed() => { idle.reset(); must_send = true; }
+                        _ = routes.changed() => { idle.reset(); must_send = true; }
                         _ = inbound_changes.changed() => {}
-                        _ = connectivity.changed() => { backoff = PeerBackoff::default(); must_send = true; }
-                        _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
+                        _ = connectivity.changed() => { idle.reset(); backoff = PeerBackoff::default(); must_send = true; }
+                        _ = tokio::time::sleep(idle_delay.expect("in_sync idle delay")) => {}
                     }
                     tokio::time::sleep_until(not_before).await;
                 }
             }
             Err(mut error) => {
+                idle.reset();
                 if let Some(removed) = error.downcast_ref::<RemovedFromFleet>() {
                     fleet.mark_removed(&peer.name, removed).await;
                     continue;
@@ -2250,6 +2300,36 @@ fn exchange_unanswered(error: &anyhow::Error) -> bool {
             error.is_connect()
                 || (error.is_request() && error.status().is_none() && !error.is_timeout())
         })
+}
+
+/// Quiet rounds back off independently for each dialer's (store, peer).
+#[derive(Default)]
+struct IdleBackoff {
+    rounds: u32,
+    inbound: Option<tokio::time::Instant>,
+}
+
+impl IdleBackoff {
+    fn reset(&mut self) {
+        self.rounds = 0;
+    }
+
+    fn observe_inbound(&mut self, inbound: Option<tokio::time::Instant>) {
+        if inbound != self.inbound {
+            self.reset();
+            self.inbound = inbound;
+        }
+    }
+
+    fn round(&mut self, moved: bool, ceiling: Duration) -> Option<Duration> {
+        if moved {
+            self.reset();
+            return None;
+        }
+        let delay = Duration::from_secs(30 * (1_u64 << self.rounds.min(7))).min(ceiling);
+        self.rounds = self.rounds.saturating_add(1);
+        Some(delay)
+    }
 }
 
 /// Failed connections have no graph wake dependency: unrelated local writes must not
@@ -2805,6 +2885,8 @@ async fn receive_exchange_inner_to<B: Backend>(
     diagnostics: &FailureDiagnostics,
     output: &mut (impl std::io::Write + Send),
 ) -> Response {
+    let answer_deadline = tokio::time::Instant::now() + EXCHANGE_RESPONSE_BUDGET;
+    let deadline_unix_ms = crate::store::now_ms() + EXCHANGE_RESPONSE_BUDGET.as_millis();
     let body = if deflated(&headers) {
         match inflate(&body, "an exchange request") {
             Ok(body) => Bytes::from(body),
@@ -2934,7 +3016,11 @@ async fn receive_exchange_inner_to<B: Backend>(
                         // membership or leave bookkeeping applies to its exchanges.
                         let result = async {
                             let received = backend
-                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default(), authenticated_member_key.as_deref())
+                                .receive(&relay, state.auth.fleet_id(), &request, ReceiveOptions {
+                                    authenticated_member_key: authenticated_member_key.as_deref(),
+                                    deadline_unix_ms: Some(deadline_unix_ms),
+                                    ..Default::default()
+                                })
                                 .await;
                             backend_timing.record("local-receive-done");
                             let received = received
@@ -2963,9 +3049,11 @@ async fn receive_exchange_inner_to<B: Backend>(
                             &relay,
                             state.auth.fleet_id(),
                             &request,
-                            None,
-                            Default::default(),
-                            authenticated_member_key.as_deref(),
+                            ReceiveOptions {
+                                authenticated_member_key: authenticated_member_key.as_deref(),
+                                deadline_unix_ms: Some(deadline_unix_ms),
+                                ..Default::default()
+                            },
                         )
                         .await;
                         backend_timing.record("local-receive-done");
@@ -2985,7 +3073,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                                 &request.signature_requests,
                             )
                             .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))?;
-                        select_leave_confirmer(&state.backend, &state.fleet, &relay)
+                        select_leave_confirmer(&state.backend, &state.fleet, &relay, &response.exchange)
                             .await
                             .map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))?;
 
@@ -3003,7 +3091,7 @@ async fn receive_exchange_inner_to<B: Backend>(
         let job = jobs.get(&job_key).unwrap();
         (job.answer.clone(), Arc::clone(&job.timing))
     };
-    let ready = tokio::time::timeout(EXCHANGE_RESPONSE_BUDGET, async {
+    let ready = tokio::time::timeout_at(answer_deadline, async {
         loop {
             if let Some(result) = answer.borrow_and_update().clone() {
                 break Some(result);
@@ -3060,6 +3148,9 @@ async fn receive_exchange_inner_to<B: Backend>(
                 || job_timing.failure_line(&headers, &relay, shard.as_deref(), "failed", Some(&failure)), output);
             // Let the next request retry a failed job. Reporting failure must never delay headers.
             finish_exchange_job(&state.fleet, &job_key, &answer);
+            if failure.code == "replication-overloaded" {
+                return signed_overload(&state, &request_digest);
+            }
             let response = signed_response(&state, &request_digest, 0, serde_json::json!({
                 "code": failure.code,
                 "failure": failure,
@@ -3529,9 +3620,12 @@ async fn exchange_inner<B: Backend>(
         &peer.name,
         auth.fleet_id(),
         &remote,
-        Some(round_trip),
-        carrier,
-        authenticated_member_key.as_deref(),
+        ReceiveOptions {
+            round_trip: Some(round_trip),
+            carrier,
+            authenticated_member_key: authenticated_member_key.as_deref(),
+            ..Default::default()
+        },
     )
     .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
     telemetry.pull(received.receipt.received);
@@ -3568,9 +3662,12 @@ async fn exchange_inner<B: Backend>(
             &peer.name,
             auth.fleet_id(),
             &response,
-            Some(round_trip),
-            carrier,
-            authenticated_member_key.as_deref(),
+            ReceiveOptions {
+                round_trip: Some(round_trip),
+                carrier,
+                authenticated_member_key: authenticated_member_key.as_deref(),
+                ..Default::default()
+            },
         )
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
         telemetry.pull(received.receipt.received);
@@ -3781,9 +3878,12 @@ async fn walk_claim_ranges<B: Backend>(
             &peer.name,
             auth.fleet_id(),
             &answer,
-            Some(started.elapsed()),
-            carrier,
-            authenticated_member_key.as_deref(),
+            ReceiveOptions {
+                round_trip: Some(started.elapsed()),
+                carrier,
+                authenticated_member_key: authenticated_member_key.as_deref(),
+                ..Default::default()
+            },
         )
         .await
         {
@@ -3862,9 +3962,7 @@ async fn post_signed<B: Backend>(
     exchange: &ReplicationExchange,
     compress: bool,
 ) -> Result<(ReplicationExchange, bool, Option<String>)> {
-    if !exchange.envelopes.is_empty() || !exchange.signatures.is_empty() {
-        select_leave_confirmer(backend, fleet, &peer.name).await?;
-    }
+    select_leave_confirmer(backend, fleet, &peer.name, exchange).await?;
     let deadline = tokio::time::Instant::now() + EXCHANGE_POLL_BUDGET;
     let attempted = crate::store::now_ms();
     let started = std::time::Instant::now();
