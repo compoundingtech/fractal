@@ -593,3 +593,19 @@ report is a system-only once-per-run fact; neither its retention nor its schema 
 authority. Local-trim convergence, retained claim equality, oracle reader comparisons,
 person-authored claim preservation, and invalid/pending-record checks remain unchanged.
 
+## Native execution and delivery phases
+
+`claims-v42.json` adds durable `step.execution-phase` evidence and the
+`exec_exited_at_unix_ms` and `start_operation` fields on `runtime.observed` to
+main's native-turn registry. Versions 1 through 41 remain frozen, including
+main's native-turn v41 snapshot. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
+The simulation, diagnostics and audit reports select v42. The focused execution-phase
+regression compares both specs with the registry and validates a generated phase input.
+Main's local-trim convergence and oracle checks remain unchanged; obsolete shared
+checkpoint agreement and its historical never-trim characterizations are not restored.
+
+Native execution wait accounting is shared through
+`fractal_kernel::step_execution::execution_wait`; both the store's timing fold
+and the reconciler's executor attestation use that leaf helper after the crate split.
+

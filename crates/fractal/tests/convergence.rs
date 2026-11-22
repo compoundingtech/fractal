@@ -67,7 +67,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v41.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v42.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -117,6 +117,26 @@ fn the_corpus_generates_valid_native_continuity_inputs() {
             if field.required {
                 assert!(input.fields.contains_key(name), "{kind} requires {name}");
             }
+        }
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_step_execution_phase_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["step.execution-phase", "runtime.observed"] {
+        assert_eq!(
+            serde_json::to_value(&corpus()[kind]).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current execution evidence fields"
+        );
+    }
+    let spec = &corpus()["step.execution-phase"];
+    let input = world.claim_of(spec, 0).expect("generate step execution phase input");
+    fractal_schema::registry().validate_claim(&input.subject, &input.kind, &input.fields).unwrap();
+    for (name, field) in &spec.fields {
+        if field.required {
+            assert!(input.fields.contains_key(name), "step.execution-phase requires {name}");
         }
     }
 }
@@ -2223,10 +2243,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 }
 
 /// One fixed seed converges. Prior corpus characterizations are recorded in
-/// fixtures/convergence/README.md; the seeds' schedules are those of corpus v39.
+/// fixtures/convergence/README.md; the seeds' schedules are those of corpus v42.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v39 seed {seed}: retired={}", outcome.trimmed);
+    eprintln!("convergence corpus v42 seed {seed}: retired={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2434,7 +2454,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v41.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v42.json"
         }))
         .unwrap(),
     )
