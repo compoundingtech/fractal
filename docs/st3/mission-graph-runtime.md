@@ -2261,8 +2261,10 @@ A missing legacy receipt or exit timestamp remains unknown, never observation ti
 Result delivery does not lengthen a completed execution interval.
 Declared `work wait` intervals are excluded from both executor overrun evidence
 and known-exit duration, and appear as waited time in the native display clock.
-`work resume` ends the pause; otherwise its declared deadline resumes accounting
-automatically. The overall guard below remains wall-clock bounded, including waits.
+`work resume`, reclaim, submission, failure, or release ends the pause; otherwise
+its declared deadline resumes accounting automatically. Executor attestation and
+completed-duration enforcement consume the same ordered lifecycle history as the
+native display clock. The overall guard below remains wall-clock bounded, including waits.
 
 Native declared execs have a dispatch/replication/admission budget equal to the
 step's declared timeout and a separate result-replication budget of the same size.

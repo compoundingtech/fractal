@@ -677,3 +677,73 @@ fn unresumed_native_wait_expires_and_execution_can_still_time_out() {
     executor.record_native_exec_observation(&desired, desired.member.as_ref().unwrap(), &observation).unwrap();
     assert!(fixture.timed_out(), "only the bounded wait is free, not subsequent execution");
 }
+
+#[test]
+fn work_lifecycle_transitions_close_native_execution_waits() {
+    for kind in ["work.claimed", "work.submitted", "work.failed", "work.released"] {
+        let fixture = Fixture::new();
+        let subject = fixture.view().subject;
+        let attempt = fixture.view().attempt;
+        fixture.phase(attempt, "exec-started", START);
+        fixture.at(START + 100);
+        fixture.store.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: "work.progress".into(), actor: None,
+            fields: BTreeMap::from([
+                ("attempt".into(), json!(attempt)),
+                ("clock".into(), json!("paused")),
+                ("wait_until_unix_ms".into(), json!(START + 3_000)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        fixture.at(START + 200);
+        fixture.store.append_claim(&ClaimInput {
+            subject, kind: kind.into(), actor: None,
+            fields: BTreeMap::from([("attempt".into(), json!(attempt))]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        fixture.at(START + 1_200);
+        fixture.phase(attempt, "exec-exited", START + 1_200);
+        assert_eq!(
+            fixture.reconciler.native_step_timed_out(&fixture.view(), TIMEOUT).unwrap(),
+            Some(true),
+            "{kind} must close the declared wait before its deadline",
+        );
+    }
+}
+
+#[test]
+fn reclaim_resumes_live_and_completed_native_execution_accounting() {
+    for completed in [false, true] {
+        let fixture = Fixture::new();
+        let (executor, desired, observation) = executor(&fixture, START);
+        let member = desired.member.as_ref().unwrap();
+        executor.record_native_exec_observation(&desired, member, &observation).unwrap();
+        let subject = fixture.view().subject;
+        let attempt = fixture.view().attempt;
+        fixture.at(START + 100);
+        fixture.store.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: "work.progress".into(), actor: None,
+            fields: BTreeMap::from([
+                ("attempt".into(), json!(attempt)),
+                ("clock".into(), json!("paused")),
+                ("wait_until_unix_ms".into(), json!(START + 3_000)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        fixture.at(START + 200);
+        fixture.store.append_claim(&ClaimInput {
+            subject, kind: "work.claimed".into(), actor: None,
+            fields: BTreeMap::from([("attempt".into(), json!(attempt))]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        fixture.at(START + 1_200);
+        if completed {
+            fixture.phase(attempt, "exec-exited", START + 1_200);
+        } else {
+            executor.record_native_exec_observation(&desired, member, &observation).unwrap();
+        }
+        assert!(fixture.timed_out(), "reclaimed execution must consume its budget, completed={completed}");
+        assert_eq!(fixture.view().execution_elapsed_ms, 1_100);
+        assert_eq!(fixture.view().execution_waited_ms, 100);
+    }
+}
