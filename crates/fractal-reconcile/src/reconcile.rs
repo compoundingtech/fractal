@@ -63,6 +63,7 @@ pub mod github_capture;
 pub mod github_plugin_store;
 pub mod plugin_store;
 pub mod idle_nudge;
+mod model_return;
 pub mod placement;
 pub mod run_report;
 mod escalation;
@@ -79,6 +80,7 @@ mod shell_resources;
 mod resource_profiles;
 mod lane_bursts;
 mod step_lanes;
+mod step_execution_phases;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
@@ -597,6 +599,13 @@ pub trait RuntimeControl: Send + Sync + 'static {
         Ok(PtyRegistrySnapshot { observations, start_operations })
     }
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
+    /// Physical exec-registry creation time, never the coordinator's work-claim time.
+    fn exec_started_at(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<u128>> {
+        Ok(None)
+    }
+    fn exec_payload_state(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+        Ok(None)
+    }
     /// Retained, redacted terminal evidence for exactly this runtime incarnation.
     fn exit_evidence(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
         Ok(None)
@@ -949,6 +958,19 @@ impl RuntimeControl for NativeRuntime {
                 _ => None,
             })
         }
+    }
+
+    fn exec_started_at(&self, runtime_id: &str, incarnation: &str) -> Result<Option<u128>> {
+        Ok(match self.exec.observe(runtime_id)? {
+            Some(fractal_runtime::ExecObservation::Running(generation)
+                | fractal_runtime::ExecObservation::Exited(generation))
+                if generation.generation_id == incarnation => Some(generation.created_at_unix_ms),
+            _ => None,
+        })
+    }
+
+    fn exec_payload_state(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+        self.exec.payload_state(runtime_id, incarnation)
     }
 
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
@@ -1741,6 +1763,7 @@ pub struct Reconciler<R = NativeRuntime> {
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
+    file_changes: Arc<FileChanges>,
     launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
     program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
@@ -1797,6 +1820,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Publish during a unit test after the work feed was observed, before wake selection.
     #[cfg(any(test, feature = "test-support"))]
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
+    /// Simulate reclamation after observation, before render admission.
+    #[cfg(test)]
+    before_workspace_render: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Where an item's evaluation started: how many writes this thread had recorded and how far the
@@ -1817,6 +1843,29 @@ struct FileWatch {
     dirty: Arc<AtomicBool>,
 }
 
+#[derive(Default)]
+struct FileChanges {
+    runs: Mutex<BTreeSet<String>>,
+    notify: Notify,
+}
+impl FileChanges {
+    fn invalidate(&self, incremental: &crate::incremental::Incremental, subject: &str,
+        rescan: bool, global_notify: &Notify) {
+        let readers = incremental.touch_readers(subject);
+        // Launch admission and other global readers still require the common loop.
+        // File-gate readers have an existing, independently driven mission evaluator.
+        if rescan || readers.iter().any(|item| !item.starts_with("mission-run/")) {
+            crate::incremental::file_watch_work::notification(true);
+            crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::FileWatch, None);
+            global_notify.notify_one();
+        } else if !readers.is_empty() {
+            self.runs.lock().unwrap_or_else(PoisonError::into_inner).extend(readers);
+            crate::incremental::file_watch_work::notification(false);
+            self.notify.notify_one();
+        }
+    }
+}
+
 impl FileWatch {
     fn relevant(event: &notify::Event, target: &Path, directory: &Path, referent: Option<&Path>) -> bool {
         // Overflow/rescan means paths may have been lost; every subscription must reread.
@@ -1830,8 +1879,9 @@ impl FileWatch {
                 || event.paths.iter().any(|path| {
                     path.starts_with(target)
                         || referent.is_some_and(|referent| path.starts_with(referent))
-                        || ((path == directory
-                            || referent.and_then(Path::parent) == Some(path.as_path()))
+                        || ((target.starts_with(path)
+                            || directory.starts_with(path)
+                            || referent.is_some_and(|referent| referent.starts_with(path)))
                             && matches!(
                                 event.kind,
                                 notify::EventKind::Remove(_)
@@ -1977,6 +2027,7 @@ impl Reconciler<NativeRuntime> {
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
+            file_changes: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
@@ -2010,6 +2061,8 @@ impl Reconciler<NativeRuntime> {
             raised_faults: Mutex::new(Some(Vec::new())),
             #[cfg(any(test, feature = "test-support"))]
             after_work_wake_observe: Mutex::new(None),
+            #[cfg(test)]
+            before_workspace_render: Mutex::new(None),
         })
     }
 }
@@ -2214,6 +2267,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
+            file_changes: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
@@ -2247,6 +2301,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             raised_faults: Mutex::new(Some(Vec::new())),
             #[cfg(any(test, feature = "test-support"))]
             after_work_wake_observe: Mutex::new(None),
+            #[cfg(test)]
+            before_workspace_render: Mutex::new(None),
         }
     }
 
@@ -3475,6 +3531,54 @@ impl<R: RuntimeControl> Reconciler<R> {
         result
     }
 
+    fn publish_model_drift_metrics(
+        &self,
+        desired: &[DesiredSubject],
+        eligible: &BTreeSet<String>,
+    ) -> Result<()> {
+        if !crate::otel::metrics_enabled() { return Ok(()); }
+        use crate::model_drift::{Reading, State};
+        use crate::store::model_drift::{ModelDriftState, declared_harness_model, model_drift_state};
+        let now = now_ms();
+        let readings = self.store.read_snapshot(|_| {
+            let mut readings = Vec::new();
+            for subject in desired.iter().filter(|subject| subject.kind == "agent"
+                && eligible.contains(&subject.subject)
+                && subject.member.as_ref().is_some_and(|member| member.host == self.host))
+            {
+                let actual = self.store.latest_actual_value(&subject.subject)?;
+                let incarnation = actual.as_ref().and_then(|value| value.pointer("/fields/incarnation_id")
+                    .or_else(|| value.get("incarnation_id"))).and_then(Value::as_str);
+                let observation = incarnation.map(|incarnation|
+                    self.store.latest_usage_model_observation(&subject.subject, incarnation)).transpose()?.flatten();
+                let declared = declared_harness_model(&subject.desired);
+                let state = model_drift_state(declared, observation.as_ref(), now,
+                    fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis());
+                let since = match (state, incarnation, declared, observation.as_ref()) {
+                    (ModelDriftState::Drifted, Some(incarnation), Some(declared), Some(observation)) =>
+                        self.store.model_drift_since(&subject.subject, incarnation, declared, &observation.model)?,
+                    _ => None,
+                };
+                readings.push(Reading {
+                    agent: subject.subject.clone(),
+                    state: match state {
+                        ModelDriftState::AtDeclared => State::AtDeclared,
+                        ModelDriftState::Drifted => State::Drifted,
+                        ModelDriftState::Unknown => State::Unknown,
+                        ModelDriftState::Stale => State::Stale,
+                        ModelDriftState::Uncomparable => State::Uncomparable,
+                    },
+                    observed_at_ms: observation.as_ref().and_then(|reading| reading.observed_at_ms),
+                    drift_since_ms: since,
+                });
+            }
+            Ok(readings)
+        })?;
+        crate::model_drift::replace(
+            &self.store.extension::<crate::model_drift::Metrics>(), readings);
+        Ok(())
+    }
+
     fn prune_stop_state(
         &self,
         gates: &[crate::store::MissionGateRunner],
@@ -3766,6 +3870,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 BTreeSet::new()
             }
         };
+        if let Err(error) = self.publish_model_drift_metrics(&desired, &eligible) {
+            tracing::warn!(%error, "model drift metrics snapshot failed");
+        }
         let eligible = |subject: &DesiredSubject| eligible.contains(&subject.subject);
         // Select members before workspace/authority preparation. Filesystem-only changes are
         // checked by the full member safety pass; failures leave the member unevaluated so
@@ -3793,9 +3900,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
         );
         let mut member_errors = BTreeMap::new();
-        // Keep every prepared worktree fenced through rendering, runtime initialization and
-        // publication later in this pass, including reuse of an existing checkout.
+        // Acquire only before creating or rendering a workspace, not validation/observation.
+        // Retain admission through runtime initialization and publication, including reuse.
         let mut activation_leases = BTreeMap::new();
+        let mut observed_worktrees = BTreeMap::new();
         for subject in &active {
             if subject.kind == "stop" {
                 continue;
@@ -3835,6 +3943,35 @@ impl<R: RuntimeControl> Reconciler<R> {
             let checkout = (subject.kind == "agent")
                 .then(|| Checkout::from_desired(&subject.desired))
                 .flatten();
+            if workspace.is_dir() {
+                if let Some(checkout) = &checkout
+                    && let Err(error) = checkout.validate_workspace(workspace)
+                {
+                    member_errors.insert(subject.subject.clone(), error);
+                    continue;
+                }
+                if let Some(repository) = checkout.as_ref().map(|checkout| checkout.repository.clone())
+                    .or_else(|| crate::repositories::workspace_repository(workspace))
+                {
+                    let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
+                        &crate::checkout::workspace_worktree(workspace)
+                            .unwrap_or_else(|| workspace.to_path_buf()),
+                    ) {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            member_errors.insert(subject.subject.clone(), error);
+                            continue;
+                        }
+                    };
+                    // Discovery is unleased: retain identity even if reclamation removes
+                    // the Git pointers before render admission.
+                    observed_worktrees.insert(subject.subject.clone(), (owner, repository));
+                }
+                if subject.kind == "agent" {
+                    self.observe_agent_workspace(&subject.subject, member)?;
+                }
+                continue;
+            }
             let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
                 .or_else(|| crate::repositories::workspace_repository(workspace));
             let lease_owner = match fractal_runtime::store_worktree_lease::canonical_owner(
@@ -3847,6 +3984,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             };
             if let Some(repository) = repository
+                && (checkout.is_some() || member.workspace_create)
                 && !activation_leases.contains_key(&lease_owner)
             {
                 let lease = self.worktree_activation_lease(&lease_owner, &repository);
@@ -3857,18 +3995,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         continue;
                     }
                 }
-            }
-            if workspace.is_dir() {
-                if let Some(checkout) = &checkout
-                    && let Err(error) = checkout.validate_workspace(workspace)
-                {
-                    member_errors.insert(subject.subject.clone(), error);
-                    continue;
-                }
-                if subject.kind == "agent" {
-                    self.observe_agent_workspace(&subject.subject, member)?;
-                }
-                continue;
             }
             let result = if let Some(checkout) = checkout {
                 self.create_checkout(
@@ -3925,35 +4051,75 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .needs(&format!("member:{}", subject.subject), now_ms())
             });
         if render_needed {
+            #[cfg(test)]
+            {
+                let hook = self.before_workspace_render.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
             renderable.retain(|subject| {
                 let member = subject.member.as_ref().expect("renderable member");
                 let workspace = Path::new(&member.workspace);
-                let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
-                    &crate::checkout::workspace_worktree(workspace).unwrap_or_else(|| workspace.to_path_buf()),
-                ) {
-                    Ok(owner) => owner,
-                    Err(error) => {
-                        member_errors.insert(subject.subject.clone(), error);
-                        return false;
-                    }
+                let checkout = (subject.kind == "agent")
+                    .then(|| Checkout::from_desired(&subject.desired))
+                    .flatten();
+                let (owner, repository) = if let Some((owner, repository)) =
+                    observed_worktrees.get(&subject.subject)
+                {
+                    (owner.clone(), Some(repository.clone()))
+                } else {
+                    let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
+                        &crate::checkout::workspace_worktree(workspace)
+                            .unwrap_or_else(|| workspace.to_path_buf()),
+                    ) {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            member_errors.insert(subject.subject.clone(), error);
+                            return false;
+                        }
+                    };
+                    let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
+                        .or_else(|| crate::repositories::workspace_repository(workspace));
+                    (owner, repository)
                 };
-                if activation_leases.contains_key(&owner) {
-                    return true;
-                }
-                let Some(repository) = crate::repositories::workspace_repository(workspace) else {
-                    return true;
-                };
-                let lease = self.worktree_activation_lease(&owner, &repository);
-                match lease {
-                    Ok(lease) => {
-                        activation_leases.insert(owner, lease);
-                        true
-                    }
-                    Err(error) => {
-                        member_errors.insert(subject.subject.clone(), error);
-                        false
+                if let Some(repository) = &repository
+                    && !activation_leases.contains_key(&owner)
+                {
+                    match self.worktree_activation_lease(&owner, repository) {
+                        Ok(lease) => {
+                            activation_leases.insert(owner, lease);
+                        }
+                        Err(error) => {
+                            member_errors.insert(subject.subject.clone(), error);
+                            return false;
+                        }
                     }
                 }
+                // Validation before admission cannot authorize rendering: GC may have
+                // removed the observed tree while no acting step held its deletion fence.
+                if !workspace.is_dir() {
+                    member_errors.insert(subject.subject.clone(), anyhow::anyhow!(
+                        "workspace reclaimed before render; recreating on a later pass"
+                    ));
+                    return false;
+                }
+                if checkout.is_none()
+                    && repository.is_some()
+                    && crate::repositories::workspace_repository(workspace) != repository
+                {
+                    member_errors.insert(subject.subject.clone(), anyhow::anyhow!(
+                        "workspace repository changed before render"
+                    ));
+                    return false;
+                }
+                if let Some(checkout) = checkout
+                    && let Err(error) = checkout.validate_workspace(workspace)
+                {
+                    member_errors.insert(subject.subject.clone(), error);
+                    return false;
+                }
+                true
             });
         }
         // A render panic faults this host's members; stops never render, so they still run.
@@ -5227,44 +5393,46 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// declared harness model. A silent provider fallback (omp falling down its model ladder on
     /// a 429) otherwise runs undeclared for hours with zero faults. This raises a non-blocking
     /// operational failure (`harness/model-drift`) on the seat naming declared vs live model
-    /// and since when: it never stops, parks, or crash-loops the seat. The fault's owner is
+    /// and since when. Only the separately gated transient-return policy may request an idle
+    /// restart; quota, auth, and unknown causes remain attention-only. The fault's owner is
     /// the seat's own declaring agent (or run requester via `fault_owner`); a person sees the
     /// drift in one aggregated attention item over every drifting seat they own
     /// (`Store::model_drift_attention_items`), never one item per seat. It resolves
     /// when usage returns to the declared model or the declaration adopts the live model.
     /// Models compare through `pricing::declared_model_matches`: Claude aliases (`sonnet`)
     /// match their family, and a declaration that is no resolvable API ID raises nothing.
-    /// The Codex resume model check (`resume_permission_overrides_applied`) only guards a
-    /// resume handshake; this is the durable observable signal for the same underlying
-    /// concept, kept as a fault rather than a crash loop so the seat keeps working.
+    /// The return policy reuses this incarnation/model-pair-fenced onset, never another
+    /// incarnation's fault clock or stale provider evidence.
     fn reconcile_model_drift(&self, subject: &DesiredSubject, incarnation: &str) -> Result<()> {
         let episode = model_drift_episode(&subject.subject);
-        let Some(declared) = Self::declared_harness_model(&subject.desired) else {
+        let Some(declared) = crate::store::model_drift::declared_harness_model(&subject.desired).map(str::to_owned) else {
             return self.recover_model_drift(&episode, "the seat declares no harness model");
         };
         // Bounded reads only: one indexed newest-first `harness.usage` window for this
         // incarnation, never a full usage fold.
-        let Some(live) = self.store.latest_usage_model(&subject.subject, incarnation)? else {
+        let Some(observation) = self.store.latest_usage_model_observation(&subject.subject, incarnation)? else {
             return self.recover_model_drift(&episode, "the seat has reported no usage model yet");
         };
+        if observation.observed_at_ms.is_none_or(|at| at > now_ms() || now_ms().saturating_sub(at) > 60_000) {
+            return self.recover_model_drift(&episode, "current-incarnation model evidence is stale");
+        }
+        let live = observation.model;
         match fractal_kernel::pricing::declared_model_matches(&declared, &live) {
             Some(true) => return self.recover_model_drift(&episode, "usage returned to the declared model"),
             None => return self.recover_model_drift(&episode, "the declared model is not a comparable model ID"),
             Some(false) => {}
         }
         let open = self.store.operational_failure(&episode)?.filter(|failure| failure.status == "pending");
-        let since_ms = open
-            .as_ref()
-            .and_then(|failure| ModelDrift::parse(&failure.reason))
-            .map_or_else(now_ms, |drift| drift.since_ms);
+        let fenced_since = self.store.model_drift_since(&subject.subject, incarnation, &declared, &live)?;
+        let since_ms = fenced_since.unwrap_or_else(now_ms);
         let reason = ModelDrift { declared, live, since_ms }.reason();
         if let Some(failure) = &open {
-            if failure.reason == reason {
-                return Ok(());
+            if failure.reason == reason && fenced_since.is_some() {
+                return self.reconcile_model_return(subject, incarnation);
             }
             // A pending failure keeps its reason: recording over it is a no-op. The live model
             // moved (or the declaration changed) while drifted, so close this episode and raise
-            // the new one, keeping the first-detected `since`.
+            // the new one with a fresh fenced onset.
             self.store.recover_operational_failure(
                 &episode,
                 "the live or declared model changed while drifted",
@@ -5280,10 +5448,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             severity: "error".into(),
             targets: vec![subject.subject.clone()],
             actor: RECONCILER_ACTOR.into(),
-            idempotency_key: format!("{episode}:attention"),
+            idempotency_key: format!("{episode}:attention:{incarnation}:{since_ms}"),
         }, MODEL_DRIFT_CONDITION)?;
         self.signal_changed();
-        Ok(())
+        self.reconcile_model_return(subject, incarnation)
     }
 
     fn recover_model_drift(&self, episode: &str, reason: &str) -> Result<()> {
@@ -5296,25 +5464,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// The declared harness model of a canonical agent body (`harness` child carrying a
-    /// `model` child with one argument). Mirrors `desired_harness_driver` in
-    /// fractal-api-core without depending on it.
-    fn declared_harness_model(desired: &Value) -> Option<String> {
-        desired
-            .get("children")?
-            .as_array()?
-            .iter()
-            .find(|child| child.get("name").and_then(Value::as_str) == Some("harness"))?
-            .get("children")?
-            .as_array()?
-            .iter()
-            .find(|child| child.get("name").and_then(Value::as_str) == Some("model"))?
-            .get("arguments")?
-            .as_array()?
-            .first()?
-            .as_str()
-            .map(str::to_owned)
-    }
 
     /// Whether a planned restart of `subject` may stop it now. A seat that can answer is first
     /// sent a "prepare for restart" message with a deadline; the restart waits until the seat has
@@ -8503,6 +8652,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         reason: &str,
         request: Option<&crate::model::ClaimRecord>,
     ) -> Result<bool> {
+        self.record_native_exec_phase(subject, "received", now_ms(), None)?;
         if subject.kind == "agent" {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
@@ -8605,6 +8755,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !self.admit_seat_start(subject, member, request)? {
             return Ok(false);
         }
+        self.record_native_exec_phase(subject, "admitted", now_ms(), None)?;
         if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
             let mut operation = self
                 .store
@@ -8759,6 +8910,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         crate::environment::set(&mut launch_member.environment, "ST3_DRIVER_STATE_DIR",
             self.driver_state_dir.to_string_lossy().into_owned());
         crate::environment::set(&mut launch_member.environment, "ST3_SUBJECT", subject.subject.clone());
+        if subject.kind == "exec" && subject.owner_step.is_some() && !member.terminal {
+            launch_member.environment.insert(fractal_runtime::payload_receipt::TRACK_ENV.into(), "1".into());
+        }
         if subject.kind == "agent" {
             crate::environment::set(&mut launch_member.environment, "ST_AGENT", subject.subject.clone());
             crate::environment::set(&mut launch_member.environment, "ST3_MAILBOX_TRANSPORT", "push".into());
@@ -8997,6 +9151,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             incarnation.as_deref(),
             observation.is_some(),
         );
+        if subject.kind == "exec" {
+            starting.insert("start_operation".into(), Value::from(operation_id));
+        }
         if let Some(observation) = &observation {
             if let Some(code) = observation.exit_code {
                 starting.insert("exit_code".into(), Value::from(code));
@@ -9041,6 +9198,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if !applied {
             return Ok(start_jobs::StartCompletion::Superseded);
+        }
+        if let Some(observation) = observation.as_ref() {
+            self.record_native_exec_observation(subject, member, observation)?;
         }
         self.signal_changed();
         Ok(start_jobs::StartCompletion::Applied(None))
@@ -9940,6 +10100,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         else {
             return Ok(RequestedRestart::Continue);
         };
+        if self.cancel_stale_model_return(subject, &request, observation)? {
+            return Ok(RequestedRestart::Continue);
+        }
         if self.retire_obsolete_failed_restart(subject, now_ms())? {
             return Ok(RequestedRestart::Handled);
         }
@@ -11334,12 +11497,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
+        self.record_native_exec_observation(subject, member, observation)?;
         let mut fields = member_fields(
             member,
             &observation.status,
             observation.incarnation_id.as_deref(),
             adopted,
         );
+        if subject.kind == "exec"
+            && let Some(incarnation) = observation.incarnation_id.as_deref()
+            && let Some(operation) = self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+        {
+            fields.insert("start_operation".into(), Value::from(operation));
+        }
         if let Some(exit_code) = observation.exit_code {
             fields.insert("exit_code".into(), Value::from(exit_code));
         }
@@ -11545,18 +11715,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         use crate::invocation_artifacts as artifacts;
         use crate::external_sessions::find_bound_pi_family_transcript;
         use crate::external_sessions::ExternalDriver;
-        self.store.record_invocation_runtime_end(observation)?;
+        // The end fold is subject-indexed and reused for unchanged observations. A periodic
+        // full stop pass still verifies physical runtime/producer closure, native bindings and
+        // artifact availability below; it does not need to deserialize immutable receipts again.
+        let Some(invocations) = self.store.invocations_for_runtime_end(observation)? else { return Ok(()); };
         let fields = &observation.body["fields"];
         if !matches!(fields["status"].as_str(), Some("stopped" | "exited")) {
             return Ok(());
         }
         let Some(incarnation) = fields["incarnation_id"].as_str() else { return Ok(()); };
-        let mut invocations = BTreeMap::new();
-        for receipt in self.store.agent_invocation_receipts(&observation.subject)? {
-            if receipt.incarnation.as_deref() == Some(incarnation) {
-                invocations.insert(receipt.invocation_id.clone(), receipt);
-            }
-        }
         if invocations.is_empty() { return Ok(()); }
         let Some(state) = self.driver_state_dir.parent() else { return Ok(()); };
         let mut stopped_launches = BTreeMap::new();
@@ -11657,7 +11824,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             if kind == "runtime.observed" {
                 self.record_runtime_observation_admission(subject, false)?;
                 if let Some(previous) = previous {
-                    self.store.record_invocation_runtime_end(previous)?;
                     self.retain_stopped_invocation_transcripts(previous)?;
                 }
             }
@@ -11680,7 +11846,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(());
             };
             self.record_runtime_observation_admission(subject, false)?;
-            self.store.record_invocation_runtime_end(&record)?;
             record
         } else {
             self.store.append_claim(&input)?
@@ -12036,6 +12201,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let crate::incremental::FeedReaders { cursor: next, readers: mut changed_runs, unseen } =
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
+        changed_runs.extend(std::mem::take(
+            &mut *self.file_changes.runs.lock().unwrap_or_else(PoisonError::into_inner)));
+        changed_runs.sort_unstable();
+        changed_runs.dedup();
         if !unseen.is_empty() {
             // Terminal runs with pending escalation discovery belong to this host too.
             let mut eligible = self.store.active_mission_run_ids_for_origin(&self.host)?;
@@ -12080,8 +12249,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         changes.mark_changed();
         let mut continuations = 0;
         loop {
-            if continuations == 0 && changes.changed().await.is_err() {
-                return;
+            if continuations == 0 {
+                tokio::select! {
+                    changed = changes.changed() => if changed.is_err() { return; },
+                    () = self.file_changes.notify.notified() => {},
+                }
             }
             changes.borrow_and_update();
             let changed = self
@@ -12947,6 +13119,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                             self.store
                                 .set_step_state(&view.subject, "failed", Some(&reason))?;
                         return Ok(changed);
+                    }
+                    if !self.resource_step_has_lane(view)?
+                        && self.expire_native_dispatch_budget(view, step.spec.timeout_ms
+                            .unwrap_or(step_execution_phases::DEFAULT_DISPATCH_BUDGET_MS))?
+                    {
+                        return Ok(true);
                     }
                     if self.step_timed_out(view, &step)? {
                         // A worker's step that runs out of time is a fault for that worker to
@@ -16415,11 +16593,26 @@ impl<R: RuntimeControl> Reconciler<R> {
                 declared_agents.insert(agent.to_owned());
             }
         }
+        // Enroll only newly materialized work (or retries of an already enrolled attempt).
+        // Existing declarations without phase evidence belong to an in-flight legacy attempt:
+        // adopting a new daemon must not retroactively arm new timeout/stall policies for it.
+        let existing = self.native_step_execs(view)?;
+        let phases = self.store.claims_for(&view.subject, Some("step.execution-phase"))?;
+        let tracked_retry = phases.iter().any(|claim|
+            claim.body["fields"]["phase"] == "dispatched"
+                && claim.body["fields"]["attempt"].as_u64().is_some_and(|attempt| attempt < u64::from(view.attempt)));
+        if existing.is_empty() || tracked_retry {
+            for desired in intent.subjects.values().filter(|desired| desired.kind == "exec") {
+                self.record_step_exec_phase(view, desired, "dispatched", now_ms(), None, None)?;
+            }
+        }
         let response = self.store.apply_internal_with_declared_agents(
             &intent,
             &format!("materialize:{}:{}", view.subject, view.attempt),
             &declared_agents,
         )?;
+        // The dispatch phase precedes desired-state publication, so an executor cannot admit
+        // a new tracked payload before its attempt's enrollment evidence is replicated.
         // A newly declared exec starts when this run's evaluation ends, not in a later pass.
         self.declared_execs
             .lock()
@@ -17490,6 +17683,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.arm_step_deadline(&handle, &view.subject, (u128::from(timeout) - elapsed).max(1) as u64);
             }
             return Ok(false);
+        }
+        if let Some(timed_out) = self.native_step_timed_out(view, timeout)? {
+            return Ok(timed_out);
         }
         let elapsed = view.execution_elapsed_ms;
         if elapsed >= timeout as u128 {
@@ -21603,11 +21799,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .context("file watch has no target component")?;
         // Backends report canonical directories (notably /private/tmp on macOS).
         // Keep the lexical target as identity, but compare events in their namespace.
-        let directory = directory.canonicalize()?;
+        let directory = file_subscriptions::canonicalize(directory)?;
         let relevant = directory.join(next_component);
         // A file symlink can point outside the lexical parent. Observe its referent's
         // parent too, so both writes and inode replacements preserve file-gate behavior.
-        let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        let referent = file_subscriptions::canonicalize(&target).ok().filter(|path| *path != relevant);
         let recursive = target.is_dir();
         if watchers.get(subject).is_some_and(|watch| {
             watch.target == target
@@ -21621,6 +21817,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let watched_directory = directory.clone();
         let watched_referent = referent.clone();
         let notify = self.notify.clone();
+        let file_changes = self.file_changes.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
         let revision = self.file_watch_revision.clone();
@@ -21636,14 +21833,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let dirty = Arc::new(AtomicBool::new(false));
         let changed_watch = dirty.clone();
-        let subscription = pool.subscribe(paths, Arc::new(move |event| {
-                // Reads (including this observer's own reads) must never self-wake.
-                if FileWatch::relevant(
-                    &event,
-                    &relevant,
-                    &watched_directory,
-                    watched_referent.as_deref(),
-                ) {
+        let subscription = pool.subscribe_input(paths, Arc::new(move |event| {
+            FileWatch::relevant(event, &relevant, &watched_directory, watched_referent.as_deref())
+        }), Arc::new(move |notification| {
+                    let event = notification.event;
                     revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
                         | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
@@ -21654,10 +21847,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&watched_subject);
                     // A file change is not a claim: mark what read the file.
-                    incremental.touch(&watched_subject);
-                    crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::FileWatch, None);
-                    notify.notify_one();
-                }
+                    file_changes.invalidate(&incremental, &watched_subject,
+                        event.need_rescan() && !notification.coverage_changed, &notify);
             }))?;
         watchers.insert(subject.into(), FileWatch {
             _subscription: subscription, target, directory, referent, recursive, dirty,
