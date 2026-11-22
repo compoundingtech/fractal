@@ -423,6 +423,71 @@ Execution uses `resource.lane.exec` or `resource.lane.run`. Scope finalization s
 Expected native failures use `ResourceError` with a distinct `code`, separate from payload exit
 status and linked-child failure.
 
+## Mission-owned dedicated scratch
+
+Dedicated scratch is storage custody, not execution admission. It extends the same local
+resource writer and authority epoch as lanes; acquiring it does not reserve CPU, memory,
+disk capacity or a lane membership.
+
+```ts
+const scratch = yield* Fractal.resources.scratch('verification', {
+  host: 'worker',
+  root: '/workspace/dedicated-scratch',
+})
+// Pass scratch.path as the cwd/diskPath of separately admitted work.
+```
+
+`scratch` returns a typed `ScratchHandle` carrying its acquisition ID, owner run and run
+generation, execution host, allocation path, object generation and authority epoch.
+The root must be absolute, canonical, private and free of symlink components. Only newly
+allocated dedicated directories are covered: existing worktrees, shared caches and arbitrary
+temporary directories are not adopted.
+
+The acquisition's durable activity/occurrence key is stable on replay. The writer commits
+intent before creating the exact generation-named allocation, then persists its receipt before
+returning the handle. A repeated identical request resumes the same allocation; a conflicting
+specification is refused. A released identity cannot be resurrected. Interrupted intent,
+creation, receipt publication and release retain their original record and object identity.
+
+Mission lifetime is not an Effect scope: completing the acquiring activity or closing a local
+JavaScript scope does not destroy the directory. Native final-release work runs on normal
+success, failure and cancellation, after authored finalizers and confirmed native consumer
+quiescence, before the terminal transition. It enumerates owner-generation records, including
+acquisitions that never returned a handle. Release is generation-fenced and repeatable;
+competing finalization and recovery use the same serialized writer. A cleanup refusal or error
+retains custody and raises an inspectable `final-scratch-release` fault without replacing the
+normal-work outcome.
+
+### Dry-run orphan inventory
+
+Mission deadline expiry skips remaining final work, including scratch final release. Daemon
+loss and interrupted release can also retain custody. There is deliberately no automatic
+reclaimer. Inspect the connected execution host with the trusted local operator:
+
+```sh
+fractal resources scratch-inventory --as person/operator --limit 100 --json
+fractal resources scratch-inventory --as person/operator --after ACQUISITION_ID --limit 100 --json
+```
+
+The operator endpoint is `GET /v1/internal/resources/scratch/inventory`; agent/run-bound callers
+are refused. Use the authenticated local operator selector, not another agent's identity.
+`--host` must name the connected host.
+The response contains `dryRun: true`, `records`, and `nextAfter`. Limits are 1–500, default
+100; continue with `--after` when `nextAfter` is non-null. A full last page may require one
+empty continuation. Reading inventory never creates, releases or deletes an allocation.
+
+Program authors can also read `Fractal.resources.scratchInventory({ host, after, limit })`,
+which returns a bounded page of the same records (maximum 1,000). Each record separates its
+custody state from `ownerObservation` and `consumerObservation`. An unreleased allocation
+with a positively observed terminal owner **of the recorded generation** is an orphan
+candidate, not deletion authorization. Missing owners, different generations and unavailable
+observations are `unknown`, never terminal-owner proof. Live or uncertain consumers and stale
+generation capabilities refuse release.
+
+This first adapter does not remove Git worktrees, dispatch or cancel GitHub workflows, reclaim
+fleet storage, clear host holds, or add another admission ledger. Keep separately retained
+evidence outside the explicitly disposable allocation.
+
 ## Data DSL
 
 ```kdl
