@@ -61,6 +61,7 @@ fn unchanged_empty_receipts_are_write_free_until_the_freshness_deadline() {
     let changes = target.connection.write().total_changes();
     let index = target.index().unwrap();
     let metrics = crate::receive_metrics::RequestMetrics::default();
+    let loans = crate::sqlite::work::writer_loans();
     {
         let _metrics = metrics.enter();
         for offset in 1..100 {
@@ -72,15 +73,18 @@ fn unchanged_empty_receipts_are_write_free_until_the_freshness_deadline() {
         }
     }
     assert_eq!(metrics.snapshot().commits, 0);
+    assert_eq!(crate::sqlite::work::writer_loans(), loans, "unchanged exchanges must not borrow the writer");
     assert_eq!(target.connection.write().total_changes(), changes);
     assert_eq!(target.index().unwrap(), index);
     set_thread_clock(Some(start + PEER_QUIET_EXCHANGE_MS / 2));
     let refreshed = crate::receive_metrics::RequestMetrics::default();
+    let refresh_loans = crate::sqlite::work::writer_loans();
     {
         let _metrics = refreshed.enter();
         target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
     }
     assert_eq!(refreshed.snapshot().commits, 1);
+    assert!(crate::sqlite::work::writer_loans() > refresh_loans, "a due receipt checkpoint still borrows the writer");
     assert_eq!(target.index().unwrap(), index, "receipt checkpoints append no claims");
     set_thread_clock(Some(start + TRANSPORT_LINK_REFRESH_MS - 1));
     target.record_transport_observation("birch", "up", None, None).unwrap();
@@ -101,22 +105,26 @@ fn empty_receipt_persists_advanced_ack_and_clears_outbound_refusal() {
     exchange.inventory.digest = "advanced-inventory".into();
     target.record_peer_failure("birch", "refused", "refused").unwrap();
     let metrics = crate::receive_metrics::RequestMetrics::default();
+    let loans = crate::sqlite::work::writer_loans();
     {
         let _metrics = metrics.enter();
         target.receive_replication_exchange_asking("birch", FLEET, &exchange, true).unwrap();
     }
     assert_eq!(metrics.snapshot().commits, 1);
+    assert!(crate::sqlite::work::writer_loans() > loans, "changed acknowledgements still borrow the writer");
     assert_eq!(target.replication_peer_refusal("birch").unwrap(), None);
     let saved: String = target.readers.get().query_row(
         "SELECT value FROM meta WHERE key='peer_projection_inventory:birch'", [], |row| row.get(0),
     ).unwrap();
     assert_eq!(saved, exchange.inventory.digest);
     let repeated = crate::receive_metrics::RequestMetrics::default();
+    let repeated_loans = crate::sqlite::work::writer_loans();
     {
         let _metrics = repeated.enter();
         target.receive_replication_exchange_asking("birch", FLEET, &exchange, true).unwrap();
     }
     assert_eq!(repeated.snapshot().commits, 0);
+    assert_eq!(crate::sqlite::work::writer_loans(), repeated_loans);
 }
 
 #[test]
@@ -147,6 +155,22 @@ fn process_local_receipt_requires_its_durable_checkpoint_and_does_not_survive_re
     target.age_replication_peer_for_test("birch");
     assert_eq!(target.replication_peer_up("birch").unwrap(), (false, Some(0)));
     assert!(target.replication_sync.lock().unwrap()["birch"].last_received_at_unix_ms.is_none());
+}
+
+#[test]
+fn settled_or_absent_first_sync_observers_do_not_borrow_the_writer() {
+    let target = node("cedar");
+    for settled in [false, true] {
+        if settled {
+            target.begin_first_sync("birch").unwrap();
+            target.observe_first_sync("birch", 0).unwrap();
+            assert_eq!(target.first_sync().unwrap().unwrap().state, "verified");
+        }
+        let loans = crate::sqlite::work::writer_loans();
+        target.observe_first_sync("birch", 0).unwrap();
+        target.observe_first_sync_log("birch", 0, "authority").unwrap();
+        assert_eq!(crate::sqlite::work::writer_loans(), loans);
+    }
 }
 
 #[test]
