@@ -91,6 +91,18 @@ fn unsupported_runtime_workspace_readers_refuse_signed_but_retain_envelopes() {
             let (_, source, readers) = fleet(&[("older", &older_key), ("signed", &signed_key)]);
             let older = &readers[0];
             let signed_reader = &readers[1];
+            // The first append by an agent also publishes its key.granted delegation
+            // in a separate envelope. Establish that supported evidence first, so the
+            // exchange below contains only the deliberately unsupported observation.
+            source.ensure_principal_key("agent/a.worker").unwrap();
+            for reader in [older, signed_reader] {
+                sync(&source, reader);
+                let baseline = source.export_replication_exchange(
+                    FLEET, &reader.replication_inventory().unwrap(),
+                ).unwrap();
+                assert!(baseline.envelopes.is_empty());
+                assert!(baseline.signed_envelopes.is_empty());
+            }
             let mut registry = fractal_schema::registry().clone();
             let code = if unknown_kind {
                 registry.claims.remove("runtime.observed").unwrap();
