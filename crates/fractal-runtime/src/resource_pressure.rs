@@ -416,7 +416,8 @@ impl Reader {
             // pgscan_direct includes memcg reclaim; kswapd also runs for routine
             // cache/ARC churn. Neither scan counter alone proves host distress.
             // ALLOCSTALL counts reclaim entry, not each sample spent stalled. Keep
-            // its timestamp so root PSI remains qualified for each rule's full window.
+            // evidence for the PSI window plus the brake's sustained interval so
+            // pressure starting within that window can trip on a later sample.
             match self.previous_allocstall {
                 Some(previous) if current > previous => self.last_allocstall_at_ms = Some(now_ms),
                 Some(previous) if current == previous => {},
@@ -443,7 +444,7 @@ impl Reader {
             let pressure = if memory_rule {
                 let root = signal_pressure(&self.root_memory, "full", rule.window)?;
                 let qualified = self.last_allocstall_at_ms.and_then(|at| now_ms.checked_sub(at))
-                    .is_some_and(|age| age <= rule.window.duration_ms());
+                    .is_some_and(|age| age <= rule.window.duration_ms().saturating_add(policy.sustained_ms));
                 if qualified { pressure.max(root) } else { pressure }
             } else { pressure };
             self.readings.push(Reading {
