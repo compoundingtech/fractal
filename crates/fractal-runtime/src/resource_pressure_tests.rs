@@ -447,7 +447,7 @@ async fn stopped_sampler_expires_cached_decision_without_reading_or_advancing_br
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
     assert_eq!(observer.decision().reason,
         Some(Reason::UnknownObservation { cause: ObservationCause::StaleDecision }));
-    assert!(!observer.brake.tripped);
+    assert!(!observer.brake.tripped, "reading stale decisions must not mutate the brake");
 }
 
 #[tokio::test(start_paused = true)]
@@ -472,6 +472,7 @@ async fn every_observe_reads_files_even_at_jittered_interval_and_preserves_error
     }
     assert!(!observer.decision().blocked);
 }
+
 
 #[test]
 fn pressure_reasons_round_trip_with_structured_values_and_units() {

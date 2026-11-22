@@ -661,6 +661,8 @@ impl Observer {
             }) };
         }
         let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // The daemon interval owns cadence. A second throttle here would discard a
+        // slightly early tick and turn scheduling jitter into a freshness gap.
         self.sampled_at = Some(now);
         let readings = match &self.paths {
             Some([placement, root, meminfo]) =>
