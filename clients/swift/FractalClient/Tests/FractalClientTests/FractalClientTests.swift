@@ -187,6 +187,15 @@ final class FractalClientTests: XCTestCase {
             let resource = try JSONDecoder().decode(Resource.self, from: data)
             guard case .agent(let row) = resource else { return XCTFail("agent discriminator lost") }
             XCTAssertEqual(row.id, agent.id)
+            let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(agent)) as? [String: Any])
+            XCTAssertEqual(encoded["declared_model"] as? String, object["declared_model"] as? String)
+            if let expected = object["model_drift"] as? [String: Any] {
+                let drift = try XCTUnwrap(encoded["model_drift"] as? [String: Any])
+                XCTAssertEqual(drift as NSDictionary, expected as NSDictionary)
+            } else {
+                XCTAssertFalse(encoded.keys.contains("declared_model"))
+                XCTAssertFalse(encoded.keys.contains("model_drift"))
+            }
         }
     }
 

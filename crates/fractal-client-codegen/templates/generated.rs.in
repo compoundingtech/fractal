@@ -2473,7 +2473,7 @@ pub struct Agent {
     #[serde(default)]
     pub live_model: Option<String>,
     /// Model selected by the current harness declaration, independent of live evidence.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_model: Option<String>,
     /// Current-incarnation drift and native fallback evidence; omitted by older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
