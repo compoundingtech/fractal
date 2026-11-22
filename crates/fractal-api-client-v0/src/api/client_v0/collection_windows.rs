@@ -262,9 +262,15 @@ mod tests {
             .unwrap();
         assert_ne!(read(&windows, &state, &session, &mission, 0, &count), first);
         assert_eq!(count.load(Ordering::SeqCst), 2);
-        // A lent writer can change local tables without advancing claim index.
+        // An unchanged lent writer no longer invalidates the view. A real local-table
+        // commit still invalidates without advancing the claim index.
         let index = state.store.index().unwrap();
         drop(state.store.connection.lock().unwrap());
+        read(&windows, &state, &session, &mission, 0, &count);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        state.store.connection.lock().unwrap().execute(
+            "INSERT INTO meta(key,value) VALUES('test:shared-window-local','1')", [],
+        ).unwrap();
         assert_eq!(state.store.index().unwrap(), index);
         read(&windows, &state, &session, &mission, 0, &count);
         assert_eq!(count.load(Ordering::SeqCst), 3);
