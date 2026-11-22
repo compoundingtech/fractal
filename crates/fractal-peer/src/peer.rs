@@ -2190,13 +2190,20 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
 async fn run_with_wake_drain(
     worker: impl Future<Output = Result<()>>,
     watcher: notify::RecommendedWatcher,
-    pacer: tokio::task::JoinHandle<()>,
+    mut pacer: tokio::task::JoinHandle<()>,
 ) -> Result<()> {
     let result = worker.await;
-    // The watcher closure owns the raw producer. Closing it lets the pacer emit
-    // its pending trailing generation before this process exits, even on failure.
+    // Some watcher backends retain the raw producer on a backend thread after drop.
+    // Drain the trailing generation, but never prevent a failed worker from exiting.
     drop(watcher);
-    let drained = pacer.await.context("replication wake pacer failed");
+    let drained = match tokio::time::timeout(Duration::from_secs(2), &mut pacer).await {
+        Ok(joined) => joined.context("replication wake pacer failed"),
+        Err(_) => {
+            pacer.abort();
+            eprintln!("st replication-worker: wake drain exceeded 2s; aborting pacer");
+            Ok(())
+        }
+    };
     result.and(drained)
 }
 
@@ -2284,6 +2291,21 @@ mod tests {
         let error = tokio::time::timeout(Duration::from_secs(2), shutdown)
             .await.expect("raw producer remained open").unwrap_err();
         assert_eq!(error.to_string(), "settings-task-failure");
+
+        // A backend retaining its handler must not strand the failed process.
+        let watcher = notify::recommended_watcher(|event: notify::Result<notify::Event>| {
+            drop(event);
+        }).unwrap();
+        let pacer = tokio::spawn(std::future::pending::<()>());
+        let aborted = pacer.abort_handle();
+        let started = tokio::time::Instant::now();
+        let error = run_with_wake_drain(
+            async { Err(anyhow::anyhow!("original-worker-failure")) }, watcher, pacer,
+        ).await.unwrap_err();
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert_eq!(error.to_string(), "original-worker-failure");
+        tokio::task::yield_now().await;
+        assert!(aborted.is_finished());
     }
 
     #[tokio::test(start_paused = true)]

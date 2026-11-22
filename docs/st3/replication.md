@@ -942,8 +942,9 @@ its `peer` and `outcome` labels for comparing `in_sync` and `moved` round rates.
 A remote-only change, or a change whose notification is missed, can now wait up to the
 idle maximum: 600 seconds by default, or 3,600 seconds when raised, versus 30 seconds
 previously. This increased anti-entropy latency is an accepted tradeoff for reducing idle I/O.
-On worker return the filesystem watcher is dropped and the pacer is awaited, retaining
-the trailing generation without depending on an external process restart.
+On worker return the filesystem watcher is dropped and the pacer gets up to two seconds
+to drain the trailing generation. If its backend retains a raw producer, timeout aborts
+the pacer and logs one warning, preserving the original worker error so supervision can restart it.
 A recent inbound exchange suppresses a redundant connection in the opposite direction;
 local graph changes still request a prompt push. Failed attempts back off exponentially
 from one second through minutes to one hour, with 20 percent
