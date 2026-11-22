@@ -2118,12 +2118,12 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     let main = MainBackend::new(config.socket.clone());
     main.ready().await;
     let mut shards = Vec::new();
-    let discovery_revision = main.wait_revision(smallclaims::sync::revision::RevisionRequest {
-        kind: smallclaims::sync::revision::RevisionKind::Authority, after: None,
-    }).await?;
     let mut followers = tokio::task::JoinSet::new();
     let held = shard_peers(&main, MESSAGES_SHARD).await?;
-    if let Some(peers) = held {
+    if held.is_some() {
+        let discovery_revision = shard_discovery_revision(&main, MESSAGES_SHARD, None).await?;
+        // Registration precedes the peer read, so admission racing startup is retained.
+        let peers = shard_peers(&main, MESSAGES_SHARD).await?.unwrap_or_default();
         let (sender, receiver) = watch::channel(peers);
         let (shard_wake, _) = watch::channel(0_u64);
         followers.spawn(follow_shard_peers(
@@ -2164,7 +2164,17 @@ async fn shard_peers(backend: &MainBackend, shard: &str) -> Result<Option<BTreeS
     }
 }
 
-/// Follow graph authority changes; local worker/status writes never refresh shard peers.
+async fn shard_discovery_revision(
+    backend: &MainBackend,
+    shard: &str,
+    after: Option<smallclaims::sync::revision::StoreRevision>,
+) -> Result<smallclaims::sync::revision::StoreRevision> {
+    backend.client.post(
+        &format!("/v1/internal/replication/shard/{shard}/peers/revision"), &after,
+    ).await
+}
+
+/// Follow admitted advertisement/membership changes; receipt and local mirrors do not refresh peers.
 async fn follow_shard_peers(
     backend: MainBackend,
     shard: &'static str,
@@ -2172,9 +2182,7 @@ async fn follow_shard_peers(
     mut after: Option<smallclaims::sync::revision::StoreRevision>,
 ) -> Result<()> {
     loop {
-        let revision = backend.wait_revision(smallclaims::sync::revision::RevisionRequest {
-            kind: smallclaims::sync::revision::RevisionKind::Authority, after,
-        }).await?;
+        let revision = shard_discovery_revision(&backend, shard, after).await?;
         let current = shard_peers(&backend, shard).await?.unwrap_or_default();
         peers.send_if_modified(|known| {
             let changed = *known != current;

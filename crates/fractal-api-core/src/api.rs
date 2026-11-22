@@ -1051,6 +1051,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::shard_replication_peers),
         )
         .route(
+            "/v1/internal/replication/shard/{shard}/peers/revision",
+            post(replication::shard_replication_peers_revision),
+        )
+        .route(
             "/v1/internal/replication/shard/{shard}/export",
             post(replication::shard_replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
         )
