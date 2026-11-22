@@ -1285,6 +1285,7 @@ impl Config {
             usage_limits.validate()?;
         }
         if let Some(resources) = &self.finite_resources {
+            resources.psi_brake.validate().context("finite_resources.psiBrake")?;
             for (key, seed) in &resources.profiles {
                 fractal_runtime::validate_profile_key(key)?;
                 seed.validate().with_context(|| format!("finite_resources.profiles.{key}"))?;
@@ -1767,6 +1768,34 @@ mod tests {
             let invalid: super::Config = toml::from_str(&text).unwrap();
             assert!(invalid.validate().is_err());
         }
+    }
+
+    #[test]
+    fn config_loaders_reject_unresolved_relative_pressure_exclusions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let config = super::Config {
+            state_dir: directory.path().join("state"),
+            finite_resources: Some(fractal_runtime::host::FinitePolicy {
+                psi_brake: fractal_runtime::resource_pressure::Policy {
+                    protected_cgroups: vec!["/user.slice".into()],
+                    job_parent_cgroups: vec!["gate.slice".into()],
+                    excluded_cgroups: Vec::new(),
+                    ..fractal_runtime::resource_pressure::Policy::default()
+                },
+                ..fractal_runtime::host::FinitePolicy::default()
+            }),
+            ..super::Config::default()
+        };
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let error = super::Config::load(Some(&path)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("finite_resources.psiBrake"), "{message}");
+        assert!(message.contains("manager-qualified protected roots"), "{message}");
+        let error = super::Config::load_with_fleet(Some(&path)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("finite_resources.psiBrake"), "{message}");
+        assert!(message.contains("manager-qualified protected roots"), "{message}");
     }
 
     /// Explicit acceptance probe for a managed, rendered daemon configuration; never starts it.
