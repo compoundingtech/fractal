@@ -117,6 +117,36 @@ fn heartbeat_local_deltas_pin_the_same_roster_rows() {
     assert_eq!(store.agent_resources_builds_for_test(), 2);
 }
 
+#[test]
+fn same_model_local_usage_refresh_invalidates_only_its_agent_card() {
+    for semantics in ["context_occupancy", "session_cumulative"] {
+        let store = roster_cache_store();
+        let agent = "agent/node.amber";
+        let mut observation = local_observation_for_test("harness.usage", json!({
+            "driver": "omp", "incarnation_id": "amber-1", "semantics": semantics,
+            "model": "gpt-6.1", "context_used_percent": 10
+        }));
+        store.append_latest_observation(&observation, 1_900_000_000_000).unwrap();
+        let index = store.index().unwrap();
+        let card = json!({"id": agent, "live_model": "gpt-6.1"});
+        store.cached_agent_resources(index, false, |_| Ok(vec![card.clone()])).unwrap();
+        store.cached_exact_agent_resources(index, false, agent, |_| Ok(vec![card.clone()])).unwrap();
+        observation.fields.insert("observed_at_unix_ms".into(), json!(1_900_000_000_001_u64));
+        let (held, _) = store.append_latest_observation(&observation, 1_900_000_000_001).unwrap();
+        assert!(local_observation_position(&held).is_some());
+        assert_eq!(store.index().unwrap(), index, "same-model held usage keeps the graph cut");
+        assert!(store.agent_resources_cached_at(index, false, None).unwrap().is_none());
+        assert!(store.exact_agent_resources_cached_at(index, false, agent).unwrap().is_none());
+        let rebuild = |changed: Option<(&BTreeSet<String>, &[Value])>| {
+            let (subjects, _) = changed.expect("usage refresh must incrementally refold the card");
+            assert_eq!(subjects, &BTreeSet::from([agent.to_owned()]));
+            Ok(vec![card.clone()])
+        };
+        store.cached_agent_resources(index, false, rebuild).unwrap();
+        store.cached_exact_agent_resources(index, false, agent, rebuild).unwrap();
+    }
+}
+
 /// A page that already covered every agent at the cut upgrades to the complete window by
 /// reusing the pinned rows: no clone, no sort, no build.
 #[test]
@@ -269,6 +299,10 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
     assert!(
         plan.iter()
             .any(|step| step.contains("local_observations_roster_frontier_index")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter().any(|step| step.contains("local_observations_roster_model_frontier_index")),
         "{plan:?}"
     );
     assert!(plan.iter().all(|step| !step.contains("TEMP B-TREE")), "{plan:?}");
