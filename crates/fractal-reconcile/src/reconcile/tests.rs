@@ -1,6 +1,8 @@
     #![cfg_attr(not(test), allow(unused, dead_code))]
     mod agent_review_loop_branches;
     mod restart_preparation;
+    #[cfg(test)]
+    mod file_watch_scope;
 
 mod native_effect_convergence {
     use super::*;
@@ -8064,6 +8066,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_observation(&subject).unwrap();
         // Publishing the initial file.observed claim signals a graph change. Consume
         // that known wake before asserting that subsequent reads stay quiet.
@@ -8228,6 +8231,10 @@ agent "import/omp/fixture" {{
         for path in [&rules, &missing] {
             reconciler.ensure_file_watch(&format!("launch-input/{}", path.display()), path).unwrap();
         }
+        reconciler.incremental.evaluated("launch-inputs:test", BTreeSet::from([
+            format!("launch-input/{}", rules.display()), format!("launch-input/{}", missing.display()),
+            "old".into(), "second".into(),
+        ]), None);
         std::fs::create_dir_all(rules.join("nested")).unwrap();
         tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
         reconciler.ensure_file_watch(&format!("launch-input/{}", rules.display()), &rules).unwrap();
@@ -8267,6 +8274,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         for parent in [root.path().join("outer"), root.path().join("outer/inner")] {
             std::fs::write(parent.parent().unwrap().join("unrelated.txt"), "ignore").unwrap();
@@ -8372,6 +8380,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from(["file/node:gate".into()]), None);
         reconciler.ensure_file_watch("file/node:gate", &first).unwrap();
         reconciler.ensure_file_watch("file/node:gate", &second).unwrap();
         std::fs::write(&first, "old target changed").unwrap();
@@ -8403,6 +8412,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         std::fs::write(actual.join("unrelated"), "ignore").unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
@@ -8444,6 +8454,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
         std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();

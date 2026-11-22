@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Route file-watch events and coverage changes only to intersecting input leases",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "The performance endpoint adds cumulative file_watch_work counters for events, event and coverage deliveries, and scoped versus global notifications."},
+  "rules": {"status": "none", "detail": "Root-indexed routing applies lexical and referent input relevance before borrowing an event to selected callbacks. Coverage replacement and directory-loss generations are scoped to intersecting roots. File-gate changes enqueue only their dependent mission runs; launch-admission or other global readers and genuine lost-path rescans retain the common-loop notification."},
+  "compatibility": {"status": "none", "detail": "Any matching path, ancestor renames and removals, symlink referents, and backend-error rescans remain observable. Unrelated sibling activity and read events do not notify reconciliation."},
+  "downtime": {"status": "none", "detail": "No migration is required."},
+  "manual": {"status": "none", "detail": "No configuration change is required."},
+  "recovery": {"status": "none", "detail": "True rescan and error events retain all-root recovery. Maintenance invalidations reread only leases intersecting replaced coverage."}
+}
