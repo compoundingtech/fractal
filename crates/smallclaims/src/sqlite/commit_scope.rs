@@ -7,16 +7,22 @@ pub(super) struct Changes {
     tables: BTreeSet<String>,
     pub(super) schema: bool,
     pub(super) unknown: bool,
+    pub(super) committed: bool,
 }
 impl Changes {
     pub(super) fn changed(&self) -> bool { self.schema || self.unknown || !self.tables.is_empty() }
     pub(super) fn matches(&self, tables: &[&str]) -> bool {
         self.schema || self.unknown || tables.iter().any(|table| self.tables.iter().any(|changed| changed.eq_ignore_ascii_case(table)))
     }
+    pub(super) fn index_changed(&mut self) {
+        self.tables.insert("claims".to_owned());
+        self.tables.insert("sqlite_sequence".to_owned());
+    }
     fn merge(&mut self, other: Self) {
         self.tables.extend(other.tables);
         self.schema |= other.schema;
         self.unknown |= other.unknown;
+        self.committed |= other.committed;
     }
 }
 
@@ -92,6 +98,9 @@ impl Ledger {
         if let Some(changes) = self.tentative.take() {
             if autocommit {
                 let mut changes = changes;
+                // Row hooks and total_changes miss implicit AUTOINCREMENT advances
+                // from ignored inserts. Preserve actual successful commit authority.
+                changes.committed = true;
                 for (_, parent) in self.savepoints.drain(..) {
                     changes.merge(parent);
                 }
@@ -158,13 +167,6 @@ impl Ledger {
         self.statement = Some(key);
         self.changes_at_start = total_changes;
         self.statement_rows = Changes::default();
-        // SQLite omits system tables from preupdate callbacks. Explicit sequence writes
-        // still change the claims index authority; resolve this hint like ordinary rows,
-        // so zero-row statements and transaction/savepoint rollbacks remain no-ops.
-        if !readonly && writes_main_sequence(sql) {
-            self.row("main", "sqlite_sequence");
-            self.row("main", "claims");
-        }
         self.savepoint_action = None;
         let mut words = Tokens(sql);
         let Some(first) = words.next() else { return; };
@@ -267,41 +269,8 @@ impl Ledger {
     }
 }
 
-// Inspect only the top-level DML target, never string literals, comments or read sources.
-// CTE bodies are parenthesized; SQLite does not allow data-changing CTE bodies.
-fn writes_main_sequence(sql: &str) -> bool {
-    let mut tokens = Tokens(sql);
-    let mut depth = 0usize;
-    while let Some(token) = tokens.next() {
-        if matches!(token, Cow::Owned(_)) { continue; }
-        if token == "(" { depth += 1; continue; }
-        if token == ")" { depth = depth.saturating_sub(1); continue; }
-        if depth != 0 { continue; }
-        let update = token.eq_ignore_ascii_case("UPDATE");
-        let insert = token.eq_ignore_ascii_case("INSERT") || token.eq_ignore_ascii_case("REPLACE");
-        let delete = token.eq_ignore_ascii_case("DELETE");
-        if !update && !insert && !delete { continue; }
-        let Some(mut target) = tokens.next() else { return false; };
-        if target.eq_ignore_ascii_case("OR") {
-            if tokens.next().is_none() { return false; }
-            let Some(next) = tokens.next() else { return false; };
-            target = next;
-        }
-        if (insert && target.eq_ignore_ascii_case("INTO")) || (delete && target.eq_ignore_ascii_case("FROM")) {
-            let Some(next) = tokens.next() else { return false; };
-            target = next;
-        }
-        if tokens.next().as_deref() == Some(".") {
-            return target.eq_ignore_ascii_case("main")
-                && tokens.next().is_some_and(|table| table.eq_ignore_ascii_case("sqlite_sequence"));
-        }
-        return target.eq_ignore_ascii_case("sqlite_sequence");
-    }
-    false
-}
-
-// SQLite accepts quoted identifiers, doubled quotes and comments between tokens.
-// Punctuation stays separate for qualified DML targets and parenthesized CTE bodies.
+// Only transaction-control identifiers are interpreted. SQLite accepts quoted savepoint names,
+// doubled quotes and comments between tokens; never split these statements on whitespace.
 struct Tokens<'a>(&'a str);
 impl<'a> Iterator for Tokens<'a> {
     type Item = Cow<'a, str>;
@@ -315,11 +284,6 @@ impl<'a> Iterator for Tokens<'a> {
             } else { break; }
         }
         let first = self.0.chars().next()?;
-        if matches!(first, '(' | ')' | ',' | '.') {
-            let (token, rest) = self.0.split_at(1);
-            self.0 = rest;
-            return Some(Cow::Borrowed(token));
-        }
         if matches!(first, '\'' | '"' | '`' | '[') {
             let close = if first == '[' { ']' } else { first };
             let mut output = String::new();
@@ -338,7 +302,7 @@ impl<'a> Iterator for Tokens<'a> {
             Some(Cow::Owned(output))
         } else {
             let end = self.0.char_indices().find_map(|(index, ch)| {
-                (ch.is_whitespace() || matches!(ch, ';' | '\'' | '"' | '`' | '[' | '(' | ')' | ',' | '.')
+                (ch.is_whitespace() || matches!(ch, ';' | '\'' | '"' | '`' | '[')
                     || self.0[index..].starts_with("/*") || self.0[index..].starts_with("--"))
                     .then_some(index)
             }).unwrap_or(self.0.len());
@@ -442,13 +406,6 @@ unsafe extern "C" fn traced(event: c_uint, context: *mut c_void, statement: *mut
                 }
             }
             ledger.started(statement as usize, &sql, ffi::sqlite3_get_autocommit(database) != 0, ffi::sqlite3_stmt_readonly(statement) != 0, ffi::sqlite3_total_changes64(database), active_write);
-            // Trigger subprogram traces share the outer statement pointer. SQLite exposes
-            // their executed SQL through the "-- " detail, not sqlite3_sql(statement).
-            let detail = CStr::from_ptr(detail.cast::<c_char>()).to_string_lossy();
-            if detail.strip_prefix("-- ").is_some_and(writes_main_sequence) {
-                ledger.row("main", "sqlite_sequence");
-                ledger.row("main", "claims");
-            }
         } else {
             // SQLite does not expose the current VDBE result code until after PROFILE.
             // Never inspect sqlite3_errcode here: it can still belong to an earlier SQL
@@ -520,30 +477,10 @@ mod tests {
             connection.execute_batch(sql).unwrap();
             let work = SqliteWorkScope::start();
             drop(connection);
-            assert_eq!(work.finish().statements, 0, "post-loan SQL after {sql}");
+            let expected = if sql.starts_with("BEGIN") { 0 } else { 1 };
+            assert_eq!(work.finish().statements, expected, "post-loan SQL after {sql}");
         }
         assert_eq!((calls(&global), calls(&claims), calls(&sequence), calls(&alpha)), (3, 3, 3, 0));
-    }
-
-    #[test]
-    fn sequence_write_target_ignores_literals_comments_and_read_sources() {
-        for sql in [
-            "UPDATE alpha SET id='sqlite_sequence'",
-            "UPDATE alpha SET id=(SELECT seq FROM sqlite_sequence)",
-            "UPDATE /* sqlite_sequence */ alpha SET id=id",
-            "UPDATE temp.sqlite_sequence SET seq=1",
-            "WITH c AS(SELECT 'UPDATE sqlite_sequence') UPDATE alpha SET id=id",
-            "WITH c AS(SELECT 1) INSERT INTO alpha SELECT seq FROM sqlite_sequence",
-        ] {
-            assert!(!writes_main_sequence(sql), "{sql}");
-        }
-        for sql in [
-            "INSERT OR REPLACE INTO main.sqlite_sequence(name,seq) VALUES('claims',9)",
-            "REPLACE INTO \"main\".\"sqlite_sequence\"(name,seq) VALUES('claims',9)",
-            "DELETE FROM main.`sqlite_sequence` WHERE name='claims'",
-        ] {
-            assert!(writes_main_sequence(sql), "{sql}");
-        }
     }
 
     #[test]
@@ -570,23 +507,61 @@ mod tests {
     }
 
     #[test]
-    fn no_op_read_only_zero_row_and_rollback_boundaries_run_no_refresh_sql() {
+    fn ignored_autoincrement_inserts_publish_index_without_row_or_change_hints() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sequence.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE);
+             CREATE TABLE alpha(id INTEGER PRIMARY KEY);
+             CREATE TRIGGER ignored_claim AFTER INSERT ON alpha BEGIN
+               INSERT OR IGNORE INTO claims(id) VALUES('existing');
+             END;"
+        ).unwrap();
+        let writer = WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+        writer.write().execute_batch("INSERT INTO claims(id) VALUES('existing')").unwrap();
+        let (claims, _claims) = counter(&writer, Some(&["claims"]));
+        let (sequence, _sequence) = counter(&writer, Some(&["sqlite_sequence"]));
+        let (alpha, _alpha) = counter(&writer, Some(&["alpha"]));
+        {
+            let connection = writer.write();
+            let before = connection.total_changes();
+            connection.execute_batch("INSERT OR IGNORE INTO claims(id) VALUES('existing')").unwrap();
+            assert_eq!(connection.total_changes(), before);
+        }
+        assert_eq!(writer.committed_index.load(Ordering::Acquire), 2);
+        assert_eq!((calls(&claims), calls(&sequence), calls(&alpha)), (1, 1, 0));
+        writer.write().execute_batch("INSERT INTO alpha VALUES(1)").unwrap();
+        let fresh_reader = Connection::open(&path).unwrap();
+        assert_eq!(crate::store::current_index(&fresh_reader).unwrap(), 3);
+        assert_eq!(writer.committed_index.load(Ordering::Acquire), 3);
+        assert_eq!((calls(&claims), calls(&sequence), calls(&alpha)), (2, 2, 1));
+        writer.write().execute_batch(
+            "BEGIN; INSERT OR IGNORE INTO claims(id) VALUES('existing'); ROLLBACK"
+        ).unwrap();
+        assert_eq!(crate::store::current_index(&fresh_reader).unwrap(), 3);
+        assert_eq!(writer.committed_index.load(Ordering::Acquire), 3);
+        assert_eq!((calls(&claims), calls(&sequence), calls(&alpha)), (2, 2, 1));
+    }
+
+    #[test]
+    fn no_op_read_only_and_rollback_boundaries_skip_callbacks_and_unneeded_sql() {
         let writer = writer();
         let (global, _global) = counter(&writer, None);
         let (alpha, _alpha) = counter(&writer, Some(&["alpha"]));
-        for sql in [
-            "",
-            "SELECT 1",
-            "BEGIN; SELECT 1; COMMIT",
-            "UPDATE alpha SET id=id WHERE id=999",
-            "BEGIN; INSERT INTO alpha VALUES(1); ROLLBACK",
-            "SAVEPOINT s; INSERT INTO alpha VALUES(1); ROLLBACK TO s; RELEASE s",
+        for (sql, expected_reads) in [
+            ("", 0),
+            ("SELECT 1", 0),
+            ("BEGIN; SELECT 1; COMMIT", 0),
+            ("UPDATE alpha SET id=id WHERE id=999", 1),
+            ("BEGIN; INSERT INTO alpha VALUES(1); ROLLBACK", 0),
+            ("SAVEPOINT s; INSERT INTO alpha VALUES(1); ROLLBACK TO s; RELEASE s", 1),
         ] {
             let connection = writer.write();
             connection.execute_batch(sql).unwrap();
             let work = SqliteWorkScope::start();
             drop(connection);
-            assert_eq!(work.finish().statements, 0, "post-loan SQL after {sql}");
+            assert_eq!(work.finish().statements, expected_reads, "post-loan SQL after {sql}");
             assert_eq!(calls(&global), 0, "global evaluation after {sql}");
             assert_eq!(calls(&alpha), 0, "dependent evaluation after {sql}");
         }
@@ -704,7 +679,7 @@ mod statement_failure_tests {
             connection.execute_batch("COMMIT").unwrap();
             let work = SqliteWorkScope::start();
             drop(connection);
-            assert_eq!(work.finish().statements, 0);
+            assert_eq!(work.finish().statements, 1);
         }
         assert_eq!(count.load(Ordering::Relaxed), 0);
         {
@@ -753,7 +728,7 @@ mod savepoint_resolution_tests {
         assert_eq!(connection.query_row("SELECT count(*) FROM child", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
         let work = SqliteWorkScope::start();
         drop(connection);
-        assert_eq!(work.finish().statements, 0);
+        assert_eq!(work.finish().statements, 1);
         assert_eq!(globals.load(Ordering::Relaxed), 0);
         assert_eq!(dependents.load(Ordering::Relaxed), 0);
     }
@@ -776,7 +751,7 @@ mod savepoint_resolution_tests {
             connection.execute_batch(sql).unwrap();
             let work = SqliteWorkScope::start();
             drop(connection);
-            assert_eq!(work.finish().statements, 0, "{sql}");
+            assert_eq!(work.finish().statements, 1, "{sql}");
             assert_eq!(globals.load(Ordering::Relaxed), 0, "{sql}");
             assert_eq!(dependents.load(Ordering::Relaxed), 0, "{sql}");
         }
@@ -825,7 +800,7 @@ mod busy_savepoint_tests {
             if rollback {
                 let work = SqliteWorkScope::start();
                 drop(connection);
-                assert_eq!(work.finish().statements, 0);
+                assert_eq!(work.finish().statements, 1);
                 assert_eq!(count.load(Ordering::Relaxed), 0);
             } else {
                 drop(connection);

@@ -1308,16 +1308,25 @@ that compile option and refuses unsupported SQLite builds rather than silently u
 global invalidation. The writer-owned native hook records physical table mutations,
 including `WITHOUT ROWID` tables, and discards rolled-back transaction/savepoint work.
 Committed schema changes retain a conservative invalidation boundary. Returning a
-read-only or unchanged writer loan still resolves native observer coverage, but does
-not refresh the committed index or evaluate commit observers. Background consumers
-declare their source tables with `observe_tables`; unrelated committed tables do not
-wake them. Table-level dependencies intentionally do not distinguish keys within `meta`
-or kinds within `claims`.
+read-only or fully rolled-back writer loan still resolves native observer coverage,
+but does not probe the committed index or evaluate commit observers. A confirmed
+SQLite write commit probes the index once, even when no row hook or `total_changes`
+delta occurred: ignored AUTOINCREMENT inserts can still advance `sqlite_sequence`.
+Only a changed index adds claims/sequence dependencies; unchanged commits do not
+evaluate callbacks. Background consumers declare their source tables with
+`observe_tables`; unrelated committed tables do not wake them. Table-level
+dependencies intentionally do not distinguish keys within `meta` or kinds within
+`claims`.
 
 `GET /v1/performance` exports lifetime `writer_observers` counters: `boundaries`, `noops`,
 `rollbacks`, `index_refreshes`, `global_evaluations` and `scoped_evaluations`. Compare
 counter deltas under the same fixture/load; evaluation counts measure callback work,
 not operating-system wakes or CPU time.
+`index_refreshes` counts these authoritative index probes, including empty write
+commits whose index is unchanged. `noops` counts boundaries with no committed table,
+schema, coverage or index change after that probe; it does not promise zero SQL for
+an otherwise empty write commit.
+
 
 A full replication projection fallback always writes one bounded line to daemon stderr before
 replay starts, even without `ST3_PROFILE_DIR`. It names the phase, reason, previous frontier and

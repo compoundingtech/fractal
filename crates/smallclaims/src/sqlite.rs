@@ -1426,8 +1426,9 @@ impl Drop for WriterGuard<'_> {
     }
 }
 
-/// Native coverage publication is unconditional: even an otherwise empty loan can resolve
-/// a replaced hook. SQL index refresh and user callbacks require committed mutations.
+/// Native coverage publication is unconditional. Confirmed write commits also check the
+/// claims index: SQLite can advance AUTOINCREMENT without row hooks or total_changes.
+/// Read-only loans and rollbacks do not probe it; callbacks require committed changes.
 fn publish_writer_boundary(
     connection: &Connection,
     committed_index: &AtomicU64,
@@ -1436,13 +1437,23 @@ fn publish_writer_boundary(
 ) {
     let Some(mutations) = mutations else { return; };
     mutations.resolved(connection);
-    let changes = mutations.take_committed(connection);
-    if !changes.changed() { return; }
-    commit_scope::INDEX_REFRESHES.fetch_add(1, Ordering::Relaxed);
-    if let Ok(index) = current_index(connection) {
-        committed_index.store(index, Ordering::Release);
+    let mut changes = mutations.take_committed(connection);
+    if changes.changed() || changes.committed {
+        commit_scope::INDEX_REFRESHES.fetch_add(1, Ordering::Relaxed);
+        match current_index(connection) {
+            Ok(index) => {
+                if index != committed_index.load(Ordering::Acquire) {
+                    changes.index_changed();
+                }
+                committed_index.store(index, Ordering::Release);
+            }
+            Err(_) => changes.unknown = true,
+        }
     }
-    observers.notify(connection, &changes);
+    commit_scope::boundary(&changes);
+    if changes.changed() {
+        observers.notify(connection, &changes);
+    }
 }
 
 /// Read connections, with separate admission and idle-retention ceilings. Top-level API
