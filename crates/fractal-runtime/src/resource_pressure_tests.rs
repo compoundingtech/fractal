@@ -494,8 +494,8 @@ fn defaults_discover_service_system_and_interactive_app_slice() {
     assert!(found.contains(&mount.join(
         "user.slice/user-1000.slice/user@1000.service/interactive.slice")));
     assert_eq!(fixture.policy.job_parent_cgroups, vec![
-        "gate.slice".into(), "app-lanes.slice".into(), "app-capped.slice".into(),
-        "app-capped-heavy.slice".into(), "app-batch.slice".into(), "app-batch-heavy.slice".into(),
+        PathBuf::from("gate.slice"), PathBuf::from("app-lanes.slice"), PathBuf::from("app-capped.slice"),
+        PathBuf::from("app-capped-heavy.slice"), PathBuf::from("app-batch.slice"), PathBuf::from("app-batch-heavy.slice"),
     ]);
     assert_eq!(fixture.policy.excluded_cgroups, vec![PathBuf::from("app-lanes.slice"), PathBuf::from("gate.slice")]);
 }
@@ -833,8 +833,8 @@ fn policy_rejects_paths_outside_mount_and_non_basename_relative_exclusions() {
 #[test]
 fn job_parent_cgroups_default_to_launcher_lane_slices_and_validate_lexically() {
     assert_eq!(Policy::default().job_parent_cgroups, vec![
-        "gate.slice".into(), "app-lanes.slice".into(), "app-capped.slice".into(),
-        "app-capped-heavy.slice".into(), "app-batch.slice".into(), "app-batch-heavy.slice".into(),
+        PathBuf::from("gate.slice"), PathBuf::from("app-lanes.slice"), PathBuf::from("app-capped.slice"),
+        PathBuf::from("app-capped-heavy.slice"), PathBuf::from("app-batch.slice"), PathBuf::from("app-batch-heavy.slice"),
     ]);
     // Basenames are systemd slice unit names; absolutes are exact mount-relative paths.
     let policy = Policy {
