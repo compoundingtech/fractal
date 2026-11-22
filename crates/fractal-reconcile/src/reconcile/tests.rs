@@ -442,12 +442,31 @@ mission "example/report" state="ready" {
                     "path":transcript,
                 })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
             let runtime = Arc::new(FakeRuntime::default());
+            if case == "exact" {
+                for index in 0..128 {
+                    let other = format!("agent/example/other-{index}");
+                    store.append_claim(&ClaimInput { subject:other.clone(), kind:"harness.invocation".into(),
+                        actor:None, fields:serde_json::from_value(serde_json::json!({
+                            "invocation_id":format!("invocation/other-{index}"),
+                            "operation_id":format!("other-{index}"), "agent":other,
+                            "phase":"started", "incarnation":"other-incarnation"
+                        })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+                }
+            }
             let mut reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
             reconciler.driver_state_dir = root.path().join("drivers");
             let status = match case { "running" => "running", "vanished" => "vanished", _ => "stopped" };
             // Exercise the actual observation writer, including its unchanged-observation retry.
-            for _ in 0..2 {
+            let member_receipts = store.claims_for(subject, Some("harness.invocation")).unwrap().len();
+            store.take_invocation_receipt_read_work();
+            for pass in 0..2 {
                 reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+                let (rows, vm) = store.take_invocation_receipt_read_work();
+                if pass == 0 && status != "running" {
+                    assert_eq!(rows, member_receipts as u64, "{case}: one subject-only reconstruction");
+                } else {
+                    assert_eq!((rows, vm), (0, 0), "{case}: unchanged observation must not reload receipts");
+                }
             }
             let claims = store.claims_for(subject, Some("harness.invocation-artifact")).unwrap();
             let captured = claims.iter().filter(|claim| claim.body["fields"]["status"] == "retained").collect::<Vec<_>>();
