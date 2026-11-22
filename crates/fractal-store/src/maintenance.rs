@@ -201,7 +201,7 @@ async fn run_replication_admission_observed(
 ) {
     let (observer, mut changed) = {
         let Some(current) = store.upgrade() else { return; };
-        let generation = match crate::store::GraphStore::replication_admission_wake_generation(&current.readers.get()) {
+        let generation = match crate::store::GraphStore::replication_maintenance_generation(&current.readers.get()) {
             Ok(generation) => generation,
             Err(error) => {
                 tracing::error!(error = %error, "replication admission wake initialization failed");
@@ -210,7 +210,7 @@ async fn run_replication_admission_observed(
         };
         let (source, changed) = tokio::sync::watch::channel(generation);
         let observer = current.observe_commits(move |connection| {
-            match crate::store::GraphStore::replication_admission_wake_generation(connection) {
+            match crate::store::GraphStore::replication_maintenance_generation(connection) {
                 Ok(generation) => {
                     source.send_if_modified(|previous| {
                         if *previous == generation { return false; }
@@ -236,6 +236,7 @@ async fn run_replication_admission_observed(
             crate::task_cpu::profiled_blocking("maintenance.replication_admission", || {
                 let admission = current.validate_replication_backlog()?;
                 let repairs = current.apply_replication_repairs()?;
+                let generation = crate::store::GraphStore::replication_maintenance_generation(&current.readers.get())?;
                 let was_deferred = current.replication_projection_deferred();
                 let projection_attempted = admission.changed
                     || repairs != 0
@@ -254,13 +255,16 @@ async fn run_replication_admission_observed(
                 Ok::<_, anyhow::Error>((
                     projected == Some(true) && (admission.changed || repairs != 0 || was_deferred),
                     retry_after,
+                    generation,
                 ))
             })
         }).await;
-        let retry_after = match result {
-            Ok(Ok((projected, retry_after))) => {
+        let (retry_after, source_changed) = match result {
+            Ok(Ok((projected, retry_after, generation))) => {
                 if projected { on_changed(); }
-                retry_after
+                // Consume our admission's wake, but never a publication racing projection.
+                let source_changed = *changed.borrow_and_update() != generation;
+                (retry_after, source_changed)
             }
             Ok(Err(error)) => {
                 tracing::error!(error = %error, "replication admission maintenance stopped");
@@ -272,7 +276,13 @@ async fn run_replication_admission_observed(
             }
         };
         on_turn(false);
+        if source_changed { continue; }
         if let Some(delay) = retry_after {
+            // A busy receive leaves durable admission behind. Resume on gate release,
+            // not a zero-delay loop of failed nonblocking projection attempts.
+            let Some(current) = store.upgrade() else { break; };
+            current.projection.ready().await;
+            drop(current);
             // Quiet peers need a continuation too. Release the Store and writer before
             // waiting; a new publication can still advance this deadline.
             tokio::select! {
@@ -454,6 +464,41 @@ mod tests {
     #[tokio::test]
     async fn admission_worker_processes_persisted_publication_before_observer_registration() {
         quiet_admission_after_publication(true).await;
+    }
+
+    #[tokio::test]
+    async fn busy_projection_gate_continues_admitted_work_without_another_receive() {
+        let (_root, store, claim_id) = held_replication_fixture();
+        publish_capped_preparation(&store);
+        assert!(store.validate_replication_backlog().unwrap().changed);
+        // A receive cannot queue behind a long projection owner. Its admission is durable.
+        let guard = store.projection.lock();
+        assert_eq!(store.project_replication_backlog_unless_catching_up().unwrap(), None);
+        assert!(store.replication_projection_deferred());
+        let admitted = crate::store::GraphStore::replication_maintenance_generation(&store.readers.get()).unwrap().1;
+        assert!(admitted > 0);
+        assert!(store.claim_by_id(&claim_id).unwrap().is_some());
+        let (turns, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let projected = notify.clone();
+        let worker = tokio::spawn(run_replication_admission_observed(
+            Arc::downgrade(&store),
+            move || projected.notify_one(),
+            move |working| { let _ = turns.send(working); },
+        ));
+        assert!(observed.recv().await.unwrap());
+        assert!(!observed.recv().await.unwrap());
+        assert!(store.replication_projection_deferred());
+        drop(guard);
+        // No exchange or write wakes the worker after releasing the gate.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        assert!(!store.replication_projection_deferred());
+        assert!(store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM resource_observations WHERE subject=?1)",
+            [ADMISSION_SUBJECT], |row| row.get::<_, bool>(0),
+        ).unwrap());
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
     }
 
     #[tokio::test]

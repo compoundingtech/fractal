@@ -1,18 +1,29 @@
-//! A discovery watermark is valid only for the same checkpoint/restored claim prefix.
+//! Discovery proves absence of new conflicts, not absence of retired conflict evidence.
 use super::*;
 
-const INSTALL: &str = /* sqlite-large-value: allow-for-now lv-hdd122545f0d0 owner=smallclaims::store::operation_conflict_fence TODO=chunk-or-reference-variable-columns */ r#"
+#[cfg(test)]
+#[path = "operation_conflict_fence_tests.rs"]
+mod tests;
+
+const INSTALL: &str = /* sqlite-large-value: allow-for-now lv-h1028a1372c50 owner=smallclaims::store::operation_conflict_fence TODO=chunk-or-reference-variable-columns */ r#"
 INSERT OR IGNORE INTO meta(key,value) VALUES('operation_conflict_source_generation','0');
 CREATE INDEX IF NOT EXISTS projection_health_degraded_operation_subject
 ON projection_health(error_code,aggregate)
 WHERE status='stale' AND error_code='operation-conflict-no-bounded-refold';
-CREATE TRIGGER IF NOT EXISTS operation_conflict_checkpoint_insert AFTER INSERT ON checkpoint_claims BEGIN
+-- Replace the old definitions on upgrade as well as on a fresh store.
+DROP TRIGGER IF EXISTS operation_conflict_checkpoint_insert;
+DROP TRIGGER IF EXISTS operation_conflict_checkpoint_delete;
+DROP TRIGGER IF EXISTS operation_conflict_prefix_delete;
+CREATE TRIGGER operation_conflict_checkpoint_insert AFTER INSERT ON checkpoint_claims
+WHEN NEW.operation_id IS NOT NULL AND NEW.request_digest IS NOT NULL
+ AND NOT EXISTS (
+    SELECT 1 FROM claims WHERE id=NEW.id AND kind=NEW.kind
+     AND json_extract(body,'$._operation.id') IS NEW.operation_id
+     AND json_extract(body,'$._operation.request_digest') IS NEW.request_digest
+ ) BEGIN
     UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='operation_conflict_source_generation';
 END;
 CREATE TRIGGER IF NOT EXISTS operation_conflict_checkpoint_update AFTER UPDATE ON checkpoint_claims BEGIN
-    UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='operation_conflict_source_generation';
-END;
-CREATE TRIGGER IF NOT EXISTS operation_conflict_checkpoint_delete AFTER DELETE ON checkpoint_claims BEGIN
     UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='operation_conflict_source_generation';
 END;
 CREATE TRIGGER IF NOT EXISTS operation_conflict_prefix_insert AFTER INSERT ON claims
@@ -22,10 +33,14 @@ END;
 CREATE TRIGGER IF NOT EXISTS operation_conflict_prefix_update AFTER UPDATE OF id,body,store_index ON claims BEGIN
     UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='operation_conflict_source_generation';
 END;
-CREATE TRIGGER IF NOT EXISTS operation_conflict_prefix_delete AFTER DELETE ON claims BEGIN
-    UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='operation_conflict_source_generation';
-END;
 "#;
+
+// Deleting a source cannot introduce a conflicting operation/digest pair. Recording the
+// same live claim as a checkpoint tombstone cannot either. Restoring new checkpoint
+// evidence, changing source metadata, or inserting below the frontier still invalidates.
+// Existing replay fences deliberately survive deletion: they conservatively prohibit an
+// automatic whole-log replay until explicit repair, just as they did after rediscovery.
+// They do not suppress keyed incremental conflict handling or erase canonical receipts.
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
     let tx = connection.unchecked_transaction()?;

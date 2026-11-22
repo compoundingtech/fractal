@@ -5090,6 +5090,8 @@ const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// Newly admitted claims projected per writer transaction. A catch-up page must not keep
 /// queued lease renewals and messages behind its entire incremental projection.
 pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
+/// Pages of discovery and projection per daemon turn. Explicit repair APIs drain fully.
+const PROJECTION_TURN_CHUNKS: usize = 8;
 /// A checkpoint that waits this long for the writer names the hold that held it up. The daemon
 /// reports the same wait as an abnormal checkpoint.
 const CHECKPOINT_HELD_UP_MS: u128 = 100;
@@ -9133,13 +9135,16 @@ impl Store {
     /// projected within the last `CATCH_UP_PROJECTION_INTERVAL_MS`. History arrives older than
     /// this node's own claims, so a catching-up node cannot extend its projection and would
     /// replay the whole graph after every exchange. It projects at most once per interval
-    /// instead, and again as soon as it has caught up. `None` means it deferred.
+    /// instead, and again as soon as it has caught up. Each daemon turn bounds discovery
+    /// and projection pages; `None` also requests continuation after a busy gate or spent turn.
     pub fn project_replication_backlog_unless_catching_up(&self) -> Result<Option<bool>> {
         if self.replication_projection_throttle_remaining().is_some() {
             self.defer_replication_projection();
             return Ok(None);
         }
-        self.project_replication_backlog().map(Some)
+        self.project_replication_backlog_chunks(
+            || {}, || {}, "replication", |line| eprintln!("{line}"), |_| {}, true,
+        )
     }
 
     /// Time until a catch-up projection may run again, without bypassing its throttle.
@@ -9194,6 +9199,14 @@ impl Store {
             )
             .optional()?
             .unwrap_or(0))
+    }
+
+    /// Observe durable admitted work as well as runtime-hold eligibility changes.
+    pub fn replication_maintenance_generation(connection: &Connection) -> Result<(u64, u64)> {
+        Ok((Self::replication_admission_wake_generation(connection)?, connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key='replication_admitted_index'",
+            [], |row| row.get(0),
+        )?))
     }
 
     pub fn projection_contention_generation(&self) -> u64 {
@@ -9322,7 +9335,8 @@ impl Store {
             phase,
             |line| eprintln!("{line}"),
             |_| {},
-        )
+            false,
+        ).map(|result| result.unwrap_or(false))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -9331,7 +9345,8 @@ impl Store {
         phase: &str,
         log: impl FnMut(&str),
     ) -> Result<bool> {
-        self.project_replication_backlog_chunks(|| {}, || {}, phase, log, |_| {})
+        self.project_replication_backlog_chunks(|| {}, || {}, phase, log, |_| {}, false)
+            .map(|result| result.unwrap_or(false))
     }
 
     /// Publish bounded observations on the projection thread; observers must not read the store.
@@ -9346,7 +9361,8 @@ impl Store {
             phase,
             |line| eprintln!("{line}"),
             progress,
-        )
+            false,
+        ).map(|result| result.unwrap_or(false))
     }
 
     /// Exercise reads and queued writes between committed projection chunks.
@@ -9358,7 +9374,8 @@ impl Store {
             "replication",
             |line| eprintln!("{line}"),
             |_| {},
-        )
+            false,
+        ).map(|result| result.unwrap_or(false))
     }
 
     /// Force an admission or deferral after the final index read, before clearing its state.
@@ -9373,7 +9390,8 @@ impl Store {
             "replication",
             |line| eprintln!("{line}"),
             |_| {},
-        )
+            false,
+        ).map(|result| result.unwrap_or(false))
     }
 
     fn log_projection_failure(
@@ -9417,7 +9435,7 @@ impl Store {
     /// Discover only the new admitted range, on readers, before lending the projection writer.
     /// A first upgrade scans the old log once; each metadata page commits its own watermark.
     /// Receipts beyond this pass's fixed target belong to the next pass, never this scan.
-    fn discover_operation_conflicts(&self, target: u64) -> Result<()> {
+    fn discover_operation_conflicts(&self, target: u64, bounded: bool) -> Result<bool> {
         let (mut scanned, generation, mut unproven) = {
             let connection = self.readers.get();
             let tx = connection.unchecked_transaction()?;
@@ -9431,12 +9449,15 @@ impl Store {
                 _ => (0,generation,true),
             }
         };
+        let mut pages = 0;
         while scanned < target || unproven {
+            if bounded && pages == PROJECTION_TURN_CHUNKS { return Ok(false); }
+            pages += 1;
             unproven = false;
             let (through, conflicts) = {
                 let connection = self.readers.get();
                 let tx = connection.unchecked_transaction()?;
-                if operation_conflict_fence::generation(&tx)? != generation { return Ok(()); }
+                if operation_conflict_fence::generation(&tx)? != generation { return Ok(false); }
                 let mut page = tx.prepare(
                     "SELECT store_index,id,
                        CASE WHEN json_type(body,'$._operation.id')='text' THEN json_extract(body,'$._operation.id') END,
@@ -9493,7 +9514,7 @@ impl Store {
                 .map_err(|error| internal(error)
                     .with_detail("projection_stage", "begin-immediate")
                     .with_detail("projection_frontier_unknown", true))?;
-            if operation_conflict_fence::generation(&tx)? != generation { return Ok(()); }
+            if operation_conflict_fence::generation(&tx)? != generation { return Ok(false); }
             for (operation, evidence) in conflicts {
                 tx.execute(
                     /* sqlite-large-value: allow-for-now lv-hb7532db3c65d owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
@@ -9511,7 +9532,7 @@ impl Store {
             tx.commit()?;
             scanned = through;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn project_replication_backlog_chunks(
@@ -9521,18 +9542,22 @@ impl Store {
         phase: &str,
         mut log: impl FnMut(&str),
         mut progress: impl FnMut(ProjectionProgress),
-    ) -> Result<bool> {
+        bounded: bool,
+    ) -> Result<Option<bool>> {
         let gate_wait = std::time::Instant::now();
-        let _projecting = self.projection.lock();
+        self.defer_replication_projection();
+        let _projecting = if bounded {
+            let Some(guard) = self.projection.try_lock() else { return Ok(None); };
+            guard
+        } else {
+            self.projection.lock()
+        };
         crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
         let _timing = time_stage(&self.replication_timers.projection);
-        self.defer_replication_projection();
-        self.last_replication_projection_unix_ms
-            .store(now_ms() as u64, Ordering::Release);
         // Finish the backlog observed at entry. New receives can admit more between chunks;
         // their own projection pass will take those up without keeping this one alive forever.
         let target = self.index()?;
-        self.discover_operation_conflicts(target).map_err(|error| {
+        let discovered = self.discover_operation_conflicts(target, bounded).map_err(|error| {
             // Discovery lends the same writer before the projection chunk. Preserve its
             // typed contention boundary, health and deferred retry state as for that chunk.
             let error = crate::error::typed(error);
@@ -9542,9 +9567,13 @@ impl Store {
             }
             error
         })?;
+        if !discovered { return Ok(None); }
         let mut chunked = false;
         let mut processed = 0_u64;
+        let mut chunks = 0;
         loop {
+            if bounded && chunks == PROJECTION_TURN_CHUNKS { return Ok(None); }
+            chunks += 1;
             // Each chunk's loan records where its hold went. The scope ends when the loan does,
             // so the tail verdict pass after it is its own hold. No other writer loan is asked
             // for on this thread inside the scope: none comes before `write()`, and a second one
@@ -9877,7 +9906,9 @@ impl Store {
                             Ordering::Acquire,
                         );
                     }
-                    return Ok(true);
+                    self.last_replication_projection_unix_ms
+                        .store(now_ms() as u64, Ordering::Release);
+                    return Ok(Some(true));
                 }
                 Err(error) => {
                     let error = record_error(error);
@@ -9891,7 +9922,7 @@ impl Store {
                         // scheduled separately; receive/wake passes can also recover sooner.
                         self.note_projection_contention();
                         stages.enter("release");
-                        return Ok(false);
+                        return Ok(Some(false));
                     }
                     stages.enter("health");
                     connection.execute(
@@ -9902,7 +9933,7 @@ impl Store {
                     params![error.code, error.message, now_ms().to_string()],
                 )?;
                     stages.enter("release");
-                    return Ok(false);
+                    return Ok(Some(false));
                 }
             }
         }

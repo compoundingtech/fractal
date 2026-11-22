@@ -13,6 +13,7 @@ use std::time::Instant;
 pub struct ProjectionGate {
     state: Mutex<State>,
     changed: Condvar,
+    released: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -45,6 +46,30 @@ impl ProjectionGate {
         self.acquire(None).expect("a wait without a deadline cannot expire")
     }
 
+    /// Take an idle gate without queueing behind another pass or overtaking a waiter.
+    pub fn try_lock(&self) -> Option<ProjectionGuard<'_>> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.next != state.serving {
+            return None;
+        }
+        state.next = state.next.wrapping_add(1);
+        Some(ProjectionGuard { gate: self })
+    }
+
+    /// Background continuation waits for ownership to clear without occupying a worker.
+    pub async fn ready(&self) {
+        loop {
+            let released = self.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            {
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                if state.next == state.serving { return; }
+            }
+            released.await;
+        }
+    }
+
     /// Acquire before `deadline`, or remove this ticket and return `None`.
     ///
     /// The deadline includes queueing time; an expired deadline cannot acquire even
@@ -70,6 +95,7 @@ impl ProjectionGate {
             if remaining.is_some_and(|remaining| remaining.is_zero()) {
                 state.cancel(ticket);
                 self.changed.notify_all();
+                self.released.notify_waiters();
                 return None;
             }
             if ticket == state.serving {
@@ -100,6 +126,7 @@ impl Drop for ProjectionGuard<'_> {
         let mut state = self.gate.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.advance();
         self.gate.changed.notify_all();
+        self.gate.released.notify_waiters();
     }
 }
 
@@ -117,6 +144,15 @@ mod tests {
             .wait_timeout_while(state, Duration::from_secs(5), |state| state.next < count)
             .unwrap_or_else(PoisonError::into_inner);
         assert!(state.next >= count, "waiters did not enroll: {timeout:?}");
+    }
+
+    #[test]
+    fn nonblocking_acquisition_never_enrolls_behind_an_owner() {
+        let gate = ProjectionGate::default();
+        let held = gate.try_lock().unwrap();
+        assert!(gate.try_lock().is_none());
+        drop(held);
+        assert!(gate.try_lock().is_some());
     }
 
     #[test]
