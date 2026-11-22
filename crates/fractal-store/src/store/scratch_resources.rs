@@ -4,6 +4,76 @@ use super::*;
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Component, Path};
+use rustix::fd::OwnedFd;
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+
+const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+// rustix uses platform-native stat fields: device IDs can be signed on macOS
+// while Linux already supplies u64. Keep the checked portable conversion here.
+#[allow(clippy::useless_conversion)]
+fn stat_identity(stat: &rustix::fs::Stat) -> Result<(u64, u64)> {
+    Ok((stat.st_dev.try_into()?, stat.st_ino.try_into()?))
+}
+
+fn fd_identity(directory: &OwnedFd) -> Result<(u64, u64)> {
+    stat_identity(&rustix::fs::fstat(directory)?)
+}
+
+/// Walk from the filesystem root without ever resolving a symlink component.
+/// Once opened, renaming any ancestor cannot redirect this directory capability.
+fn open_custody_root(record: &Record) -> Result<OwnedFd> {
+    let path = Path::new(&record.request.root);
+    anyhow::ensure!(path.is_absolute() && path.parent().is_some(), "scratch root must be an absolute dedicated directory");
+    anyhow::ensure!(Path::new(&record.handle.path).parent() == Some(path), "scratch object escaped dedicated root");
+    let mut directory = rustix::fs::open("/", DIRECTORY_FLAGS, Mode::empty())?;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {},
+            Component::Normal(name) => {
+                directory = rustix::fs::openat(&directory, name, DIRECTORY_FLAGS, Mode::empty())?;
+            }
+            _ => anyhow::bail!("noncanonical scratch root"),
+        }
+    }
+    anyhow::ensure!(fd_identity(&directory)? == (record.root_device, record.root_inode), "scratch root identity changed");
+    anyhow::ensure!(rustix::fs::fstat(&directory)?.st_mode & 0o077 == 0, "scratch root must be private (0700)");
+    Ok(directory)
+}
+
+fn verify_entry(parent: &OwnedFd, name: &std::ffi::CStr, expected: (u64, u64)) -> Result<()> {
+    let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    let observed = stat_identity(&stat)?;
+    anyhow::ensure!(observed == expected, "scratch entry identity changed before removal");
+    Ok(())
+}
+
+/// Mutations use only held parent capabilities and single-component names.
+/// An entry replaced between stat and open is rejected; O_NOFOLLOW prevents a
+/// replacement symlink from becoming a traversal. There is no pathname retry.
+fn remove_contents(directory: &OwnedFd) -> Result<()> {
+    for entry in Dir::read_from(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_bytes() == b"." || name.to_bytes() == b".." { continue; }
+        let stat = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        let expected = stat_identity(&stat)?;
+        if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
+            let child = rustix::fs::openat(directory, name, DIRECTORY_FLAGS, Mode::empty())?;
+            anyhow::ensure!(fd_identity(&child)? == expected, "scratch child identity changed before traversal");
+            remove_contents(&child)?;
+            verify_entry(directory, name, expected)?;
+            rustix::fs::unlinkat(directory, name, AtFlags::REMOVEDIR)?;
+        } else {
+            verify_entry(directory, name, expected)?;
+            rustix::fs::unlinkat(directory, name, AtFlags::empty())?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -163,32 +233,9 @@ fn owner_observation(connection: &Connection, record: &Record) -> Result<OwnerOb
     } else { OwnerObservation::Unknown })
 }
 
-fn inside(path: &str, root: &str) -> bool {
-    let path = Path::new(path);
-    if path.starts_with(root) { return true; }
-    // Aliased cwd/disk paths must not evade custody checks.
-    fs::canonicalize(path).is_ok_and(|path| path.starts_with(root))
-}
-
 fn consumers(connection: &Connection, record: &Record) -> Result<OwnerObservation> {
-    let mut observation = OwnerObservation::Terminal;
-    let mut members = connection.prepare("SELECT body FROM resource_memberships_v1 WHERE host=?1 AND state NOT IN ('retired','refused','cancelled')")?;
-    for body in members.query_map([&record.request.host], |row| row.get::<_, String>(0))? {
-        let member: Value = serde_json::from_str(&body?)?;
-        if member.pointer("/request/diskPath").and_then(Value::as_str).is_some_and(|path| inside(path, &record.handle.path)) {
-            if matches!(member.get("state").and_then(Value::as_str), Some("admitted" | "launched")) { return Ok(OwnerObservation::Live); }
-            observation = OwnerObservation::Unknown;
-        }
-    }
-    let mut commands = connection.prepare("SELECT body FROM shell_resources_v1 WHERE host=?1 AND state NOT IN ('completed','failed','cancelled','refused')")?;
-    for body in commands.query_map([&record.request.host], |row| row.get::<_, String>(0))? {
-        let command: Value = serde_json::from_str(&body?)?;
-        if command.pointer("/command/cwd").and_then(Value::as_str).is_some_and(|path| inside(path, &record.handle.path)) {
-            if matches!(command.get("state").and_then(Value::as_str), Some("running" | "queued")) { return Ok(OwnerObservation::Live); }
-            observation = OwnerObservation::Unknown;
-        }
-    }
-    Ok(observation)
+    super::scratch_consumers::observation(
+        connection, &record.request.host, &record.handle.path, record.object)
 }
 
 impl Store {
@@ -263,37 +310,40 @@ impl Store {
             && proof.owner_generation == record.request.owner_generation, "scratch finalization proof owner mismatch");
         if owner_observation(&connection, &record)? == OwnerObservation::Unknown { return Ok(false); }
         if consumers(&connection, &record)? != OwnerObservation::Terminal { return Ok(false); }
-        custody(&record)?;
-        match fs::symlink_metadata(&record.handle.path) {
-            Ok(_) => {
-                let observed = identity(Path::new(&record.handle.path))?;
+        let root = open_custody_root(&record)?;
+        let name = Path::new(&record.handle.path).file_name()
+            .ok_or_else(|| anyhow::anyhow!("scratch object has no basename"))?;
+        let object = match rustix::fs::openat(&root, name, DIRECTORY_FLAGS, Mode::empty()) {
+            Ok(directory) => {
+                let observed = fd_identity(&directory)?;
                 if let Some(expected) = record.object {
                     anyhow::ensure!(observed == expected, "scratch object identity changed");
                 } else { record.object = Some(observed); }
+                Some(directory)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(rustix::io::Errno::NOENT) => {
                 anyhow::ensure!(record.state == "intent" || record.state == "releasing", "held scratch disappeared; custody unknown");
+                None
             }
             Err(error) => return Err(error.into()),
-        }
+        };
         record.handle.authority_epoch = handle.authority_epoch.clone();
         record.state = "releasing".into();
         let transaction = connection.transaction()?;
         write(&transaction, &record)?;
         transaction.commit()?;
-        custody(&record)?;
-        if Path::new(&record.handle.path).try_exists()? {
-            anyhow::ensure!(Some(identity(Path::new(&record.handle.path))?) == record.object,
-                "scratch object identity changed before removal");
-        }
+        // The verified allocation fd, not its absolute pathname, crosses the
+        // durable releasing boundary and the final custody/mutation handoff.
         #[cfg(test)]
         tests::before_remove();
-        match fs::remove_dir_all(&record.handle.path) {
-            Ok(()) => {},
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-            Err(error) => return Err(error.into()),
+        if let Some(object) = object {
+            let name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(name))?;
+            verify_entry(&root, &name, fd_identity(&object)?)?;
+            remove_contents(&object)?;
+            verify_entry(&root, &name, fd_identity(&object)?)?;
+            rustix::fs::unlinkat(&root, &name, AtFlags::REMOVEDIR)?;
         }
-        fs::File::open(&record.request.root)?.sync_all()?;
+        rustix::fs::fsync(&root)?;
         record.state = "released".into();
         write(&connection, &record)?;
         Ok(true)

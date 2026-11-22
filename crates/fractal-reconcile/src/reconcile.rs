@@ -1436,7 +1436,7 @@ impl NativeRuntime {
                         .find(|slot| cwd.starts_with(slot.root()))
                         .context("darwin-custody-cwd: shell cwd is outside its admitted slot")?)
                 } else { None };
-                store.prepare_resource_membership(&grant, &member.runtime_id)?;
+                let cwd = store.prepare_resource_membership_cwd(&grant, &member.runtime_id, &cwd)?;
                 let guarded = || -> Result<()> {
                     if let Some(guard) = guard { guard()?; }
                     anyhow::ensure!(matches!(store.resource_membership(&request.id, &request.owner, now())?,

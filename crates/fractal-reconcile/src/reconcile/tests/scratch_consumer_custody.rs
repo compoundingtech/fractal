@@ -1,4 +1,4 @@
-//! Public producer/release regressions: this file also compiles against the pre-fix APIs.
+//! Public producer/release regressions for durable native and shell directory custody.
 use super::*;
 use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner, RequestClass};
 use crate::store::scratch_resources::{OwnerObservation, ScratchHandle, ScratchReleaseProof, ScratchRequest};

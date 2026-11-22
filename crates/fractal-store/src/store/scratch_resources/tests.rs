@@ -398,3 +398,43 @@ fn renamed_ancestor_after_final_check_never_deletes_symlink_target() {
     assert!(!original.exists());
     assert_eq!(record(&store, &request.id).state, "released");
 }
+
+#[test]
+fn allocation_swap_after_final_check_retains_original_and_replacement() {
+    let (store, directory, request) = fixture();
+    let handle = store.acquire_scratch(&request).unwrap();
+    fs::write(Path::new(&handle.path).join("payload"), b"owned").unwrap();
+    let allocation = Path::new(&handle.path).to_path_buf();
+    let displaced = directory.path().join("displaced");
+    let payload = displaced.join("payload");
+    let foreign = directory.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    let sentinel = foreign.join("sentinel");
+    fs::write(&sentinel, b"unrelated").unwrap();
+    BEFORE_REMOVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        fs::rename(&allocation, &displaced).unwrap();
+        std::os::unix::fs::symlink(&foreign, &allocation).unwrap();
+    })));
+    assert!(release(&store, &handle).is_err());
+    assert_eq!(fs::read(sentinel).unwrap(), b"unrelated");
+    assert_eq!(fs::read(payload).unwrap(), b"owned");
+    assert!(fs::symlink_metadata(&handle.path).unwrap().file_type().is_symlink());
+    assert_eq!(record(&store, &request.id).state, "releasing");
+}
+
+#[test]
+fn recursive_removal_unlinks_directory_symlinks_without_traversal() {
+    let (store, directory, request) = fixture();
+    let handle = store.acquire_scratch(&request).unwrap();
+    let foreign = directory.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    let sentinel = foreign.join("sentinel");
+    fs::write(&sentinel, b"unrelated").unwrap();
+    let nested = Path::new(&handle.path).join("nested");
+    fs::create_dir(&nested).unwrap();
+    std::os::unix::fs::symlink(&foreign, nested.join("alias")).unwrap();
+    assert!(release(&store, &handle).unwrap());
+    assert_eq!(fs::read(sentinel).unwrap(), b"unrelated");
+    assert!(!Path::new(&handle.path).exists());
+    assert_eq!(record(&store, &request.id).state, "released");
+}

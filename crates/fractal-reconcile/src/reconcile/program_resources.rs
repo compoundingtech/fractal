@@ -780,6 +780,7 @@ mission "window-child" state="ready" {{
         let roots = vec![crate::store::resource_membership::ExecutionRoot {
             runtime_id: id.clone(), execution: None,
             payload_released_at: None, execution_ended_at: None,
+            cwd_directory: None,
         }];
         assert!(command_root(&roots, "request-key", &id).unwrap().is_some());
         for changed in [
