@@ -30,6 +30,18 @@ pub fn apply_all_checked(
     host: &str,
     guard: &dyn Fn(&DesiredSubject) -> Result<()>,
 ) -> BTreeMap<String, Result<RenderResult>> {
+    apply_all_admitted(store, desired, host, guard, &mut |_| Ok(()))
+}
+
+/// Admit only members that will mutate the filesystem. Unchanged plans never commit:
+/// a later disk change must not turn an unleased observation into a write.
+pub fn apply_all_admitted(
+    store: &Store,
+    desired: &[&DesiredSubject],
+    host: &str,
+    guard: &dyn Fn(&DesiredSubject) -> Result<()>,
+    admit: &mut dyn FnMut(&DesiredSubject) -> Result<()>,
+) -> BTreeMap<String, Result<RenderResult>> {
     let mut plans = BTreeMap::new();
     let mut results = BTreeMap::new();
     for subject in desired {
@@ -43,6 +55,14 @@ pub fn apply_all_checked(
         }
         if let Err(error) = store.owned_desired_guard(subject) {
             results.insert(subject.subject.clone(), Err(error.into()));
+            continue;
+        }
+        // A missing observed workspace may have been reclaimed. Give admission the
+        // opportunity to reject it before planning loses its repository identity.
+        if subject.member.as_ref().is_some_and(|member| !Path::new(&member.workspace).is_dir())
+            && let Err(error) = admit(subject)
+        {
+            results.insert(subject.subject.clone(), Err(error));
             continue;
         }
         match prepare_member(store, subject)
@@ -81,11 +101,6 @@ pub fn apply_all_checked(
             *current = text.into_bytes();
         }
     }
-    for (writes, _) in plans.values_mut() {
-        for write in writes.iter_mut().filter(|write| write.append_lines) {
-            write.bytes = excludes[&write.destination].clone();
-        }
-    }
     let mut owners = BTreeMap::<&Path, Vec<(&str, &PlannedWrite)>>::new();
     for (subject, (writes, _)) in &plans {
         for write in writes {
@@ -98,7 +113,8 @@ pub fn apply_all_checked(
     for (destination, owners) in owners {
         if owners
             .iter()
-            .any(|(_, write)| write.bytes != owners[0].1.bytes || write.mode != owners[0].1.mode)
+            .any(|(_, write)| planned_bytes(write, &excludes) != planned_bytes(owners[0].1, &excludes)
+                || write.mode != owners[0].1.mode)
         {
             let names = owners
                 .iter()
@@ -110,11 +126,12 @@ pub fn apply_all_checked(
             let current = fs::read(destination).ok();
             let incumbent = owners
                 .iter()
-                .find(|(_, write)| current.as_deref() == Some(write.bytes.as_slice()))
+                .find(|(_, write)| current.as_deref() == Some(planned_bytes(write, &excludes)))
                 .map(|(_, write)| *write);
             for (subject, write) in owners {
                 if incumbent.is_some_and(|incumbent| {
-                    incumbent.bytes == write.bytes && incumbent.mode == write.mode
+                    planned_bytes(incumbent, &excludes) == planned_bytes(write, &excludes)
+                        && incumbent.mode == write.mode
                 }) {
                     continue;
                 }
@@ -136,7 +153,8 @@ pub fn apply_all_checked(
             Some((subject.subject.as_str(), Path::new(&member.workspace)))
         })
         .collect::<BTreeMap<_, _>>();
-    for (subject, (writes, mut warnings)) in plans {
+    let mut admitted_plans = BTreeMap::new();
+    for (subject, (mut writes, mut warnings)) in plans {
         if results.contains_key(&subject) {
             continue;
         }
@@ -170,10 +188,59 @@ pub fn apply_all_checked(
             results.insert(subject, Err(error));
             continue;
         }
-        if let Some(workspace) = native_workspaces.get(subject.as_str()) {
+        let workspace = native_workspaces.get(subject.as_str());
+        let cleanup = workspace.is_some_and(|workspace| legacy_cleanup_needed(workspace));
+        let changed = writes.iter().any(|write|
+            write_needed_with_bytes(write, planned_bytes(write, &excludes)));
+        if changed || cleanup {
+            let declaration = desired.iter().find(|d| d.subject == subject)
+                .expect("planned member declaration");
+            if let Err(error) = admit(declaration) {
+                results.insert(subject, Err(error));
+                continue;
+            }
+            // The unleased plan authorizes admission, never a write. If the admitted
+            // workspace produces a different plan, defer the graph's conflict/union
+            // decisions to a later pass rather than applying stale bytes.
+            match prepare_member(store, declaration) {
+                Ok((fresh, fresh_warnings)) if fresh == writes => {
+                    writes = fresh;
+                    warnings = fresh_warnings;
+                }
+                Ok(_) => {
+                    results.insert(subject, Err(anyhow::anyhow!(
+                        "render plan changed during admission; replanning on a later pass"
+                    )));
+                    continue;
+                }
+                Err(error) => {
+                    results.insert(subject, Err(error));
+                    continue;
+                }
+            }
+        }
+        admitted_plans.insert(subject, (writes, warnings, changed, cleanup));
+    }
+    // Reprepare every mutating member before the first commit: otherwise an earlier
+    // member's shared exclude write would invalidate a later member's raw plan.
+    for (subject, (mut writes, mut warnings, changed, cleanup)) in admitted_plans {
+        let workspace = native_workspaces.get(subject.as_str());
+        let declaration = desired.iter().find(|d| d.subject == subject)
+            .expect("planned member declaration");
+        if let Err(error) = store.owned_desired_guard(declaration)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| guard(declaration))
+        {
+            results.insert(subject, Err(error));
+            continue;
+        }
+        if cleanup && let Some(workspace) = workspace {
             warnings.extend(remove_legacy_st3(workspace));
         }
-        let result = commit_transaction(&writes)
+        for write in writes.iter_mut().filter(|write| write.append_lines) {
+            write.bytes = excludes[&write.destination].clone();
+        }
+        let result = (if changed { commit_transaction(&writes) } else { Ok(()) })
             .with_context(|| format!("commit render for {subject}"))
             .map(|()| RenderResult {
                 warnings,
@@ -189,6 +256,13 @@ pub fn apply_all_checked(
         results.insert(subject, result);
     }
     results
+}
+
+fn planned_bytes<'a>(
+    write: &'a PlannedWrite,
+    excludes: &'a BTreeMap<PathBuf, Vec<u8>>,
+) -> &'a [u8] {
+    if write.append_lines { &excludes[&write.destination] } else { &write.bytes }
 }
 
 /// What render would refuse for the members a publication declares on this host, before the
@@ -317,6 +391,14 @@ fn native_harness(subject: &DesiredSubject) -> bool {
 /// and excluded `.st3/` from Git. Nothing else uses `.st3`.
 const LEGACY_ST3_DIRECTORY: &str = ".st3";
 
+fn legacy_cleanup_needed(workspace: &Path) -> bool {
+    fs::symlink_metadata(workspace.join(LEGACY_ST3_DIRECTORY))
+        .is_ok_and(|metadata| metadata.is_dir())
+        || git_exclude_destination(workspace).ok().flatten()
+            .and_then(|exclude| fs::read_to_string(exclude).ok())
+            .is_some_and(|current| current.lines().any(is_legacy_st3_exclude))
+}
+
 /// Remove what older releases rendered for a typed harness: the workspace's `.st3` directory,
 /// unless Git tracks something in it, and the `.st3/` line of its Git exclude file once no
 /// worktree sharing that file still has a `.st3` directory. It never fails the member; each
@@ -414,6 +496,67 @@ fn shared_worktrees(exclude: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use fractal_seats::render::shared_tests_attention_tests::{git, harness_agent};
+
+    #[test]
+    fn same_repository_replacement_during_admission_never_receives_a_stale_plan() {
+        let store = Store::open_memory("node").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init"]);
+        git(&repository, &["-c", "user.name=Example", "-c", "user.email=example@example.invalid",
+            "commit", "--allow-empty", "-m", "fixture"]);
+        git(&repository, &["worktree", "add", "-b", "worker", workspace.to_str().unwrap()]);
+        fs::write(workspace.join("settings"), "old\n").unwrap();
+        let intent = crate::graph::parse_test_intent(&format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; render {{ ensure-line \"settings\" \"managed\" }} }}",
+            workspace.to_string_lossy(),
+        ), "node").unwrap();
+        let desired = intent.subjects.values().collect::<Vec<_>>();
+        let mut admissions = 0;
+        let results = apply_all_admitted(&store, &desired, "node", &|_| Ok(()),
+            &mut |_| {
+                admissions += 1;
+                git(&repository, &["worktree", "remove", "--force", workspace.to_str().unwrap()]);
+                git(&repository, &["worktree", "add", workspace.to_str().unwrap(), "worker"]);
+                fs::write(workspace.join("settings"), "new\n").unwrap();
+                Ok(())
+            });
+        assert_eq!(admissions, 1);
+        assert!(results["agent/node.worker"].as_ref().unwrap_err().to_string()
+            .contains("render plan changed during admission"));
+        assert_eq!(fs::read_to_string(workspace.join("settings")).unwrap(), "new\n");
+        assert!(apply_all(&store, &desired, "node")["agent/node.worker"].is_ok());
+        assert_eq!(fs::read_to_string(workspace.join("settings")).unwrap(), "new\nmanaged\n");
+    }
+
+    #[test]
+    fn unchanged_plans_need_no_admission_and_changed_plans_cannot_write_without_it() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let intent = crate::graph::parse_test_intent(&format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+            workspace.path().to_string_lossy(),
+        ), "node").unwrap();
+        let desired = intent.subjects.values().collect::<Vec<_>>();
+        fs::write(workspace.path().join("output"), "ready").unwrap();
+        assert!(apply_all_admitted(&store, &desired, "node", &|_| Ok(()),
+            &mut |_| panic!("unchanged output must not request admission"))
+            ["agent/node.worker"].is_ok());
+
+        fs::write(workspace.path().join("output"), "drift").unwrap();
+        assert!(apply_all_admitted(&store, &desired, "node", &|_| Ok(()),
+            &mut |_| anyhow::bail!("admission refused"))
+            ["agent/node.worker"].is_err());
+        assert_eq!(fs::read_to_string(workspace.path().join("output")).unwrap(), "drift");
+        let mut admissions = 0;
+        assert!(apply_all_admitted(&store, &desired, "node", &|_| Ok(()),
+            &mut |_| { admissions += 1; Ok(()) })
+            ["agent/node.worker"].is_ok());
+        assert_eq!(admissions, 1);
+        assert_eq!(fs::read_to_string(workspace.path().join("output")).unwrap(), "ready");
+    }
 
     #[test]
     fn graph_render_rejects_two_owners_before_it_writes() {

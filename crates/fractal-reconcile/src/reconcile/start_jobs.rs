@@ -24,6 +24,8 @@ struct ActivationLeases {
     owners: BTreeMap<PathBuf, std::sync::Weak<fractal_runtime::store_worktree_lease::StoreWorktreeLease>>,
     // Durable operations keep admission through queueing, worker exit, result adoption and cleanup.
     starts: HashMap<String, ActivationLease>,
+    // Unleased pass observations remain usable after reclamation removes Git pointers.
+    observed: BTreeMap<PathBuf, (PathBuf, PathBuf)>,
 }
 
 pub struct StartJobs {
@@ -118,14 +120,37 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(lease)
     }
 
+    pub(super) fn observe_start_worktrees(
+        &self,
+        observed: BTreeMap<PathBuf, (PathBuf, PathBuf)>,
+    ) {
+        self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
+            .observed = observed;
+    }
+
     pub(super) fn member_activation_lease(&self, member: &MemberSpec) -> Result<Option<ActivationLease>> {
         let workspace = Path::new(&member.workspace);
-        let Some(repository) = crate::repositories::workspace_repository(workspace) else {
-            return Ok(None);
+        let observed = self.start_jobs.activation_leases.lock()
+            .unwrap_or_else(PoisonError::into_inner).observed.get(workspace).cloned();
+        let identity = observed.or_else(|| {
+            let repository = crate::repositories::workspace_repository(workspace)?;
+            let owner = crate::checkout::workspace_worktree(workspace)?;
+            Some((owner, repository))
+        });
+        let lease = if let Some((owner, repository)) = identity {
+            let lease = self.worktree_activation_lease(&owner, &repository)?;
+            anyhow::ensure!(
+                crate::repositories::workspace_repository(workspace).as_ref() == Some(&repository),
+                "workspace reclaimed or repository changed before start"
+            );
+            Some(lease)
+        } else {
+            None
         };
-        let owner = crate::checkout::workspace_worktree(workspace)
-            .context("Git workspace has no worktree owner")?;
-        self.worktree_activation_lease(&owner, &repository).map(Some)
+        // Preparation owns directory creation. Start must not turn a reclaimed checkout
+        // into a plain directory, including recovered starts without a pass observation.
+        anyhow::ensure!(workspace.is_dir(), "workspace reclaimed before start");
+        Ok(lease)
     }
 
     fn retain_start_activation_lease(&self, id: &str, member: &MemberSpec) -> Result<Option<ActivationLease>> {

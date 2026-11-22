@@ -1737,6 +1737,79 @@ fn unchanged_running_workspaces_with_retained_render_failures_spawn_no_leases() 
 }
 
 #[test]
+fn unchanged_full_render_passes_spawn_no_leases_but_disk_drift_is_repaired() {
+    let _clock = Clock::at(START);
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+        repository.to_str().unwrap(),
+    ), "unchanged-full-render");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ).skipping_unneeded(true);
+    reconciler.reconcile_once().unwrap();
+    let before = crate::checkout::test_support::lease_count(&repository);
+    let starts = runtime.started_members.lock().unwrap().len();
+    smallclaims::store::set_thread_clock(Some(START + crate::incremental::FULL_PASS_INTERVAL_MS));
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before,
+        "even a full safety render must not lease unchanged output");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+    assert_eq!(std::fs::read_to_string(repository.join("output")).unwrap(), "ready");
+
+    std::fs::write(repository.join("output"), "drift").unwrap();
+    smallclaims::store::set_thread_clock(Some(START + 2 * crate::incremental::FULL_PASS_INTERVAL_MS));
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before + 1,
+        "a full pass repairing changed output must acquire admission");
+    assert_eq!(std::fs::read_to_string(repository.join("output")).unwrap(), "ready");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+}
+
+#[test]
+fn a_worktree_reclaimed_after_unchanged_render_never_starts_as_a_plain_directory() {
+    for declared_checkout in [false, true] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        std::fs::write(workspace.join("output"), "ready").unwrap();
+        let checkout = if declared_checkout {
+            format!("checkout {:?} base=\"origin/main\" branch=\"worker\";",
+                repository.to_str().unwrap())
+        } else {
+            String::new()
+        };
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?} create=#true; {checkout} command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+            workspace.to_str().unwrap(),
+        ), "reclaimed-after-unchanged-render");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        ).tolerating_faults();
+        let removed = workspace.clone();
+        let source_repository = repository.clone();
+        *reconciler.after_workspace_render.lock().unwrap() = Some(Box::new(move || {
+            assert_eq!(crate::checkout::test_support::lease_count(&source_repository), 0,
+                "unchanged rendering must remain unleased");
+            std::fs::remove_dir_all(&removed).unwrap();
+        }));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1,
+            "start must use the observed identity even after Git pointers disappear");
+        assert!(!workspace.exists(), "start must not recreate a checkout as a plain directory");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn an_existing_workspace_renders_and_publishes_with_exactly_one_lease() {
     let root = crate::test_support::canonical_tempdir();
     let repository = crate::checkout::test_support::repository(root.path());
