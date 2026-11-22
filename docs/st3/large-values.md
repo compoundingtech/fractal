@@ -1163,8 +1163,9 @@ flow record changes are accepted by this refresh.
 
 ### Model-return admission ledger (#6803)
 
-The `fractal_store::store` schema identity is `lv-h3133a3608b56` after combining
-the model-return admission ledger with the existing schema. The catalog is
+The `fractal_store::store` schema identity is `lv-h25bdee44f9bb` after combining
+the model-return admission ledger, bounded local model-observation cache frontier
+index and the existing schema. The catalog is
 regenerated from the combined source using `scripts/propose-sqlite-large-values`,
 preserving existing declarations, reviewed metadata and flow records rather than
 replacing them with an older branch snapshot.
