@@ -8,6 +8,13 @@ use fractal_daemon::store::shell_resources::{self, Execution, PayloadResult};
 pub(super) enum ResourcesCommand {
     /// Wait for host admission, execute argv, and await confirmed retirement.
     Exec(ExecArgs),
+    /// Dry-run a bounded page of dedicated scratch custody; never removes allocations.
+    ScratchInventory {
+        #[arg(long)] host: Option<String>,
+        #[arg(long)] after: Option<String>,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))] limit: u32,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)] actor: Option<String>,
+    },
     /// List shell executions and their host custody.
     Ls {
         #[arg(long)] host: Option<String>,
@@ -130,7 +137,8 @@ impl ResourcesCommand {
         match self {
             Self::Exec(args) => args.actor.as_deref(),
             Self::Ls { actor, .. } | Self::Show { actor, .. } | Self::Cancel { actor, .. }
-                | Self::MemberScope { actor, .. } | Self::Hold { actor, .. } | Self::Release { actor, .. } => actor.as_deref(),
+                | Self::MemberScope { actor, .. } | Self::Hold { actor, .. } | Self::Release { actor, .. }
+                | Self::ScratchInventory { actor, .. } => actor.as_deref(),
             Self::InMember { .. } => None,
         }
     }
@@ -139,6 +147,13 @@ impl ResourcesCommand {
 pub(super) async fn run(client: &Client, person: Option<&str>, command: ResourcesCommand, json_output: bool) -> Result<()> {
     match command {
         ResourcesCommand::Exec(args) => execute(client, args).await,
+        ResourcesCommand::ScratchInventory { host, after, limit, .. } => {
+            let mut query = vec![format!("limit={limit}")];
+            if let Some(host) = host { query.push(format!("host={}", urlencoding::encode(&host))); }
+            if let Some(after) = after { query.push(format!("after={}", urlencoding::encode(&after))); }
+            let inventory: Value = client.get(&format!("/v1/internal/resources/scratch/inventory?{}", query.join("&"))).await?;
+            print_value(&inventory, json_output)
+        },
         ResourcesCommand::Ls { host, class, head, .. } => {
             let mut query = Vec::new();
             if let Some(host) = host { query.push(format!("host={}", urlencoding::encode(&host))); }
@@ -424,6 +439,23 @@ mod tests {
         assert!(cli.json);
         assert!(Cli::try_parse_from(["fractal", "resources", "in-member"]).is_err());
         assert!(Cli::try_parse_from(["fractal", "resources", "in-member", "--owner-uid", "-1"]).is_err());
+    }
+
+    #[test]
+    fn scratch_inventory_requires_bounded_read_only_arguments() {
+        let cli = Cli::try_parse_from(["fractal", "--json", "resources", "scratch-inventory",
+            "--after", "previous", "--limit", "500", "--as", "person/operator"]).unwrap();
+        assert!(cli.json);
+        let Command::Resources { command: ResourcesCommand::ScratchInventory { host, after, limit, actor } } = cli.command
+            else { panic!("wrong command") };
+        assert!(host.is_none());
+        assert_eq!(after.as_deref(), Some("previous"));
+        assert_eq!(limit, 500);
+        assert_eq!(actor.as_deref(), Some("person/operator"));
+        for limit in ["0", "501"] {
+            assert!(Cli::try_parse_from(["fractal", "resources", "scratch-inventory", "--limit", limit]).is_err());
+        }
+        assert!(Cli::try_parse_from(["fractal", "resources", "scratch-inventory", "--apply"]).is_err());
     }
 
     #[test]

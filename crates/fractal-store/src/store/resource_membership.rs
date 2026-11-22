@@ -218,6 +218,8 @@ pub struct Membership {
     pub retired_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_filesystem: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_directory: Option<super::scratch_consumers::DirectoryIdentity>,
     #[serde(default)]
     pub roots: Vec<ExecutionRoot>,
     #[serde(default)]
@@ -252,6 +254,8 @@ pub struct ExecutionRoot {
     pub execution: Option<ExecutionIdentity>,
     pub payload_released_at: Option<u64>,
     pub execution_ended_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_directory: Option<super::scratch_consumers::DirectoryIdentity>,
 }
 
 /// Reference to the runtime-owned generation record; command outcomes remain runtime facts.
@@ -704,6 +708,8 @@ impl Store {
             Membership { request: request.clone(), grant: None, state: "queued".into(), reason: "waiting for admission".into(),
                 queued_at: now_ms, admitted_at: None, payload_released_at: None, execution_ended_at: None,
                 retirement_requested_at: None, retired_at: None, disk_filesystem: None,
+                disk_directory: request.disk_path.as_deref().and_then(|path|
+                    super::scratch_consumers::DirectoryIdentity::capture(Path::new(path)).ok()),
                 roots: Vec::new(), child_runs: Vec::new(), clock_uncertain: false, clock_epoch: epoch.clone(),
                 refusal_code: None, blocked_by: None, pressure_reason: None, admission_decision: None }
         };
@@ -856,9 +862,25 @@ impl Store {
             anyhow::ensure!(matches!(member.state.as_str(), "admitted" | "launched"), "membership is not launchable");
             anyhow::ensure!(!member.roots.iter().any(|root| root.runtime_id == runtime_id), "execution root already prepared");
             member.roots.push(ExecutionRoot { runtime_id: runtime_id.into(), execution: None,
-                payload_released_at: None, execution_ended_at: None });
+                payload_released_at: None, execution_ended_at: None, cwd_directory: None });
             Ok(())
         })
+    }
+
+    /// Capture the effective native cwd and register preparation under the same writer
+    /// as scratch release. A lane's disk path does not describe its execution cwd.
+    pub fn prepare_resource_membership_cwd(&self, grant: &Grant, runtime_id: &str, cwd: &Path) -> Result<std::path::PathBuf> {
+        let mut resolved = None;
+        self.update_resource_membership(grant, |member| {
+            anyhow::ensure!(matches!(member.state.as_str(), "admitted" | "launched"), "membership is not launchable");
+            anyhow::ensure!(!member.roots.iter().any(|root| root.runtime_id == runtime_id), "execution root already prepared");
+            let directory = super::scratch_consumers::DirectoryIdentity::capture(cwd)?;
+            resolved = Some(directory.resolved_path.clone());
+            member.roots.push(ExecutionRoot { runtime_id: runtime_id.into(), execution: None,
+                payload_released_at: None, execution_ended_at: None, cwd_directory: Some(directory) });
+            Ok(())
+        })?;
+        resolved.context("prepared cwd missing")
     }
 
     /// Only positive producer rejection may erase a preparation intent. Absence of a record
