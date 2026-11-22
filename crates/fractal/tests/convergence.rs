@@ -2313,7 +2313,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 /// are historical and recorded in fixtures/convergence/README.md.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v43 seed {seed}: retired={}", outcome.trimmed);
+    eprintln!("convergence corpus v44 seed {seed}: retired={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
