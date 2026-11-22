@@ -1024,9 +1024,9 @@ impl Store {
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
-    /// Open an existing current-schema store without creating, migrating, or starting a writer.
+    /// Open a cleanly stopped, checkpointed current-schema store without changing any source files.
     pub fn open_backup_read_only(path: &Path, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        let connection = crate::sqlite::open_read_connection(path, false)?;
+        let connection = crate::sqlite::open_immutable_read_connection(path)?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         anyhow::ensure!(
             (CURRENT_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
@@ -1048,7 +1048,7 @@ impl Store {
             "SELECT CAST(value AS INTEGER) FROM meta WHERE key='seeded_batch_rowid'",
             [], |row| row.get(0),
         ).optional()?.unwrap_or(0);
-        let readers = ReadPool::new(&path, false)?;
+        let readers = ReadPool::new_immutable(&path)?;
         let committed_index = Arc::new(AtomicU64::new(index));
         let writer = WriterConnection::read_only(committed_index.clone());
         Self::from_open_parts(

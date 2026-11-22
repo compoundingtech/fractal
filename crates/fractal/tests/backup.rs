@@ -298,6 +298,9 @@ fn assert_stdout_receipt(output: &std::process::Output) -> backup::Header {
     assert_eq!(receipt["writer_id"], "alder");
     assert!(receipt["max_store_index"].as_u64().unwrap() > 0);
     assert!(receipt["peak_wal_growth"].as_u64().unwrap() <= 4294967296);
+    let peaks = receipt["peak_wal_growth_by_file"].as_object().unwrap();
+    assert!(peaks.values().all(|value| value.as_u64().is_some()));
+    assert_eq!(receipt["peak_wal_growth_by_file"], end["data"].get("peak_wal_growth_by_file").cloned().unwrap_or_else(|| json!({})));
     let started = receipt["started_at"].as_str().unwrap().parse::<chrono::DateTime<chrono::Utc>>().unwrap();
     let finished = receipt["finished_at"].as_str().unwrap().parse::<chrono::DateTime<chrono::Utc>>().unwrap();
     assert!(finished >= started);
@@ -329,7 +332,9 @@ async fn offline_stdout_backup_preserves_source_bytes_and_restores_the_source_gr
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join("config/st3")).unwrap();
     std::fs::write(root.path().join("config/st3/config.toml"), "node = \"alder\"\n").unwrap();
-    let database = root.path().join("source.db");
+    let source_directory = root.path().join("source-store");
+    std::fs::create_dir(&source_directory).unwrap();
+    let database = source_directory.join("source.db");
     let source = Store::open(&database, "alder").unwrap();
     source.put_document("doc/backup", b"Offline streaming backup.\n", &None, "backup-document").unwrap();
     let mut expected_archive = Vec::new();
@@ -337,8 +342,21 @@ async fn offline_stdout_backup_preserves_source_bytes_and_restores_the_source_gr
     drop(source);
     rusqlite::Connection::open(&database).unwrap()
         .execute("INSERT OR REPLACE INTO meta(key,value) VALUES('local_node_writer','alder')", []).unwrap();
-    let source_paths = [database.clone(), root.path().join("source.db-wal")];
-    let before: Vec<_> = source_paths.iter().map(|path| std::fs::read(path).ok()).collect();
+    let source_paths = [
+        database.clone(), source_directory.join("source.db-wal"), source_directory.join("source.db-shm"),
+    ];
+    let digests = || {
+        use sha2::{Digest as _, Sha256};
+        source_paths.iter().map(|path| std::fs::read(path).ok().map(|bytes| hex::encode(Sha256::digest(bytes)))).collect::<Vec<_>>()
+    };
+    let directory_entries = || {
+        let mut entries = std::fs::read_dir(&source_directory).unwrap()
+            .map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>();
+        entries.sort();
+        entries
+    };
+    let before = digests();
+    let entries_before = directory_entries();
     let socket = root.path().join("unused.sock");
     let output = backup_cli(root.path(), &socket)
         .args(["backup", "create", "-", "--database"]).arg(&database)
@@ -347,9 +365,8 @@ async fn offline_stdout_backup_preserves_source_bytes_and_restores_the_source_gr
     let header = assert_stdout_receipt(&output);
     assert_eq!(header.graph_digest, expected.graph_digest);
     assert_eq!(header.log_digest, expected.log_digest);
-    for (path, bytes) in source_paths.iter().zip(before) {
-        assert_eq!(std::fs::read(path).ok(), bytes, "source bytes changed: {}", path.display());
-    }
+    assert_eq!(digests(), before, "source database, WAL and SHM must remain unchanged");
+    assert_eq!(directory_entries(), entries_before, "offline export must not create or remove files");
     let archive = root.path().join("saved-stdout.jsonl");
     std::fs::write(&archive, &output.stdout).unwrap();
     assert_restores_snapshot(root.path(), &socket, &archive, &header, "restored/claims.sqlite3").await;

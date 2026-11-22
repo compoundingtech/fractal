@@ -5,7 +5,8 @@ use axum::response::{IntoResponse, Response};
 use smallclaims::read_budget::{self, ReadBudget};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use std::sync::{Arc, LazyLock};
+use std::collections::BTreeMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use super::super::ApiError;
 
 static EXPORTS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
@@ -98,54 +99,82 @@ fn wal_size(path: &std::path::Path) -> std::io::Result<u64> {
     }
 }
 
+struct WalFile {
+    name: &'static str,
+    path: std::path::PathBuf,
+    initial: std::io::Result<u64>,
+    peak: u64,
+}
+
+struct WalGrowth {
+    files: [WalFile; 2],
+    peak: u64,
+    limit: u64,
+}
+
+impl WalGrowth {
+    fn new(databases: [std::path::PathBuf; 2], limit: u64) -> Self {
+        let mut names = ["graph", "shards/messages"].into_iter();
+        let files = databases.map(|database| {
+            let mut path = database.into_os_string();
+            path.push("-wal");
+            let path = std::path::PathBuf::from(path);
+            let initial = wal_size(&path);
+            WalFile { name: names.next().unwrap(), path, initial, peak: 0 }
+        });
+        Self { files, peak: 0, limit }
+    }
+
+    fn sample(&mut self) -> std::io::Result<()> {
+        let mut total = 0_u64;
+        for file in &mut self.files {
+            let initial = file.initial.as_ref().map_err(|error| {
+                std::io::Error::other(format!("cannot inspect backup WAL {}: {error}", file.name))
+            })?;
+            let size = wal_size(&file.path).map_err(|error| {
+                std::io::Error::other(format!("cannot inspect backup WAL {}: {error}", file.name))
+            })?;
+            let growth = size.saturating_sub(*initial);
+            file.peak = file.peak.max(growth);
+            total = total.saturating_add(growth);
+        }
+        self.peak = self.peak.max(total);
+        if total > self.limit {
+            return Err(std::io::Error::other(format!(
+                "backup WAL growth {total} bytes exceeds --max-wal-growth {}; snapshot cancelled",
+                self.limit
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Direct exports deliberately keep their read snapshot through downstream backpressure.
 pub(super) fn direct_response(
     permit: OwnedSemaphorePermit,
-    database: std::path::PathBuf,
+    databases: [std::path::PathBuf; 2],
     max_wal_growth: u64,
     produce: impl FnOnce(&mut dyn std::io::Write) -> anyhow::Result<()> + Send + 'static,
 ) -> Response {
-    use std::sync::atomic::{AtomicU64, Ordering};
     let cancellation = ReadBudget::cancellable("/v1/backup/direct");
     let worker_budget = cancellation.clone();
     let monitor_budget = cancellation.clone();
     let (sender, receiver) = tokio::sync::mpsc::channel(2);
     let (abort, aborted) = tokio::sync::watch::channel(None::<String>);
     let (done, mut finished) = tokio::sync::watch::channel(false);
-    let peak = Arc::new(AtomicU64::new(0));
-    let monitor_peak = peak.clone();
-    let mut wal_name = database.into_os_string();
-    wal_name.push("-wal");
-    let wal = std::path::PathBuf::from(wal_name);
-    let initial = wal_size(&wal);
-    let writer_wal = wal.clone();
-    let initial_size = initial.as_ref().copied().unwrap_or(0);
+    let growth = Arc::new(Mutex::new(WalGrowth::new(databases, max_wal_growth)));
+    let monitor_growth = growth.clone();
     tokio::spawn(async move {
-        let initial = match initial {
-            Ok(initial) => initial,
-            Err(error) => {
-                let _ = abort.send(Some(format!("cannot inspect backup WAL: {error}")));
-                monitor_budget.cancel();
-                return;
-            }
-        };
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = finished.changed() => break,
                 _ = interval.tick() => {
-                    let result = wal_size(&wal).map(|size| size.saturating_sub(initial));
-                    let error = match result {
-                        Ok(growth) => {
-                            monitor_peak.fetch_max(growth, Ordering::Relaxed);
-                            (growth > max_wal_growth).then(|| format!(
-                                "backup WAL growth {growth} bytes exceeds --max-wal-growth {max_wal_growth}; snapshot cancelled"
-                            ))
-                        }
-                        Err(error) => Some(format!("cannot inspect backup WAL: {error}")),
-                    };
-                    if let Some(error) = error {
-                        let _ = abort.send(Some(error));
+                    let result = monitor_growth.lock()
+                        .map_err(|_| std::io::Error::other("backup WAL monitor poisoned"))
+                        .and_then(|mut growth| growth.sample());
+                    if let Err(error) = result {
+                        let _ = abort.send(Some(error.to_string()));
                         monitor_budget.cancel();
                         break;
                     }
@@ -157,8 +186,7 @@ pub(super) fn direct_response(
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut writer = DirectWriter {
-            sender, aborted, handle, pending: Vec::new(), peak,
-            wal: writer_wal, initial_size, max_wal_growth,
+            sender, aborted, handle, pending: Vec::new(), growth,
         };
         let result = read_budget::with(Some(worker_budget), || produce(&mut writer));
         let result = result.and_then(|()| {
@@ -194,10 +222,7 @@ struct DirectWriter {
     aborted: tokio::sync::watch::Receiver<Option<String>>,
     handle: tokio::runtime::Handle,
     pending: Vec<u8>,
-    peak: Arc<std::sync::atomic::AtomicU64>,
-    wal: std::path::PathBuf,
-    initial_size: u64,
-    max_wal_growth: u64,
+    growth: Arc<Mutex<WalGrowth>>,
 }
 
 impl DirectWriter {
@@ -236,16 +261,16 @@ impl std::io::Write for DirectWriter {
             if self.pending.last() == Some(&b'\n') {
                 let mut line = std::mem::take(&mut self.pending);
                 if line.starts_with(b"{\"record\":\"end\",") {
-                    let growth = wal_size(&self.wal)?.saturating_sub(self.initial_size);
-                    self.peak.fetch_max(growth, std::sync::atomic::Ordering::Relaxed);
-                    if growth > self.max_wal_growth {
-                        return Err(std::io::Error::other(format!(
-                            "backup WAL growth {growth} bytes exceeds --max-wal-growth {}; snapshot cancelled",
-                            self.max_wal_growth
-                        )));
-                    }
+                    let mut growth = self.growth.lock()
+                        .map_err(|_| std::io::Error::other("backup WAL monitor poisoned"))?;
+                    growth.sample()?;
+                    let by_file = growth.files.iter()
+                        .map(|file| (file.name.to_owned(), file.peak))
+                        .collect::<BTreeMap<String, u64>>();
                     let mut end: serde_json::Value = serde_json::from_slice(&line)?;
-                    end["data"]["peak_wal_growth"] = self.peak.load(std::sync::atomic::Ordering::Relaxed).into();
+                    end["data"]["peak_wal_growth"] = growth.peak.into();
+                    end["data"]["peak_wal_growth_by_file"] = serde_json::to_value(by_file)?;
+                    drop(growth);
                     line = serde_json::to_vec(&end)?;
                     line.push(b'\n');
                 }
@@ -268,6 +293,122 @@ mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom, Write};
     use std::time::Duration;
+
+    fn database_paths(root: &std::path::Path) -> [std::path::PathBuf; 2] {
+        [
+            root.join("claims.sqlite3"),
+            fractal_store::store::backup_shards::database_path(root).unwrap(),
+        ]
+    }
+
+    fn wal_database(path: &std::path::Path) -> rusqlite::Connection {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE payload (value BLOB);
+             INSERT INTO payload VALUES (zeroblob(16384));
+             PRAGMA wal_checkpoint(TRUNCATE);"
+        ).unwrap();
+        connection
+    }
+
+    fn pin_snapshot(path: &std::path::Path) -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection.execute_batch("BEGIN;").unwrap();
+        let count: u64 = connection.query_row("SELECT count(*) FROM payload", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        connection
+    }
+
+    async fn final_record_after_writes(writes: [bool; 2], limit: u64) -> (serde_json::Value, [u64; 2]) {
+        let root = tempfile::tempdir().unwrap();
+        let databases = database_paths(root.path());
+        let writers = databases.each_ref().map(|path| wal_database(path));
+        let snapshots = databases.clone();
+        let (started, begun) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let response = direct_response(
+            reserve_from(&Arc::new(Semaphore::new(1))).unwrap(), databases.clone(), limit,
+            move |output| {
+                let _graph = pin_snapshot(&snapshots[0]);
+                let _shard = pin_snapshot(&snapshots[1]);
+                started.send(()).unwrap();
+                gate.recv()?;
+                output.write_all(b"{\"record\":\"end\",\"data\":{}}\n")?;
+                Ok(())
+            },
+        );
+        begun.await.unwrap();
+        for (writer, write) in writers.iter().zip(writes) {
+            if write {
+                writer.execute("INSERT INTO payload VALUES (zeroblob(16384))", []).unwrap();
+            }
+        }
+        let sizes = databases.map(|database| {
+            let mut wal = database.into_os_string();
+            wal.push("-wal");
+            wal_size(std::path::Path::new(&wal)).unwrap()
+        });
+        release.send(()).unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        (serde_json::from_slice(&bytes).unwrap(), sizes)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_sample_rejects_shard_only_growth() {
+        let (record, sizes) = final_record_after_writes([false, true], 1).await;
+        assert_eq!(sizes[0], 0);
+        assert!(sizes[1] > 1);
+        assert_eq!(record["record"], "failure");
+        assert!(record["data"]["message"].as_str().unwrap().contains("--max-wal-growth 1"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wal_limit_applies_to_the_sum_not_each_database() {
+        let limit = 32768;
+        let (record, sizes) = final_record_after_writes([true, true], limit).await;
+        assert!(sizes.iter().all(|size| *size <= limit), "{sizes:?}");
+        assert!(sizes.iter().sum::<u64>() > limit, "{sizes:?}");
+        assert_eq!(record["record"], "failure");
+        assert!(record["data"]["message"].as_str().unwrap().contains("--max-wal-growth 32768"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_metadata_includes_final_aggregate_and_per_file_peaks() {
+        let (record, sizes) = final_record_after_writes([true, true], u64::MAX).await;
+        assert!(sizes.iter().all(|size| *size > 0), "{sizes:?}");
+        assert_eq!(record["record"], "end");
+        assert_eq!(record["data"]["peak_wal_growth"], sizes.iter().sum::<u64>());
+        assert_eq!(record["data"]["peak_wal_growth_by_file"], serde_json::json!({
+            "graph": sizes[0], "shards/messages": sizes[1],
+        }));
+    }
+
+    #[test]
+    fn aggregate_peak_is_not_the_sum_of_independent_file_peaks() {
+        let root = tempfile::tempdir().unwrap();
+        let databases = database_paths(root.path());
+        let graph = wal_database(&databases[0]);
+        let shard = wal_database(&databases[1]);
+        let graph_snapshot = pin_snapshot(&databases[0]);
+        let _shard_snapshot = pin_snapshot(&databases[1]);
+        let mut growth = WalGrowth::new(databases, u64::MAX);
+        graph.execute("INSERT INTO payload VALUES (zeroblob(16384))", []).unwrap();
+        growth.sample().unwrap();
+        let graph_peak = growth.peak;
+        assert!(graph_peak > 0);
+        drop(graph_snapshot);
+        graph.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        shard.execute("INSERT INTO payload VALUES (zeroblob(16384))", []).unwrap();
+        growth.sample().unwrap();
+        let shard_peak = growth.files[1].peak;
+        assert!(shard_peak > 0);
+        assert_eq!(growth.files[0].peak, graph_peak);
+        assert_eq!(growth.peak, graph_peak.max(shard_peak));
+        assert!(growth.peak < graph_peak + shard_peak);
+    }
 
     #[tokio::test]
     async fn headers_return_before_export_and_the_request_budget_does_not_cancel_the_stream() {
@@ -322,7 +463,7 @@ mod tests {
         let (finished, result) = tokio::sync::oneshot::channel();
         let pool = Arc::new(Semaphore::new(1));
         let response = direct_response(
-            reserve_from(&pool).unwrap(), root.path().join("claims.sqlite3"), u64::MAX,
+            reserve_from(&pool).unwrap(), database_paths(root.path()), u64::MAX,
             move |output| {
                 started.send(()).unwrap();
                 let result = output.write_all(&vec![b'\n'; 256 * 1024]);
@@ -340,19 +481,26 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn wal_growth_cancels_a_direct_snapshot_and_reports_the_limit() {
         let root = tempfile::tempdir().unwrap();
-        let database = root.path().join("claims.sqlite3");
-        let wal = root.path().join("claims.sqlite3-wal");
-        std::fs::write(&wal, b"").unwrap();
+        let databases = database_paths(root.path());
+        let graph = wal_database(&databases[0]);
+        let shard = wal_database(&databases[1]);
+        let snapshots = databases.clone();
+        let (started, begun) = tokio::sync::oneshot::channel();
         let (release, gate) = std::sync::mpsc::channel();
         let response = direct_response(
-            reserve_from(&Arc::new(Semaphore::new(1))).unwrap(), database, 1,
+            reserve_from(&Arc::new(Semaphore::new(1))).unwrap(), databases, 1,
             move |output| {
+                let _graph = pin_snapshot(&snapshots[0]);
+                let _shard = pin_snapshot(&snapshots[1]);
+                started.send(()).unwrap();
                 gate.recv()?;
                 output.write_all(b"{\"record\":\"header\"}\n")?;
                 Ok(())
             },
         );
-        std::fs::write(&wal, b"growth").unwrap();
+        begun.await.unwrap();
+        shard.execute("INSERT INTO payload VALUES (zeroblob(16384))", []).unwrap();
+        assert_eq!(graph.query_row("SELECT count(*) FROM payload", [], |row| row.get::<_, u64>(0)).unwrap(), 1);
         tokio::time::advance(Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
         release.send(()).unwrap();

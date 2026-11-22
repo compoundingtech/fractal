@@ -471,7 +471,11 @@ pub async fn backup_export(
     if query.stream {
         return Ok(backup_export::direct_response(
             permit,
-            state.store.path.clone(),
+            [
+                state.store.path.clone(),
+                fractal_store::store::backup_shards::database_path(&state.state_dir)
+                    .map_err(ApiError::internal)?,
+            ],
             query.max_wal_growth.unwrap_or(4 * 1024 * 1024 * 1024),
             move |mut output| {
                 state.store.write_backup_with_bodies(&mut output, Some(&bodies))?;

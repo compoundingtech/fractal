@@ -1451,6 +1451,7 @@ pub struct ReadPool {
     pub returned: Condvar,
     pub path: PathBuf,
     pub shared_memory: bool,
+    immutable: bool,
     counts: Arc<ReaderCounts>,
     admission: Arc<Semaphore>,
     diagnostic_id: u64,
@@ -1678,19 +1679,25 @@ impl Drop for PinnedRead<'_> {
 
 impl ReadPool {
     pub fn new(path: &Path, shared_memory: bool) -> Result<Self> {
-        Self::new_with(path, shared_memory, None,
+        Self::new_with(path, shared_memory, false, None,
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    /// Readers of a cleanly stopped offline source never create or update WAL/SHM files.
+    pub(crate) fn new_immutable(path: &Path) -> Result<Self> {
+        Self::new_with(path, false, true, None,
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
     pub(crate) fn new_admitted(admitted: Arc<crate::store::AdmittedStore>) -> Result<Self> {
         let path = admitted.database_path().to_path_buf();
-        Self::new_with(&path, false, Some(admitted),
+        Self::new_with(&path, false, false, Some(admitted),
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_temporary(path: &Path, directory: Option<Arc<tempfile::TempDir>>) -> Result<Self> {
-        Self::new_with(path, false, None, directory)
+        Self::new_with(path, false, false, None, directory)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1709,6 +1716,7 @@ impl ReadPool {
     fn new_with(
         path: &Path,
         shared_memory: bool,
+        immutable: bool,
         admitted: Option<Arc<crate::store::AdmittedStore>>,
         #[cfg(any(test, feature = "test-support"))]
         temporary_directory: Option<Arc<tempfile::TempDir>>,
@@ -1718,6 +1726,7 @@ impl ReadPool {
             returned: Condvar::new(),
             path: path.to_path_buf(),
             shared_memory,
+            immutable,
             counts: Arc::new(ReaderCounts::default()),
             admission: Arc::new(Semaphore::new(constructor_read_limit())),
             diagnostic_id: read_lifetime::next_pool_id(),
@@ -1753,8 +1762,10 @@ impl ReadPool {
     fn open_connection(&self) -> Result<ReadConnection> {
         let connection = if let Some(admitted) = &self.admitted {
             let connection = admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            crate::store::blob_file::attach_reader(&connection, admitted.database_path())?;
+            crate::store::blob_file::attach_reader(&connection, admitted.database_path(), false)?;
             configure_open_read_connection(connection)?
+        } else if self.immutable {
+            open_immutable_read_connection(&self.path)?
         } else {
             open_read_connection(&self.path, self.shared_memory)?
         };
@@ -2487,8 +2498,55 @@ pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connecti
     };
     let connection = Connection::open_with_flags(path, flags)
         .with_context(|| format!("open st read connection {}", path.display()))?;
-    crate::store::blob_file::attach_reader(&connection, path)?;
+    crate::store::blob_file::attach_reader(&connection, path, false)?;
     configure_open_read_connection(connection)
+}
+
+/// Encode a native filename, not a caller-supplied SQLite URI. In particular, `?`, `#`
+/// and `%` in source paths must not become URI options or change the opened database.
+pub(crate) fn immutable_database_uri(path: &Path) -> Result<String> {
+    let mut uri = String::from("file:");
+    use std::fmt::Write as _;
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'/' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(char::from(byte));
+            }
+            _ => write!(uri, "%{byte:02X}")?,
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    Ok(uri)
+}
+
+/// Immutable SQLite ignores WAL, so refuse any nonempty WAL before opening the file.
+/// This is an offline contract: the caller must keep the source stopped throughout export.
+pub(crate) fn open_immutable_read_connection(path: &Path) -> Result<Connection> {
+    let path = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve offline backup database {}", path.display()))?;
+    require_checkpointed_backup_database(&path)?;
+    let uri = immutable_database_uri(&path)?;
+    let connection = Connection::open_with_flags(
+        uri, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    ).with_context(|| format!("open immutable backup read connection {}", path.display()))?;
+    crate::store::blob_file::attach_reader(&connection, &path, true)?;
+    configure_open_read_connection(connection)
+}
+
+pub(crate) fn require_checkpointed_backup_database(path: &Path) -> Result<()> {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let wal = PathBuf::from(wal);
+    match std::fs::metadata(&wal) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.len() == 0,
+            "read-only backup refuses nonempty WAL {}; source must be cleanly stopped and checkpointed before exporting",
+            wal.display(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspect offline backup WAL {}", wal.display())),
+    }
+    Ok(())
 }
 
 fn configure_open_read_connection(mut connection: Connection) -> Result<Connection> {

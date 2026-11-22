@@ -114,20 +114,38 @@ pub fn attach_writer(connection: &Connection, database: &Path) -> Result<()> {
 /// no row, and a cursor reads as unset. An in-memory stand-in can't do that: on a read-only
 /// connection it is read-only too, and could not take the tables. A private in-memory store has no
 /// file to share, so its reader keeps an in-memory stand-in.
-pub fn attach_reader(connection: &Connection, database: &Path) -> Result<()> {
+pub fn attach_reader(connection: &Connection, database: &Path, immutable: bool) -> Result<()> {
     let location = location(database);
     if location == ":memory:" {
         connection.execute(/* sqlite-large-value: allow-for-now lv-hb2d3b2648e1d owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ':memory:' AS blob_file", [])?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hedea69cc751c owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ BLOB_FILE_TABLE)?;
         return Ok(());
     }
-    let attached = if location.starts_with("file:") || Path::new(&location).exists() {
+    let attached = if immutable {
+        immutable_reader_location(database)?
+    } else if location.starts_with("file:") || Path::new(&location).exists() {
         location
     } else {
         database.to_string_lossy().into_owned()
     };
     connection.execute(/* sqlite-large-value: allow-for-now lv-h5219554f400a owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS blob_file", [&attached])?;
     Ok(())
+}
+
+/// Offline readers must keep attachments immutable too: a plain read-only ATTACH can
+/// create or update WAL shared memory even when the main database is immutable.
+fn immutable_reader_location(database: &Path) -> Result<String> {
+    let mut name = database.file_stem().context("offline backup database has no filename")?.to_os_string();
+    name.push(".blobs");
+    if let Some(extension) = database.extension() {
+        name.push(".");
+        name.push(extension);
+    }
+    let blob = database.with_file_name(name);
+    let attached = if blob.try_exists()? { blob.as_path() } else { database };
+    let attached = std::fs::canonicalize(attached)?;
+    crate::sqlite::require_checkpointed_backup_database(&attached)?;
+    crate::sqlite::immutable_database_uri(&attached)
 }
 
 /// Create the empty blob file at `location` with the writer's settings. Two at once are harmless:
@@ -159,7 +177,7 @@ pub fn copy_beside(database: &Path, shared_memory: bool, copy: &Path) -> Result<
     };
     let connection = Connection::open_with_flags(database, flags)?;
     connection.busy_timeout(Duration::from_secs(5))?;
-    attach_reader(&connection, database)?;
+    attach_reader(&connection, database, false)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h1145b31da060 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "VACUUM blob_file INTO ?1", [&target])?;
     Ok(())
 }

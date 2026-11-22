@@ -782,6 +782,7 @@ fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> 
 mod tests {
     use super::*;
     use crate::backup;
+    use std::path::PathBuf;
 
     fn offline_fixture(path: &Path, seal: bool) {
         let source = Store::open(path, "alder").unwrap();
@@ -794,6 +795,108 @@ mod tests {
         connection.execute(
             "INSERT INTO meta(key,value) VALUES('local_node_writer','alder')", [],
         ).unwrap();
+    }
+
+    // Include every filename (directories too) and every file's content digest, including
+    // absent/present WAL and SHM sidecars and the separately attached blob databases.
+    fn source_snapshot(directory: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+            for entry in fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                if path.is_dir() {
+                    files.insert(relative, None);
+                    visit(root, &path, files);
+                } else {
+                    files.insert(relative, Some(Sha256::digest(fs::read(&path).unwrap()).to_vec()));
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        visit(directory, directory, &mut files);
+        files
+    }
+
+    fn sidecar(database: &Path, suffix: &str) -> PathBuf {
+        let mut path = database.as_os_str().to_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
+    fn offline_shard(directory: &Path) -> PathBuf {
+        let path = super::super::backup_shards::database_path(directory).unwrap();
+        let shard = GraphStore::open(
+            &path, "alder",
+            Arc::new(super::super::messages_shard::MessagesRuntime::default()),
+        ).unwrap();
+        shard.connection.write().execute(
+            "INSERT INTO stream_lifecycle(subject,kind,actor,fields,recorded_at_unix_ms)
+             VALUES('message/offline','message.read','agent/reader','{}',1)", [],
+        ).unwrap();
+        drop(shard);
+        path
+    }
+
+    #[test]
+    fn offline_export_preserves_all_files_with_present_and_absent_sidecars() {
+        for present in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().join("source ?#%");
+            fs::create_dir(&directory).unwrap();
+            let database = directory.join("claims ?#%.sqlite3");
+            offline_fixture(&database, true);
+            let shard = offline_shard(&directory);
+            for path in [&database, &shard] {
+                let blob = PathBuf::from(smallclaims::store::blob_file::location(path));
+                for database in [path.as_path(), blob.as_path()] {
+                    assert!(!sidecar(database, "-wal").exists());
+                    assert!(!sidecar(database, "-shm").exists());
+                    if present {
+                        fs::write(sidecar(database, "-wal"), []).unwrap();
+                        fs::write(sidecar(database, "-shm"), b"must remain byte-for-byte unchanged").unwrap();
+                    }
+                }
+            }
+            let before = source_snapshot(&directory);
+            let source = Store::open_backup_read_only(&database).unwrap();
+            assert_eq!(source_snapshot(&directory), before);
+            // Force the pool to open another physical reader, not just reuse its first one.
+            let first = source.readers.get();
+            let second = source.readers.get();
+            drop((first, second));
+            let mut output = Vec::new();
+            let header = source.write_backup_read_only(&mut output, None).unwrap();
+            assert!(header.shards.contains_key(super::super::messages_shard::SHARD_ID));
+            assert_eq!(source_snapshot(&directory), before);
+            drop(source);
+            assert_eq!(source_snapshot(&directory), before);
+        }
+    }
+
+    #[test]
+    fn offline_open_refuses_nonempty_graph_and_shard_wals_without_changing_source() {
+        for shard_wal in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let database = root.path().join("claims.sqlite3");
+            offline_fixture(&database, true);
+            let shard = offline_shard(root.path());
+            let target = if shard_wal { &shard } else { &database };
+            let writer = Connection::open(target).unwrap();
+            writer.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA wal_autocheckpoint=0;
+                 INSERT INTO meta(key,value) VALUES('offline_wal_test','uncheckpointed');",
+            ).unwrap();
+            assert!(fs::metadata(sidecar(target, "-wal")).unwrap().len() > 0);
+            let before = source_snapshot(root.path());
+            let error = Store::open_backup_read_only(&database).err().unwrap();
+            let message = format!("{error:#}");
+            assert!(message.contains("nonempty WAL"), "{message}");
+            assert!(message.contains("cleanly stopped and checkpointed"), "{message}");
+            assert!(message.contains(&sidecar(target, "-wal").display().to_string()), "{message}");
+            assert_eq!(source_snapshot(root.path()), before);
+            drop(writer);
+        }
     }
 
     #[test]

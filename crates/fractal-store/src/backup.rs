@@ -81,6 +81,7 @@ pub struct StreamReceipt {
     pub started_at: String,
     pub finished_at: String,
     pub peak_wal_growth: u64,
+    pub peak_wal_growth_by_file: BTreeMap<String, u64>,
 }
 
 struct CheckedOutput<W> {
@@ -102,6 +103,7 @@ impl<W: Write> CheckedOutput<W> {
     fn finish(mut self) -> Result<StreamReceipt> {
         let records = self.verifier.records;
         let peak_wal_growth = self.verifier.peak_wal_growth;
+        let peak_wal_growth_by_file = std::mem::take(&mut self.verifier.peak_wal_growth_by_file);
         let header = self.verifier.finish()?;
         let source = header.source.context("backup source has no persisted local writer identity")?;
         self.output.flush()?;
@@ -110,17 +112,20 @@ impl<W: Write> CheckedOutput<W> {
             sha256: hex::encode(self.hash.finalize()), bytes: self.bytes,
             writer_id: source.writer_id, max_store_index: source.max_store_index,
             started_at: self.started_at, finished_at: chrono::Utc::now().to_rfc3339(),
-            peak_wal_growth,
+            peak_wal_growth, peak_wal_growth_by_file,
         })
     }
 }
 
 impl<W: Write> Write for CheckedOutput<W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.verifier.push(bytes).map_err(std::io::Error::other)?;
-        self.output.write_all(bytes)?;
-        self.hash.update(bytes);
-        self.bytes += bytes.len() as u64;
+        let Self { output, verifier, hash, bytes: written, .. } = self;
+        verifier.push(bytes, |line| {
+            output.write_all(line)?;
+            hash.update(line);
+            *written += line.len() as u64;
+            Ok(())
+        }).map_err(std::io::Error::other)?;
         Ok(bytes.len())
     }
 
@@ -357,10 +362,11 @@ struct StreamVerifier {
     pending: Vec<u8>,
     records: u64,
     peak_wal_growth: u64,
+    peak_wal_growth_by_file: BTreeMap<String, u64>,
 }
 
 impl StreamVerifier {
-    fn push(&mut self, mut bytes: &[u8]) -> Result<()> {
+    fn push(&mut self, mut bytes: &[u8], mut emit: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
         while !bytes.is_empty() {
             let count = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |index| index + 1);
             ensure!(self.pending.len() as u64 + count as u64 <= MAX_RECORD_BYTES, "oversized backup record");
@@ -370,6 +376,7 @@ impl StreamVerifier {
                 let line = std::mem::take(&mut self.pending);
                 let record = serde_json::from_slice(&line).context("decode backup record")?;
                 self.record(record, &line)?;
+                emit(&line)?;
                 self.pending = line;
                 self.pending.clear();
             }
@@ -436,6 +443,9 @@ impl StreamVerifier {
             } => {
                 let end: serde_json::Value = serde_json::from_slice(bytes)?;
                 self.peak_wal_growth = end["data"]["peak_wal_growth"].as_u64().unwrap_or(0);
+                if let Some(peaks) = end["data"].get("peak_wal_growth_by_file") {
+                    self.peak_wal_growth_by_file = serde_json::from_value(peaks.clone())?;
+                }
                 ensure!(
                     self.envelopes == expected && hex::encode(self.hash.clone().finalize()) == sha256,
                     "backup checksum/count mismatch"
@@ -778,4 +788,44 @@ fn require_empty_database(connection: &rusqlite::Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stream_output_tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_and_invalid_records_never_reach_output() {
+        let mut output = CheckedOutput::new(Vec::new());
+        output.write_all(b"{\"record\":").unwrap();
+        assert!(output.output.is_empty());
+        assert!(output.write_all(b"invalid}\n").is_err());
+        assert!(output.output.is_empty());
+    }
+
+    #[test]
+    fn split_valid_records_emit_only_after_validation() {
+        let store = Store::open_memory("backup-output").unwrap();
+        let mut line = serde_json::to_vec(&Record::Header(store.backup_header().unwrap())).unwrap();
+        line.push(b'\n');
+        let mut output = CheckedOutput::new(Vec::new());
+        output.write_all(&line[..line.len() - 1]).unwrap();
+        assert!(output.output.is_empty());
+        output.write_all(&line[line.len() - 1..]).unwrap();
+        assert_eq!(output.output, line);
+        output.write_all(b"{\"record\":\"end\"").unwrap();
+        assert_eq!(output.output, line, "the truncated tail must remain private");
+        assert!(output.finish().is_err());
+    }
+
+    #[test]
+    fn a_checksum_failure_never_emits_the_end_record() {
+        let store = Store::open_memory("backup-output").unwrap();
+        let mut line = serde_json::to_vec(&Record::Header(store.backup_header().unwrap())).unwrap();
+        line.push(b'\n');
+        let mut output = CheckedOutput::new(Vec::new());
+        output.write_all(&line).unwrap();
+        assert!(output.write_all(b"{\"record\":\"end\",\"data\":{\"envelopes\":0,\"sha256\":\"wrong\"}}\n").is_err());
+        assert_eq!(output.output, line);
+    }
 }
