@@ -80,6 +80,8 @@ mod observation_trim_tests;
 pub mod availability;
 pub mod directive_notes;
 mod declared_admission;
+#[cfg(test)]
+mod runtime_workspace_tests;
 mod agent_charter;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
@@ -13559,7 +13561,7 @@ pub fn runtime_incarnation_state(
                     });
                 }
             }
-            Some("exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
+            Some(status) if matches!(status, "exited" | "vanished" | "stopped" | "absent" | "failed") => match observed {
                 Some(ended) if ended == incarnation => return Ok(IncarnationRuntime::Ended),
                 Some(_) => other_ended = true,
                 None => {
