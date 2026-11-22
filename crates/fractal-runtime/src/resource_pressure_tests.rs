@@ -362,7 +362,9 @@ fn allocator_counter_reset_is_not_pressure_and_malformed_vmstat_is_unknown() {
     for now in (2500..=65000).step_by(2500) {
         assert!(!fixture.observe(now).blocked);
     }
-    for value in ["pgscan_kswapd 1\n", "allocstall_normal NaN\n", "allocstall_normal 1 extra\n"] {
+    for value in ["pgscan_kswapd 1\n", "allocstall_normal NaN\n", "allocstall_normal 1 extra\n",
+        "allocstall_normal 1\nallocstall_normal 2\n", "allocstall_normal\n",
+        "allocstall_normal 1", "allocstall_ 1\n"] {
         fixture.write("proc/vmstat", value);
         assert_eq!(fixture.observe(67500).reason, Some(Reason::UnknownObservation));
     }
@@ -402,14 +404,63 @@ fn floor_at_or_above_total_memory_is_an_explicit_configuration_error() {
         let mut policy = fixture.policy.clone();
         policy.memory_available_floor_bytes = floor;
         let root = fixture.root.path();
-        let mut observer = Observer::with_paths(policy.clone(), [
+        let error = Observer::with_paths(policy.clone(), [
             root.join("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure"),
             root.join("proc/pressure/io"), root.join("proc/meminfo"),
             root.join("proc/pressure/memory"), root.join("proc/vmstat"),
-        ]).unwrap();
-        for _ in 0..2 {
-            let error = observer.observe(&policy).unwrap_err().to_string();
-            assert!(error.contains("memoryAvailableFloorBytes") && error.contains("must be below MemTotal"));
+        ]).err().expect("invalid floor must be rejected at construction").to_string();
+        assert!(error.contains("memoryAvailableFloorBytes") && error.contains("must be below MemTotal"));
+    }
+    let root = fixture.root.path();
+    let mut observer = Observer::with_paths(fixture.policy.clone(), [
+        root.join("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure"),
+        root.join("proc/pressure/io"), root.join("proc/meminfo"),
+        root.join("proc/pressure/memory"), root.join("proc/vmstat"),
+    ]).unwrap();
+    fixture.write("proc/meminfo", "MemTotal: 2097152 kB\nMemAvailable: 1048576 kB\n");
+    for _ in 0..2 {
+        let error = observer.observe(&fixture.policy).unwrap_err().to_string();
+        assert!(error.contains("memoryAvailableFloorBytes") && error.contains("must be below MemTotal"));
+    }
+}
+
+#[test]
+fn bursty_allocator_events_qualify_root_pressure_through_the_sustained_interval() {
+    for cadence_ms in [5000, 20000] {
+        let mut fixture = PressureFixture::new();
+        assert!(!fixture.observe(0).blocked);
+        for now in (2500..=cadence_ms + 60000).step_by(2500) {
+            fixture.write("proc/vmstat", &format!("allocstall_normal {}\n", 100 + now / cadence_ms));
+            let decision = fixture.observe(now);
+            assert_eq!(decision.blocked, now >= cadence_ms + 60000);
         }
+    }
+}
+
+#[test]
+fn one_allocator_event_qualifies_a_long_stall_for_exactly_the_psi_window() {
+    for window in [Window::Avg10, Window::Avg60, Window::Avg300] {
+        let mut fixture = PressureFixture::new();
+        fixture.policy.rules[0].window = window;
+        fixture.brake = Brake::new(fixture.policy.clone()).unwrap();
+        fixture.write("proc/pressure/memory", "full avg10=3.0 avg60=3.0 avg300=3.0\n");
+        fixture.write("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure",
+            "full avg10=0.0 avg60=0.0 avg300=0.0\n");
+        assert!(!fixture.observe(0).blocked); // No earlier increment is inferred.
+        assert_eq!(fixture.reader.readings[0].millipercent, 0);
+        fixture.write("proc/vmstat", "allocstall_normal 101\n");
+        for now in (2500..=2500 + window.duration_ms()).step_by(2500) {
+            fixture.observe(now);
+            assert_eq!(fixture.reader.readings[0].millipercent, 3000);
+        }
+        fixture.observe(5000 + window.duration_ms());
+        assert_eq!(fixture.reader.readings[0].millipercent, 0);
+        // A reset clears even unexpired evidence, rather than qualifying the root.
+        fixture.write("proc/vmstat", "allocstall_normal 102\n");
+        fixture.observe(7500 + window.duration_ms());
+        assert_eq!(fixture.reader.readings[0].millipercent, 3000);
+        fixture.write("proc/vmstat", "allocstall_normal 0\n");
+        fixture.observe(10000 + window.duration_ms());
+        assert_eq!(fixture.reader.readings[0].millipercent, 0);
     }
 }
