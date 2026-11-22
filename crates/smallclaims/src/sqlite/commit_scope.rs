@@ -185,6 +185,14 @@ impl Ledger {
             Some(SavepointAction::RollbackTo(index)) if !autocommit => {
                 self.pending = Changes::default();
                 self.savepoints.truncate(index + 1);
+                // ROLLBACK TO also undoes writes of a still-live RETURNING statement.
+                // Such a writer could not predate this savepoint: SQLite rejects opening
+                // savepoints while a writable statement is active. Its delayed PROFILE
+                // must not resurrect hints after another statement advances total_changes.
+                self.statement_rows = Changes::default();
+                for statement in &mut self.suspended {
+                    statement.rows = Changes::default();
+                }
             }
             Some(SavepointAction::Release { index, transaction: false }) if !autocommit => {
                 for (_, parent) in self.savepoints.drain(index..) {
@@ -659,5 +667,49 @@ mod busy_savepoint_tests {
                 assert_eq!(count.load(Ordering::Relaxed), 1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod suspended_rollback_tests {
+    use super::*;
+    use crate::sqlite::WriterConnection;
+    use std::sync::Arc;
+
+    #[test]
+    fn rollback_to_discards_live_returning_hints_without_discarding_later_writes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+             CREATE TABLE alpha(id INTEGER PRIMARY KEY);
+             CREATE TABLE beta(id INTEGER PRIMARY KEY);"
+        ).unwrap();
+        let writer = WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+        let alpha = Arc::new(AtomicU64::new(0));
+        let observed = alpha.clone();
+        let _alpha = writer.observe_tables(&["alpha"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let beta = Arc::new(AtomicU64::new(0));
+        let observed = beta.clone();
+        let _beta = writer.observe_tables(&["beta"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let globals = Arc::new(AtomicU64::new(0));
+        let observed = globals.clone();
+        let _global = writer.observe_commits(move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        {
+            let connection = writer.write();
+            connection.execute_batch("SAVEPOINT s").unwrap();
+            {
+                let mut statement = connection.prepare("INSERT INTO alpha VALUES(1) RETURNING id").unwrap();
+                let mut rows = statement.query([]).unwrap();
+                assert!(rows.next().unwrap().is_some());
+                connection.execute_batch("ROLLBACK TO s; INSERT INTO beta VALUES(1)").unwrap();
+                // Dropping the live statement runs its delayed PROFILE after beta's write.
+            }
+            connection.execute_batch("RELEASE s").unwrap();
+            assert_eq!(connection.query_row("SELECT count(*) FROM alpha", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
+            assert_eq!(connection.query_row("SELECT count(*) FROM beta", [], |row| row.get::<_, u64>(0)).unwrap(), 1);
+        }
+        assert_eq!(alpha.load(Ordering::Relaxed), 0);
+        assert_eq!(beta.load(Ordering::Relaxed), 1);
+        assert_eq!(globals.load(Ordering::Relaxed), 1);
     }
 }
