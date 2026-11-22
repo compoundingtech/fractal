@@ -18484,10 +18484,11 @@ async fn publish_harness_activity(
                 ) {
                     Ok(emit) => emit.then(|| format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}")),
                     Err(error) => {
-                        tracing::warn!(%error, "preparing channel readiness failed; publishing without coalescing");
-                        if let Err(error) = fractal_drivers::harness_events::invalidate_channel_readiness(dir, runtime) {
-                            tracing::warn!(%error, "invalidating channel readiness fence failed");
-                        }
+                        tracing::warn!(%error, "preparing channel readiness failed; invalidating fence before fallback");
+                        // Without invalidation a fallback edge could leave a stale fence
+                        // suppressing its successor. Retain the event until this succeeds.
+                        fractal_drivers::harness_events::invalidate_channel_readiness(dir, runtime)
+                            .context("invalidating channel readiness before fallback publication")?;
                         Some(legacy_key())
                     }
                 }

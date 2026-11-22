@@ -11339,5 +11339,40 @@ async fn omp_successor_drains_predecessor_readiness_and_preparation_failure() {
     ).unwrap();
     assert_eq!(latest.body["fields"]["code"], "omp-channel-ready",
         "preparation recovery must publish ready after the fallback unready edge");
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-ha9a8015b2338 owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER refuse_readiness BEFORE INSERT ON prepared
+         WHEN NEW.slot='omp-channel-readiness' BEGIN SELECT RAISE(ABORT,'readiness preparation refused'); END;
+         CREATE TRIGGER refuse_invalidation BEFORE DELETE ON metadata
+         WHEN OLD.key LIKE 'omp-channel-readiness:%' BEGIN SELECT RAISE(ABORT,'readiness invalidation refused'); END;",
+    ).unwrap();
+    let mut unready = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    unready.channel_ready = Some(false);
+    writer.observe(unready).unwrap();
+    let before = store.claims_for(subject, Some("harness.diagnostic")).unwrap().len();
+    assert!(observations.drain(&client, subject, "omp", &mut false).await.is_err());
+    assert!(!harness_events::pending(root.path(), 100).unwrap().is_empty(),
+        "failure to invalidate must retain the event for retry");
+    assert_eq!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().len(), before,
+        "no fallback edge may publish while the old fence remains");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5f558c3b9bbd owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER refuse_readiness; DROP TRIGGER refuse_invalidation;").unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    assert_eq!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().len(), before + 1);
+    let mut ready = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    ready.channel_ready = Some(true);
+    writer.observe(ready).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    assert_eq!(diagnostics.len(), before + 2, "the reverse edge must not be suppressed");
+    let latest = diagnostics.iter().rev().find(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b"
+            && matches!(claim.body["fields"]["code"].as_str(), Some("omp-channel-ready" | "omp-channel-unready"))
+    ).unwrap();
+    assert_eq!(latest.body["fields"]["code"], "omp-channel-ready");
     server.abort();
 }
