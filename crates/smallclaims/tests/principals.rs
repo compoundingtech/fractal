@@ -86,7 +86,7 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     assert_eq!(verdict(&store, &claim), Verdict::Verified);
     {
         let connection = store.connection.write();
-        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 20);
+        assert_default_writer_version(&connection);
         for table in ["claim_signatures", "claim_signature_sources"] {
             let types: i64 = connection.query_row(&format!("SELECT count(*) FROM {table} WHERE typeof(signature)!='text'"), [], |row| row.get(0)).unwrap();
             assert_eq!(types, 0, "{table} must stay readable by the previous release");
@@ -143,6 +143,22 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     rusqlite::Connection::open(&path).unwrap()
         .pragma_update(None, "user_version", fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION + 1).unwrap();
     assert!(Store::open(&path, "studio", Arc::new(Plain)).is_err());
+}
+
+/// The default writer leaves a store at version 20, or at 26 once the signature compaction writer
+/// (its own flag) has compacted a claim; no other writer format is switched on.
+fn assert_default_writer_version(connection: &rusqlite::Connection) {
+    assert_writer_version(connection, 20);
+}
+
+/// The store is at `version`, or at 26 if the signature compaction writer has fenced it since.
+fn assert_writer_version(connection: &rusqlite::Connection, version: u32) {
+    use smallclaims::store::principals::compaction::{COMPACTION_STORAGE_VERSION, COMPACTION_WRITER_FLAG};
+    let found: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+    let compacting: bool = connection
+        .query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value='1')", [COMPACTION_WRITER_FLAG], |row| row.get(0))
+        .unwrap();
+    assert!(found == version || (found == COMPACTION_STORAGE_VERSION && compacting), "user_version {found}, expected {version}");
 }
 
 fn key() -> Arc<MemberKey> {
@@ -1978,7 +1994,7 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
     }
     {
         let connection = store.connection.write();
-        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), 20);
+        assert_default_writer_version(&connection);
         for table in ["claim_verdict_dependency_keys", "claim_verdict_dependency_edges"] {
             assert_eq!(connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_, u64>(0)).unwrap(), 0, "the default writer must not activate integer dependencies");
         }
@@ -2098,7 +2114,7 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
     assert_eq!(verdict(&store, &later), Verdict::Verified);
     assert!(store.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claim_verdict_links WHERE claim_id=?1)", [&later.id], |row| row.get::<_, bool>(0)).unwrap());
     assert_eq!(store.readers.get().query_row("SELECT count(*) FROM claim_verdict_dependency_edges", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
-    assert_eq!(store.readers.get().pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), if compact { 22 } else { 20 });
+    assert_writer_version(&store.readers.get(), if compact { 22 } else { 20 });
 }
 
 /// `dbstat.pgsize` counts occupied SQLite pages, not file size, freelist bytes, or

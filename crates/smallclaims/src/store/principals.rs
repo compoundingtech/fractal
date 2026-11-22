@@ -377,7 +377,7 @@ fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
     )
 }
 
-mod compaction;
+pub mod compaction;
 mod link_sweep;
 mod dependencies;
 mod judging;
@@ -1364,6 +1364,17 @@ pub struct JudgingPrune {
     pub finished: bool,
 }
 
+/// One page of [`Store::compact_settled_signatures`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SignatureCompaction {
+    pub examined: usize,
+    pub compacted: usize,
+    /// Every claim an earlier release kept whole has been looked at; later pages do nothing.
+    pub finished: bool,
+    /// How long this page held the writer, from its loan to its return.
+    pub held: std::time::Duration,
+}
+
 /// What a verdict recheck found.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerdictMismatch {
@@ -1789,6 +1800,30 @@ impl Store {
         Ok(JudgingPrune { examined, deleted, finished })
     }
 
+    /// Compact one page of the settled claims that earlier releases kept with their candidate
+    /// and source rows (see `compaction`), in one short background writer loan. Waits until the
+    /// candidate model serves, as the judging prune does.
+    pub fn compact_settled_signatures(&self) -> Result<SignatureCompaction> {
+        if !self.signature_migration()?.done() {
+            return Ok(SignatureCompaction::default());
+        }
+        // Once the walk is done, look for a settled claim left whole on a reader: nothing found
+        // takes no writer loan.
+        let restart = match compaction::settled_left(&self.readers.get())? {
+            Some(false) => return Ok(SignatureCompaction { finished: true, ..SignatureCompaction::default() }),
+            Some(true) => true,
+            None => false,
+        };
+        let mut connection = self.connection.write_background();
+        let lent = std::time::Instant::now();
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (examined, compacted, finished) = compaction::compact_page_tx(&transaction, restart)?;
+        transaction.commit()?;
+        drop(connection);
+        Ok(SignatureCompaction { examined, compacted, finished, held: lent.elapsed() })
+    }
+
     /// Milliseconds until the next orphan verdict-link sweep may start; none when one is due or
     /// under way. One meta read on a reader.
     pub fn verdict_link_sweep_wait(&self, now_ms: u64) -> Result<Option<u64>> {
@@ -2035,8 +2070,12 @@ impl Store {
                     // A changed delegation or revocation changes what relied on it.
                     queue_affected_by_row_tx(&transaction, &row)?;
                 }
-                // Its verdict is published: a settled small fold keeps no resume state.
+                // Its verdict is published: a settled small fold keeps no resume state, and
+                // a settled claim keeps only its facade (version 26).
                 judging::discard_settled_tx(&transaction, claim_id)?;
+                if !track_bootstrap {
+                    compaction::compact_settled_tx(&transaction, claim_id)?;
+                }
                 judged += 1;
             }
             if track_bootstrap && candidates_judged != 0 {

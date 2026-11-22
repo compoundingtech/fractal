@@ -110,9 +110,14 @@ fn a_settled_verdict_drops_its_judging_row_and_a_late_revocation_still_invalidat
     drain(a);
     assert_eq!(a.claim_verdict(&earlier.id).unwrap(), Verdict::Verified);
     assert_eq!(judging_rows(a), 0, "a settled small fold keeps no resume row");
-    // Serving and verification read the facade and candidates, which stay.
+    // Serving and verification read the facade and candidates: every signed claim keeps its
+    // candidates or, compacted once settled (storage version 26), its facade and count.
     assert_eq!(a.claim_signature(&earlier.id).unwrap().unwrap(), signature);
-    assert_eq!(count(a, "SELECT COUNT(*) FROM claim_signature_candidates"), count(a, "SELECT COUNT(*) FROM claim_signatures"));
+    assert_eq!(
+        count(a, "SELECT COUNT(*) FROM claim_signatures s WHERE EXISTS(SELECT 1 FROM claim_signature_candidates d WHERE d.claim_id=s.claim_id)
+                  OR EXISTS(SELECT 1 FROM claim_signature_counts n WHERE n.claim_id=s.claim_id AND n.candidates=1)"),
+        count(a, "SELECT COUNT(*) FROM claim_signatures"),
+    );
     assert!(a.recheck_claim_verdicts().unwrap().is_empty());
 
     // c withdrew the key earlier in canonical order; a learns of it only now. The dependency
