@@ -1160,3 +1160,29 @@ reclamation-cost bound. The existing generation-staging and certified keyed
 reclamation work therefore remains necessary; this review neither removes the
 exception nor grants a wider exemption. No statement, column catalog or other
 flow record changes are accepted by this refresh.
+
+### Mission-owned dedicated scratch (#7035)
+
+[The scratch custody review](https://github.com/compoundingtech/fractal/pull/7035)
+is owned by the `fractal_store::store::scratch_resources` maintainer.
+`lv-hc855c0885bb7` declares the new host-local custody table and `(host,id)` index;
+`lv-hef0a8dd0d560` publishes its durable intent, allocation receipt and release
+tombstone. These are resource ownership facts, not another admission accountant.
+The current producer bounds each input field to 4,096 bytes before serialization,
+and the schema caps serialized record bytes at 32,768. Inline records keep the
+intent/receipt transition atomic with the existing writer. Those limits do not
+by themselves establish lifetime row-count, index, transition or reclamation
+costs. The maintainer must qualify bounded physical key/value units and a
+generation-keyed retention/reclamation representation while preserving release
+tombstones and idempotent replay; automatic reclamation is not introduced here.
+
+The `fractal_store::store::scratch_resources::tests` maintainer owns
+`lv-he0bc37451fe9`, `lv-h40d4f40c9604`, `lv-hedc321694261`,
+`lv-hb652bf2a21a3`, `lv-ha2b4809b35ad`, `lv-h1bbc5325cd30` and
+`lv-h5eee83bba1b5`. These isolated fixtures insert/update one fixed owner,
+publish a bounded consumer JSON record, and remove owner evidence or arm an
+expired deadline to exercise fail-closed behavior. They do not add production
+writers to mission or shell history. Their remaining representation work is
+to preserve these exact interruption and uncertainty cases through the owning
+bounded fixture/native-store APIs, not to generalize the test registrations
+into permission for new unbounded production writes.
