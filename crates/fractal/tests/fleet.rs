@@ -7267,10 +7267,20 @@ async fn previous_release_verdicts_survive_signature_compaction_across_upgrade_a
         assert!(ids(n.claims().await).is_superset(&before));
     } else {
         o.daemon = Some(daemon);
+        // Started by hand to tell a refusal from a start, so its worker is too, as `start` does.
+        o.start_worker();
+        // A legacy member dials its static peers and announces no endpoint: wait for its port.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_err() {
+            assert!(Instant::now() < deadline, "the rolled-back member does not listen:\n{}", o.logs());
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         settle!(&o);
         kept(&judged, &verdicts(&o), "rollback");
-        note(&o, "o-rolled-back").await;
-        expected.insert("custom/fleet-test/o-rolled-back".into());
+        for (node, text) in [(&o, "o-rolled-back"), (&n, "n-after-rollback")] {
+            note(node, text).await;
+            expected.insert(format!("custom/fleet-test/{text}"));
+        }
         for node in [&o, &n] {
             wait_for_notes(node, &expected, 90, &[&o, &n]).await;
             settle!(node);
