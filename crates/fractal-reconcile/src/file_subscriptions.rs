@@ -92,7 +92,7 @@ pub(super) struct Pool(Mutex<State>);
 struct State {
     watcher: notify::RecommendedWatcher,
     users: Users,
-    generation: Arc<Mutex<BTreeMap<PathBuf, u64>>>,
+    generation: Arc<Mutex<BTreeMap<PathBuf, (bool, u64)>>>,
     requested: BTreeMap<PathBuf, [isize; 2]>,
     physical: BTreeMap<PathBuf, (bool, Stamp, u64)>,
     next: u64,
@@ -127,21 +127,27 @@ fn subtree<'a, T>(
         .take_while(move |(p, _)| p.starts_with(root))
         .map(|(p, _)| p)
 }
-fn invalidate_coverage(generations: &Mutex<BTreeMap<PathBuf, u64>>, event: &notify::Event) {
+fn invalidate_coverage(generations: &Mutex<BTreeMap<PathBuf, (bool, u64)>>, event: &notify::Event) {
     if !event.need_rescan() && !matches!(event.kind, EventKind::Remove(_)
         | EventKind::Modify(ModifyKind::Name(_))) {
         return;
     }
     let mut generations = lock(generations);
     if event.need_rescan() || event.paths.is_empty() {
-        for generation in generations.values_mut() { *generation += 1; }
+        for (_, generation) in generations.values_mut() { *generation += 1; }
     } else {
         let mut roots = BTreeSet::new();
         for path in &event.paths {
-            roots.extend(path.ancestors().filter(|root| generations.contains_key(*root)).map(Path::to_owned));
+            // A sibling file replacement cannot detach a nonrecursive parent watch.
+            // Recursive roots may lose descendant coverage; descendants of a renamed
+            // or removed ancestor always need reinstallation.
+            if !matches!(event.kind, EventKind::Remove(notify::event::RemoveKind::File)) {
+                roots.extend(path.ancestors().filter(|root|
+                    generations.get(*root).is_some_and(|(recursive, _)| *recursive)).map(Path::to_owned));
+            }
             roots.extend(subtree(&generations, path).cloned());
         }
-        for root in roots { *generations.get_mut(&root).expect("indexed root") += 1; }
+        for root in roots { generations.get_mut(&root).expect("indexed root").1 += 1; }
     }
 }
 impl Pool {
@@ -213,7 +219,12 @@ impl State {
     }
     fn install(&mut self, path: &Path, recursive: bool, post: Probe) -> Result<()> {
         let identity = stamp(path)?;
-        let generation = *lock(&self.generation).entry(path.to_owned()).or_default();
+        let generation = {
+            let mut generations = lock(&self.generation);
+            let entry = generations.entry(path.to_owned()).or_default();
+            entry.0 = recursive;
+            entry.1
+        };
         let mode = if recursive { Recursive } else { NonRecursive };
         if let Err(error) = self.watcher.watch(path, mode) {
             lock(&self.generation).remove(path);
@@ -260,7 +271,7 @@ impl State {
             };
             let mut pending = Vec::new();
             for path in candidates {
-                let generation = lock(&self.generation).get(&path).copied().unwrap_or_default();
+                let generation = lock(&self.generation).get(&path).map_or(0, |entry| entry.1);
                 let desired = self.requested.get(&path).map(|c| c[1] > 0).filter(|_| {
                     !path
                         .ancestors()
@@ -367,8 +378,12 @@ mod tests {
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::From)))
             .add_path(paths[0].clone());
         invalidate_coverage(&generations, &event);
-        assert_eq!(lock(&generations)[&paths[0]], 1);
-        assert!(paths[1..].iter().all(|path| lock(&generations)[path] == 0));
+        assert_eq!(lock(&generations)[&paths[0]].1, 1);
+        assert!(paths[1..].iter().all(|path| lock(&generations)[path].1 == 0));
+        let sibling = notify::Event::new(EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Both)))
+            .add_path(paths[1].join("unrelated"));
+        invalidate_coverage(&generations, &sibling);
+        assert_eq!(lock(&generations)[&paths[1]].1, 0, "sibling rename keeps parent coverage");
         assert_eq!(dispatch(&users, &event, false), 2);
         let event = notify::Event::new(EventKind::Remove(notify::event::RemoveKind::Folder))
             .add_path(parent.clone());
@@ -441,7 +456,7 @@ mod tests {
             drop(duplicate);
             assert_eq!(STATS.get(), 1);
         }
-        for generation in lock(&lock(&pool.0).generation).values_mut() { *generation += 1; }
+        for (_, generation) in lock(&lock(&pool.0).generation).values_mut() { *generation += 1; }
         STATS.set(0);
         let renewal = pool
             .subscribe(vec![(root.path().join("0"), false)], Arc::new(|_| {}))
