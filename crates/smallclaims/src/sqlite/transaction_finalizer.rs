@@ -321,10 +321,17 @@ mod tests {
             assert_eq!(runtime_calls.load(Ordering::Relaxed), 0);
             assert_eq!(maintenance_calls.load(Ordering::Relaxed), 1);
             assert_eq!(adapter_calls.load(Ordering::Relaxed), u64::from(failure != Some("maintenance")));
-            assert_eq!(
-                observations.try_recv().unwrap(),
-                (i64::from(failure.is_none()), 0),
-            );
+            // Observers publish only boundaries with committed changes. A maintenance or
+            // adapter refusal rolls the handoff back, so it leaves no committed mutation
+            // to observe; only the committed handoff publishes its captured source state.
+            if failure.is_none() {
+                assert_eq!(
+                    observations.try_recv().unwrap(),
+                    (1, 0),
+                );
+            } else {
+                assert!(observations.try_recv().is_err());
+            }
             if failure.is_none() {
                 // A later worker loan retains the ordinary managed finalization path.
                 {

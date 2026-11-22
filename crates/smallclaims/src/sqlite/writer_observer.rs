@@ -80,6 +80,94 @@ impl Drop for ScopeLease {
     }
 }
 
+/// Native transaction-resolution consumers for one connection. The mutation dispatcher
+/// owns the single commit/rollback hook slot and fans out to these subscribers, so
+/// installing or reinstating it at a loan boundary cannot drop another writer-owned
+/// transaction-resolution callback the way a raw slot swap would.
+struct Resolution {
+    commits: Mutex<Vec<Arc<dyn Fn() -> bool + Send + Sync>>>,
+    rollbacks: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+const RESOLUTION: &std::ffi::CStr = c"st3.transaction-resolution";
+
+fn resolution(connection: &Connection) -> Option<&Resolution> {
+    // SAFETY: this private name holds only the Arc<Resolution> transferred below.
+    // SQLite owns it until connection close; this borrow cannot outlive the connection.
+    unsafe {
+        (rusqlite::ffi::sqlite3_get_clientdata(connection.handle(), RESOLUTION.as_ptr())
+            as *const Resolution).as_ref()
+    }
+}
+
+unsafe extern "C" fn destroy_resolution(pointer: *mut std::ffi::c_void) {
+    // SAFETY: SQLite releases exactly the strong reference transferred by ensure_resolution,
+    // including allocation failure in sqlite3_set_clientdata.
+    unsafe { drop(Arc::from_raw(pointer.cast::<Resolution>())); }
+}
+
+fn commit_resolved(resolution: &Resolution) -> bool {
+    let commits = resolution.commits.lock().unwrap();
+    // Any subscriber vetoing a commit converts COMMIT into a rollback, as SQLite's
+    // native commit-hook contract requires.
+    commits.iter().any(|commit| commit())
+}
+
+fn rollback_resolved(resolution: &Resolution) {
+    let rollbacks = resolution.rollbacks.lock().unwrap();
+    for rollback in rollbacks.iter() {
+        rollback();
+    }
+}
+
+fn ensure_resolution(connection: &Connection) -> Result<Arc<Resolution>> {
+    // SAFETY: this private name holds only the Arc<Resolution> transferred below. The
+    // clientdata reference is not consumed, so the strong count is restored before use.
+    unsafe {
+        let installed = rusqlite::ffi::sqlite3_get_clientdata(
+            connection.handle(), RESOLUTION.as_ptr()) as *const Resolution;
+        if !installed.is_null() {
+            Arc::increment_strong_count(installed);
+            return Ok(Arc::from_raw(installed));
+        }
+    }
+    let resolution = Arc::new(Resolution {
+        commits: Mutex::new(Vec::new()),
+        rollbacks: Mutex::new(Vec::new()),
+    });
+    // SAFETY: SQLite owns this reference and releases it with the matching destructor.
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_set_clientdata(connection.handle(), RESOLUTION.as_ptr(),
+            Arc::into_raw(resolution.clone()).cast_mut().cast(), Some(destroy_resolution))
+    };
+    if result != rusqlite::ffi::SQLITE_OK {
+        return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(result), None).into());
+    }
+    // Own the slot until a mutation dispatcher takes it over. Bare replay/proof
+    // connections never get one, and their registered work still resolves.
+    let commits = resolution.clone();
+    connection.commit_hook(Some(move || commit_resolved(&commits)));
+    let rollbacks = resolution.clone();
+    connection.rollback_hook(Some(move || rollback_resolved(&rollbacks)));
+    Ok(resolution)
+}
+
+/// Register connection-local work for native transaction resolution. The mutation
+/// dispatcher owns the single commit/rollback hook slot and fans out to every
+/// registered consumer, so reinstalling that slot at a loan boundary cannot strand
+/// transaction-local state the way replacing a raw hook silently would. `commit`
+/// returning true converts COMMIT into a rollback, matching SQLite's contract.
+pub fn observe_transaction_resolution(
+    connection: &Connection,
+    commit: impl Fn() -> bool + Send + Sync + 'static,
+    rollback: impl Fn() + Send + Sync + 'static,
+) -> Result<()> {
+    let resolution = ensure_resolution(connection)?;
+    resolution.commits.lock().unwrap().push(Arc::new(commit));
+    resolution.rollbacks.lock().unwrap().push(Arc::new(rollback));
+    Ok(())
+}
+
 /// Writers without physical-row consumers still own the native mutation dispatcher.
 pub(crate) struct NoPhysicalObserver;
 impl WriterObserver for NoPhysicalObserver {
@@ -128,24 +216,32 @@ impl MutationState {
     fn install_scope(self: &Arc<Self>, connection: &Connection) {
         self.replacing_scope.store(true, Ordering::Relaxed);
         super::commit_scope::install_preupdate(connection, &self.ledger);
+        // Resolve registered connection-local work alongside the ledger: this slot swap
+        // replaces whatever fanout held the hooks before, and the dispatcher must not
+        // strand transaction-local hints that earlier owners installed. A failed hub
+        // keeps the ledger resolving and leaves those hints conservatively raised.
+        let resolution = ensure_resolution(connection).ok();
         let state = self.clone();
         let lease = ScopeLease(self.clone());
         connection.commit_hook(Some(move || {
             let _lease = &lease;
             state.ledger.lock().unwrap().committing();
-            false
+            resolution.as_ref().is_some_and(|resolution| commit_resolved(resolution))
         }));
         let state = self.clone();
         let lease = ScopeLease(self.clone());
         connection.rollback_hook(Some(move || {
             let _lease = &lease;
             state.ledger.lock().unwrap().rollback();
+            if let Some(resolution) = resolution.as_ref() {
+                rollback_resolved(resolution);
+            }
         }));
         super::commit_scope::install_trace(connection, &self.ledger);
         self.replacing_scope.store(false, Ordering::Relaxed);
     }
 
-    pub(crate) fn take_committed(&self, connection: &Connection) -> super::commit_scope::Changes {
+    pub(super) fn take_committed(&self, connection: &Connection) -> super::commit_scope::Changes {
         let mut changes = self.ledger.lock().unwrap().take(
             connection,
             self.unknown_commit.swap(false, Ordering::Relaxed),

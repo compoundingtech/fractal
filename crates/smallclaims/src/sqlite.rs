@@ -53,6 +53,7 @@ pub(crate) mod writer_observer;
 mod commit_scope;
 pub use commit_scope::{WriterObserverStats, writer_observer_stats};
 pub use writer_observer::WriterObserver;
+pub use writer_observer::observe_transaction_resolution;
 
 use crate::store::current_index;
 
@@ -2448,12 +2449,19 @@ pub mod work {
                 statement.query_row([],|row|row.get::<_,u64>(0)).unwrap();
                 capture.store(statement.get_status(rusqlite::StatementStatus::VmStep) as u64,Ordering::Relaxed);
             });
+            // The native contract publishes nothing for an unchanged loan, so the fixture
+            // commits an actual mutation; the loan's whole return, including the observer
+            // the dispatcher publishes at guard return, stays inside the one scope.
             let scope = SqliteWorkScope::start();
-            drop(writer.write());
+            let guard = writer.write();
+            guard
+                .execute("INSERT INTO claims(store_index) VALUES (1)", [])
+                .unwrap();
+            drop(guard);
             let work = scope.finish();
             assert_eq!(
-                work.statements, 2,
-                "committed index read plus returned-guard observer"
+                work.statements, 3,
+                "the committed mutation, its index read and the returned-guard observer"
             );
             assert!(observed_vm.load(Ordering::Relaxed) > 0);
             assert!(work.vm_steps > observed_vm.load(Ordering::Relaxed));

@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "Existing startup drains and real deadlines remain active. Confirmed SQLite write commits probe the claims index once, including otherwise empty commits: ignored AUTOINCREMENT inserts can advance its sequence without row hooks or total_changes. Explicit and implicit sequence advances wake claims-index dependents. Read-only and fully rolled-back loans do not probe the index. Writer observation work counters are exposed through the performance endpoint. Custom SQLite builds must enable SQLITE_ENABLE_PREUPDATE_HOOK; bundled builds enable it automatically."},
   "downtime": {"status": "none", "detail": "No additional service interruption."},
   "manual": {"status": "none", "detail": "No additional upgrade action required."},
-  "recovery": {"status": "none", "detail": "Lost native observation coverage conservatively invalidates dependent readers. SQLite builds missing required native hook support refuse writer initialization."}
+  "recovery": {"status": "none", "detail": "Lost native observation coverage conservatively invalidates dependent readers. Transaction-resolution subscribers share the writer-owned commit/rollback dispatcher, preserving connection-local work fences across native hook reinstalls. SQLite builds missing required native hook support refuse writer initialization."}
 }
