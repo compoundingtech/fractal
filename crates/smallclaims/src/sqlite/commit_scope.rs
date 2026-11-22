@@ -33,6 +33,11 @@ struct SuspendedStatement {
     action: Option<SavepointAction>,
 }
 
+struct DeferredProfile {
+    rows: Changes,
+    changes_at_start: i64,
+}
+
 #[derive(Default)]
 pub(super) struct Ledger {
     pending: Changes,
@@ -45,6 +50,7 @@ pub(super) struct Ledger {
     savepoint_action: Option<SavepointAction>,
     transaction_savepoint: bool,
     suspended: Vec<SuspendedStatement>,
+    deferred_profile: Option<DeferredProfile>,
 }
 impl Ledger {
     pub(super) fn row(&mut self, database: &str, table: &str) {
@@ -60,7 +66,7 @@ impl Ledger {
         }
     }
     pub(super) fn committing(&mut self) {
-        if self.statement.is_none() {
+        if self.statement.is_none() && self.deferred_profile.is_none() {
             // A replaced trace callback hid transaction-control/DDL execution. The row
             // and commit hooks still fence this actual write, but cannot route it selectively.
             self.pending.unknown = true;
@@ -73,6 +79,7 @@ impl Ledger {
         self.tentative = None;
         self.savepoints.clear();
         self.statement_rows = Changes::default();
+        self.deferred_profile = None;
         self.savepoint_action = None;
         self.transaction_savepoint = false;
         for statement in &mut self.suspended {
@@ -96,7 +103,12 @@ impl Ledger {
             }
         }
     }
-    pub(super) fn take(&mut self, autocommit: bool, unknown: bool) -> Changes {
+    pub(super) fn take(&mut self, connection: &Connection, unknown: bool) -> Changes {
+        // SAFETY: this is the exclusively lent, live writer connection. Unlike the legacy
+        // counter, the 64-bit API matches the baseline used by the native trace callback.
+        let total_changes = unsafe { ffi::sqlite3_total_changes64(connection.handle()) };
+        self.resolve_deferred(total_changes);
+        let autocommit = connection.is_autocommit();
         self.confirm(autocommit);
         if autocommit {
             // Prepared/no-op DDL can run without ever opening a write transaction.
@@ -122,7 +134,20 @@ impl Ledger {
         self.savepoint_action = statement.action;
     }
 
+    fn resolve_deferred(&mut self, total_changes: i64) {
+        if let Some(profile) = self.deferred_profile.take()
+            && total_changes > profile.changes_at_start
+        {
+            if let Some(tentative) = &mut self.tentative {
+                tentative.merge(profile.rows);
+            } else {
+                self.pending.merge(profile.rows);
+            }
+        }
+    }
+
     fn started(&mut self, key: usize, sql: &str, autocommit: bool, readonly: bool, total_changes: i64, active_write: bool) {
+        self.resolve_deferred(total_changes);
         self.confirm(autocommit);
         if self.statement == Some(key) { return; }
         // A live RETURNING statement or a reentrant SQL function can run other SQL
@@ -165,7 +190,7 @@ impl Ledger {
         }
     }
 
-    fn finished(&mut self, key: usize, total_changes: i64, autocommit: bool) {
+    fn finished(&mut self, key: usize, total_changes: i64, autocommit: bool, resetting: bool) {
         if self.statement != Some(key) {
             let Some(index) = self.suspended.iter().position(|statement| statement.key == key) else { return; };
             let statement = self.suspended.remove(index);
@@ -211,7 +236,12 @@ impl Ledger {
         // A failing trigger can advance it before its outer statement rolls back: in that
         // case retaining a hint is deliberately conservative, never an authorization.
         let rows = std::mem::take(&mut self.statement_rows);
-        if total_changes > self.changes_at_start {
+        if resetting {
+            // sqlite3_reset/finalize invoke PROFILE before VdbeReset halts a live
+            // RETURNING statement. Its successful writes and commit hook can therefore
+            // occur after PROFILE; resolve the delta at the next SQL/writer boundary.
+            self.deferred_profile = Some(DeferredProfile { rows, changes_at_start: self.changes_at_start });
+        } else if total_changes > self.changes_at_start {
             if let Some(tentative) = &mut self.tentative {
                 tentative.merge(rows);
             } else {
@@ -368,7 +398,7 @@ unsafe extern "C" fn traced(event: c_uint, context: *mut c_void, statement: *mut
             // Never inspect sqlite3_errcode here: it can still belong to an earlier SQL
             // error. Transaction and savepoint rollback are resolved by native hooks and
             // executed control statements, respectively.
-            ledger.finished(statement as usize, ffi::sqlite3_total_changes64(database), ffi::sqlite3_get_autocommit(database) != 0);
+            ledger.finished(statement as usize, ffi::sqlite3_total_changes64(database), ffi::sqlite3_get_autocommit(database) != 0, ffi::sqlite3_stmt_busy(statement) != 0);
             drop(ledger);
             let nanos = *detail.cast::<u64>();
             super::record_sqlite_time(&sql, std::time::Duration::from_nanos(nanos));
@@ -711,5 +741,47 @@ mod suspended_rollback_tests {
         assert_eq!(alpha.load(Ordering::Relaxed), 0);
         assert_eq!(beta.load(Ordering::Relaxed), 1);
         assert_eq!(globals.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod returning_reset_tests {
+    use super::*;
+    use crate::sqlite::WriterConnection;
+    use std::sync::Arc;
+
+    #[test]
+    fn unfinished_autocommit_returning_publishes_scoped_writes_at_guard_boundary() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+             CREATE TABLE alpha(id INTEGER PRIMARY KEY);
+             CREATE TABLE beta(id INTEGER PRIMARY KEY);"
+        ).unwrap();
+        let writer = WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+        let alpha = Arc::new(AtomicU64::new(0));
+        let observed = alpha.clone();
+        let _alpha = writer.observe_tables(&["alpha"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let beta = Arc::new(AtomicU64::new(0));
+        let observed = beta.clone();
+        let _beta = writer.observe_tables(&["beta"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let globals = Arc::new(AtomicU64::new(0));
+        let observed = globals.clone();
+        let _global = writer.observe_commits(move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        {
+            let connection = writer.write();
+            {
+                let mut statement = connection.prepare("INSERT INTO alpha VALUES(1),(2) RETURNING id").unwrap();
+                let mut rows = statement.query([]).unwrap();
+                assert!(rows.next().unwrap().is_some());
+                // Do not drain RETURNING. Reset runs PROFILE before it updates the final
+                // change count or invokes the native autocommit commit hook.
+            }
+            // No subsequent SQL: the guard boundary itself must resolve those writes.
+        }
+        assert_eq!(alpha.load(Ordering::Relaxed), 1);
+        assert_eq!(beta.load(Ordering::Relaxed), 0);
+        assert_eq!(globals.load(Ordering::Relaxed), 1);
+        assert_eq!(writer.write().query_row("SELECT count(*) FROM alpha", [], |row| row.get::<_, u64>(0)).unwrap(), 2);
     }
 }
