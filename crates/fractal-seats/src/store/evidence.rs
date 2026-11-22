@@ -39,23 +39,34 @@ impl EvidenceSeatsStore for Store {
         let local = crate::performance::task("roster/frontier-read", || {
             roster_local_frontier(&self.readers.get(), index)
         })?;
-        let mut cache = self.fractal.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned");
-        let entry = cache.iter_mut().rev()
-            .find(|entry| entry.index == index && entry.local <= local && entry.history == history)
-            .filter(|entry| agent_resources_entry_hits(entry, now, index, entry.local, history, selected));
-        let hit = if let Some(entry) = entry {
-            if roster_local_unchanged(&self.readers.get(), entry.local, local, index)? {
-                // Remember the checked interval without republishing or copying the rows.
-                entry.local = local;
-                Some((Arc::clone(&entry.items), entry.published_at_unix_ms))
+        let candidate = {
+            let cache = self.fractal.agent_resources_cache.lock()
+                .expect("agent resources cache poisoned");
+            cache.iter().rev()
+                .find(|entry| entry.index == index && entry.local <= local && entry.history == history)
+                .filter(|entry| agent_resources_entry_hits(entry, now, index, entry.local, history, selected))
+                .map(|entry| (entry.local, Arc::clone(&entry.items), entry.published_at_unix_ms))
+        };
+        let hit = if let Some((before, items, published_at)) = candidate {
+            if before == local {
+                Some((items, published_at))
+            } else if roster_local_unchanged(&self.readers.get(), before, local, index)? {
+                // Reader acquisition and SQL must not run under the cache lock. Only advance
+                // the entry we checked; a concurrent replacement keeps its own token.
+                let mut cache = self.fractal.agent_resources_cache.lock()
+                    .expect("agent resources cache poisoned");
+                if let Some(entry) = cache.iter_mut().find(|entry|
+                    entry.index == index && entry.history == history && entry.local == before
+                        && entry.published_at_unix_ms == published_at && Arc::ptr_eq(&entry.items, &items)) {
+                    entry.local = local;
+                }
+                Some((items, published_at))
             } else {
                 None
             }
         } else {
             None
         };
-        drop(cache);
         Ok(hit.map(|hit| crate::performance::task("roster/cache-hit", || {
             crate::otel::record_roster("hit", hit.0.len());
             hit

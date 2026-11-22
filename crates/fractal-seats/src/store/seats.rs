@@ -1305,18 +1305,31 @@ impl SeatsStore for Store {
             roster_local_frontier(&self.readers.get(), index)
         })?;
         let selected = BTreeSet::from([agent.to_owned()]);
+        let candidate = {
+            let cache = self.fractal.exact_agent_resources_cache.lock()
+                .expect("exact agent resources cache poisoned");
+            cache.iter().rev()
+                .find(|entry| exact_agent_entry(entry, agent)
+                    && entry.index == index && entry.local <= local && entry.history == history)
+                .filter(|entry| agent_resources_entry_hits(entry, now, index, entry.local, history, Some(&selected)))
+                .map(|entry| (entry.local, Arc::clone(&entry.items), entry.published_at_unix_ms))
+        };
+        let Some((before, items, published_at)) = candidate else { return Ok(None); };
+        if before == local {
+            return Ok(Some(items));
+        }
+        if !roster_local_unchanged(&self.readers.get(), before, local, index)? {
+            return Ok(None);
+        }
+        // Match the checked entry after releasing the lock for reader acquisition and SQL.
         let mut cache = self.fractal.exact_agent_resources_cache.lock()
             .expect("exact agent resources cache poisoned");
-        let entry = cache.iter_mut().rev()
-            .find(|entry| exact_agent_entry(entry, agent)
-                && entry.index == index && entry.local <= local && entry.history == history)
-            .filter(|entry| agent_resources_entry_hits(entry, now, index, entry.local, history, Some(&selected)));
-        if let Some(entry) = entry
-            && roster_local_unchanged(&self.readers.get(), entry.local, local, index)? {
+        if let Some(entry) = cache.iter_mut().find(|entry|
+            entry.index == index && entry.history == history && entry.local == before
+                && entry.published_at_unix_ms == published_at && Arc::ptr_eq(&entry.items, &items)) {
             entry.local = local;
-            return Ok(Some(Arc::clone(&entry.items)));
         }
-        Ok(None)
+        Ok(Some(items))
     }
 
     fn agent_page_refs_cached_at(
