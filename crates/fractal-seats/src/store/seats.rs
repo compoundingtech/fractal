@@ -510,7 +510,7 @@ impl SeatsStore for Store {
             let step = subject.starts_with("step-run/") && matches!(kind.as_str(),
                 "step-run.state" | "step-run.retried" | "step-run.carried"
                 | "work.claimed" | "work.renewed" | "work.progress" | "work.submitted"
-                | "work.failed" | "work.released" | "work.handoff-returned" | "work.extended"
+                | "work.failed" | "work.released" | "work.handoff-returned" | "work.extended" | "work.rebound"
                 | "work.person-asked" | "work.person-done" | "work.person-cancelled");
             // Any other kind on a run, generation or step (a fault, a nudge): a card sees these
             // subjects only through its owner and its queue, so refold the agents they own or
@@ -1025,8 +1025,8 @@ impl SeatsStore for Store {
             entry.idle_residency == idle_residency
                 && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         };
-        // Local agent timeline rows do not advance the graph index, but do change cards; the
-        // frontier ignores heartbeats and every other local kind, none of which a card reads.
+        // Local agent timeline and main-loop usage rows change cards without advancing the
+        // graph index. The frontier ignores heartbeats and response/subagent spend.
         // Read it inside the caller's SQLite snapshot, never from a future atomic generation
         // that could race this cut.
         let local = crate::performance::task("roster/frontier-read", || {
@@ -1108,7 +1108,9 @@ impl SeatsStore for Store {
                     let connection = self.readers.get();
                     let mut statement = connection.prepare_cached(
                         "SELECT DISTINCT subject FROM local_observations WHERE id>?1 AND id<=?2
-                         AND after_store_index<=?3 AND kind='harness.timeline' AND subject LIKE 'agent/%'",
+                         AND after_store_index<=?3 AND subject LIKE 'agent/%'
+                         AND (kind='harness.timeline' OR (kind='harness.usage'
+                           AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')))",
                     )?;
                     changed.extend(statement.query_map(params![previous.local, local, index],
                         |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<BTreeSet<_>>>()?);

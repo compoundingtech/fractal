@@ -660,7 +660,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .0
-                .contains("Copied https://example.com/notes")
+                .contains("Clipboard request sent (OSC 52) for https://example.com/notes")
         );
         ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(ui.popover.is_none());

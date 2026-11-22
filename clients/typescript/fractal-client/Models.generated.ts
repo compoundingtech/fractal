@@ -118,6 +118,7 @@ export type Agent = ResourceHeader & {
   current_work?: Array<WorkLabel>;
   current_work_ids?: Array<StepRunId>;
   declared_admission?: DeclaredAdmission;
+  declared_model?: string | null;
   delivery?: (AgentDelivery | null);
   down_since?: (Timestamp | null);
   driver?: string | null;
@@ -138,6 +139,7 @@ export type Agent = ResourceHeader & {
   lifecycle?: AgentLifecycle;
   live_model?: string | null;
   mail_custody?: AgentMailCustody;
+  model_drift?: AgentModelDrift;
   name: string;
   next_work?: (WorkLabel | null);
   next_work_id?: (Id | null);
@@ -269,6 +271,15 @@ export type AgentMessageEstimate = {
   fallback_low_microusd: number;
   method: string;
   source: string;
+};
+
+export type AgentModelDrift = {
+  drift_age_seconds: number | null;
+  drift_since: (Timestamp | null);
+  fallback_reason: ("transient" | "quota" | "auth" | "unknown" | null);
+  observed_at: (Timestamp | null);
+  return_attempts: number | null;
+  state: "at-declared" | "drifted" | "unknown" | "stale" | "uncomparable";
 };
 
 export type AgentPresentation = {
