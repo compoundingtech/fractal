@@ -68,6 +68,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
         round_trip: Option<Duration>,
         carrier: crate::replication::ReplicationCarrier,
         authenticated_member_key: Option<&str>,
+        deadline_unix_ms: Option<u128>,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
 
     fn publish_endpoints(
@@ -214,6 +215,7 @@ where
         round_trip: Option<Duration>,
         carrier: crate::replication::ReplicationCarrier,
         authenticated_member_key: Option<&str>,
+        deadline_unix_ms: Option<u128>,
     ) -> Result<ReplicationReceiveResponse> {
         let backend = self.clone();
         let peer = peer.to_owned();
@@ -222,23 +224,29 @@ where
         let authenticated_member_key = authenticated_member_key.map(str::to_owned);
         self.store().connection.spawn_blocking(move || crate::task_cpu::blocking("replication.receive", || {
             let store = backend.store();
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             if let Some(round_trip) = round_trip {
                 store.record_replication_round_trip(round_trip);
             }
             let receipt = store
-                .receive_replication_exchange_via(
+                .receive_replication_exchange_before(
                     &peer,
                     &fleet_id,
                     &exchange,
                     round_trip.is_some(),
                     carrier,
                     authenticated_member_key.as_deref(),
+                    deadline_unix_ms,
                 )
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::from)?;
             store.record_transport_observation(&peer, "up", None, None)?;
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let admission = store.validate_replication_backlog()?;
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let repairs = store.apply_replication_repairs()?;
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let projected = store.project_replication_backlog()?;
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             Ok(ReplicationReceiveResponse {
                 receipt,
                 changed: projected && (admission.changed || repairs != 0),

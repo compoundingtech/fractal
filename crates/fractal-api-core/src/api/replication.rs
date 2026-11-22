@@ -186,6 +186,17 @@ pub(super) fn receive_correlation(headers: &axum::http::HeaderMap) -> uuid::Uuid
         .unwrap_or_else(uuid::Uuid::new_v4)
 }
 
+/// Local connector budget only; it is not part of the peer exchange.
+fn receive_deadline(headers: &axum::http::HeaderMap) -> Result<Option<u128>, ApiError> {
+    headers.get("x-fractal-receive-deadline-unix-ms").map(|value| {
+        value.to_str().ok().filter(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        }).and_then(|value| value.parse().ok()).ok_or_else(|| ApiError::bad(
+            FractalError::new("invalid-receive-deadline", "receive deadline must be absolute Unix milliseconds"),
+        ))
+    }).transpose()
+}
+
 /// One INFO event describes all work charged to this receive, including failed requests.
 /// Phase wall times contain nested writer work and are non-additive with writer/shared costs.
 /// Counts include backlog work done by this request, not only envelopes it offered.
@@ -208,7 +219,12 @@ pub async fn replication_receive(
         && request.exchange.signed_envelopes.is_empty()
     { ExchangeClass::Empty } else { ExchangeClass::Nonempty };
     let metrics = smallclaims::receive_metrics::RequestMetrics::new(correlation_id.clone());
-    let result = replication_receive_inner(state, request, metrics.clone(), correlation).await;
+    let result = match receive_deadline(&headers) {
+        Ok(deadline_unix_ms) => replication_receive_inner(
+            state, request, metrics.clone(), correlation, deadline_unix_ms,
+        ).await,
+        Err(error) => Err(error),
+    };
     let counters = metrics.snapshot();
     use smallclaims::receive_metrics::Finalizer;
     let outcome = match &result {
@@ -266,16 +282,16 @@ pub async fn replication_receive(
     result
 }
 
-async fn replication_receive_inner(
-    state: AppState,
-    request: ReplicationReceiveRequest,
+// Checkpoints run only after a store phase has returned its transaction and writer loan.
+fn replication_receive_phases(
+    store: &Store,
+    request: &ReplicationReceiveRequest,
     metrics: smallclaims::receive_metrics::RequestMetrics,
-    correlation: uuid::Uuid,
-) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
-    let store = state.store.clone();
-    let response_metrics = metrics.clone();
-    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+    deadline_unix_ms: Option<u128>,
+    mut check_deadline: impl FnMut() -> Result<(), FractalError>,
+) -> Result<(ReplicationReceiveResponse, bool, bool), FractalError> {
         let _metrics = metrics.enter();
+        check_deadline()?;
         let receipt_timer = smallclaims::receive_metrics::Timer::start(
             smallclaims::receive_metrics::Stage::ReceiptIngest,
         );
@@ -290,14 +306,16 @@ async fn replication_receive_inner(
         }
         let notice_was_visible = store.replication_peer_in_sync_notice(&request.peer);
         // Only the worker's own requests carry a round trip, and only they prove its route out.
-        let receipt = store.receive_replication_exchange_via(
+        let receipt = store.receive_replication_exchange_before(
             &request.peer,
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
             request.carrier,
             request.authenticated_member_key.as_deref(),
+            deadline_unix_ms,
         )?;
+        check_deadline()?;
         if store
             .observes_transport_to(&request.peer)
             .map_err(|error| FractalError::new("internal", error.to_string()))?
@@ -307,17 +325,22 @@ async fn replication_receive_inner(
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
         drop(receipt_timer);
-        let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
+        check_deadline()?;
+        // A retry may contain only duplicates after an earlier receipt committed.
+        let new_data = replication_receive_has_new_data(receipt.received + receipt.duplicate + receipt.signatures)
+            || !request.exchange.signatures.is_empty();
         let (admission, repairs) = if new_data {
             let admission = store
                 .validate_replication_backlog()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
+            check_deadline()?;
             let _repairs = smallclaims::receive_metrics::Timer::start(
                 smallclaims::receive_metrics::Stage::Repairs,
             );
             let repairs = store
                 .apply_replication_repairs()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
+            check_deadline()?;
             (admission, repairs)
         } else {
             (Default::default(), 0)
@@ -365,6 +388,7 @@ async fn replication_receive_inner(
         } else {
             Some(true)
         };
+        check_deadline()?;
         let _response = smallclaims::receive_metrics::Timer::start(
             smallclaims::receive_metrics::Stage::ResponsePostcommit,
         );
@@ -385,6 +409,7 @@ async fn replication_receive_inner(
             && store
                 .claims_since_only_quiet_notifications(before_index)
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
+        check_deadline()?;
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
         Ok((
             ReplicationReceiveResponse {
@@ -395,6 +420,21 @@ async fn replication_receive_inner(
             changed && !quiet_only && projected,
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
+}
+
+async fn replication_receive_inner(
+    state: AppState,
+    request: ReplicationReceiveRequest,
+    metrics: smallclaims::receive_metrics::RequestMetrics,
+    correlation: uuid::Uuid,
+    deadline_unix_ms: Option<u128>,
+) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let store = state.store.clone();
+    let response_metrics = metrics.clone();
+    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+        replication_receive_phases(&store, &request, metrics, deadline_unix_ms, || {
+            smallclaims::replication::check_receive_deadline(deadline_unix_ms)
+        })
     })
     .await.inspect_err(|error| {
         smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
@@ -424,6 +464,7 @@ async fn replication_receive_inner(
             .event_notify
             .send_modify(|generation| *generation = generation.saturating_add(1));
     }
+    smallclaims::replication::check_receive_deadline(deadline_unix_ms).map_err(ApiError::bad)?;
     Ok(Json(response))
 }
 
@@ -588,29 +629,39 @@ pub(crate) async fn stream_admitted(state: &AppState) {
 pub async fn shard_replication_receive(
     State(state): State<AppState>,
     AxumPath(shard): AxumPath<String>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let deadline_unix_ms = receive_deadline(&headers)?;
     let store = replication_shard(&state, &shard)?;
     let response = blocking_action(move || {
         let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
+        smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         let before_index = store.index().map_err(internal)?;
-        let receipt = store.receive_replication_exchange_via(
+        let receipt = store.receive_replication_exchange_before(
             &request.peer,
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
             request.carrier,
             request.authenticated_member_key.as_deref(),
+            deadline_unix_ms,
         )?;
+        smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         // Held envelopes get another pass when the graph's membership moved since the last one.
-        if replication_receive_has_new_data(receipt.received + receipt.signatures)
+        if replication_receive_has_new_data(receipt.received + receipt.duplicate + receipt.signatures)
+            || !request.exchange.signatures.is_empty()
             || store.fleet_moved_since_admission().map_err(internal)?
         {
             store.validate_replication_backlog().map_err(internal)?;
+            smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
             store.apply_replication_repairs().map_err(internal)?;
+            smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
             store.project_replication_backlog().map_err(internal)?;
+            smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         }
         let store_index = store.index().map_err(internal)?;
+        smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         Ok(ReplicationReceiveResponse {
             receipt,
             changed: store_index != before_index,
@@ -621,6 +672,7 @@ pub async fn shard_replication_receive(
     if response.changed {
         stream_admitted(&state).await;
     }
+    smallclaims::replication::check_receive_deadline(deadline_unix_ms).map_err(ApiError::bad)?;
     Ok(Json(response))
 }
 

@@ -8270,6 +8270,24 @@ impl Store {
         carrier: crate::replication::ReplicationCarrier,
         authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceipt, FractalError> {
+        self.receive_replication_exchange_before(
+            relay, fleet_id, input, asks, carrier, authenticated_member_key, None,
+        )
+    }
+
+    /// The local connector's optional answer deadline. Admission may refuse the page;
+    /// once its receipt transaction starts, it commits atomically without cancellation.
+    pub fn receive_replication_exchange_before(
+        &self,
+        relay: &str,
+        fleet_id: &str,
+        input: &ReplicationExchange,
+        asks: bool,
+        carrier: crate::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
+        deadline_unix_ms: Option<u128>,
+    ) -> Result<ReplicationReceipt, FractalError> {
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
         if input.peer != relay {
             return Err(FractalError::new(
                 "peer-label-mismatch",
@@ -8334,7 +8352,7 @@ impl Store {
         let registry_key = format!("peer_projection_registry:{relay}");
         let inventory_key = format!("peer_projection_inventory:{relay}");
         let (received, duplicate, signatures, received_at, checkpoint_at) = 'receipt: {
-            let mut connection = self.connection.write_background();
+            let mut connection = self.connection.write_background_before(deadline_unix_ms)?;
             let received_at = now_ms();
             // Compare under the writer loan so concurrent failures and acknowledgements remain
             // ordered. Unchanged receipts open no transaction and run no managed finalizers.

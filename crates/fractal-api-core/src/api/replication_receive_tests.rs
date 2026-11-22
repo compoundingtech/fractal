@@ -257,3 +257,132 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
         }
     }.with_subscriber(subscriber).await;
 }
+
+fn deadline_request(store: &Store) -> ReplicationReceiveRequest {
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    let source = Store::open_memory("deadline-source").unwrap();
+    source.append_client_claim(&smallclaims::ClaimInput {
+        subject: "resource/receive-deadline".into(),
+        kind: "resource.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("kind".into(), json!("custom.test.replication"))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    store.project_replication_backlog().unwrap();
+    let inventory = store.export_replication_summary(FLEET).unwrap().inventory;
+    let exchange = source.export_replication_exchange(FLEET, &inventory).unwrap();
+    assert!(!exchange.envelopes.is_empty());
+    ReplicationReceiveRequest {
+        peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
+        round_trip_ms: None, carrier: Default::default(), authenticated_member_key: None,
+    }
+}
+
+#[test]
+fn receive_deadline_header_is_optional_and_accepts_absolute_u128_only() {
+    let mut headers = axum::http::HeaderMap::new();
+    assert_eq!(receive_deadline(&headers).unwrap(), None);
+    headers.insert("x-fractal-receive-deadline-unix-ms", u128::MAX.to_string().parse().unwrap());
+    assert_eq!(receive_deadline(&headers).unwrap(), Some(u128::MAX));
+    for invalid in ["", "-1", "+1", "1.5", " 1", "340282366920938463463374607431768211456"] {
+        headers.insert("x-fractal-receive-deadline-unix-ms", invalid.parse().unwrap());
+        assert_eq!(receive_deadline(&headers).unwrap_err().code, "invalid-receive-deadline");
+    }
+}
+
+#[tokio::test]
+async fn missing_receive_deadline_preserves_receive_and_duplicate_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let request = deadline_request(&state.store);
+    let first = replication_receive(
+        State(state.clone()), Default::default(), Json(request.clone()),
+    ).await.unwrap().0;
+    assert!(first.receipt.received > 0);
+    let retry = replication_receive(
+        State(state.clone()), Default::default(), Json(request),
+    ).await.unwrap().0;
+    assert_eq!(retry.receipt.received, 0);
+    assert!(retry.receipt.duplicate > 0);
+    assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn expired_receive_deadline_rejects_before_admission_without_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let request = deadline_request(&state.store);
+    let before = state.store.index().unwrap();
+    let inventory = state.store.replication_inventory().unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("x-fractal-receive-deadline-unix-ms", "0".parse().unwrap());
+    let error = replication_receive(State(state.clone()), headers, Json(request.clone())).await.unwrap_err();
+    assert_eq!(error.code, "replication-overloaded");
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(state.store.index().unwrap(), before);
+    assert_eq!(state.store.replication_inventory().unwrap().digest, inventory.digest);
+    assert!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().is_empty());
+    let retry = replication_receive(
+        State(state.clone()), Default::default(), Json(request),
+    ).await.unwrap().0;
+    assert!(retry.receipt.received > 0);
+}
+
+#[test]
+fn receive_phase_deadlines_leave_atomic_work_and_retry_projects_exactly_once() {
+    struct RestoreClock;
+    impl Drop for RestoreClock {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    let _clock = RestoreClock;
+    // Receipt, pre-admission, admission, repairs, projection, response.
+    // The simulated clock moves only after the preceding phase has returned its loans.
+    for expire_at_checkpoint in 2..=7 {
+        smallclaims::store::set_thread_clock(None);
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let request = deadline_request(&state.store);
+        let now = smallclaims::store::now_ms();
+        let deadline = now + 1_000;
+        smallclaims::store::set_thread_clock(Some(now));
+        let metrics = smallclaims::receive_metrics::RequestMetrics::new("deadline-abandon".into());
+        let mut checkpoint = 0;
+        let error = replication_receive_phases(
+            &state.store, &request, metrics.clone(), Some(deadline), || {
+                checkpoint += 1;
+                if checkpoint == expire_at_checkpoint {
+                    smallclaims::store::set_thread_clock(Some(deadline));
+                }
+                smallclaims::replication::check_receive_deadline(Some(deadline))
+            },
+        ).unwrap_err();
+        assert_eq!(error.code, "replication-overloaded");
+        assert_eq!(checkpoint, expire_at_checkpoint);
+        if expire_at_checkpoint <= 3 {
+            assert!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().is_empty());
+            assert_eq!(metrics.snapshot().envelopes_admitted, 0);
+        }
+        for _ in 0..2 {
+            let (response, _, _) = replication_receive_phases(
+                &state.store, &request,
+                smallclaims::receive_metrics::RequestMetrics::new("deadline-retry".into()),
+                None, || smallclaims::replication::check_receive_deadline(None),
+            ).unwrap();
+            assert_eq!(response.receipt.received, 0);
+            assert!(response.receipt.duplicate > 0);
+            assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
+            let visible: i64 = state.store.readers.get().query_row(
+                "SELECT COUNT(*) FROM events WHERE subject='resource/receive-deadline' AND kind='resource.observed'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(visible, 1);
+            assert!(!state.store.replication_projection_deferred());
+        }
+    }
+}

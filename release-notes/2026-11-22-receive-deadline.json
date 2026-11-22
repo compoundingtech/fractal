@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Replication receivers stop expired exchange work before writer admission or between committed phases and return signed retryable overload responses for receive deadlines and local receive timeouts.",
+  "replay": {"status": "none", "detail": "Receipts remain atomic and retries use existing envelope deduplication."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "No rule or authority change."},
+  "compatibility": {"status": "none", "detail": "An optional connector-to-daemon deadline header changes only the local process contract. Missing headers preserve existing behavior; older daemons ignore the header. Signed peer messages are unchanged."},
+  "downtime": {"status": "none", "detail": "Normal deployment; no migration downtime."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Abandoned exchanges remain unacknowledged; retries resume complete durable receipts without inserting duplicate claims."}
+}

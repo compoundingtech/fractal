@@ -1435,8 +1435,10 @@ async fn receive_from_peer<B: Backend>(
     round_trip: Option<Duration>,
     carrier: crate::replication::ReplicationCarrier,
     authenticated_member_key: Option<&str>,
+    deadline_unix_ms: Option<u128>,
 ) -> Result<crate::replication::ReplicationReceiveResponse> {
     let _refresh = fleet.view_refresh.lock().await;
+    crate::replication::check_receive_deadline(deadline_unix_ms)?;
     let before = backend.fleet_view().await?;
     let protect = before
         .members
@@ -1461,7 +1463,7 @@ async fn receive_from_peer<B: Backend>(
         *leave = updated;
     }
     let received = backend
-        .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key)
+        .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key, deadline_unix_ms)
         .await?;
     if received.changed {
         backend.changed().await;
@@ -2868,6 +2870,8 @@ async fn receive_exchange_inner_to<B: Backend>(
     diagnostics: &FailureDiagnostics,
     output: &mut (impl std::io::Write + Send),
 ) -> Response {
+    let answer_deadline = tokio::time::Instant::now() + EXCHANGE_RESPONSE_BUDGET;
+    let deadline_unix_ms = crate::store::now_ms() + EXCHANGE_RESPONSE_BUDGET.as_millis();
     let body = if deflated(&headers) {
         match inflate(&body, "an exchange request") {
             Ok(body) => Bytes::from(body),
@@ -2997,7 +3001,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                         // membership or leave bookkeeping applies to its exchanges.
                         let result = async {
                             let received = backend
-                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default(), authenticated_member_key.as_deref())
+                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default(), authenticated_member_key.as_deref(), Some(deadline_unix_ms))
                                 .await;
                             backend_timing.record("local-receive-done");
                             let received = received
@@ -3029,6 +3033,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                             None,
                             Default::default(),
                             authenticated_member_key.as_deref(),
+                            Some(deadline_unix_ms),
                         )
                         .await;
                         backend_timing.record("local-receive-done");
@@ -3066,7 +3071,7 @@ async fn receive_exchange_inner_to<B: Backend>(
         let job = jobs.get(&job_key).unwrap();
         (job.answer.clone(), Arc::clone(&job.timing))
     };
-    let ready = tokio::time::timeout(EXCHANGE_RESPONSE_BUDGET, async {
+    let ready = tokio::time::timeout_at(answer_deadline, async {
         loop {
             if let Some(result) = answer.borrow_and_update().clone() {
                 break Some(result);
@@ -3123,6 +3128,9 @@ async fn receive_exchange_inner_to<B: Backend>(
                 || job_timing.failure_line(&headers, &relay, shard.as_deref(), "failed", Some(&failure)), output);
             // Let the next request retry a failed job. Reporting failure must never delay headers.
             finish_exchange_job(&state.fleet, &job_key, &answer);
+            if failure.code == "replication-overloaded" {
+                return signed_overload(&state, &request_digest);
+            }
             let response = signed_response(&state, &request_digest, 0, serde_json::json!({
                 "code": failure.code,
                 "failure": failure,
@@ -3595,6 +3603,7 @@ async fn exchange_inner<B: Backend>(
         Some(round_trip),
         carrier,
         authenticated_member_key.as_deref(),
+        None,
     )
     .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
     telemetry.pull(received.receipt.received);
@@ -3634,6 +3643,7 @@ async fn exchange_inner<B: Backend>(
             Some(round_trip),
             carrier,
             authenticated_member_key.as_deref(),
+            None,
         )
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
         telemetry.pull(received.receipt.received);
@@ -3847,6 +3857,7 @@ async fn walk_claim_ranges<B: Backend>(
             Some(started.elapsed()),
             carrier,
             authenticated_member_key.as_deref(),
+            None,
         )
         .await
         {
