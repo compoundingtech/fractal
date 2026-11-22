@@ -349,6 +349,7 @@ fn spawn<R: Send + Sync + 'static>(
             "projection_digest_repaired_claims", "documents", "blobs",
             "custom_sources", "local_host_holds", "local_latest_slots", "local_stop_deferral_backfill",
             "mission_run_after", "mission_run_deadlines", "ordered_reassignments", "stop_deferral_claims",
+            "local_run_eta_mission_changes",
         ], move |_| commits.notify_one());
         // A list whose rows read the agents roster also folds when a roster is published.
         let _roster = wakes.roster.then(|| {
