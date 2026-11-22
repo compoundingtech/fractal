@@ -299,6 +299,27 @@ mod tests {
     use super::*;
     const GIB: u64 = 1 << 30;
 
+    /// Disk/ARC fit tests supply all host observations, including a real file-backed PSI reader.
+    /// Keep the directory alive for the test so sampling never reaches the actual host.
+    fn quiet_pressure<R: RuntimeControl>(reconciler: &Reconciler<R>) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let memory = directory.path().join("memory.pressure");
+        let io = directory.path().join("io");
+        let meminfo = directory.path().join("meminfo");
+        let root_memory = directory.path().join("root-memory");
+        let vmstat = directory.path().join("vmstat");
+        let quiet = "some avg10=0.00 avg60=0.00 avg300=0.00\nfull avg10=0.00 avg60=0.00 avg300=0.00\n";
+        for path in [&memory, &io, &root_memory] { std::fs::write(path, quiet).unwrap(); }
+        std::fs::write(&meminfo, "MemTotal: 134217728 kB\nMemAvailable: 125829120 kB\n").unwrap();
+        std::fs::write(&vmstat, "allocstall_normal 0\n").unwrap();
+        *reconciler.seat_admission.pressure.lock().unwrap() =
+            Some(fractal_runtime::resource_pressure::Observer::with_paths(
+                reconciler.seat_admission.finite_policy.psi_brake.clone(),
+                [memory, io, meminfo, root_memory, vmstat]).unwrap());
+        assert!(!reconciler.seat_admission.pressure_decision().unwrap().blocked);
+        directory
+    }
+
     fn test_fit() -> Fit {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 * GIB }), ..Fit::default() }
     }
@@ -462,6 +483,7 @@ mod tests {
         let policy = fractal_runtime::host::FinitePolicy { heavy_io_slots: Some(0), ..Default::default() };
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "disabled".into(), name: "checks".into(), host: "node".into(), max_members: 1,
@@ -490,6 +512,7 @@ mod tests {
             .with_disk_probe(vec![], Arc::new(move |_| Ok(crate::disk::DiskSpace {
                 filesystem: 7, available: reading.load(Ordering::Relaxed), total: 200 * GIB,
             })));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "disk-wait".into(), name: "checks".into(), host: "node".into(), max_members: 1,
@@ -590,6 +613,7 @@ mod tests {
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy))
             .with_disk_probe(vec![], Arc::new(|_| Ok(crate::disk::DiskSpace { filesystem: 7, available: 100, total: 200 })));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "ci-check".into(), name: "ci".into(), host: "node".into(), max_members: 1,
@@ -630,6 +654,7 @@ mod tests {
         store.start_resource_authority("node", "epoch").unwrap();
         let mut reconciler = Reconciler::new(
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let _pressure = quiet_pressure(&reconciler);
         let room = host::for_lanes(Capacity { cores: 32, memory: 125 * GIB });
         reconciler.seat_admission.lanes = Some(seat_admission::LaneHost {
             room, outside, burst_lane: Some(seat_admission::BURST_LANE),
