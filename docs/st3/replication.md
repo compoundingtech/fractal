@@ -922,8 +922,10 @@ Filesystem events are coalesced **before** shared fan-out to graph, messages-sha
 membership followers: the leading wake is immediate, followed by at most one broadcast
 per second while events continue. The final event is retained for the trailing broadcast.
 Authority guard reads also have a one-second minimum gap, including re-entry caused by
-inbound or route notifications. Coalescing adds at most one second before a write is
-announced; movement still drains immediately and failure/overload scheduling is unchanged.
+inbound or route notifications. A local wake is announced at most one second after its
+write. Scheduling delay can approach two seconds: the one-second pacer plus the existing
+one-second no-movement window, followed by the round's execution time. Movement still
+drains immediately and failure/overload scheduling is unchanged.
 `st.replication.wakes{stage="raw"}` counts filesystem events and `stage="paced"` counts
 shared broadcasts, exposing wake amplification separately from completed round rates.
 
@@ -937,6 +939,11 @@ from that peer, changed routes or local connectivity also resets the idle sequen
 default 600,000). `ST3_WORKER_INTERVAL_MS` retains its cap-only meaning and can shorten
 these waits. Worker status reports the next idle deadline; `st.replication.rounds` retains
 its `peer` and `outcome` labels for comparing `in_sync` and `moved` round rates.
+A remote-only change, or a change whose notification is missed, can now wait up to the
+idle maximum: 600 seconds by default, or 3,600 seconds when raised, versus 30 seconds
+previously. This increased anti-entropy latency is an accepted tradeoff for reducing idle I/O.
+On worker return the filesystem watcher is dropped and the pacer is awaited, retaining
+the trailing generation without depending on an external process restart.
 A recent inbound exchange suppresses a redundant connection in the opposite direction;
 local graph changes still request a prompt push. Failed attempts back off exponentially
 from one second through minutes to one hour, with 20 percent

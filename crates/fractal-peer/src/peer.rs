@@ -2180,9 +2180,24 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
             wake: shard_wake,
         });
     }
-    let result = smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards).await;
-    wake_pacer.abort();
-    result
+    run_with_wake_drain(
+        smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards),
+        database_watcher,
+        wake_pacer,
+    ).await
+}
+
+async fn run_with_wake_drain(
+    worker: impl Future<Output = Result<()>>,
+    watcher: notify::RecommendedWatcher,
+    pacer: tokio::task::JoinHandle<()>,
+) -> Result<()> {
+    let result = worker.await;
+    // The watcher closure owns the raw producer. Closing it lets the pacer emit
+    // its pending trailing generation before this process exits, even on failure.
+    drop(watcher);
+    let drained = pacer.await.context("replication wake pacer failed");
+    result.and(drained)
 }
 
 /// The shard the daemon keeps messages in; see `fractal_store::store::messages_shard`.
@@ -2235,6 +2250,41 @@ async fn follow_shard_peers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_failure_closes_raw_producer_and_awaits_the_trailing_wake() {
+        let (raw, events) = watch::channel(0_u64);
+        let (paced, mut observed) = watch::channel(0_u64);
+        let producer = raw.clone();
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event.is_ok() {
+                producer.send_modify(|generation| *generation += 1);
+            }
+        }).unwrap();
+        let pacer = tokio::spawn(smallclaims::sync::coalesce_replication_wakes(events, paced));
+        raw.send_modify(|generation| *generation += 1);
+        observed.changed().await.unwrap();
+        assert_eq!(*observed.borrow(), 1);
+        for _ in 0..100 {
+            raw.send_modify(|generation| *generation += 1);
+        }
+        drop(raw); // The actual watcher closure is now the only producer.
+        let shutdown = run_with_wake_drain(
+            async { Err(anyhow::anyhow!("settings-task-failure")) }, watcher, pacer,
+        );
+        tokio::pin!(shutdown);
+        assert!(futures_util::poll!(&mut shutdown).is_pending());
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert_eq!(*observed.borrow(), 1);
+        assert!(futures_util::poll!(&mut shutdown).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::time::timeout(Duration::from_secs(1), observed.changed())
+            .await.expect("shutdown dropped the trailing wake").unwrap();
+        assert_eq!(*observed.borrow(), 2);
+        let error = tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await.expect("raw producer remained open").unwrap_err();
+        assert_eq!(error.to_string(), "settings-task-failure");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn filesystem_burst_has_one_leading_and_one_trailing_shared_wake() {
