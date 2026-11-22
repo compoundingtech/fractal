@@ -340,7 +340,17 @@ fn spawn<R: Send + Sync + 'static>(
     tokio::spawn(crate::task_cpu::account(label, async move {
         // The writer's callback only wakes this task; it never reads.
         let commits = Arc::clone(&wake);
-        let _observer = store.observe_commits(move |_| commits.notify_one());
+        let _observer = store.observe_tables(&[
+            "claims", "claim_positions", "batches", "replica_records", "desired",
+            "identity_names", "identity_heads", "meta", "local_observations",
+            "mission_definitions", "mission_runs", "run_generations", "step_runs",
+            "ivm_heads", "ivm_contributions", "local_agent_harness_rows",
+            "operations", "card_actual_revisions", "projection_health",
+            "projection_digest_repaired_claims", "documents", "blobs",
+            "custom_sources", "local_host_holds", "local_latest_slots", "local_stop_deferral_backfill",
+            "mission_run_after", "mission_run_deadlines", "ordered_reassignments", "stop_deferral_claims",
+            "local_run_eta_mission_changes",
+        ], move |_| commits.notify_one());
         // A list whose rows read the agents roster also folds when a roster is published.
         let _roster = wakes.roster.then(|| {
             let mut published = store.subscribe_agent_roster();
