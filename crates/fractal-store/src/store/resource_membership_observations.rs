@@ -189,6 +189,7 @@ mod tests {
         let mut observations = Observations::default();
         let mut member = member();
         assert_eq!(member.blocked_by, None, "older persisted memberships omit attribution");
+        assert_eq!(member.pressure_reason, None, "older persisted memberships omit pressure evidence");
         member.blocked_by = Some(super::super::BlockedBy::Hold);
         observations.transition(&member, None, 100, false);
         member.blocked_by = Some(super::super::BlockedBy::Psi);
