@@ -10,8 +10,6 @@ pub fn fixture(count: usize) -> Store {
         {
             let mut connection = store.connection.write();
             let tx = connection.transaction().unwrap();
-            tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h10977bf13277 owner=fractal_store::store::usage_period_tests_shared_seats TODO=chunk-or-reference-variable-columns */ "CREATE INDEX claims_usage_rollup_index ON claims(store_index)
-                WHERE kind='harness.usage' AND json_extract(body,'$.fields.semantics')='response_rollup'").unwrap();
             // Legacy batches exercise the canonical position fallback without a contrived
             // single huge batch. Accepted times and batch sequences oppose arrival order.
             for i in 0..count {
@@ -43,5 +41,13 @@ pub fn fixture(count: usize) -> Store {
             }
             tx.commit().unwrap();
         }
+        loop {
+            let mut writer = store.connection.write_background();
+            let tx = writer.transaction().unwrap();
+            let complete = backfill_step_tx(&tx).unwrap();
+            tx.commit().unwrap();
+            if complete { break; }
+        }
+        assert!(ready(&store.readers.get()).unwrap());
         store
     }

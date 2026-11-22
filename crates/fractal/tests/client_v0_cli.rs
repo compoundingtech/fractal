@@ -45,9 +45,15 @@ async fn sender_outcome_fixtures_render_raw_status_and_delivery_reason() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let cases: Value = serde_json::from_str(include_str!(
         "../../../docs/st3/client-v0/fixtures/message-sender-outcomes.json")).unwrap();
-    for message in cases["items"].as_array().unwrap() {
+    let mut messages = cases["items"].as_array().unwrap().clone();
+    messages.push(serde_json::json!({
+        "id":"message/stopped-recipient", "from":"person/sender", "to":"agent/stopped-recipient",
+        "content":"waiting for startup", "state":"sent", "status_from":null
+    }));
+    for message in &messages {
         let phase = message["state"].as_str().unwrap();
         let reason = match phase {
+            "sent" => "recipient stopped; queued message will be delivered when it starts",
             "expired" => "cutoff-uncertain-attempt",
             "delivered" => "the native transport accepted the message; waiting for recipient read",
             "read" => "the recipient has read the message",
@@ -56,7 +62,7 @@ async fn sender_outcome_fixtures_render_raw_status_and_delivery_reason() {
         let case = serde_json::json!({
             "id":message["id"], "subject":message["id"], "from":message["from"], "to":message["to"],
             "content":message["content"], "created_index":1, "status":phase, "status_from":message["status_from"],
-            "delivery":{"phase":phase, "state":if phase == "delivered" { "pending" } else { phase }, "reason":reason}
+            "delivery":{"phase":phase, "state":match phase { "sent" => "waiting", "delivered" => "pending", _ => phase }, "reason":reason}
         });
         for list in [false, true] {
             for json in [false, true] {

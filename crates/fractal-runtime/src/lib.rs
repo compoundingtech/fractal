@@ -18,6 +18,7 @@ mod isolate;
 mod lane;
 mod priority;
 mod peer_process;
+pub mod native_attach;
 mod process;
 mod procfs;
 mod pty;
@@ -41,6 +42,7 @@ mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]
 mod pty_launch_environment;
 
+pub mod payload_receipt;
 pub use environment::{
     ShellStartupTimeout, expand_path_placeholder, is_shell_startup_timeout, login_environment,
     login_environment_from, login_environment_within, materialize_environment, overlay_environment,

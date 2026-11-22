@@ -97,7 +97,7 @@ default-members = [
   "crates/fractal-tui",
 ]
 
-exclude = ["vendor/libghostty-vt-sys"]
+exclude = ["vendor/libghostty-vt-sys", "vendor/notify"]
 
 [workspace.package]
 version = "0.1.0"
@@ -110,6 +110,8 @@ ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 # macOS SDKs; see vendor/libghostty-vt-sys/README.md.
 [patch.crates-io]
 libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
+# notify 8.2.0 with gapless FSEvents reconfiguration; see vendor/notify/UPSTREAM.json.
+notify = { path = "vendor/notify" }
 
 # Debug assertions are OFF in the dev and test profiles and ON in release-with-assertions runs
 # (docs/ci.md, "Debug assertions"): measured on the same tree, they cost about 21% of compile CPU

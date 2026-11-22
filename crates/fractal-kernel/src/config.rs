@@ -12,6 +12,7 @@ pub use smallclaims::fleet::file::{FleetFile, FleetMode, FleetRemoval, PeerConfi
 use crate::model::PlannerSpec;
 
 pub mod changes;
+pub mod model_return;
 mod client;
 
 /// The per-host switch for seat lanes.
@@ -158,6 +159,9 @@ pub struct Config {
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
+    /// Automatic, idle-only return from positively classified transient model fallback.
+    #[serde(skip_serializing_if = "model_return::Config::is_default")]
+    pub model_return: model_return::Config,
     /// What a write outside a mission run's authority does. Written only when it differs from
     /// the default.
     #[serde(skip_serializing_if = "ProgramsConfig::is_default")]
@@ -858,20 +862,21 @@ pub fn reload_daemon_limits() -> Option<Result<LimitsConfig>> {
     Some(read_limits(path.as_deref()))
 }
 
-/// Read both policies once on the existing two-minute reload loop, outside database work.
-pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig, AsksConfig)>> {
+/// Read daemon policies once on the existing two-minute reload loop, outside database work.
+pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig, AsksConfig, model_return::Config)>> {
     let path = DAEMON_CONFIG.get()?;
     Some(read_daemon_policies(path.as_deref()))
 }
 
-fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig, AsksConfig)> {
+fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig, AsksConfig, model_return::Config)> {
     let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
     anyhow::ensure!(selected.exists(), "st config {} is missing", selected.display());
     let config = Config::load_unvalidated(Some(&selected))?;
     config.limits.validate()?;
     config.reconcile.validate()?;
     config.asks.validate()?;
-    Ok((config.limits, config.reconcile, config.asks))
+    config.model_return.validate()?;
+    Ok((config.limits, config.reconcile, config.asks, config.model_return))
 }
 
 /// `[limits]` from a config file that must exist: a file that is missing for a moment must not
@@ -1045,6 +1050,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
+            model_return: model_return::Config::default(),
             programs: ProgramsConfig::default(),
             asks: AsksConfig::default(),
             codex_work_without_asking: None,
@@ -1285,6 +1291,7 @@ impl Config {
             usage_limits.validate()?;
         }
         if let Some(resources) = &self.finite_resources {
+            resources.psi_brake.validate().context("finite_resources.psiBrake")?;
             for (key, seed) in &resources.profiles {
                 fractal_runtime::validate_profile_key(key)?;
                 seed.validate().with_context(|| format!("finite_resources.profiles.{key}"))?;
@@ -1308,6 +1315,7 @@ impl Config {
             );
         }
         self.reconcile.validate()?;
+        self.model_return.validate()?;
         self.asks.validate()?;
         self.github.validate()?;
         anyhow::ensure!(
@@ -1769,6 +1777,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn config_loaders_reject_unresolved_relative_pressure_exclusions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let config = super::Config {
+            state_dir: directory.path().join("state"),
+            finite_resources: Some(fractal_runtime::host::FinitePolicy {
+                psi_brake: fractal_runtime::resource_pressure::Policy {
+                    protected_cgroups: vec!["/user.slice".into()],
+                    job_parent_cgroups: vec!["gate.slice".into()],
+                    excluded_cgroups: Vec::new(),
+                    ..fractal_runtime::resource_pressure::Policy::default()
+                },
+                ..fractal_runtime::host::FinitePolicy::default()
+            }),
+            ..super::Config::default()
+        };
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let error = super::Config::load(Some(&path)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("finite_resources.psiBrake"), "{message}");
+        assert!(message.contains("manager-qualified protected roots"), "{message}");
+        let error = super::Config::load_with_fleet(Some(&path)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("finite_resources.psiBrake"), "{message}");
+        assert!(message.contains("manager-qualified protected roots"), "{message}");
+    }
+
     /// Explicit acceptance probe for a managed, rendered daemon configuration; never starts it.
     #[test]
     #[ignore = "requires FRACTAL_RENDERED_CONFIG pointing to a rendered host configuration"]
@@ -2120,7 +2156,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
-        let (_, mut effective, _) = read_daemon_policies(Some(&path)).unwrap();
+        let (_, mut effective, _, _) = read_daemon_policies(Some(&path)).unwrap();
         assert_eq!(effective.max_passes_per_minute, None);
         assert_eq!(effective.max_passes_per_minute_or(DEFAULT_MAX_PASSES_PER_MINUTE), 30);
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=60\n").unwrap();
@@ -2429,7 +2465,7 @@ sekrets_profile = "nathan/daemon-gh"
             "[reconcile\n",
         ] {
             fs::write(&path, bad).unwrap();
-            if let Ok((_, reconcile, _)) = read_daemon_policies(Some(&path)) {
+            if let Ok((_, reconcile, _, _)) = read_daemon_policies(Some(&path)) {
                 effective = reconcile.idle_residency().unwrap();
                 panic!("invalid policy was accepted: {bad}; settings: {effective:?}");
             }
