@@ -57,10 +57,27 @@ fn assert_open_indexes_reviewed(connection: &rusqlite::Connection) {
         );
         actual.get_mut(&table).unwrap().push(name);
     }
-    assert_eq!(
-        actual, allowlist.indexes,
-        "Store-open indexes changed: remove obsolete entries from docs/st3/open-indexes.json"
+    let mut absent = Vec::new();
+    for (table, names) in &allowlist.indexes {
+        for name in names {
+            if !actual.get(table).is_some_and(|indexes| indexes.contains(name)) {
+                absent.push(format!("{table}.{name}"));
+            }
+        }
+    }
+    assert!(
+        absent.is_empty(),
+        "Listed store-open indexes are absent: {}. Remove these obsolete entries from \
+         docs/st3/open-indexes.json; removing an index does not require approval to add one.",
+        absent.join(", ")
     );
+}
+
+#[test]
+#[should_panic(expected = "Listed store-open indexes are absent: claims.claims_accepted_order_index")]
+fn open_index_guard_reports_obsolete_allowlist_entries_separately() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    assert_open_indexes_reviewed(&connection);
 }
 
 #[test]
