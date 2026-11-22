@@ -282,16 +282,16 @@ pub async fn replication_receive(
     result
 }
 
-// Checkpoints run only after a store phase has returned its transaction and writer loan.
+// Only receipt admission is cancellable. Once it commits, finish all follow-up work.
 fn replication_receive_phases(
     store: &Store,
     request: &ReplicationReceiveRequest,
     metrics: smallclaims::receive_metrics::RequestMetrics,
     deadline_unix_ms: Option<u128>,
-    mut check_deadline: impl FnMut() -> Result<(), FractalError>,
+    after_receipt: impl FnOnce(),
 ) -> Result<(ReplicationReceiveResponse, bool, bool), FractalError> {
         let _metrics = metrics.enter();
-        check_deadline()?;
+        smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         let receipt_timer = smallclaims::receive_metrics::Timer::start(
             smallclaims::receive_metrics::Stage::ReceiptIngest,
         );
@@ -315,7 +315,7 @@ fn replication_receive_phases(
             request.authenticated_member_key.as_deref(),
             deadline_unix_ms,
         )?;
-        check_deadline()?;
+        after_receipt();
         if store
             .observes_transport_to(&request.peer)
             .map_err(|error| FractalError::new("internal", error.to_string()))?
@@ -325,22 +325,17 @@ fn replication_receive_phases(
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
         drop(receipt_timer);
-        check_deadline()?;
-        // A retry may contain only duplicates after an earlier receipt committed.
-        let new_data = replication_receive_has_new_data(receipt.received + receipt.duplicate + receipt.signatures)
-            || !request.exchange.signatures.is_empty();
+        let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
         let (admission, repairs) = if new_data {
             let admission = store
                 .validate_replication_backlog()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
-            check_deadline()?;
             let _repairs = smallclaims::receive_metrics::Timer::start(
                 smallclaims::receive_metrics::Stage::Repairs,
             );
             let repairs = store
                 .apply_replication_repairs()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
-            check_deadline()?;
             (admission, repairs)
         } else {
             (Default::default(), 0)
@@ -388,7 +383,6 @@ fn replication_receive_phases(
         } else {
             Some(true)
         };
-        check_deadline()?;
         let _response = smallclaims::receive_metrics::Timer::start(
             smallclaims::receive_metrics::Stage::ResponsePostcommit,
         );
@@ -409,7 +403,6 @@ fn replication_receive_phases(
             && store
                 .claims_since_only_quiet_notifications(before_index)
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
-        check_deadline()?;
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
         Ok((
             ReplicationReceiveResponse {
@@ -432,9 +425,7 @@ async fn replication_receive_inner(
     let store = state.store.clone();
     let response_metrics = metrics.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
-        replication_receive_phases(&store, &request, metrics, deadline_unix_ms, || {
-            smallclaims::replication::check_receive_deadline(deadline_unix_ms)
-        })
+        replication_receive_phases(&store, &request, metrics, deadline_unix_ms, || {})
     })
     .await.inspect_err(|error| {
         smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
@@ -464,7 +455,6 @@ async fn replication_receive_inner(
             .event_notify
             .send_modify(|generation| *generation = generation.saturating_add(1));
     }
-    smallclaims::replication::check_receive_deadline(deadline_unix_ms).map_err(ApiError::bad)?;
     Ok(Json(response))
 }
 
@@ -647,21 +637,15 @@ pub async fn shard_replication_receive(
             request.authenticated_member_key.as_deref(),
             deadline_unix_ms,
         )?;
-        smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         // Held envelopes get another pass when the graph's membership moved since the last one.
-        if replication_receive_has_new_data(receipt.received + receipt.duplicate + receipt.signatures)
-            || !request.exchange.signatures.is_empty()
+        if replication_receive_has_new_data(receipt.received + receipt.signatures)
             || store.fleet_moved_since_admission().map_err(internal)?
         {
             store.validate_replication_backlog().map_err(internal)?;
-            smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
             store.apply_replication_repairs().map_err(internal)?;
-            smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
             store.project_replication_backlog().map_err(internal)?;
-            smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         }
         let store_index = store.index().map_err(internal)?;
-        smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
         Ok(ReplicationReceiveResponse {
             receipt,
             changed: store_index != before_index,
@@ -672,7 +656,6 @@ pub async fn shard_replication_receive(
     if response.changed {
         stream_admitted(&state).await;
     }
-    smallclaims::replication::check_receive_deadline(deadline_unix_ms).map_err(ApiError::bad)?;
     Ok(Json(response))
 }
 

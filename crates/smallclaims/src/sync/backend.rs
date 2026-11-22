@@ -240,13 +240,9 @@ where
                 )
                 .map_err(anyhow::Error::from)?;
             store.record_transport_observation(&peer, "up", None, None)?;
-            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let admission = store.validate_replication_backlog()?;
-            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let repairs = store.apply_replication_repairs()?;
-            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let projected = store.project_replication_backlog()?;
-            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             Ok(ReplicationReceiveResponse {
                 receipt,
                 changed: projected && (admission.changed || repairs != 0),

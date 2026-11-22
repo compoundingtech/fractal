@@ -8383,6 +8383,9 @@ impl Store {
             if let Some(checkpoint_at) = checkpoint_at {
                 break 'receipt (0, 0, 0, received_at, checkpoint_at as u128);
             }
+            // This is the last cancellable boundary. Once receipt writes begin, complete
+            // the atomic receipt and its follow-up phases so duplicate retries stay cheap.
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;

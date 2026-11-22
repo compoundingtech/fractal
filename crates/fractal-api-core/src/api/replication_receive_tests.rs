@@ -333,7 +333,7 @@ async fn expired_receive_deadline_rejects_before_admission_without_mutation() {
 }
 
 #[test]
-fn receive_phase_deadlines_leave_atomic_work_and_retry_projects_exactly_once() {
+fn receive_deadline_after_receipt_finishes_followups_and_retry_projects_exactly_once() {
     struct RestoreClock;
     impl Drop for RestoreClock {
         fn drop(&mut self) {
@@ -341,48 +341,61 @@ fn receive_phase_deadlines_leave_atomic_work_and_retry_projects_exactly_once() {
         }
     }
     let _clock = RestoreClock;
-    // Receipt, pre-admission, admission, repairs, projection, response.
-    // The simulated clock moves only after the preceding phase has returned its loans.
-    for expire_at_checkpoint in 2..=7 {
-        smallclaims::store::set_thread_clock(None);
-        let root = tempfile::tempdir().unwrap();
-        let state = state(root.path());
-        let request = deadline_request(&state.store);
-        let now = smallclaims::store::now_ms();
-        let deadline = now + 1_000;
-        smallclaims::store::set_thread_clock(Some(now));
-        let metrics = smallclaims::receive_metrics::RequestMetrics::new("deadline-abandon".into());
-        let mut checkpoint = 0;
-        let error = replication_receive_phases(
-            &state.store, &request, metrics.clone(), Some(deadline), || {
-                checkpoint += 1;
-                if checkpoint == expire_at_checkpoint {
-                    smallclaims::store::set_thread_clock(Some(deadline));
-                }
-                smallclaims::replication::check_receive_deadline(Some(deadline))
-            },
-        ).unwrap_err();
-        assert_eq!(error.code, "replication-overloaded");
-        assert_eq!(checkpoint, expire_at_checkpoint);
-        if expire_at_checkpoint <= 3 {
-            assert!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().is_empty());
-            assert_eq!(metrics.snapshot().envelopes_admitted, 0);
-        }
-        for _ in 0..2 {
-            let (response, _, _) = replication_receive_phases(
-                &state.store, &request,
-                smallclaims::receive_metrics::RequestMetrics::new("deadline-retry".into()),
-                None, || smallclaims::replication::check_receive_deadline(None),
-            ).unwrap();
-            assert_eq!(response.receipt.received, 0);
-            assert!(response.receipt.duplicate > 0);
-            assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
-            let visible: i64 = state.store.readers.get().query_row(
-                "SELECT COUNT(*) FROM events WHERE subject='resource/receive-deadline' AND kind='resource.observed'",
-                [], |row| row.get(0),
-            ).unwrap();
-            assert_eq!(visible, 1);
-            assert!(!state.store.replication_projection_deferred());
-        }
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let request = deadline_request(&state.store);
+    let now = smallclaims::store::now_ms();
+    let deadline = now + 86_400_000;
+    smallclaims::store::set_thread_clock(Some(now));
+    let metrics = smallclaims::receive_metrics::RequestMetrics::new("deadline-after-receipt".into());
+    let (response, _, _) = replication_receive_phases(
+        &state.store, &request, metrics.clone(), Some(deadline), || {
+            // Move the clock only after the atomic receipt has returned its writer.
+            smallclaims::store::set_thread_clock(Some(deadline));
+        },
+    ).unwrap();
+    assert!(response.receipt.received > 0);
+    assert!(metrics.snapshot().envelopes_admitted > 0);
+    assert!(smallclaims::replication::check_receive_deadline(Some(deadline)).is_err());
+    assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
+    for _ in 0..2 {
+        let (retry, _, _) = replication_receive_phases(
+            &state.store, &request,
+            smallclaims::receive_metrics::RequestMetrics::new("deadline-retry".into()),
+            None, || {},
+        ).unwrap();
+        assert_eq!(retry.receipt.received, 0);
+        assert!(retry.receipt.duplicate > 0);
+        assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
+        let visible: i64 = state.store.readers.get().query_row(
+            "SELECT COUNT(*) FROM events WHERE subject='resource/receive-deadline' AND kind='resource.observed'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(visible, 1);
+        assert!(!state.store.replication_projection_deferred());
     }
+}
+
+#[test]
+fn duplicate_only_receive_skips_backlog_validation_and_projection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let request = deadline_request(&state.store);
+    let first_metrics = smallclaims::receive_metrics::RequestMetrics::new("duplicate-first".into());
+    let (first, _, _) = replication_receive_phases(
+        &state.store, &request, first_metrics.clone(), None, || {},
+    ).unwrap();
+    assert!(first.receipt.received > 0);
+    assert!(first_metrics.snapshot().envelopes_admitted > 0);
+    let metrics = smallclaims::receive_metrics::RequestMetrics::new("duplicate-only".into());
+    let (retry, _, _) = replication_receive_phases(
+        &state.store, &request, metrics.clone(), None, || {},
+    ).unwrap();
+    assert_eq!(retry.receipt.received, 0);
+    assert_eq!(retry.receipt.signatures, 0);
+    assert!(retry.receipt.duplicate > 0);
+    let counters = metrics.snapshot();
+    assert_eq!(counters.admit_time, Duration::ZERO, "backlog validation must not run");
+    assert_eq!(counters.project_time, Duration::ZERO, "duplicate receipts must stay cheap");
+    assert_eq!(counters.envelopes_prepared, 0);
 }

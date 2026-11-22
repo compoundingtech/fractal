@@ -355,8 +355,8 @@ pub struct ReplicationReceiveRequest {
     pub authenticated_member_key: Option<String>,
 }
 
-/// Local receive work checks this only at admission and between committed phases.
-/// It must never interrupt a write transaction or acknowledge an abandoned batch.
+/// Local receive work checks this only before its first receipt transaction begins.
+/// Once receipt writes begin, the transaction and follow-up phases finish normally.
 pub fn check_receive_deadline(deadline_unix_ms: Option<u128>) -> Result<(), crate::error::Error> {
     if deadline_unix_ms.is_some_and(|deadline| crate::store::now_ms() >= deadline) {
         return Err(crate::error::Error::new(
