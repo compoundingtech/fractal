@@ -11146,3 +11146,92 @@ async fn assert_record_pages_resume_after_restart(reclaim_a_chunk: bool, fail_re
     drop(store);
     assert_eq!(free(&path), 0, "the next start gave them back");
 }
+
+#[tokio::test]
+async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use fractal_drivers::{harness_events, harness_state};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("amber").unwrap());
+    let lose_ack = Arc::new(AtomicBool::new(true));
+    let app = Router::new().route("/v1/claims", post({
+        let store = store.clone();
+        move |Json(claim): Json<ClaimInput>| {
+            let store = store.clone();
+            let lose_ack = lose_ack.clone();
+            async move {
+                let record = store.append_claim(&claim).unwrap();
+                if claim.kind == "harness.diagnostic" && lose_ack.swap(false, Ordering::SeqCst) {
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"acknowledgement lost"}))).into_response()
+                } else {
+                    Json(json!({"api_version":"st3.v1","value":record})).into_response()
+                }
+            }
+        }
+    })).route("/v1/harness-events", post({
+        let store = store.clone();
+        move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
+            let store = store.clone();
+            async move {
+                let record = store.append_claim(&request.claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
+    let subject = "agent/example/seat";
+    let diagnostic_count = || store.claims_for(subject, Some("harness.diagnostic")).unwrap().len();
+    let mut reason = 0;
+    for (runtime, owner, incarnation, states, expected) in [
+        ("runtime-a", "provider-a", "incarnation-a", vec![true; 32], 1),
+        ("runtime-a", "provider-a", "incarnation-a", vec![false, false], 2),
+        ("runtime-a", "provider-a", "incarnation-a", vec![true, true], 3),
+        ("runtime-a", "provider-a", "incarnation-b", vec![true, true], 4),
+        ("runtime-b", "provider-b", "incarnation-c", vec![true, true], 5),
+    ] {
+        harness_events::enable(root.path(), runtime).unwrap();
+        for ready in states {
+            reason += 1;
+            harness_events::write_snapshot(root.path(), "harness-state",
+                &serde_json::to_vec(&json!({"incarnation":owner,"reason":reason})).unwrap()).unwrap();
+            let event = harness_events::pending(root.path(), 1).unwrap().remove(0);
+            let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
+            observed.channel_ready = Some(ready);
+            // Vary activity independently of channel readiness, as ordinary native frames do.
+            observed.state = if reason % 2 == 0 { harness_state::Activity::Active } else { harness_state::Activity::Idle };
+            let publisher = ObservationClient {
+                client: &client,
+                event: Some((runtime, event.sequence, root.path(), None)),
+            };
+            if reason == 1 {
+                assert!(publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+                    Some(incarnation), &observed, &mut None).await.is_err());
+                assert_eq!(diagnostic_count(), 1, "the lost acknowledgement followed a committed edge");
+            }
+            publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+                Some(incarnation), &observed, &mut None).await.unwrap();
+            harness_events::acknowledge(root.path(), event.sequence).unwrap();
+        }
+        assert_eq!(diagnostic_count(), expected);
+    }
+    // Legacy/non-durable callers still publish both readiness and activity, and retries
+    // keep the original episode/fingerprint idempotency rather than requiring a spool.
+    let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
+    observed.channel_ready = Some(true);
+    observed.state = harness_state::Activity::Idle;
+    let publisher = ObservationClient { client: &client, event: None };
+    let activity_count = store.claims_for(subject, Some("harness.observed")).unwrap().len();
+    let mut last_fingerprint = None;
+    for _ in 0..2 {
+        publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+            Some("incarnation-c"), &observed, &mut last_fingerprint).await.unwrap();
+    }
+    assert_eq!(diagnostic_count(), 6);
+    assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().len(), activity_count + 1);
+    server.abort();
+}

@@ -18463,25 +18463,33 @@ async fn publish_harness_activity(
     if driver == "omp"
         && let (Some(incarnation), Some(ready)) = (incarnation, channel_ready)
     {
-        // Extensible diagnostics are reader-first: older readers retain these facts without
-        // rejecting the native activity claim. No suspension action consumes this proof yet.
-        let episode = match client.event {
-            Some((runtime, sequence, _, _)) => format!("{runtime}:{sequence}"),
-            None => format!("{}:{}:{}", observed.evidence_incarnation.as_deref().unwrap_or(""),
-                observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0)),
+        // Idle suspension consumes the latest incarnation edge, not a heartbeat.
+        // Freeze durable decisions so retries and re-exec cannot lose an edge.
+        let key = match client.event {
+            Some((runtime, sequence, dir, _)) => {
+                fractal_drivers::harness_events::prepare_channel_readiness(
+                    dir, sequence, runtime, incarnation, ready,
+                )?.then(|| format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}"))
+            }
+            // Without an outbox, retain the original fail-open publication and episode key.
+            None => Some(format!("native-channel:{subject}:{incarnation}:{}:{}:{}:{ready}:{fingerprint}",
+                observed.evidence_incarnation.as_deref().unwrap_or(""),
+                observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0))),
         };
-        let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
-            subject: subject.into(), kind: "harness.diagnostic".into(),
-            actor: Some(subject.into()),
-            fields: BTreeMap::from([
-                ("code".into(), Value::from(if ready { "omp-channel-ready" } else { "omp-channel-unready" })),
-                ("driver".into(), Value::from("omp")),
-                ("incarnation_id".into(), Value::from(incarnation)),
-                ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
-            ]),
-            evidence: Vec::new(), expected_subject: None,
-            idempotency_key: Some(format!("native-channel:{subject}:{incarnation}:{episode}:{ready}:{fingerprint}")),
-        }).await?;
+        if let Some(key) = key {
+            let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
+                subject: subject.into(), kind: "harness.diagnostic".into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([
+                    ("code".into(), Value::from(if ready { "omp-channel-ready" } else { "omp-channel-unready" })),
+                    ("driver".into(), Value::from("omp")),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                    ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
+                ]),
+                evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some(key),
+            }).await?;
+        }
     }
     if last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return Ok(());
