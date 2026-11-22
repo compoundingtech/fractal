@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
     let node = args.get(2).ok_or_else(|| anyhow::anyhow!("the copy's node name is required"))?;
     let state_dir = args.get(3).map(Path::new);
     let run = Instant::now();
-    // S2D_PASSES picks the passes (sign, empty, delete, release, retire, vacuum; all but retire
+    // S2D_PASSES picks the passes (sign, empty, delete, release, retire, localtrim, vacuum; all but retire and localtrim
     // by default) and S2D_NO_SPACE skips the byte counts, to measure one pass again on a copy
     // already measured. S2D_RETIRE_CLAIMS sets how many retirements retire seeds (a day's cap).
     let passes_env = std::env::var("S2D_PASSES").unwrap_or_else(|_| "sign,empty,delete,release,vacuum".into());
@@ -167,9 +167,23 @@ fn main() -> anyhow::Result<()> {
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let job = Instant::now();
-                let _ = store.connection.batched(|tx| tx.execute("INSERT INTO measure_control VALUES (1)", []));
+                // The holds that end while it waits name what it waited for.
+                let watch = store.connection.writer_thread().map(smallclaims::windows::holds::WaitWatch::start);
+                let ran = std::sync::atomic::AtomicU64::new(0);
+                let _ = store.connection.batched(|tx| {
+                    let running = Instant::now();
+                    let done = tx.execute("INSERT INTO measure_control VALUES (1)", []);
+                    ran.store(running.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                    done
+                });
                 if job.elapsed() >= Duration::from_millis(100) {
-                    println!("slow_job=control at_unix_ms={} hold_ms={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), job.elapsed().as_millis());
+                    let blocked_by = watch.and_then(smallclaims::windows::holds::WaitWatch::blocked_by).unwrap_or_default();
+                    println!(
+                        "slow_job=control at_unix_ms={} hold_ms={} ran_ms={} blocked_by={blocked_by}",
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                        job.elapsed().as_millis(),
+                        ran.load(std::sync::atomic::Ordering::Relaxed) / 1000,
+                    );
                 }
                 control.lock().unwrap().push(job.elapsed());
                 std::thread::sleep(Duration::from_millis(50));
@@ -361,6 +375,38 @@ fn main() -> anyhow::Result<()> {
         report("control_quiet", &mut quiet_holds);
         println!("control_retire_over_100ms={}", retire_holds.iter().filter(|took| took.as_millis() >= 100).count());
         report("control_retire", &mut retire_holds);
+    }
+
+    if passes.contains(&"localtrim") {
+        // The member's own cut, resumed through the same paced chunks under the day's cap
+        // (S2D_RETIRE_CLAIMS), with the control writer's waits beside a quiet minute.
+        store.trim_locally(true)?;
+        store.trim_locally_at_most(retire_claims);
+        let cuts: Vec<String> = store.readers.get()
+            .prepare("SELECT id FROM checkpoints WHERE state IN ('trimming', 'set-aside') AND id NOT LIKE 'checkpoint/retired-by-peers/%' ORDER BY cut_unix_ms")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        store.connection.batched(|tx| tx.execute("UPDATE checkpoints SET state='trimming' WHERE state='set-aside' AND id NOT LIKE 'checkpoint/retired-by-peers/%'", []))
+            .map_err(|error| anyhow::anyhow!(error))??;
+        let quiet = control.lock().unwrap().len();
+        std::thread::sleep(Duration::from_secs(60));
+        let from = control.lock().unwrap().len();
+        let mut quiet_holds = control.lock().unwrap()[quiet..from].to_vec();
+        let started = Instant::now();
+        for cut in &cuts {
+            let mut actions = Vec::new();
+            store.finish_trim(cut, &mut actions)?;
+            for action in &actions {
+                println!("localtrim_cut={cut} action={}", serde_json::to_string(action)?);
+            }
+        }
+        let to = control.lock().unwrap().len();
+        let mut trim_holds = control.lock().unwrap()[from..to].to_vec();
+        println!("localtrim_ms={}", started.elapsed().as_millis());
+        println!("control_quiet_over_100ms={}", quiet_holds.iter().filter(|took| took.as_millis() >= 100).count());
+        report("control_quiet", &mut quiet_holds);
+        println!("control_localtrim_over_100ms={}", trim_holds.iter().filter(|took| took.as_millis() >= 100).count());
+        report("control_localtrim", &mut trim_holds);
     }
 
     if passes.contains(&"vacuum") {
