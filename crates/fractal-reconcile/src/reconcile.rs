@@ -21671,6 +21671,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if host != self.host {
             return Ok(());
         }
+        // The filesystem is an external input even when its recorded actual state
+        // and cached stamp are unchanged. Watch dispatch uses this input key.
+        smallclaims::touched::note_read(|| subject.to_owned());
         self.ensure_file_watch(subject, Path::new(path))?;
         let before = FileStamp::read(Path::new(path));
         if before.as_ref().is_some_and(|stamp| {

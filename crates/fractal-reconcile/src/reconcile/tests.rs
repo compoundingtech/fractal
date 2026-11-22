@@ -8180,6 +8180,39 @@ agent "import/omp/fixture" {{
             .expect("a target mutation must still wake reconciliation");
     }
 
+    #[tokio::test]
+    async fn cached_file_observation_retains_scoped_mission_dependency() {
+        use futures_util::FutureExt as _;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate.txt");
+        std::fs::write(&path, "ready").unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let reconciler = Reconciler::new(
+            store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert!(reconciler.file_observations.lock().unwrap().contains_key(&subject));
+        let ((), reads) = smallclaims::touched::record(|| {
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert!(reconciler.subject_value(&subject).unwrap().is_some());
+        });
+        assert!(reads.contains(&subject), "cached observations still read the external input");
+        assert!(reads.contains(&format!("actual:{subject}")));
+        reconciler.incremental.evaluated("mission-run/file-reader", reads, None);
+        reconciler.incremental.evaluated(
+            "mission-run/unrelated", BTreeSet::from(["file/unrelated".into()]), None,
+        );
+        let global = Notify::new();
+        reconciler.file_changes.invalidate(&reconciler.incremental, &subject, false, &global);
+        assert!(global.notified().now_or_never().is_none());
+        assert!(reconciler.file_changes.notify.notified().now_or_never().is_some());
+        assert_eq!(
+            *reconciler.file_changes.runs.lock().unwrap(),
+            BTreeSet::from(["mission-run/file-reader".into()]),
+        );
+    }
+
     #[test]
     fn managed_launch_inputs_remain_watched_when_profile_or_wrapper_is_missing() {
         use std::os::unix::fs::PermissionsExt as _;
