@@ -314,6 +314,13 @@ fn main() -> anyhow::Result<()> {
         let pending = |store: &Store| -> anyhow::Result<u64> {
             Ok(store.readers.get().query_row("SELECT COUNT(*) FROM peer_retired_claims WHERE state='pending'", [], |row| row.get(0))?)
         };
+        // What the step's last write costs at this many pending: what is gone no longer waits.
+        let probe = Instant::now();
+        store.connection.batched(|tx| tx.execute(
+            "DELETE FROM peer_retired_claims WHERE state='pending' AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=peer_retired_claims.id)",
+            [],
+        )).map_err(|error| anyhow::anyhow!(error))??;
+        println!("retire_cleanup_probe_ms={} pending={}", probe.elapsed().as_millis(), pending(&store)?);
         let quiet = control.lock().unwrap().len();
         std::thread::sleep(Duration::from_secs(60));
         let from = control.lock().unwrap().len();
