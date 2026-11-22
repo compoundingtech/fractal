@@ -147,11 +147,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let placement = admission.pressure.lock().unwrap_or_else(PoisonError::into_inner)
                 .as_ref().and_then(|observer| observer.lane_psi_not_applicable_placement())
                 .map(str::to_owned);
-            if let Some(placement) = placement {
-                if let Err(error) = self.record_pressure_layout_diagnostic(&placement) {
-                    tracing::warn!(%error, "could not publish lane PSI coverage diagnostic");
-                    admission.pressure_dirty.store(true, Ordering::Release);
-                }
+            if let Some(placement) = placement
+                && let Err(error) = self.record_pressure_layout_diagnostic(&placement)
+            {
+                tracing::warn!(%error, "could not publish lane PSI coverage diagnostic");
+                admission.pressure_dirty.store(true, Ordering::Release);
             }
         }
         if let Some(host) = admission.lanes {
