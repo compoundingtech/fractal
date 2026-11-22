@@ -240,7 +240,7 @@ fn a_member_that_trims_locally_serves_nothing_it_retired_even_while_it_holds_a_c
         [retired_envelope.clone(), kept_envelope.clone()]
     );
     local.set_retirement_wins(false);
-    assert_eq!(local.envelopes_carrying_claims(&[retired.clone(), kept.clone()]).unwrap(), [kept_envelope.clone()]);
+    assert_eq!(local.envelopes_carrying_claims(&[retired.clone(), kept.clone()]).unwrap(), std::slice::from_ref(&kept_envelope));
 
     let fresh = member("birch");
     push_everything(&local, &fresh);
