@@ -282,7 +282,7 @@ fn expire_request_cancellations(connection: &Connection, now: u64) -> Result<()>
     if let Some(cutoff) = now.checked_sub(REQUEST_TOMBSTONE_RETENTION_MS) {
         // Bound reclamation per request; expired rows are ignored even if this batch
         // leaves more expired tombstones for the next operation.
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h3ecd1f97c431 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM shell_resource_request_cancellations_v1 WHERE id IN
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h77ddc7013964 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM shell_resource_request_cancellations_v1 WHERE id IN
             (SELECT id FROM shell_resource_request_cancellations_v1 WHERE cancelled_at<=?1 ORDER BY cancelled_at LIMIT 128)", [cutoff])?;
     }
     Ok(())
@@ -353,23 +353,52 @@ struct AgentRequestIncarnation {
     first_receipt: i64,
 }
 
+struct AgentRequestOwners {
+    owners: BTreeMap<String, resource_membership::Owner>,
+    ended: std::collections::BTreeSet<String>,
+}
+
+impl AgentRequestOwners {
+    fn is_live(&self, connection: &Connection, id: &str) -> Result<bool> {
+        let owner = &self.owners[id];
+        if owner.invocation.as_ref().is_some_and(|invocation| self.ended.contains(invocation)) { return Ok(false); }
+        if owner.run.starts_with("mission-run/") || owner.step.starts_with("step-run/")
+            || owner.invocation.as_deref().is_some_and(|invocation| invocation.starts_with("invocation/") && owner.step != invocation) {
+            let step: Option<(String, u32, String)> = connection.query_row(
+                "SELECT run_id,attempt,status FROM step_runs WHERE subject=?1", [&owner.step],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+            return Ok(step.is_some_and(|(run, attempt, status)|
+                super::turn_invocations::mission_run_id(&run) == super::turn_invocations::mission_run_id(&owner.run)
+                && attempt == owner.attempt && super::run_credentials::LIVE_STEP_STATES.contains(&status.as_str())));
+        }
+        Ok(true)
+    }
+}
+
 impl AgentRequestIncarnation {
     /// The existing subject/kind index restricts this walk to the incarnation's
     /// receipt interval. No retained receipts before its start are visited.
-    fn request_ids(&self, connection: &Connection, key: uuid::Uuid) -> Result<std::collections::BTreeSet<String>> {
+    fn request_owners(&self, connection: &Connection, key: uuid::Uuid) -> Result<AgentRequestOwners> {
         let mut statement = connection.prepare(
             "SELECT json_extract(body,'$.fields') FROM claims INDEXED BY claims_subject_kind_index
              WHERE subject=?1 AND kind='harness.invocation' AND store_index>=?2 ORDER BY store_index DESC")?;
         let receipts = statement.query_map(rusqlite::params![self.agent, self.first_receipt], |row|
             row.get::<_, String>(0))?;
-        let mut ids = std::collections::BTreeSet::new();
+        let mut owners = BTreeMap::new();
+        let mut ended = std::collections::BTreeSet::new();
         for receipt in receipts {
             let receipt: fractal_schema::invocation::InvocationReceipt = serde_json::from_str(&receipt?)?;
+            use fractal_schema::invocation::InvocationPhase;
+            if matches!(receipt.phase, InvocationPhase::StartupFailed | InvocationPhase::Revoked | InvocationPhase::Cancelled
+                | InvocationPhase::ProducerClosed | InvocationPhase::Ended) {
+                ended.insert(receipt.invocation_id.clone());
+            }
             if receipt.incarnation.as_deref() != Some(self.incarnation.as_str()) { continue; }
             let Ok(owner) = invocation_owner(&receipt) else { continue; };
-            ids.insert(request_execution_id(&RequestScope::Agent { owner: &owner, live_owners: &[] }, key)?);
+            let id = request_execution_id(&RequestScope::Agent { owner: &owner, live_owners: &[] }, key)?;
+            owners.entry(id).or_insert(owner);
         }
-        Ok(ids)
+        Ok(AgentRequestOwners { owners, ended })
     }
 }
 
@@ -393,23 +422,24 @@ impl Store {
         let environment = std::mem::take(&mut command.environment);
         // Serialize submission with launch lookup; absence after restart refuses launch.
         let mut environments = self.shell_environments.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
+        let mut execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
             cancellation_kill_generation: None, retirement_retry_at_unix_ms: None, retirement_retry_delay_ms: 0,
             root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None,
             learning_decision: None, admission_decision: None };
         let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         expire_request_cancellations(&transaction, now)?;
-        let cancellation_ids = match (&incarnation, request_id) {
-            (Some(incarnation), Some(key)) => incarnation.request_ids(&transaction, key)?,
-            _ => std::collections::BTreeSet::new(),
+        let request_owners = match (&incarnation, request_id) {
+            (Some(incarnation), Some(key)) => Some(incarnation.request_owners(&transaction, key)?),
+            _ => None,
         };
         let mut cancelled = false;
         // Refresh the incarnation's indexed receipt interval while holding the writer
         // lock, then seek each owner's tombstone key before committing acceptance.
-        for id in std::iter::once(&execution.command.id).chain(cancellation_ids.iter().filter(|id| **id != execution.command.id)) {
+        for id in std::iter::once(&execution.command.id).chain(request_owners.iter().flat_map(|owners|
+            owners.owners.keys()).filter(|id| **id != execution.command.id)) {
             cancelled = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM shell_resource_request_cancellations_v1 WHERE id=?1
                  AND (?2 IS NULL OR cancelled_at>?2))",
@@ -420,6 +450,35 @@ impl Store {
             transaction.commit()?;
             return Err(FractalError::new("resource-request-cancelled",
                 "resource request was cancelled before acceptance").into());
+        }
+        if let Some(owners) = &request_owners {
+            let mut sibling = None;
+            let mut ended_sibling = false;
+            for id in owners.owners.keys() {
+                let body: Option<String> = transaction.query_row(
+                    "SELECT body FROM shell_resources_v1 WHERE id=?1", [id], |row| row.get(0)).optional()?;
+                let Some(body) = body else { continue; };
+                let existing: Execution = serde_json::from_str(&body)?;
+                if existing.cancel || existing.state == "cancelled" {
+                    transaction.commit()?;
+                    return Err(FractalError::new("resource-request-cancelled", "a sibling execution of this request was cancelled").into());
+                }
+                if !owners.is_live(&transaction, id)? { ended_sibling = true; continue; }
+                // Request identity is shared across owners. Compare the same semantic
+                // submission after normalizing only its frozen execution/owner keys.
+                execution.command.id.clone_from(&existing.command.id);
+                execution.command.lane.id.clone_from(&existing.command.lane.id);
+                execution.command.lane.owner.clone_from(&existing.command.lane.owner);
+                if existing.submission_digest.as_deref() != Some(self::submission_digest(&execution.command)?.as_str()) {
+                    return Err(FractalError::new("resource-request-conflict",
+                        "resource request identity is already bound to different execution intent").into());
+                }
+                if sibling.is_none() { sibling = Some(existing); }
+            }
+            if let Some(existing) = sibling { transaction.commit()?; return Ok(existing); }
+            if ended_sibling {
+                return Err(FractalError::new("resource-exec-owner", "request executions belong to ended owners").into());
+            }
         }
         // One row per command does not bound its serialized argv/result bytes.
         let inserted = transaction.execute(/* sqlite-large-value: allow-for-now lv-h319ba7a29fc7 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
@@ -483,26 +542,30 @@ impl Store {
     fn cancel_shell_resource_by_request_prepared(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid,
         now: u64, incarnation: Option<AgentRequestIncarnation>) -> Result<Option<Execution>> {
         let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         expire_request_cancellations(&transaction, now)?;
-        let cancellation_ids = match incarnation {
-            Some(incarnation) => incarnation.request_ids(&transaction, request_id)?,
-            None => {
-                let mut ids = std::collections::BTreeSet::from([request_execution_id(scope, request_id)?]);
-                if let RequestScope::Agent { live_owners, .. } = scope {
-                    for owner in *live_owners {
-                        ids.insert(request_execution_id(&RequestScope::Agent { owner, live_owners: &[] }, request_id)?);
-                    }
+        let request_owners = incarnation.map(|incarnation| incarnation.request_owners(&transaction, request_id)).transpose()?;
+        let mut fallback_ids = std::collections::BTreeSet::new();
+        if request_owners.is_none() {
+            fallback_ids.insert(request_execution_id(scope, request_id)?);
+            if let RequestScope::Agent { live_owners, .. } = scope {
+                for owner in *live_owners {
+                    fallback_ids.insert(request_execution_id(&RequestScope::Agent { owner, live_owners: &[] }, request_id)?);
                 }
-                ids
-            },
-        };
+            }
+        }
+        let cancellation_ids = || fallback_ids.iter().chain(request_owners.iter().flat_map(|owners| owners.owners.keys()));
         let mut execution = None;
-        for id in &cancellation_ids {
+        let mut ended_execution = false;
+        for id in cancellation_ids() {
             let body: Option<String> = transaction.query_row(
                 "SELECT body FROM shell_resources_v1 WHERE id=?1", [id], |row| row.get(0)).optional()?;
             if let Some(body) = body {
-                let found = serde_json::from_str(&body)?;
+                let mut found = serde_json::from_str(&body)?;
+                if request_owners.as_ref().map(|owners| owners.is_live(&transaction, id)).transpose()? == Some(false) {
+                    ended_execution = true;
+                    continue;
+                }
                 if let Err(error) = scope.validate_execution(&found, request_id) {
                     if matches!(scope, RequestScope::Agent { live_owners, .. } if !live_owners.contains(&found.command.lane.owner)) {
                         return Err(FractalError::new("resource-request-conflict",
@@ -511,20 +574,19 @@ impl Store {
                     }
                     return Err(error);
                 }
-                execution = Some(found);
-                break;
+                cancel_command(&transaction, id)?;
+                found.cancel = true;
+                if execution.is_none() { execution = Some(found); }
             }
         }
-        if let Some(execution) = &mut execution {
-            cancel_command(&transaction, &execution.command.id)?;
-            execution.cancel = true;
-        } else {
-            // Lookup and fan-out use the same locked owner set, so an owner appended
-            // after precomputation cannot hide an execution from cancellation.
-            for id in cancellation_ids {
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-hc433437e984c owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resource_request_cancellations_v1(id,cancelled_at)
-                    VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET cancelled_at=MAX(cancelled_at,excluded.cancelled_at)", rusqlite::params![id, now])?;
-            }
+        if execution.is_none() && ended_execution {
+            return Err(FractalError::new("resource-exec-owner", "request executions belong to ended owners").into());
+        }
+        // Always retain cancellation evidence, including when executions already
+        // exist: a paused sibling acceptance must not create a second execution.
+        for id in cancellation_ids() {
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hd7eb21c24865 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resource_request_cancellations_v1(id,cancelled_at)
+                VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET cancelled_at=MAX(cancelled_at,excluded.cancelled_at)", rusqlite::params![id, now])?;
         }
         transaction.commit()?;
         Ok(execution)
@@ -592,7 +654,7 @@ impl Store {
 
     pub fn cancel_shell_resource(&self, id: &str) -> Result<()> {
         let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         cancel_command(&transaction, id)?;
         transaction.commit()?;
         Ok(())
@@ -1413,6 +1475,95 @@ mod tests {
         assert_eq!(cancelled.command.id, accepted_id);
         assert!(cancelled.cancel);
         assert!(store.shell_resource(&accepted_id).unwrap().cancel);
+    }
+
+    fn started_request_owner(store: &Store, operation: &str) -> fractal_schema::invocation::InvocationReceipt {
+        let receipt = crate::store::invocation_receipts::native_receipt(operation, "agent/host-a/worker",
+            &json!({"subject":{"kind":"agent"},"launch_member":{"driver":"omp","environment":{}}}),
+            fractal_schema::invocation::InvocationPhase::Started,
+            Some(&json!({"verification":"operation-incarnation","incarnation":"exact"}))).unwrap().unwrap();
+        store.connection.batched(|tx| crate::store::invocation_receipts::append_receipt_tx(
+            tx, store.origin(), &receipt)).unwrap().unwrap();
+        receipt
+    }
+
+    fn keyed_command(owner: &Owner, key: uuid::Uuid) -> Command {
+        let id = request_execution_id(&RequestScope::Agent { owner, live_owners:std::slice::from_ref(owner) }, key).unwrap();
+        let mut command = command(&id);
+        command.request_id = Some(key.to_string());
+        command.lane.owner = owner.clone();
+        command
+    }
+
+    #[test]
+    fn paused_accept_cannot_run_after_acknowledged_cancel_of_existing_sibling() {
+        let store = Store::open_memory("host-a").unwrap();
+        let a = invocation_owner(&started_request_owner(&store, "a")).unwrap();
+        let key = uuid::Uuid::now_v7();
+        let paused = keyed_command(&a, key);
+        let paused_id = paused.id.clone();
+        std::thread::scope(|threads| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            let store_ref = &store;
+            let a_ref = &a;
+            let accept = threads.spawn(move || {
+                let scope = RequestScope::Agent { owner:a_ref, live_owners:std::slice::from_ref(a_ref) };
+                assert!(store_ref.shell_resource_by_request(&scope, key).unwrap().is_none());
+                ready_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                store_ref.submit_shell_resource(paused, 4)
+            });
+            ready_rx.recv().unwrap();
+            let c = invocation_owner(&started_request_owner(&store, "c")).unwrap();
+            let accepted = store.submit_shell_resource(keyed_command(&c, key), 2).unwrap();
+            let owners = [a.clone(), c.clone()];
+            let scope = RequestScope::Agent { owner:&c, live_owners:&owners };
+            let cancelled = store.cancel_shell_resource_by_request(&scope, key, 3).unwrap().unwrap();
+            assert_eq!(cancelled.command.id, accepted.command.id);
+            assert!(store.shell_resource(&accepted.command.id).unwrap().cancel);
+            resume_tx.send(()).unwrap();
+            let error = accept.join().unwrap().unwrap_err();
+            assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "resource-request-cancelled");
+        });
+        assert!(store.shell_resource_if_exists(&paused_id).unwrap().is_none());
+        // Even after tombstone expiry, the cancelled sibling execution fences K.
+        let error = store.submit_shell_resource(keyed_command(&a, key), REQUEST_TOMBSTONE_RETENTION_MS + 5).unwrap_err();
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "resource-request-cancelled");
+    }
+
+    #[test]
+    fn ended_owner_is_permanently_refused_and_never_masks_a_live_sibling() {
+        use crate::store::invocation_receipts::append_receipt_tx;
+        let store = Store::open_memory("host-a").unwrap();
+        let key = uuid::Uuid::now_v7();
+        let mut receipts = [started_request_owner(&store, "a"), started_request_owner(&store, "b")];
+        receipts.sort_by_key(|receipt| keyed_command(&invocation_owner(receipt).unwrap(), key).id);
+        let a = invocation_owner(&receipts[0]).unwrap();
+        let b = invocation_owner(&receipts[1]).unwrap();
+        let accepted = store.submit_shell_resource(keyed_command(&a, key), 1).unwrap();
+        let mut ended = receipts[0].clone();
+        ended.phase = fractal_schema::invocation::InvocationPhase::Ended;
+        store.connection.batched(|tx| append_receipt_tx(tx, store.origin(), &ended)).unwrap().unwrap();
+        let scope = RequestScope::Agent { owner:&b, live_owners:std::slice::from_ref(&b) };
+        let error = store.cancel_shell_resource_by_request(&scope, key, 2).unwrap_err();
+        let error = error.downcast_ref::<FractalError>().unwrap();
+        assert_eq!(error.code, "resource-exec-owner");
+        assert_ne!(error.details.get("retryable"), Some(&json!(true)));
+
+        // Prior implementations could persist duplicate owner rows. Seed that real
+        // historical shape, with ended A sorting first, then cancel the live B row.
+        let mut live = accepted.clone();
+        live.command = keyed_command(&b, key);
+        live.submission_digest = Some(submission_digest(&live.command).unwrap());
+        store.connection.batched(|tx| tx.execute(
+            "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![live.command.id,live.command.lane.host,live.state,serde_json::to_string(&live).unwrap()])).unwrap().unwrap();
+        assert!(accepted.command.id < live.command.id);
+        let cancelled = store.cancel_shell_resource_by_request(&scope, key, 3).unwrap().unwrap();
+        assert_eq!(cancelled.command.id, live.command.id);
+        assert!(store.shell_resource(&live.command.id).unwrap().cancel);
+        assert!(!store.shell_resource(&accepted.command.id).unwrap().cancel);
     }
 
     #[test]

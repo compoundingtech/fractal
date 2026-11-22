@@ -389,6 +389,10 @@ mod tests {
         let intent = cancel_error(FractalError::new("resource-request-conflict", "different execution intent").into());
         assert_eq!(intent.status, StatusCode::CONFLICT);
         assert!(!client_error_retryable(intent.status, Some(&intent.code)));
+        let ended = cancel_error(FractalError::new("resource-exec-owner", "request executions belong to ended owners").into());
+        assert_eq!(ended.code, "resource-exec-owner");
+        assert_eq!(ended.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!client_error_retryable(ended.status, Some(&ended.code)));
     }
 
     #[cfg(not(target_os = "macos"))]
