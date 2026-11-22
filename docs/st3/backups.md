@@ -95,6 +95,8 @@ Unlike file mode, a slow consumer keeps the source snapshot pinned; concurrent w
 can grow the WALs until the consumer finishes. `--max-wal-growth BYTES` limits
 the **sum** of nonnegative growth relative to the starting sizes of every pinned
 database's WAL (graph and opened messages shard), default `4294967296` (4 GiB).
+The guard uses the opened graph and shard paths, including when `store_dir` differs
+from the product state directory; an unopened shard contributes no WAL.
 Sizes are sampled once per second and before the end record; this is not a hard
 filesystem quota. Exceeding the limit aborts export, leaving no successful receipt.
 Cancellation releases the snapshot and the single live-export slot after
