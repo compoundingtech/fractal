@@ -4,7 +4,6 @@
 use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -14,7 +13,7 @@ use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
 use crate::fleet::handshake::JoinRequest;
 use crate::replication::{
-    ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
+    ReceiveOptions, ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
     ReplicationReceiveResponse,
 };
 use crate::store::{FleetRedemption, Store};
@@ -58,17 +57,14 @@ pub trait Backend: Clone + Send + Sync + 'static {
         async move { Ok(self.guard_summary(fleet_id).await?.exchange.authority_digest) }
     }
 
-    /// Store a peer's exchange, then admit and project what it carried. `round_trip` is how
-    /// long this worker's request that returned it took, when the exchange is a response.
+    /// Store a peer's exchange, then admit and project what it carried. The options retain
+    /// local dial evidence, authenticated sender incarnation and the optional answer deadline.
     fn receive(
         &self,
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: crate::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
-        deadline_unix_ms: Option<u128>,
+        options: ReceiveOptions<'_>,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
 
     fn publish_endpoints(
@@ -212,11 +208,9 @@ where
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: crate::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
-        deadline_unix_ms: Option<u128>,
+        options: ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
+        let ReceiveOptions { round_trip, carrier, authenticated_member_key, deadline_unix_ms } = options;
         let backend = self.clone();
         let peer = peer.to_owned();
         let fleet_id = fleet_id.to_owned();
@@ -234,9 +228,12 @@ where
                     &fleet_id,
                     &exchange,
                     round_trip.is_some(),
-                    carrier,
-                    authenticated_member_key.as_deref(),
-                    deadline_unix_ms,
+                    ReceiveOptions {
+                        round_trip,
+                        carrier,
+                        authenticated_member_key: authenticated_member_key.as_deref(),
+                        deadline_unix_ms,
+                    },
                 )
                 .map_err(anyhow::Error::from)?;
             store.record_transport_observation(&peer, "up", None, None)?;

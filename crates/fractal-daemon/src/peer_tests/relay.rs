@@ -23,6 +23,7 @@ use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
+use smallclaims::replication::ReceiveOptions;
 use smallclaims::sync::{ Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, WorkerConfig, };
 use smallclaims::sync::{dial_targets, signed_error_response_for, signed_response_for};
 use crate::client::Client;
@@ -630,7 +631,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .unwrap();
         async move {
             backend
-                .receive("fern", fleet, &exchange, None, Default::default(), None, None)
+                .receive("fern", fleet, &exchange, ReceiveOptions::default())
                 .await
                 .unwrap()
         }
@@ -778,7 +779,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .export_replication_exchange(fleet, &ReplicationInventory::default())
             .unwrap();
         backend
-            .receive(names[other], fleet, &exchange, None, Default::default(), None, None)
+            .receive(names[other], fleet, &exchange, ReceiveOptions::default())
             .await
             .unwrap();
         assert!(
@@ -797,7 +798,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             .unwrap()
             .len();
         backend
-            .receive(names[other], fleet, &exchange, None, Default::default(), None, None)
+            .receive(names[other], fleet, &exchange, ReceiveOptions::default())
             .await
             .unwrap();
         assert_eq!(
@@ -3551,10 +3552,11 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
             "source",
             fleet,
             &exchange,
-            Some(Duration::from_millis(10)),
-            smallclaims::replication::ReplicationCarrier::Fabric,
-            None,
-            None,
+            ReceiveOptions {
+                round_trip: Some(Duration::from_millis(10)),
+                carrier: smallclaims::replication::ReplicationCarrier::Fabric,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -3615,7 +3617,7 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
         before + 1
     );
     backend
-        .receive("source", fleet, &exchange, None, Default::default(), None, None)
+        .receive("source", fleet, &exchange, ReceiveOptions::default())
         .await
         .unwrap();
     let (success, failure) = store.replication_peer_transport("source");

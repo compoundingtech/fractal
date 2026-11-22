@@ -311,9 +311,12 @@ fn replication_receive_phases(
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
-            request.carrier,
-            request.authenticated_member_key.as_deref(),
-            deadline_unix_ms,
+            smallclaims::replication::ReceiveOptions {
+                carrier: request.carrier,
+                authenticated_member_key: request.authenticated_member_key.as_deref(),
+                deadline_unix_ms,
+                ..Default::default()
+            },
         )?;
         after_receipt();
         if store
@@ -633,9 +636,12 @@ pub async fn shard_replication_receive(
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
-            request.carrier,
-            request.authenticated_member_key.as_deref(),
-            deadline_unix_ms,
+            smallclaims::replication::ReceiveOptions {
+                carrier: request.carrier,
+                authenticated_member_key: request.authenticated_member_key.as_deref(),
+                deadline_unix_ms,
+                ..Default::default()
+            },
         )?;
         // Held envelopes get another pass when the graph's membership moved since the last one.
         if replication_receive_has_new_data(receipt.received + receipt.signatures)

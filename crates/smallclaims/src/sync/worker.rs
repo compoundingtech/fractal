@@ -31,7 +31,7 @@ use crate::fleet::transport::{
     parse_route, resolve_tool, routes_from_endpoints, tailscale_addresses,
 };
 use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
-use crate::replication::{ReplicationExchange, ReplicationInventory};
+use crate::replication::{ReceiveOptions, ReplicationExchange, ReplicationInventory};
 use crate::replication_diagnostics::{FAILURE_DIAGNOSTICS, FailureDiagnostics, FailureKind};
 
 const REPLICATION_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1432,13 +1432,10 @@ async fn receive_from_peer<B: Backend>(
     peer: &str,
     fleet_id: &str,
     exchange: &ReplicationExchange,
-    round_trip: Option<Duration>,
-    carrier: crate::replication::ReplicationCarrier,
-    authenticated_member_key: Option<&str>,
-    deadline_unix_ms: Option<u128>,
+    options: ReceiveOptions<'_>,
 ) -> Result<crate::replication::ReplicationReceiveResponse> {
     let _refresh = fleet.view_refresh.lock().await;
-    crate::replication::check_receive_deadline(deadline_unix_ms)?;
+    crate::replication::check_receive_deadline(options.deadline_unix_ms)?;
     let before = backend.fleet_view().await?;
     let protect = before
         .members
@@ -1463,7 +1460,7 @@ async fn receive_from_peer<B: Backend>(
         *leave = updated;
     }
     let received = backend
-        .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key, deadline_unix_ms)
+        .receive(peer, fleet_id, exchange, options)
         .await?;
     if received.changed {
         backend.changed().await;
@@ -3001,7 +2998,11 @@ async fn receive_exchange_inner_to<B: Backend>(
                         // membership or leave bookkeeping applies to its exchanges.
                         let result = async {
                             let received = backend
-                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default(), authenticated_member_key.as_deref(), Some(deadline_unix_ms))
+                                .receive(&relay, state.auth.fleet_id(), &request, ReceiveOptions {
+                                    authenticated_member_key: authenticated_member_key.as_deref(),
+                                    deadline_unix_ms: Some(deadline_unix_ms),
+                                    ..Default::default()
+                                })
                                 .await;
                             backend_timing.record("local-receive-done");
                             let received = received
@@ -3030,10 +3031,11 @@ async fn receive_exchange_inner_to<B: Backend>(
                             &relay,
                             state.auth.fleet_id(),
                             &request,
-                            None,
-                            Default::default(),
-                            authenticated_member_key.as_deref(),
-                            Some(deadline_unix_ms),
+                            ReceiveOptions {
+                                authenticated_member_key: authenticated_member_key.as_deref(),
+                                deadline_unix_ms: Some(deadline_unix_ms),
+                                ..Default::default()
+                            },
                         )
                         .await;
                         backend_timing.record("local-receive-done");
@@ -3600,10 +3602,12 @@ async fn exchange_inner<B: Backend>(
         &peer.name,
         auth.fleet_id(),
         &remote,
-        Some(round_trip),
-        carrier,
-        authenticated_member_key.as_deref(),
-        None,
+        ReceiveOptions {
+            round_trip: Some(round_trip),
+            carrier,
+            authenticated_member_key: authenticated_member_key.as_deref(),
+            ..Default::default()
+        },
     )
     .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
     telemetry.pull(received.receipt.received);
@@ -3640,10 +3644,12 @@ async fn exchange_inner<B: Backend>(
             &peer.name,
             auth.fleet_id(),
             &response,
-            Some(round_trip),
-            carrier,
-            authenticated_member_key.as_deref(),
-            None,
+            ReceiveOptions {
+                round_trip: Some(round_trip),
+                carrier,
+                authenticated_member_key: authenticated_member_key.as_deref(),
+                ..Default::default()
+            },
         )
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
         telemetry.pull(received.receipt.received);
@@ -3854,10 +3860,12 @@ async fn walk_claim_ranges<B: Backend>(
             &peer.name,
             auth.fleet_id(),
             &answer,
-            Some(started.elapsed()),
-            carrier,
-            authenticated_member_key.as_deref(),
-            None,
+            ReceiveOptions {
+                round_trip: Some(started.elapsed()),
+                carrier,
+                authenticated_member_key: authenticated_member_key.as_deref(),
+                ..Default::default()
+            },
         )
         .await
         {

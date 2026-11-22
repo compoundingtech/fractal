@@ -351,7 +351,7 @@ mod tests {
     }
 
     use crate::claim::ClaimInput;
-    use crate::replication::ReplicationInventory;
+    use crate::replication::{ReceiveOptions, ReplicationInventory};
     use crate::store::Store;
     use crate::sync::Local;
 
@@ -377,12 +377,9 @@ mod tests {
             peer: &str,
             fleet_id: &str,
             exchange: &crate::replication::ReplicationExchange,
-            round_trip: Option<Duration>,
-            carrier: crate::replication::ReplicationCarrier,
-            authenticated_member_key: Option<&str>,
-            deadline_unix_ms: Option<u128>,
+            options: ReceiveOptions<'_>,
         ) -> Result<crate::replication::ReplicationReceiveResponse> {
-            self.0.receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key, deadline_unix_ms).await
+            self.0.receive(peer, fleet_id, exchange, options).await
         }
 
         async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {

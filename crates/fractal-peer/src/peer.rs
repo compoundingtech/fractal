@@ -1939,11 +1939,14 @@ impl Backend for MainBackend {
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: smallclaims::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
-        deadline_unix_ms: Option<u128>,
+        options: smallclaims::replication::ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
+        let smallclaims::replication::ReceiveOptions {
+            round_trip,
+            carrier,
+            authenticated_member_key,
+            deadline_unix_ms,
+        } = options;
         let started = std::time::Instant::now();
         self.client
             .post_receive_before(

@@ -355,6 +355,16 @@ pub struct ReplicationReceiveRequest {
     pub authenticated_member_key: Option<String>,
 }
 
+/// Per-call local receive context; never part of the signed peer exchange.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReceiveOptions<'a> {
+    /// The worker's outbound round trip, when this exchange answers its own dial.
+    pub round_trip: Option<std::time::Duration>,
+    pub carrier: ReplicationCarrier,
+    pub authenticated_member_key: Option<&'a str>,
+    pub deadline_unix_ms: Option<u128>,
+}
+
 /// Local receive work checks this only before its first receipt transaction begins.
 /// Once receipt writes begin, the transaction and follow-up phases finish normally.
 pub fn check_receive_deadline(deadline_unix_ms: Option<u128>) -> Result<(), crate::error::Error> {

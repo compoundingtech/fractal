@@ -885,8 +885,10 @@ impl Client {
                     bytes,
                     self.deadlines.connect,
                     deadline,
-                    RequestAuthority::LocalPerson(self.person.as_deref()),
-                    receive_deadline_unix_ms,
+                    UnixRequestOptions::LocalPerson {
+                        person: self.person.as_deref(),
+                        receive_deadline_unix_ms,
+                    },
                 )
                 .await?
             }
@@ -908,8 +910,7 @@ impl Client {
                     bytes,
                     self.deadlines.connect,
                     deadline,
-                    RequestAuthority::FabricBearer(credential.as_ref()),
-                    None,
+                    UnixRequestOptions::FabricBearer(credential.as_ref()),
                 )
                 .await?
             }
@@ -1442,9 +1443,12 @@ where
     Ok(())
 }
 
-/// A tunneled request cannot claim the Unix socket's local-person authority.
-enum RequestAuthority<'a> {
-    LocalPerson(Option<&'a str>),
+/// A tunneled request cannot claim local-person authority or carry a local receive deadline.
+enum UnixRequestOptions<'a> {
+    LocalPerson {
+        person: Option<&'a str>,
+        receive_deadline_unix_ms: Option<u128>,
+    },
     FabricBearer(Option<&'a reqwest::header::HeaderValue>),
 }
 
@@ -1455,14 +1459,15 @@ async fn unix_request(
     body: &[u8],
     connect_deadline: Duration,
     deadline: Duration,
-    authority: RequestAuthority<'_>,
-    receive_deadline_unix_ms: Option<u128>,
+    options: UnixRequestOptions<'_>,
 ) -> Result<Vec<u8>> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let (person, authorization) = match authority {
-        RequestAuthority::LocalPerson(person) => (person, None),
-        RequestAuthority::FabricBearer(credential) => (None, credential),
+    let (person, authorization, receive_deadline_unix_ms) = match options {
+        UnixRequestOptions::LocalPerson { person, receive_deadline_unix_ms } => {
+            (person, None, receive_deadline_unix_ms)
+        }
+        UnixRequestOptions::FabricBearer(credential) => (None, credential, None),
     };
 
     let started = tokio::time::Instant::now();
@@ -2071,8 +2076,7 @@ mod tests {
         let bytes = unix_request(
             &socket, "GET", "/v1/client/capabilities", &[],
             Duration::from_secs(1), Duration::from_secs(1),
-            RequestAuthority::FabricBearer(Some(&credential)),
-            None,
+            UnixRequestOptions::FabricBearer(Some(&credential)),
         ).await.unwrap();
         assert_eq!(decode_api_response::<Value>(&bytes).unwrap(), json!({"accepted": true}));
         server.await.unwrap();

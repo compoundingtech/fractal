@@ -12,7 +12,7 @@ use tower::ServiceExt as _;
 use super::*;
 use crate::claim::{ClaimInput, ReplicaEnvelopeId};
 use crate::fleet::handshake::JoinRequest;
-use crate::replication::{ReplicationExportResponse, ReplicationReceiveResponse};
+use crate::replication::{ReceiveOptions, ReplicationExportResponse, ReplicationReceiveResponse};
 use crate::store::runtime::Plain;
 use crate::store::{Runtime as _, Store};
 use crate::sync::Local;
@@ -3154,10 +3154,10 @@ async fn withheld_receipt_expires_after_restart_without_confirming_the_sender() 
         "b",
         fixture.leaving_auth.fleet_id(),
         &replay,
-        None,
-        Default::default(),
-        Some(fixture.key.public()),
-        None,
+        ReceiveOptions {
+            authenticated_member_key: Some(fixture.key.public()),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -3257,10 +3257,10 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
         "b",
         fixture.leaving_auth.fleet_id(),
         &ordinary,
-        None,
-        Default::default(),
-        Some(&key),
-        None,
+        ReceiveOptions {
+            authenticated_member_key: Some(&key),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -3385,10 +3385,10 @@ async fn interrupted_leave_admission_keeps_first_receive_bound_and_denies_failed
             "b",
             fixture.leaving_auth.fleet_id(),
             &exchange,
-            None,
-            Default::default(),
-            Some(fixture.key.public()),
-            None,
+            ReceiveOptions {
+                authenticated_member_key: Some(fixture.key.public()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -4985,11 +4985,14 @@ impl Backend for SlowExport {
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: crate::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
-        deadline_unix_ms: Option<u128>,
+        options: ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
+        let ReceiveOptions {
+            round_trip,
+            carrier,
+            authenticated_member_key,
+            deadline_unix_ms,
+        } = options;
         let deadline_unix_ms = if self.expire_next_receive.swap(false, std::sync::atomic::Ordering::Relaxed) {
             Some(0)
         } else {
@@ -5011,7 +5014,17 @@ impl Backend for SlowExport {
         }
         let result = self
             .local
-            .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key, deadline_unix_ms)
+            .receive(
+                peer,
+                fleet_id,
+                exchange,
+                ReceiveOptions {
+                    round_trip,
+                    carrier,
+                    authenticated_member_key,
+                    deadline_unix_ms,
+                },
+            )
             .await?;
         self.receives
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -5243,7 +5256,15 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     );
     assert_eq!(backend.receives.load(Ordering::Relaxed), 1);
     Local(left.clone())
-        .receive("cedar", fleet_id, &answer, None, Default::default(), authenticated_member_key.as_deref(), None)
+        .receive(
+            "cedar",
+            fleet_id,
+            &answer,
+            ReceiveOptions {
+                authenticated_member_key: authenticated_member_key.as_deref(),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     for store in [&left, &right] {
@@ -5388,7 +5409,7 @@ async fn interrupted_exchange_reopens_pending_page_and_resumes_without_duplicate
     let right = Arc::new(plain_open(&right_path, "cedar").unwrap());
     assert_eq!(pending(&left), page.envelopes.len(), "receipt survives reopen before projection");
     let replay = Local(left.clone())
-        .receive("cedar", fleet_id, &page, None, Default::default(), None, None)
+        .receive("cedar", fleet_id, &page, ReceiveOptions::default())
         .await.unwrap();
     assert_eq!(replay.receipt.received, 0, "replay cannot insert a second envelope");
     assert_eq!(replay.receipt.duplicate, page.envelopes.len());

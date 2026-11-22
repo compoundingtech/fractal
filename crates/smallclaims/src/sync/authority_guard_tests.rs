@@ -2,7 +2,7 @@
 //! daemon is used. The mock changes only the guard's response; ordinary exports stay full.
 use super::*;
 use crate::fleet::handshake::JoinRequest;
-use crate::replication::{ReplicationExportResponse, ReplicationReceiveResponse};
+use crate::replication::{ReceiveOptions, ReplicationExportResponse, ReplicationReceiveResponse};
 use crate::store::Runtime as _;
 use crate::sync::Local;
 use std::sync::{
@@ -102,10 +102,7 @@ impl Backend for GuardBackend {
         _peer: &str,
         _fleet: &str,
         _exchange: &ReplicationExchange,
-        _trip: Option<Duration>,
-        _carrier: crate::replication::ReplicationCarrier,
-        _authenticated_member_key: Option<&str>,
-        _deadline_unix_ms: Option<u128>,
+        _options: ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
         unreachable!()
     }

@@ -8271,7 +8271,11 @@ impl Store {
         authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceipt, FractalError> {
         self.receive_replication_exchange_before(
-            relay, fleet_id, input, asks, carrier, authenticated_member_key, None,
+            relay, fleet_id, input, asks, crate::replication::ReceiveOptions {
+                carrier,
+                authenticated_member_key,
+                ..Default::default()
+            },
         )
     }
 
@@ -8283,10 +8287,11 @@ impl Store {
         fleet_id: &str,
         input: &ReplicationExchange,
         asks: bool,
-        carrier: crate::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
-        deadline_unix_ms: Option<u128>,
+        options: crate::replication::ReceiveOptions<'_>,
     ) -> Result<ReplicationReceipt, FractalError> {
+        let crate::replication::ReceiveOptions {
+            carrier, authenticated_member_key, deadline_unix_ms, ..
+        } = options;
         crate::replication::check_receive_deadline(deadline_unix_ms)?;
         if input.peer != relay {
             return Err(FractalError::new(
