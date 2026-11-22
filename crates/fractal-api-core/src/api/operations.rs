@@ -450,14 +450,35 @@ fn legacy_start_repair_evidence(
 
 mod backup_export;
 
+#[derive(Default, Deserialize)]
+pub struct BackupExportQuery {
+    #[serde(default)]
+    stream: bool,
+    max_wal_growth: Option<u64>,
+}
+
 /// Return export headers before preparing the archive; its stream owns the work.
-pub async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
+pub async fn backup_export(
+    State(state): State<AppState>,
+    Query(query): Query<BackupExportQuery>,
+) -> Result<Response, ApiError> {
     let permit = backup_export::reserve()?;
     let store = state.store.clone();
     // A bounded metadata check keeps ordinary precondition failures as HTTP errors.
     // The producer checks again in the snapshot that actually backs up the data.
     blocking_store(move || store.check_backup_projection()).await?;
     let bodies = message_body::bodies(&state.state_dir);
+    if query.stream {
+        return Ok(backup_export::direct_response(
+            permit,
+            backup_export::database_paths(&state.store),
+            query.max_wal_growth.unwrap_or(4 * 1024 * 1024 * 1024),
+            move |mut output| {
+                state.store.write_backup_with_bodies(&mut output, Some(&bodies))?;
+                Ok(())
+            },
+        ));
+    }
     Ok(backup_export::response(permit, move || {
         let mut file = tempfile::tempfile()?;
         state.store.write_backup_with_bodies(&mut file, Some(&bodies))?;

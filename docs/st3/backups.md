@@ -51,10 +51,81 @@ fractal backup create rehearsal.jsonl --database /var/lib/example/copy/claims.sq
 fractal backup restore rehearsal.jsonl --database /var/lib/example/restored/claims.sqlite3 --json
 ```
 
-The offline exporter migrates and finishes upgrade recovery on its input, so use a copy. Its header identifies the exporting
+The offline file exporter migrates and finishes upgrade recovery on its input, so use a copy. Its header identifies the exporting
 build and the schema of that migrated snapshot. A pinned old daemon writes the compatibility test
 fixture; the current exporter archives a copy of that graph and the current restorer verifies
 that its envelope inventory, claim sources and all graph table digests match.
+
+## Stream an archive to stdout
+
+`fractal backup create -` writes the archive JSONL to stdout instead of preparing a
+destination file. Save it before restoring; restore still takes a file, not stdin:
+
+```sh
+umask 077
+fractal backup create - > claims.jsonl 2> backup-receipt.json
+fractal backup restore claims.jsonl --database /var/lib/example/recovery/claims.sqlite3 --json
+```
+
+Only a zero exit status and the successful JSON receipt on stderr establish completion.
+On failure, stdout can contain a partial archive: discard it, and do not treat a failed
+command's stderr as a receipt. When piping into storage or compression, check every
+pipeline process's exit status (for example with `set -o pipefail` in Bash).
+
+The receipt contains `format`, `version`, `records`, `sha256`, `bytes`, `writer_id`,
+`max_store_index`, `started_at`, `finished_at`, `peak_wal_growth` and
+`peak_wal_growth_by_file`. `records` counts
+all JSONL records, including header and end. `bytes` and the receipt's `sha256` cover
+**all stdout bytes, including the end record and its newline**. The archive end record's
+existing `sha256` still covers only preceding archive bytes. The format and version
+match the archive header; no new archive version is required. `writer_id` identifies
+the source's persisted writer/member identity, not a physical database UUID, and
+`max_store_index` identifies the snapshot's highest local store index. Start and finish
+times are UTC timestamps; WAL growth is measured in bytes. `peak_wal_growth` is
+the maximum sampled sum of growth across the graph and messages-shard WALs.
+`peak_wal_growth_by_file` reports each WAL's individual peak under logical keys
+`graph` and `shards/messages` (only opened shards are listed).
+
+Live stdout mode requests `/v1/backup?stream=true&max_wal_growth=4294967296`.
+The daemon sends records through a bounded channel without an archive tempfile.
+Upgrade the daemon before using live stdout mode. The CLI requires the response header
+`x-fractal-backup-stream: 1` and refuses older daemons that might ignore the streaming
+query and prepare a temporary archive instead. Offline stdout export is unaffected.
+Unlike file mode, a slow consumer keeps the source snapshot pinned; concurrent writes
+can grow the WALs until the consumer finishes. `--max-wal-growth BYTES` limits
+the **sum** of nonnegative growth relative to the starting sizes of every pinned
+database's WAL (graph and opened messages shard), default `4294967296` (4 GiB).
+The guard uses the opened graph and shard paths, including when `store_dir` differs
+from the product state directory; an unopened shard contributes no WAL.
+Sizes are sampled once per second and before the end record; this is not a hard
+filesystem quota. Exceeding the limit aborts export, leaving no successful receipt.
+Cancellation releases the snapshot and the single live-export slot after
+the worker exits. File-destination mode retains its existing preparation, private
+temporary file and verified-publication behavior.
+
+For a stopped source, stdout mode also accepts an explicit database:
+
+```sh
+fractal backup create - --database /var/lib/example/copy/claims.sqlite3 \
+  --max-wal-growth 4294967296 > claims.jsonl 2> backup-receipt.json
+```
+
+This offline stdout exporter requires a **cleanly stopped and checkpointed** source.
+It refuses any nonempty `-wal`, for both graph and messages shard. Checkpoint with
+the source's maintenance procedure before export, require a successful non-busy
+result, and prevent daemon restarts for the entire export. Export itself never
+checkpoints or removes sidecars.
+
+Every offline connection uses SQLite `mode=ro&immutable=1`: it never migrates,
+repairs, seals, checkpoints, writes WAL read marks, or creates/updates `-shm`.
+The immutable promise is valid only while no process can change the source.
+Current compatible schema, persisted writer identity, fully sealed history and
+healthy, fully projected state are required; input needing upgrade or recovery
+is refused. This differs from the existing offline **file** exporter, which can
+migrate and recover its input. Include copied message bodies and shards as
+described above, and keep the complete stopped source unchanged until recovery
+has been verified.
+
 
 ## Relocate only the SQLite store
 
@@ -167,7 +238,7 @@ product state, so retain the unchanged state root throughout.
 
 A populated v0.3.4 store can contain sealed delegation grants without claim
 signatures. Preserve raw state and keys **before** doctor, restart, checkpoint,
-or offline export: those operations can seal pending work or migrate their input.
+or offline file export: those operations can seal pending work or migrate their input.
 A claim archive does not preserve private keys or all pending unsealed work.
 
 Keep the original database, keys, configuration and exact binary together with
