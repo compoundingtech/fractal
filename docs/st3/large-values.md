@@ -1174,3 +1174,19 @@ reclamation-cost bound. The existing generation-staging and certified keyed
 reclamation work therefore remains necessary; this review neither removes the
 exception nor grants a wider exemption. No statement, column catalog or other
 flow record changes are accepted by this refresh.
+
+### Model-return admission ledger (#6803)
+
+The `fractal_store::store` schema identity is `lv-h3133a3608b56` after combining
+the model-return admission ledger with the existing schema. The catalog is
+regenerated from the combined source using `scripts/propose-sqlite-large-values`,
+preserving existing declarations, reviewed metadata and flow records rather than
+replacing them with an older branch snapshot.
+
+The `fractal_store::store::model_return` maintainer owns `lv-h5004436e697c`.
+Durable admission evidence retains variable identifiers and serialized claim
+values inline. The schema retains `chunk-or-reference-variable-columns`; the
+sink retains `trace-statement-and-value-representation`. Neither the idle-only
+admission policy nor its restart-rate bound proves a physical SQLite value-size
+bound. Any later representation change must preserve episode, incarnation and
+declaration fencing and replay-safe admission identity.
