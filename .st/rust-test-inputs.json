@@ -292,7 +292,8 @@
    "extra": [
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
     "scripts/ci-test-paths.rs",
-    "slo"
+    "slo",
+    "vendor/notify/src/fsevent_cursor.rs"
    ]
   },
   "fractal-resource-protocol": {
