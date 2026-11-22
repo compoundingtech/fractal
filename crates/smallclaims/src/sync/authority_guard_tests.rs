@@ -24,6 +24,9 @@ struct GuardBackend {
     calls: Arc<AtomicUsize>,
     exports: Arc<AtomicUsize>,
     views: Arc<AtomicUsize>,
+    receives: Arc<AtomicUsize>,
+    changes: Arc<AtomicUsize>,
+    receive_changed: bool,
     gate: Option<Arc<Gate>>,
 }
 
@@ -65,6 +68,9 @@ impl GuardBackend {
             calls: Arc::default(),
             exports: Arc::default(),
             views: Arc::default(),
+            receives: Arc::default(),
+            changes: Arc::default(),
+            receive_changed: false,
             gate: None,
         }
     }
@@ -104,7 +110,20 @@ impl Backend for GuardBackend {
         _exchange: &ReplicationExchange,
         _options: ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
-        unreachable!()
+        self.receives.fetch_add(1, Ordering::Relaxed);
+        Ok(ReplicationReceiveResponse {
+            receipt: crate::replication::ReplicationReceipt {
+                received: 0,
+                duplicate: 0,
+                signatures: 0,
+                inventory: ReplicationInventory::default(),
+                claim_ranges: None,
+                signed_envelopes: 0,
+                refused_signed_envelopes: 0,
+            },
+            changed: self.receive_changed,
+            store_index: 0,
+        })
     }
     async fn publish_endpoints(&self, _mode: &str, _endpoints: &[Value]) -> Result<()> {
         unreachable!()
@@ -125,6 +144,9 @@ impl Backend for GuardBackend {
         _failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> Result<()> {
         Ok(())
+    }
+    async fn changed(&self) {
+        self.changes.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -170,6 +192,36 @@ async fn paced_wake_burst_bounds_actual_guard_export_and_membership_work() {
     assert_eq!(backend.calls.load(Ordering::Relaxed), 2);
     assert_eq!(backend.views.load(Ordering::Relaxed), 2);
     assert_eq!(backend.exports.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn shard_exchanges_and_empty_offers_do_not_fold_graph_membership() {
+    for changed in [false, true] {
+        let mut backend = GuardBackend::new(Ok("same"));
+        backend.receive_changed = changed;
+        let mut fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
+        fleet.own_key = Some("local-key".into());
+        let mut exchange = response("same".into()).exchange;
+        select_leave_confirmer(&backend, &fleet, "peer", &exchange).await.unwrap();
+        assert_eq!(backend.views.load(Ordering::Relaxed), 0);
+        exchange.shard_id = Some("messages".into());
+        for _ in 0..100 {
+            receive_from_peer(
+                &backend, &fleet, "peer", FLEET, &exchange, ReceiveOptions::default(),
+            ).await.unwrap();
+            select_leave_confirmer(&backend, &fleet, "peer", &exchange).await.unwrap();
+        }
+        assert_eq!(backend.receives.load(Ordering::Relaxed), 100);
+        assert_eq!(backend.changes.load(Ordering::Relaxed), if changed { 100 } else { 0 });
+        assert_eq!(backend.views.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.exports.load(Ordering::Relaxed), 0);
+        // Default-store admission still reads fresh membership, including on a quiet reply.
+        exchange.shard_id = None;
+        receive_from_peer(
+            &backend, &fleet, "peer", FLEET, &exchange, ReceiveOptions::default(),
+        ).await.unwrap();
+        assert_eq!(backend.views.load(Ordering::Relaxed), if changed { 2 } else { 1 });
+    }
 }
 
 #[tokio::test]

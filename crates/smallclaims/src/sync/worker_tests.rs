@@ -2549,7 +2549,7 @@ async fn a_durable_confirmer_fences_competing_push_and_pull_exports_even_with_a_
             &ReplicationInventory::default(),
         )
         .unwrap();
-    select_leave_confirmer(&backend, &fixture.leaving_fleet, "a")
+    select_leave_confirmer(&backend, &fixture.leaving_fleet, "a", &payload)
         .await
         .unwrap();
     let persisted = serde_json::to_vec(&*fixture.leaving_fleet.leave.lock().await).unwrap();
@@ -2774,7 +2774,12 @@ async fn lost_leave_exchange_response_keeps_the_selected_receiver_retryable() {
         "a lost initial response is not yet an authenticated leave proof"
     );
     assert!(
-        select_leave_confirmer(&Local(fixture.leaving.clone()), &fixture.leaving_fleet, "c")
+        select_leave_confirmer(
+            &Local(fixture.leaving.clone()), &fixture.leaving_fleet, "c",
+            &fixture.leaving.export_replication_exchange(
+                fixture.leaving_auth.fleet_id(), &ReplicationInventory::default(),
+            ).unwrap(),
+        )
             .await
             .is_err(),
         "an ambiguous send cannot switch confirmers and strand the original receiver"
