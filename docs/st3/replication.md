@@ -1599,7 +1599,10 @@ missing) moves, as a key with a claim at or after the cut does. `unsigned` answe
 a signature can arrive apart from its claim, and listing them would hold a key for each of them.
 Two members compare the reader only when both carry it, and a member carries it only while its
 verdicts come from the current signature tables (not during the signature migration or from a
-legacy cache). It does not make a member count as running the fold readers.
+legacy cache) and no requeue is paging, when any claim linked to it may still wait on it. It
+reads the claims still to be judged and the verdicts other than `verified` and `unsigned` once a
+pass, so it adds a few index reads to the pass rather than reads for each answer. It does not
+make a member count as running the fold readers.
 
 ### First sync
 

@@ -894,19 +894,81 @@ pub(crate) fn verdicts_comparable(connection: &Connection) -> Result<bool> {
     Ok(!legacy::active(connection)? && migration::unavailable(connection)?.is_none())
 }
 
-/// A claim's served verdict for the answers check, or `None` while it is still to be judged: fresh,
-/// queued, or held as [`Store::claim_verdict`] holds it while judgment is incomplete.
-pub(crate) fn settled_verdict(connection: &Connection, claim_id: &str) -> Result<Option<Verdict>> {
-    let waiting: bool = connection
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM claim_verdict_fresh WHERE claim_id=?1)
-                 OR EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id=?1)",
-        )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h66bf27ca9800 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, bool>(0))?;
-    if waiting || judging::unavailable(connection, claim_id)?.is_some() {
+/// The verdicts the answers check reads, loaded once for a whole pass, so the pass costs a few
+/// index reads rather than several for each answer: the claims still to be judged and the claims
+/// whose verdict is neither `verified` nor `unsigned`. Most claims are in neither set.
+pub(crate) struct ServedVerdicts {
+    waiting: BTreeSet<String>,
+    judged: BTreeMap<String, String>,
+}
+
+/// What a claim's served verdict says to the answers check.
+pub(crate) enum Served<'a> {
+    /// Still to be judged: fresh, queued, or held as [`Store::claim_verdict`] holds it while
+    /// judgment is incomplete, or held by its verdict.
+    Waiting,
+    /// Judged invalid, for this reason.
+    Invalid(&'a str),
+    /// `verified` or `unsigned`.
+    Plain,
+}
+
+impl ServedVerdicts {
+    pub(crate) fn served(&self, claim_id: &str) -> Served<'_> {
+        if self.waiting.contains(claim_id) {
+            return Served::Waiting;
+        }
+        self.judged.get(claim_id).map_or(Served::Plain, |reason| Served::Invalid(reason))
+    }
+}
+
+/// The served verdicts as [`judging::unavailable`] and [`cached_verdict`] give them, claim by
+/// claim, or `None` while a requeue is paging: any claim linked to it may wait on it, and finding
+/// which would take a read for each claim.
+pub(crate) fn served_verdicts(connection: &Connection) -> Result<Option<ServedVerdicts>> {
+    let requeuing: bool = connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM meta WHERE key>=?1 AND key<?2)")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h717c8e763221 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![REQUEUE, REQUEUE_END], |row| row.get(0))?;
+    if requeuing {
         return Ok(None);
     }
-    Ok(Some(cached_verdict(connection, claim_id)?.unwrap_or(Verdict::Unsigned)))
+    let mut waiting = BTreeSet::new();
+    let mut pending = connection.prepare_cached(
+        "SELECT claim_id FROM claim_verdict_fresh UNION ALL SELECT claim_id FROM claim_verdict_queue
+         UNION ALL SELECT claim_id FROM claim_signature_judging WHERE complete=0 OR dirty=1 OR blocked=1",
+    )?;
+    for claim_id in pending.query_map([], |row| row.get::<_, String>(0))? {
+        waiting.insert(claim_id?);
+    }
+    // More candidates than one page and no complete judgment of them all.
+    let mut large = connection.prepare_cached(
+        "SELECT c.claim_id FROM claim_signature_counts c WHERE c.candidates>?1 AND NOT EXISTS(
+             SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=c.claim_id
+             AND p.complete=1 AND p.dirty=0 AND p.blocked=0 AND p.candidate_count=c.candidates)",
+    )?;
+    for claim_id in large.query_map([CANDIDATE_PAGE as i64], |row| row.get::<_, String>(0))? {
+        waiting.insert(claim_id?);
+    }
+    // Every verdict but `verified` and `unsigned`, as ranges of the verdict index.
+    let mut judged = BTreeMap::new();
+    let mut verdicts = connection.prepare_cached(
+        "SELECT claim_id, verdict, reason FROM claim_verdicts
+         WHERE verdict<'unsigned' OR (verdict>'unsigned' AND verdict<'verified') OR verdict>'verified'",
+    )?;
+    let mut rows = verdicts.query([])?;
+    while let Some(row) = rows.next()? {
+        let claim_id: String = row.get(0)?;
+        match verdict_from(&row.get::<_, String>(1)?, row.get(2)?) {
+            Verdict::Invalid(reason) => {
+                judged.insert(claim_id, reason);
+            }
+            Verdict::Held(_) => {
+                waiting.insert(claim_id);
+            }
+            Verdict::Verified | Verdict::Unsigned => {}
+        }
+    }
+    Ok(Some(ServedVerdicts { waiting, judged }))
 }
 
 fn cached_verdict(connection: &Connection, claim_id: &str) -> Result<Option<Verdict>> {

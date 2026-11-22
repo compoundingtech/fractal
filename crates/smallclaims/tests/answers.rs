@@ -573,6 +573,13 @@ fn a_verdict_that_differs_between_members_is_named_and_one_still_to_judge_is_not
     alder.connection.write().execute("DELETE FROM claim_verdict_queue WHERE claim_id=?1", [&claim]).unwrap();
     assert_eq!(differing(&alder, &birch), vec![kind.clone()], "a settled verified verdict differs from invalid");
 
+    // While a requeue pages, any linked claim may wait on it: the member leaves the reader out.
+    alder.connection.write().execute("INSERT INTO meta(key,value) VALUES ('claim_candidate_requeue:root','')", []).unwrap();
+    assert!(!alder.answers_summary(cut).unwrap().kinds.contains_key(&kind), "no verdicts while a requeue pages");
+    assert!(differing(&alder, &birch).is_empty());
+    alder.connection.write().execute("DELETE FROM meta WHERE key='claim_candidate_requeue:root'", []).unwrap();
+    assert_eq!(differing(&alder, &birch), vec![kind.clone()]);
+
     // A member on a build without the reader is no disagreement, and the reader alone does not
     // make a member compare fold readers it does not run.
     let mut old = birch.answers_summary(cut).unwrap();

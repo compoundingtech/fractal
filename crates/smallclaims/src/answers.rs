@@ -336,13 +336,13 @@ pub fn summary(connection: &Connection, cut_unix_ms: u128) -> Result<AnswersSumm
 fn summary_with_verdicts(
     connection: &Connection,
     cut_unix_ms: u128,
-    mut verdicts: Option<&mut Vec<AnswerKey>>,
+    mut verdicts: Option<(&crate::store::principals::ServedVerdicts, &mut Vec<AnswerKey>)>,
 ) -> Result<AnswersSummary> {
     let mut kinds_answers = BTreeMap::new();
     for kind in kinds(connection)? {
         let answers = kind_answers_visiting(connection, &kind, cut_unix_ms, |key| {
-            if let Some(verdicts) = verdicts.as_deref_mut()
-                && let Some(verdict) = verdict_key(connection, &kind, key)?
+            if let Some((served, verdicts)) = verdicts.as_mut()
+                && let Some(verdict) = verdict_key(served, &kind, key)?
             {
                 verdicts.push(verdict);
             }
@@ -350,7 +350,7 @@ fn summary_with_verdicts(
         })?;
         kinds_answers.insert(kind, answers);
     }
-    if let Some(verdicts) = verdicts {
+    if let Some((_, verdicts)) = verdicts {
         verdicts.sort();
     }
     Ok(AnswersSummary { version: ANSWERS_VERSION, cut_unix_ms, kinds: kinds_answers, ..AnswersSummary::default() })
@@ -363,7 +363,8 @@ fn summary_with_verdicts(
 /// `unsigned` answers are no key, so a member that serves `verified` where its peer serves
 /// `invalid` differs in that key. An answer still to be judged (fresh, queued or held) moves, as
 /// does a key whose newest claim is at or after the cut. Members compare it only when both run it,
-/// and only while their verdicts come from the current signature tables; see [`differing_kinds`].
+/// and only while their verdicts come from the current signature tables and no requeue pages;
+/// see [`differing_kinds`] and `served_verdicts`.
 /// `unsigned` answers are not listed: a signature can arrive apart from its claim, and listing
 /// them would hold one key for every unsigned answer.
 pub const VERDICTS: &str = "verdicts";
@@ -373,21 +374,22 @@ pub fn verdicts_kind() -> String {
     format!("{READER_PREFIX}{VERDICTS}")
 }
 
-fn verdict_key(connection: &Connection, kind: &str, key: &AnswerKey) -> Result<Option<AnswerKey>> {
+fn verdict_key(served: &crate::store::principals::ServedVerdicts, kind: &str, key: &AnswerKey) -> Result<Option<AnswerKey>> {
+    use crate::store::principals::Served;
     let origin = serde_json::to_string(&[kind, key.origin.as_str()])?;
     let moving = |claim: String| AnswerKey { subject: key.subject.clone(), origin: origin.clone(), claim, moving: true };
     if key.moving {
         return Ok(Some(moving(String::new())));
     }
-    Ok(match crate::store::principals::settled_verdict(connection, &key.claim)? {
-        None | Some(crate::principal::Verdict::Held(_)) => Some(moving(String::new())),
-        Some(crate::principal::Verdict::Invalid(reason)) => Some(AnswerKey {
+    Ok(match served.served(&key.claim) {
+        Served::Waiting => Some(moving(String::new())),
+        Served::Invalid(reason) => Some(AnswerKey {
             subject: key.subject.clone(),
             origin: origin.clone(),
             claim: format!("{} invalid: {reason}", key.claim),
             moving: false,
         }),
-        Some(crate::principal::Verdict::Verified | crate::principal::Verdict::Unsigned) => None,
+        Served::Plain => None,
     })
 }
 
@@ -581,9 +583,15 @@ impl Store {
             )?)
         };
         let before = trims()?;
-        let comparable = crate::store::principals::verdicts_comparable(&connection)?;
+        // Read once for the pass. Left out while a requeue pages: see `served_verdicts`.
+        let served = if crate::store::principals::verdicts_comparable(&connection)? {
+            crate::store::principals::served_verdicts(&connection)?
+        } else {
+            None
+        };
         let mut verdicts = Vec::new();
-        let mut summary = summary_with_verdicts(&connection, cut_unix_ms, comparable.then_some(&mut verdicts))?;
+        let mut summary =
+            summary_with_verdicts(&connection, cut_unix_ms, served.as_ref().map(|served| (served, &mut verdicts)))?;
         let (trimmed, unfinished) = trims()?;
         summary.trims_locally = self.trims_locally();
         summary.trimmed_cut_unix_ms = u128::try_from(trimmed)?;
@@ -591,7 +599,7 @@ impl Store {
         let mut readers = Vec::new();
         // A legacy cache or a signature migration that started during the pass served some of
         // those verdicts from tables that were changing: then none counts.
-        if comparable && crate::store::principals::verdicts_comparable(&connection)? {
+        if served.is_some() && crate::store::principals::verdicts_comparable(&connection)? {
             let (kind, answers, buckets) = reader_answers(VERDICTS, cut_unix_ms, verdicts);
             summary.kinds.insert(kind, answers);
             readers.push(buckets);
