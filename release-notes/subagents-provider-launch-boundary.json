@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No runtime replay change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rules change."},
-  "compatibility": {"status": "compatible", "detail": "Driver re-exec state carries the provider launch boundary. Older state defaults to zero without disturbing an already adopted ledger; client and harness contracts are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Driver re-exec state adds the provider launch boundary. Older state defaults to zero without disturbing an already adopted ledger, and older readers ignore the added field. Client and harness contracts are unchanged; no intermediate upgrade is required."},
   "downtime": {"status": "none", "detail": "No additional interruption or service lifecycle change."},
   "manual": {"status": "none", "detail": "No installation or operator steps required."},
   "recovery": {"status": "none", "detail": "No database recovery change; existing lifecycle claims are not rewritten."}
