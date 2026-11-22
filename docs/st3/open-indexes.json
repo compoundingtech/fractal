@@ -1,6 +1,6 @@
 {
   "owner": "Fractal Product Lead",
-  "note": "Baseline from main at e679ab2d7c9e68df32c19a4db1dd0bfad989140e, with five native_attach_* indexes removed after #7038 merged at c2de8bf275ec7521059879784bd00c3d77d74f36. Includes the already-landed claims_model_return_attempt_index from #6803: model_return.rs forces this index with INDEXED BY, so moving its creation offline without changing reader admission would break existing stores. This is a ceiling, not permission to add startup DDL. New indexes on claims or local_observations must use offline fractal store prepare-indexes (owner_indexes) or reuse an existing index. Extending this list requires Fractal Product Lead approval. Includes SQLite implicit indexes. Remove entries when indexes stop being created at open.",
+  "note": "Baseline from main at e679ab2d7c9e68df32c19a4db1dd0bfad989140e, with five native_attach_* indexes removed after #7038 merged at c2de8bf275ec7521059879784bd00c3d77d74f36. Includes the already-landed claims_model_return_attempt_index and local_observations_roster_model_frontier_index from #6803: model_return.rs forces the former with INDEXED BY, while the roster model frontier requires the latter for its bounded seek. Moving their creation offline without changing reader admission would break existing stores or their bounded lookup contract. This is a ceiling, not permission to add startup DDL. New indexes on claims or local_observations must use offline fractal store prepare-indexes (owner_indexes) or reuse an existing index. Extending this list requires Fractal Product Lead approval. Includes SQLite implicit indexes. Remove entries when indexes stop being created at open.",
   "indexes": {
     "claims": [
       "claims_accepted_order_index",
@@ -104,6 +104,7 @@
       "local_observations_after_store_index",
       "local_observations_dedupe_index",
       "local_observations_roster_frontier_index",
+      "local_observations_roster_model_frontier_index",
       "local_observations_subject_id_index",
       "local_observations_subject_kind_index",
       "local_observations_time_index",
