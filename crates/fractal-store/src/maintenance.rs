@@ -21,6 +21,12 @@ pub struct EventMigrationReport {
     pub max_chunk_call_ms: f64,
     pub retries: u64,
 }
+/// Test-only attempt signal: a failed busy BEGIN commits nothing, so waiting tests
+/// synchronize on the reported attempt rather than a commit publication.
+#[cfg(test)]
+#[derive(Default)]
+struct MigrationAttempts(tokio::sync::Notify);
+
 
 /// Drain admitted legacy membership, at most 64 rows per commit and with a 20 ms pause.
 /// Daemon startup and the load fixture call this worker, rather than separate drain loops.
@@ -30,12 +36,12 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
     let mut retry = Duration::from_millis(200);
     let mut first = true;
     loop {
-        let store = store.clone();
+        let clean_store = store.clone();
         let result = store.connection.write_workers().spawn_blocking(move || {
             crate::task_cpu::profiled_blocking("maintenance.event_payloads", || {
-                let pending = store.event_payload_migration_pending()?;
+                let pending = clean_store.event_payload_migration_pending()?;
                 let chunk_started = Instant::now();
-                let result = store.migrate_event_payloads();
+                let result = clean_store.migrate_event_payloads();
                 Ok::<_, anyhow::Error>((pending, result, chunk_started.elapsed()))
             })
         })
@@ -45,6 +51,8 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
             Err(error) if contention(&error) => {
                 report.retries += 1;
                 eprintln!("fractal: event migration read contention; retrying in {retry:?}: {error:#}");
+                #[cfg(test)]
+                store.extension::<MigrationAttempts>().0.notify_one();
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
                 continue;
@@ -73,6 +81,8 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
             Err(error) if contention(&error) => {
                 report.retries += 1;
                 eprintln!("fractal: event migration contention; retrying in {retry:?}: {error:#}");
+                #[cfg(test)]
+                store.extension::<MigrationAttempts>().0.notify_one();
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
             }
@@ -102,6 +112,19 @@ impl Drop for SelectorLoan {
     }
 }
 
+// These are the durable maintenance frontiers, including trigger-populated queues.
+// `meta` holds selector backfill/fold/stream-seed markers; projection_health releases
+// selectors held behind admitted-but-not-yet-projected declarations.
+const SELECTOR_TABLES: &[&str] = &[
+    "local_client_message_selectors_v1",
+    "local_client_message_fold_batches",
+    "local_client_message_publications",
+    "local_client_message_cut_epoch",
+    "projection_health",
+    "meta",
+];
+const COMPLETION_HEALTH_TABLES: &[&str] = &["local_completion_health_v1_backfill"];
+
 /// Drain startup work and react to committed source changes, including projection-only
 /// commits, repair, trimming and rebuild. Each chunk has independent background admission.
 /// No Store owner or blocking task survives while waiting for a source change.
@@ -124,7 +147,7 @@ pub async fn run_client_message_selectors_observed(
         let Some(current) = store.upgrade() else { return; };
         // Subscribe before the initial durable read. The observer owns the sender, not
         // this task, so dropping the Store closes the channel and ends an idle worker.
-        current.observe_commits(move |_| {
+        current.connection.observe_tables(SELECTOR_TABLES, move |_| {
             if !SELECTOR_LOAN.with(std::cell::Cell::get) {
                 source.send_replace(());
             }
@@ -209,7 +232,7 @@ async fn run_replication_admission_observed(
             }
         };
         let (source, changed) = tokio::sync::watch::channel(generation);
-        let observer = current.observe_commits(move |connection| {
+        let observer = current.connection.observe_tables(&["meta"], move |connection| {
             match crate::store::GraphStore::replication_admission_wake_generation(connection) {
                 Ok(generation) => {
                     source.send_if_modified(|previous| {
@@ -290,7 +313,7 @@ pub async fn run_completion_health(store: std::sync::Weak<Store>) {
     let (source, mut changed) = tokio::sync::watch::channel(());
     let observer = {
         let Some(current) = store.upgrade() else { return; };
-        current.observe_commits(move |_| { source.send_replace(()); })
+        current.connection.observe_tables(COMPLETION_HEALTH_TABLES, move |_| { source.send_replace(()); })
     };
     loop {
         changed.borrow_and_update();
@@ -337,6 +360,50 @@ pub fn divergence_check_interval(value: Option<&str>) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_subscriptions_route_only_committed_dependency_mutations() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        for tables in [SELECTOR_TABLES, COMPLETION_HEALTH_TABLES] {
+            let connection = rusqlite::Connection::open_in_memory().unwrap();
+            connection.execute_batch(
+                "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+                 CREATE TABLE unrelated(k TEXT PRIMARY KEY) WITHOUT ROWID;",
+            ).unwrap();
+            for table in tables {
+                connection.execute_batch(&format!(
+                    "CREATE TABLE {table}(k TEXT PRIMARY KEY,v INTEGER NOT NULL) WITHOUT ROWID;"
+                )).unwrap();
+            }
+            let writer = smallclaims::sqlite::WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = calls.clone();
+            let _observer = writer.observe_tables(tables, move |_| { count.fetch_add(1, Ordering::SeqCst); });
+            {
+                let connection = writer.write();
+                connection.execute("INSERT INTO unrelated VALUES('committed')", []).unwrap();
+            }
+            drop(writer.write());
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "unrelated and no-op loans");
+            for (index, table) in tables.iter().enumerate() {
+                {
+                    let mut connection = writer.write();
+                    let transaction = connection.transaction().unwrap();
+                    transaction.execute(&format!("INSERT INTO {table} VALUES('rolled-back',0)"), []).unwrap();
+                    transaction.rollback().unwrap();
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), index, "rollback of {table}");
+                {
+                    let mut connection = writer.write();
+                    let transaction = connection.transaction().unwrap();
+                    transaction.execute(&format!("INSERT INTO {table} VALUES('committed',1)"), []).unwrap();
+                    transaction.commit().unwrap();
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), index + 1, "committed {table}");
+            }
+        }
+    }
     use crate::model::ClaimInput;
 
     const ADMISSION_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
@@ -578,15 +645,21 @@ mod tests {
             .unwrap();
         let blocker = rusqlite::Connection::open(root.path().join("claims.sqlite3")).unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let (notice, mut changed) = tokio::sync::watch::channel(());
+        let (notice, changed) = tokio::sync::watch::channel(());
         let _observer = store.observe_commits(move |_| {
             notice.send_replace(());
         });
+        // A failed busy BEGIN commits nothing, so synchronize on the reported attempt
+        // instead of waiting for a commit publication that must not exist.
+        let attempted = store.extension::<MigrationAttempts>();
         let task = tokio::spawn(migrate_event_payloads(store.clone()));
-        tokio::time::timeout(Duration::from_secs(5), changed.changed())
+        tokio::time::timeout(Duration::from_secs(5), attempted.0.notified())
             .await
-            .unwrap()
-            .unwrap();
+            .expect("the busy migration attempt is reported without a no-op commit publication");
+        assert!(
+            !changed.has_changed().unwrap(),
+            "a failed busy BEGIN must not publish a commit hint"
+        );
         assert!(!task.is_finished());
         assert!(store.event_payload_migration_pending().unwrap());
         blocker.execute_batch("ROLLBACK").unwrap();

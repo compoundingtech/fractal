@@ -22840,15 +22840,97 @@ async fn copy_stop_deferral_history(store: Arc<Store>) {
     }
 }
 
+// Subscribe to durable work frontiers, not writer returns. Trigger-generated queue
+// mutations also cover source repair, deletion and projection-only transactions.
+const PUBLICATION_EVIDENCE_TABLES: &[&str] = &[
+    "local_publication_bootstrap", "local_publication_pending", "local_publication_batches",
+];
+const STREAM_MIRROR_TABLES: &[&str] = &["stream_messages", "stream_lifecycle", "claims"];
+const MESSAGE_OUTBOX_TABLES: &[&str] = &["local_message_outbox"];
+// Committed claim time can release expiry's clock-safety deferral.
+const RESPONSE_EXPIRY_TABLES: &[&str] = &["idempotency", "meta", "claims"];
+// These are replicated payload/authority and retirement inputs, not local worker
+// bookkeeping. In particular, an envelope/signature can change without new mail.
+const SHARD_REPLICATION_TABLES: &[&str] = &[
+    "claims", "batches", "replica_envelopes", "replica_records",
+    "replica_envelope_signatures", "released_envelopes",
+    "checkpoint_envelopes", "checkpoint_claims",
+    "retired_claim_ids", "retired_envelopes", "retired_envelope_withdrawals",
+];
+
+#[cfg(test)]
+mod daemon_observer_scope_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    #[test]
+    fn daemon_scopes_count_committed_dependencies_not_unrelated_or_rolled_back_work() {
+        for tables in [
+            PUBLICATION_EVIDENCE_TABLES, STREAM_MIRROR_TABLES, MESSAGE_OUTBOX_TABLES,
+            RESPONSE_EXPIRY_TABLES, SHARD_REPLICATION_TABLES,
+        ] {
+            let connection = rusqlite::Connection::open_in_memory().unwrap();
+            connection.execute_batch(
+                "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT,k TEXT UNIQUE,v INTEGER);
+                 CREATE TABLE unrelated(k TEXT PRIMARY KEY) WITHOUT ROWID;",
+            ).unwrap();
+            for table in tables.iter().filter(|table| **table != "claims") {
+                connection.execute_batch(&format!(
+                    "CREATE TABLE {table}(k TEXT PRIMARY KEY,v INTEGER NOT NULL) WITHOUT ROWID;"
+                )).unwrap();
+            }
+            let writer = smallclaims::sqlite::WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = calls.clone();
+            let _observer = writer.observe_tables(tables, move |_| { count.fetch_add(1, Ordering::SeqCst); });
+            {
+                let connection = writer.write();
+                connection.execute("INSERT INTO unrelated VALUES('committed')", []).unwrap();
+            }
+            drop(writer.write());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            for (index, table) in tables.iter().enumerate() {
+                {
+                    let connection = writer.write();
+                    connection.execute_batch(&format!(
+                        "BEGIN; INSERT INTO {table}(k,v) VALUES('rollback',0); ROLLBACK;
+                         SAVEPOINT discarded; INSERT INTO {table}(k,v) VALUES('savepoint',0);
+                         ROLLBACK TO discarded; RELEASE discarded;"
+                    )).unwrap();
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), index, "rolled back {table}");
+                {
+                    let connection = writer.write();
+                    // A later rollback in the same loan must not erase earlier commits.
+                    connection.execute_batch(&format!(
+                        "BEGIN; INSERT INTO {table}(k,v) VALUES('committed',1); COMMIT;
+                         BEGIN; UPDATE {table} SET v=2 WHERE k='committed'; COMMIT;
+                         BEGIN; DELETE FROM {table} WHERE k='committed'; ROLLBACK;"
+                    )).unwrap();
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), index + 1, "committed {table}");
+            }
+        }
+    }
+
+    #[test]
+    fn replication_wake_is_independent_of_mirror_and_local_bookkeeping() {
+        assert!(SHARD_REPLICATION_TABLES.contains(&"replica_envelopes"));
+        assert!(SHARD_REPLICATION_TABLES.contains(&"replica_envelope_signatures"));
+        assert!(!STREAM_MIRROR_TABLES.contains(&"replica_envelopes"));
+        for table in ["meta", "local_observations", "replication_peers", "idempotency"] {
+            assert!(!SHARD_REPLICATION_TABLES.contains(&table), "{table} is local bookkeeping");
+        }
+    }
+}
+
 /// Commit notifications drive exact-delta maintenance after the API has bound.
 /// Each bootstrap page yields the FIFO writer; malformed source stops the job and
 /// leaves a durable incomplete state for doctor, rather than retrying a local defect.
 fn spawn_publication_evidence(store: Arc<Store>) {
     let (changed, mut receiver) = tokio::sync::watch::channel(());
-    let observer = store.observe_commits(move |connection| {
-        if connection.is_autocommit() {
-            changed.send_replace(());
-        }
+    let observer = store.connection.observe_tables(PUBLICATION_EVIDENCE_TABLES, move |_| {
+        changed.send_replace(());
     });
     tokio::spawn(fractal_daemon::task_cpu::account("publication.evidence", async move {
         let _observer = observer;
@@ -22886,7 +22968,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 }
 
 /// Mirror the messages shard into the graph's mail indexes (store/stream_mirror.rs): once at
-/// start, which catches up on what a crash left unmirrored, then after each shard commit. A
+/// start, which catches up on what a crash left unmirrored, then after source mutations. A
 /// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
 /// after a pause; the cursors keep what it already mirrored.
 fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, state_dir: PathBuf) {
@@ -22895,17 +22977,32 @@ fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, stat
         return;
     };
     let (changed, mut receiver) = tokio::sync::watch::channel(());
-    let observer = shard.observe_commits(move |_| {
+    let source = changed.clone();
+    let observer = shard.connection.observe_tables(STREAM_MIRROR_TABLES, move |_| {
+        source.send_replace(());
+    });
+    // A graph rebuild can reset the replay cursors without a new shard commit.
+    let replay_observer = store.connection.observe_tables(&["meta"], move |_| {
         changed.send_replace(());
     });
+    let (replicated, mut replication) = tokio::sync::watch::channel(());
+    let replication_observer = shard.connection.observe_tables(SHARD_REPLICATION_TABLES, move |_| {
+        replicated.send_replace(());
+    });
+    tokio::spawn(fractal_daemon::task_cpu::account("messages.replication_wake", async move {
+        let _observer = replication_observer;
+        loop {
+            replication.borrow_and_update();
+            // Wake dialers for replicated changes even when there is no mirror work.
+            let _ = fs::write(state_dir.join("replication.wake"), format!("{}\n", uuid::Uuid::now_v7()));
+            if replication.changed().await.is_err() { return; }
+        }
+    }));
     tokio::spawn(fractal_daemon::task_cpu::account("messages.stream_mirror", async move {
         let _observer = observer;
+        let _replay_observer = replay_observer;
         loop {
             receiver.borrow_and_update();
-            // The shard's dialers wake on the replication file, as the graph's do: a stream item
-            // this member wrote goes out to its recipient's host at once, not at the worker's
-            // next timer. An item a peer pushed wakes them too, which finds nothing new to send.
-            let _ = fs::write(state_dir.join("replication.wake"), format!("{}\n", uuid::Uuid::now_v7()));
             let mirror_store = store.clone();
             let mirrored = mirror_store.connection.write_workers().spawn_blocking(move || {
                 fractal_daemon::task_cpu::blocking("messages.stream_mirror", || {
@@ -22940,19 +23037,14 @@ fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, stat
     }));
 }
 
-/// Drain the message outbox (message_outbox.rs) once at startup and again after each commit
-/// that leaves a new message in it. The callback performs no SQL and never takes the writer; the
-/// probe is one read of the table on a pooled reader, so while the outbox is empty, as it always
-/// is in this build, a commit costs no more than that. A message a drain could not write (the
-/// shard or the graph refused it, or the drain failed) is tried again after a pause, not on every
-/// commit, so it never holds up new mail.
+/// Drain durable outbox work once at startup and after outbox mutations. The callback
+/// performs no SQL and never takes the writer. A refused message retains its retry
+/// deadline while fresh mail can wake and drain independently.
 fn spawn_message_outbox(store: Arc<Store>) {
     const RETRY: Duration = Duration::from_secs(30);
     let (changed, mut receiver) = tokio::sync::watch::channel(());
-    let observer = store.observe_commits(move |connection| {
-        if connection.is_autocommit() {
-            changed.send_replace(());
-        }
+    let observer = store.connection.observe_tables(MESSAGE_OUTBOX_TABLES, move |_| {
+        changed.send_replace(());
     });
     let waiting = |store: Arc<Store>| async move {
         tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_waiting", || {
@@ -23039,9 +23131,13 @@ fn maintenance_contention(error: &anyhow::Error) -> bool {
     })
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct ResponseExpiryAttempts(tokio::sync::Notify);
+
 /// Register before the first rowid deadline read. The callback performs no SQL and never
-/// takes the writer: it only coalesces committed-write notifications. Deadline reads run on a
-/// pooled reader, so unrelated commits add no expiry SQL to the writer path.
+/// takes the writer: it only coalesces committed receipt/cursor mutations. Deadline reads
+/// run on a pooled reader, while the existing expiry deadline remains authoritative.
 #[cfg(test)]
 fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
     spawn_response_expiry_with(store, smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS)
@@ -23051,10 +23147,8 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
 /// go too, in their own paced chunks.
 fn spawn_response_expiry_with(store: Arc<Store>, replay_safe_window_ms: i64) -> tokio::task::JoinHandle<()> {
     let (changed, receiver) = tokio::sync::watch::channel(());
-    let observer = store.observe_commits(move |connection| {
-        if connection.is_autocommit() {
-            changed.send_replace(());
-        }
+    let observer = store.connection.observe_tables(RESPONSE_EXPIRY_TABLES, move |_| {
+        changed.send_replace(());
     });
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.response_expiry", async move {
         let _observer = observer;
@@ -23143,15 +23237,17 @@ async fn expire_completed_responses(
         }
         clock_deferred = false;
         let clean_store = store.clone();
-        match clean_store.connection.write_workers().spawn_blocking(move || {
+        let cleaned = clean_store.connection.write_workers().spawn_blocking(move || {
             fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry", || {
                 // Two short writer transactions, never one long one.
                 clean_store.cleanup_idempotency(now)?;
                 clean_store.cleanup_replay_safe_idempotency(now, replay_safe_window_ms)
             })
         })
-        .await
-        {
+        .await;
+        #[cfg(test)]
+        store.extension::<ResponseExpiryAttempts>().0.notify_one();
+        match cleaned {
             Ok(Ok(_)) => {
                 retry = Duration::from_millis(200);
                 tokio::time::sleep(Duration::from_millis(20)).await;
