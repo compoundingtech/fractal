@@ -1025,10 +1025,9 @@ impl SeatsStore for Store {
             entry.idle_residency == idle_residency
                 && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         };
-        // Local agent timeline and main-loop usage rows change cards without advancing the
-        // graph index. The frontier ignores heartbeats and response/subagent spend.
-        // Read it inside the caller's SQLite snapshot, never from a future atomic generation
-        // that could race this cut.
+        // Every local append changes the snapshot token, including usage repeats clearing a
+        // pending slot. A bounded append-interval delta filters heartbeats and response spend,
+        // reusing all card rows when none of their inputs changed. Read inside this snapshot.
         let local = crate::performance::task("roster/frontier-read", || {
             roster_local_frontier(&self.readers.get(), index)
         })?;
