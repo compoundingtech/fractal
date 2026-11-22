@@ -21637,11 +21637,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .context("file watch has no target component")?;
         // Backends report canonical directories (notably /private/tmp on macOS).
         // Keep the lexical target as identity, but compare events in their namespace.
-        let directory = directory.canonicalize()?;
+        let directory = file_subscriptions::canonicalize(directory)?;
         let relevant = directory.join(next_component);
         // A file symlink can point outside the lexical parent. Observe its referent's
         // parent too, so both writes and inode replacements preserve file-gate behavior.
-        let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        let referent = file_subscriptions::canonicalize(&target).ok().filter(|path| *path != relevant);
         let recursive = target.is_dir();
         if watchers.get(subject).is_some_and(|watch| {
             watch.target == target

@@ -96,13 +96,44 @@ struct State {
     requested: BTreeMap<PathBuf, [isize; 2]>,
     physical: BTreeMap<PathBuf, (bool, Stamp, u64)>,
     next: u64,
+    reported: [usize; 3],
 }
 pub(super) struct Lease {
     pool: Arc<Pool>,
     id: u64,
 }
+impl Drop for State {
+    fn drop(&mut self) {
+        crate::incremental::file_watch_work::coverage(self.reported, [0; 3]);
+    }
+}
+// Compile the vendored production cursor's deterministic tests on every CI platform.
+#[cfg(test)]
+#[path = "../../../vendor/notify/src/fsevent_cursor.rs"]
+mod fsevent_cursor;
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub(super) fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(not(target_os = "macos"))]
+    { path.canonicalize() }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::{fd::AsRawFd as _, unix::{ffi::OsStrExt as _, fs::OpenOptionsExt as _}};
+        // realpath preserves the caller's letter case on case-insensitive APFS.
+        // F_GETPATH returns the vnode's spelling, matching FSEvents' namespace.
+        let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_EVTONLY).open(path)?;
+        let mut bytes = [0_u8; libc::PATH_MAX as usize];
+        // SAFETY: the descriptor stays live; F_GETPATH writes at most PATH_MAX
+        // bytes into this writable buffer and terminates the successful result.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, bytes.as_mut_ptr()) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let length = bytes.iter().position(|byte| *byte == 0)
+            .ok_or_else(|| std::io::Error::other("F_GETPATH returned an unterminated path"))?;
+        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..length])))
+    }
 }
 fn dispatch(users: &Users, event: &notify::Event, coverage: bool) -> usize {
     let callbacks = lock(users).callbacks(event, coverage);
@@ -174,6 +205,7 @@ impl Pool {
             requested: BTreeMap::new(),
             physical: BTreeMap::new(),
             next: 0,
+            reported: [0; 3],
         }))))
     }
     pub(super) fn subscribe_input(
@@ -188,7 +220,7 @@ impl Pool {
     fn acquire(self: &Arc<Self>, paths: Paths, predicate: Option<Predicate>, callback: Callback) -> Result<Lease> {
         let paths = paths
             .into_iter()
-            .map(|(path, recursive)| Ok((path.canonicalize()?, recursive)))
+            .map(|(path, recursive)| Ok((canonicalize(&path)?, recursive)))
             .collect::<Result<Paths>>()?;
         let mut state = lock(&self.0);
         let id = state.next;
@@ -221,7 +253,13 @@ impl State {
         }
     }
     fn install(&mut self, path: &Path, recursive: bool, post: Probe) -> Result<()> {
-        let identity = stamp(path)?;
+        let identity = match stamp(path) {
+            Ok(identity) => identity,
+            Err(error) => {
+                lock(&self.generation).remove(path);
+                return Err(error.into());
+            }
+        };
         let generation = {
             let mut generations = lock(&self.generation);
             let entry = generations.entry(path.to_owned()).or_default();
@@ -243,6 +281,14 @@ impl State {
         Ok(())
     }
     fn update(&mut self, paths: &Paths, add: bool, post: Probe) -> Result<()> {
+        let result = self.update_inner(paths, add, post);
+        let current = [self.physical.len(), lock(&self.generation).len(),
+            lock(&self.users).leases.len()];
+        crate::incremental::file_watch_work::coverage(self.reported, current);
+        self.reported = current;
+        result
+    }
+    fn update_inner(&mut self, paths: &Paths, add: bool, post: Probe) -> Result<()> {
         for (path, recursive) in paths {
             let counts = self.requested.entry(path.clone()).or_default();
             counts[usize::from(*recursive)] += if add { 1 } else { -1 };
@@ -344,6 +390,46 @@ impl State {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+    #[test]
+    fn root_index_matches_components_not_character_prefixes() {
+        let users = Users::default();
+        for (id, path) in [(0, "/a/b"), (1, "/a/bc")] {
+            lock(&users).insert(id, (vec![(PathBuf::from(path), true)], Arc::new(|_| {})));
+        }
+        for kind in [EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(notify::event::RemoveKind::Folder),
+            EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::From))] {
+            let event = notify::Event::new(kind).add_path(PathBuf::from("/a/b"));
+            assert_eq!(dispatch(&users, &event, false), 1);
+            assert_eq!(dispatch(&users, &event, true), 1);
+        }
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from("/a/bc/input"));
+        assert_eq!(dispatch(&users, &event, false), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn case_insensitive_volume_aliases_share_canonical_watch_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("MixedCaseDirectory");
+        let alias = root.path().join("mixedcasedirectory");
+        std::fs::create_dir(&directory).unwrap();
+        if !alias.is_dir() {
+            eprintln!("case-sensitive test volume: case-insensitive alias case is not applicable");
+            return;
+        }
+        let pool = Pool::new().unwrap();
+        let canonical = canonicalize(&directory).unwrap();
+        let first = pool.subscribe(vec![(directory, false)], Arc::new(|_| {})).unwrap();
+        let second = pool.subscribe(vec![(alias, false)], Arc::new(|_| {})).unwrap();
+        assert_eq!(lock(&pool.0).physical.len(), 1, "case aliases must not add a stream root");
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(canonical.join("input"));
+        assert_eq!(dispatch(&lock(&pool.0).users, &event, false), 2);
+        drop((first, second));
+        assert!(lock(&lock(&pool.0).generation).is_empty());
+    }
     #[test]
     fn sixty_four_roots_dispatch_and_upgrade_only_intersecting_leases() {
         use std::sync::atomic::AtomicUsize;
@@ -515,8 +601,10 @@ mod tests {
             assert!(wakeups.load(Ordering::Relaxed) > 0);
             assert!(!lock(&pool.0).physical.contains_key(&missing));
             assert_eq!(lock(&pool.0).physical.len(), 2);
+            assert_eq!(lock(&lock(&pool.0).generation).len(), 2, "missing reinstall has no generation");
             drop(stale);
             assert_eq!(lock(&pool.0).physical.len(), 2);
+            assert_eq!(lock(&lock(&pool.0).generation).len(), 2, "stale release cannot retain dead roots");
             assert!(pool
                 .subscribe(vec![(missing.clone(), recursive)], Arc::new(|_| {}))
                 .is_err());
@@ -528,6 +616,7 @@ mod tests {
             assert_eq!(lock(&pool.0).physical[&missing].1, stamp(&missing).unwrap());
             drop((recreated, replacement, independent));
             assert!(lock(&pool.0).physical.is_empty());
+            assert!(lock(&lock(&pool.0).generation).is_empty());
             assert!(lock(&lock(&pool.0).users).is_empty());
         }
     }

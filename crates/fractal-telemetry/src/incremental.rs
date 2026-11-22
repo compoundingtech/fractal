@@ -23,6 +23,15 @@ pub mod file_watch_work {
     static COVERAGE: AtomicU64 = AtomicU64::new(0);
     static SCOPED: AtomicU64 = AtomicU64::new(0);
     static GLOBAL: AtomicU64 = AtomicU64::new(0);
+    static COVERAGE_GAUGES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    pub fn coverage(previous: [usize; 3], current: [usize; 3]) {
+        let values = |counts: [usize; 3]| [counts[0], counts[1], counts[2],
+            usize::from(cfg!(target_os = "macos") && counts[0] != 0)];
+        for ((before, after), gauge) in values(previous).into_iter().zip(values(current)).zip(&COVERAGE_GAUGES) {
+            if after >= before { gauge.fetch_add((after - before) as u64, Ordering::Relaxed); }
+            else { gauge.fetch_sub((before - after) as u64, Ordering::Relaxed); }
+        }
+    }
     pub fn event() { EVENTS.fetch_add(1, Ordering::Relaxed); }
     pub fn delivery(coverage: bool) {
         let counter = if coverage { &COVERAGE } else { &DELIVERIES };
@@ -39,6 +48,10 @@ pub mod file_watch_work {
             "coverage_deliveries": COVERAGE.load(Ordering::Relaxed),
             "scoped_notifications": SCOPED.load(Ordering::Relaxed),
             "global_notifications": GLOBAL.load(Ordering::Relaxed),
+            "physical_roots": COVERAGE_GAUGES[0].load(Ordering::Relaxed),
+            "coverage_generations": COVERAGE_GAUGES[1].load(Ordering::Relaxed),
+            "logical_leases": COVERAGE_GAUGES[2].load(Ordering::Relaxed),
+            "fsevents_streams": COVERAGE_GAUGES[3].load(Ordering::Relaxed),
         })
     }
 }
