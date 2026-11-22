@@ -463,6 +463,13 @@ impl WatchesStore for Store {
         agent: &str,
         watch: &crate::model::WatchSpec,
     ) -> Result<bool, FractalError> {
+        // Use first-send admission itself: terminal identity resolution and lifecycle
+        // conflicts must agree with the wake's eventual send.
+        match fractal_store::store::retirements::admit_recipient(&self.readers.get(), Some(agent)) {
+            Err(error) if error.code == "recipient-retired" => return Ok(true),
+            Err(error) => return Err(error),
+            Ok(()) => {}
+        }
         if self
             .desired_subjects_named(&[agent.to_owned()])
             .map_err(internal)?
