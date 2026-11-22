@@ -29,7 +29,7 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
         store.judge_claims(true).unwrap();
         assert_eq!(verdict(&store, &claim), Verdict::Verified);
         {
-            let mut connection = store.connection.write();
+            let connection = store.connection.write();
             if tampered {
                 // Rejudgment must use the current transaction's body, never the earlier one.
                 connection.execute(
@@ -45,6 +45,7 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
                 "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
                 [&claim.id],
             ).unwrap();
+            drop(connection);
             BODY_READS.with(|reads| reads.borrow_mut().clear());
             // The native mutation dispatcher reinstalls its one trace callback on every loan,
             // so a raw connection.trace would be clobbered; the capture is layered into it.

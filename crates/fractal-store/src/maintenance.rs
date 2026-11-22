@@ -36,12 +36,12 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
     let mut retry = Duration::from_millis(200);
     let mut first = true;
     loop {
-        let store = store.clone();
+        let clean_store = store.clone();
         let result = store.connection.write_workers().spawn_blocking(move || {
             crate::task_cpu::profiled_blocking("maintenance.event_payloads", || {
-                let pending = store.event_payload_migration_pending()?;
+                let pending = clean_store.event_payload_migration_pending()?;
                 let chunk_started = Instant::now();
-                let result = store.migrate_event_payloads();
+                let result = clean_store.migrate_event_payloads();
                 Ok::<_, anyhow::Error>((pending, result, chunk_started.elapsed()))
             })
         })
@@ -645,15 +645,15 @@ mod tests {
             .unwrap();
         let blocker = rusqlite::Connection::open(root.path().join("claims.sqlite3")).unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let (notice, mut changed) = tokio::sync::watch::channel(());
+        let (notice, changed) = tokio::sync::watch::channel(());
         let _observer = store.observe_commits(move |_| {
             notice.send_replace(());
         });
         // A failed busy BEGIN commits nothing, so synchronize on the reported attempt
         // instead of waiting for a commit publication that must not exist.
-        let attempted = store.extension::<MigrationAttempts>().0.clone();
+        let attempted = store.extension::<MigrationAttempts>();
         let task = tokio::spawn(migrate_event_payloads(store.clone()));
-        tokio::time::timeout(Duration::from_secs(5), attempted.notified())
+        tokio::time::timeout(Duration::from_secs(5), attempted.0.notified())
             .await
             .expect("the busy migration attempt is reported without a no-op commit publication");
         assert!(
