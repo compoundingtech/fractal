@@ -6876,7 +6876,7 @@ mod model_return_policy_tests {
     use super::*;
     #[test]
     fn model_return_accepts_explicit_off_and_safe_partial_overrides() {
-        for policy in ["model-return { enabled false; }", "model-return { max-drift 900; max-per-hour 0; }"] {
+        for policy in ["model-return { enabled #false; }", "model-return { max-drift 900; max-per-hour 0; }"] {
             let source = format!("version 2\nagent \"example\" {{ command \"true\"; {policy}; }}");
             assert!(parse_internal_intent(&source, "node").is_ok(), "{policy}");
         }
@@ -6888,9 +6888,9 @@ mod model_return_policy_tests {
             "model-return { max-per-hour 2; }",
             "model-return { max-per-hour -1; }",
             "model-return { enabled \"off\"; }",
-            "model-return { enabled false; enabled true; }",
-            "model-return { unknown true; }",
-            "model-return false",
+            "model-return { enabled #false; enabled #true; }",
+            "model-return { unknown #true; }",
+            "model-return #false",
             "model-return {}; model-return {}",
         ] {
             let source = format!("version 2\nagent \"example\" {{ command \"true\"; {policy}; }}");

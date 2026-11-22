@@ -92,6 +92,8 @@ mod tests {
     }
 
     fn binding(store: &Store, incarnation: &str, session: &str) {
+        append(store, "runtime.observed", json!({"status":"running",
+            "incarnation_id":incarnation}), None);
         append(store, "harness.session-file", json!({"harness":"omp", "session_id":session,
             "incarnation_id":incarnation, "path":"/session/example.jsonl"}), None);
     }

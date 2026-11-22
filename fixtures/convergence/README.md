@@ -593,3 +593,16 @@ report is a system-only once-per-run fact; neither its retention nor its schema 
 authority. Local-trim convergence, retained claim equality, oracle reader comparisons,
 person-authored claim preservation, and invalid/pending-record checks remain unchanged.
 
+## Native model fallback claim registration
+
+`claims-v42.json` adds `harness.model-fallback.observed` and the optional
+`runtime.action.requested.model_return_attempt` field. Versions 1 through 41 remain
+frozen. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`;
+do not hand-edit the snapshot. The simulation and audit reports select v42. The native
+fallback input generator supplies bounded session, incarnation, source-event and episode
+provenance, an explicit sanitized cause, and the same-subject agent actor. Model mismatch
+alone does not establish fallback. Local-trim convergence, retained claim equality,
+oracle reader comparisons, person-authored claim preservation, and invalid/pending-record
+checks remain unchanged.
+

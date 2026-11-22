@@ -42,7 +42,7 @@ test('full and read entrypoints share validators and strict unknown-case trackin
     assert.equal(read.decodeUnknownSync(read.ReadCollectionCommand)(conversation).collection, 'conversation');
 });
 
-test('strict agent decoders accept optional model drift extension fields without regeneration', async () => {
+test('strict agent decoders preserve optional model drift contract fields', async () => {
     const [{ Schema }, Rich] = await modules;
     const read = await import('./ReadSchema.generated.ts');
     const base = {
@@ -67,7 +67,28 @@ test('strict agent decoders accept optional model drift extension fields without
             } }]) {
             const decoded = decode(wire);
             assert.equal(decoded.id, base.id);
-            assert.equal(Schema.encodeSync(schema.Agent)(decoded).live_model, base.live_model);
+            const encoded = Schema.encodeSync(schema.Agent)(decoded);
+            assert.equal(encoded.live_model, base.live_model);
+            assert.equal(encoded.declared_model, wire.declared_model);
+            if (wire.model_drift) {
+                assert.deepEqual(encoded.model_drift, wire.model_drift);
+            } else {
+                assert.equal(Object.hasOwn(encoded, 'model_drift'), false);
+            }
+        }
+        for (const state of ['at-declared', 'drifted', 'unknown', 'stale', 'uncomparable']) {
+            assert.equal(decode({ ...base, ...extension,
+                model_drift: { ...extension.model_drift, state } }).model_drift.state, state);
+        }
+        for (const fallback_reason of ['transient', 'quota', 'auth', 'unknown', null]) {
+            assert.equal(decode({ ...base, ...extension,
+                model_drift: { ...extension.model_drift, fallback_reason } }).model_drift.fallback_reason, fallback_reason);
+        }
+        for (const invalid of [{ state: 'healthy' }, { fallback_reason: 'model-mismatch' },
+            { drift_age_seconds: -1 }, { return_attempts: -1 }, { return_attempts: 0.5 },
+            { unexpected: true }]) {
+            assert.throws(() => decode({ ...base, ...extension,
+                model_drift: { ...extension.model_drift, ...invalid } }));
         }
     }
 });

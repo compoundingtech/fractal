@@ -126,62 +126,62 @@ mod tests {
     fn durable_admission_replays_excludes_host_and_preserves_cross_incarnation_budget() {
         let store = fixture();
         let now = now_ms();
-        let first = request(&store, "agent/first", "one", "return-one");
+        let first = request(&store, "agent/node.first", "one", "return-one");
         let claim = store.admit_model_return(&first, now).unwrap();
         assert_eq!(store.admit_model_return(&first, now).unwrap().id, claim.id);
-        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 1);
-        assert_eq!(store.model_return_attempt_count("agent/first", "two").unwrap(), 0);
-        let second = request(&store, "agent/second", "one", "return-two");
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "one").unwrap(), 1);
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "two").unwrap(), 0);
+        let second = request(&store, "agent/node.second", "one", "return-two");
         assert_eq!(store.admit_model_return(&second, now).unwrap_err().code, "model-return-host-busy");
         store.append_claim(&ClaimInput {
-            subject: "agent/first".into(), kind: "runtime.action.succeeded".into(), actor: Some("agent/st3/reconciler".into()),
+            subject: "agent/node.first".into(), kind: "runtime.action.succeeded".into(), actor: Some("agent/st3/reconciler".into()),
             fields: BTreeMap::from([("action".into(), json!("restart")), ("reason".into(), json!("cancelled stale return"))]),
             evidence: vec![claim.id.clone()], expected_subject: None,
             idempotency_key: Some(format!("agent-restart-completed:{}", claim.id)),
         }).unwrap();
-        let next = request(&store, "agent/first", "two", "return-three");
+        let next = request(&store, "agent/node.first", "two", "return-three");
         assert_eq!(store.admit_model_return(&next, now).unwrap_err().code, "model-return-budget");
         assert!(store.admit_model_return(&second, now).is_ok());
-        assert_eq!(store.model_return_attempt_count("agent/second", "one").unwrap(), 1);
+        assert_eq!(store.model_return_attempt_count("agent/node.second", "one").unwrap(), 1);
     }
     #[test]
     fn declaration_fence_rejects_stale_request() {
         let store = fixture();
-        let mut input = request(&store, "agent/first", "one", "stale-return");
+        let mut input = request(&store, "agent/node.first", "one", "stale-return");
         input.evidence = vec!["stale-declaration".into()];
         assert_eq!(store.admit_model_return(&input, now_ms()).unwrap_err().code, "model-return-stale");
-        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 0);
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "one").unwrap(), 0);
     }
     #[test]
     fn reopening_store_preserves_request_identity_and_hourly_budget() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("graph.db");
         let store = initialize(Store::open(&path, "node").unwrap());
-        let input = request(&store, "agent/first", "one", "persistent-return");
+        let input = request(&store, "agent/node.first", "one", "persistent-return");
         let now = now_ms();
         let id = store.admit_model_return(&input, now).unwrap().id;
         drop(store);
         let store = Store::open(&path, "node").unwrap();
         assert_eq!(store.admit_model_return(&input, now).unwrap().id, id);
-        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 1);
-        let next = request(&store, "agent/first", "two", "after-restart");
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "one").unwrap(), 1);
+        let next = request(&store, "agent/node.first", "two", "after-restart");
         assert_eq!(store.admit_model_return(&next, now).unwrap_err().code, "model-return-budget");
-        let other = request(&store, "agent/second", "two", "host-after-restart");
+        let other = request(&store, "agent/node.second", "two", "host-after-restart");
         assert_eq!(store.admit_model_return(&other, now).unwrap_err().code, "model-return-host-busy");
     }
     #[test]
     fn writer_rejects_counter_skips_and_stale_generations_without_counting_them() {
         let store = fixture();
-        let mut input = request(&store, "agent/first", "one", "counter-skip");
+        let mut input = request(&store, "agent/node.first", "one", "counter-skip");
         input.fields.insert("model_return_attempt".into(), json!(2));
         assert_eq!(store.admit_model_return(&input, now_ms()).unwrap_err().code, "model-return-stale");
-        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 0);
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "one").unwrap(), 0);
         input.fields.insert("model_return_attempt".into(), json!(1));
         let claim = store.admit_model_return(&input, now_ms()).unwrap();
         assert_eq!(claim.body["fields"]["model_return_attempt"], 1);
-        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 1);
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "one").unwrap(), 1);
         store.append_claim(&ClaimInput {
-            subject: "agent/first".into(), kind: "runtime.action.succeeded".into(), actor: Some("agent/st3/reconciler".into()),
+            subject: "agent/node.first".into(), kind: "runtime.action.succeeded".into(), actor: Some("agent/st3/reconciler".into()),
             fields: BTreeMap::from([("action".into(), json!("restart")), ("reason".into(), json!("cancelled"))]),
             evidence: vec![claim.id.clone()], expected_subject: None,
             idempotency_key: Some(format!("agent-restart-completed:{}", claim.id)),
@@ -189,15 +189,15 @@ mod tests {
         input.idempotency_key = Some("stale-counter-generation".into());
         let after_budget = claim.accepted_at_unix_ms + 3_600_001;
         assert_eq!(store.admit_model_return(&input, after_budget).unwrap_err().code, "model-return-stale");
-        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 1);
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "one").unwrap(), 1);
         input.fields.insert("model_return_attempt".into(), json!(2));
         assert!(store.admit_model_return(&input, after_budget).is_ok());
-        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 2);
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "one").unwrap(), 2);
     }
 
     fn manual_fresh_restart(store: &Store, key: &str) -> ClaimRecord {
         store.append_claim(&ClaimInput {
-            subject: "agent/first".into(), kind: "runtime.action.requested".into(),
+            subject: "agent/node.first".into(), kind: "runtime.action.requested".into(),
             actor: Some("person/operator".into()),
             fields: BTreeMap::from([
                 ("action".into(), json!("restart")),
@@ -211,33 +211,33 @@ mod tests {
     #[test]
     fn model_return_host_slot_releases_after_manual_fresh_restart_supersedes_bridge() {
         let store = fixture();
-        let bridge = request(&store, "agent/first", "one", "superseded-bridge");
+        let bridge = request(&store, "agent/node.first", "one", "superseded-bridge");
         let bridge = store.admit_model_return(&bridge, now_ms()).unwrap();
         let manual = manual_fresh_restart(&store, "superseding-manual-restart");
-        assert_eq!(crate::restart::latest_request(&store, "agent/first").unwrap().unwrap().id, manual.id);
+        assert_eq!(crate::restart::latest_request(&store, "agent/node.first").unwrap().unwrap().id, manual.id);
         store.append_claim(&ClaimInput {
-            subject: "agent/first".into(), kind: "runtime.action.succeeded".into(),
+            subject: "agent/node.first".into(), kind: "runtime.action.succeeded".into(),
             actor: Some("agent/st3/reconciler".into()),
             fields: BTreeMap::from([("action".into(), json!("restart")), ("reason".into(), json!("fresh session started"))]),
             evidence: vec![manual.id.clone()], expected_subject: None,
             idempotency_key: Some(format!("agent-restart-completed:{}", manual.id)),
         }).unwrap();
         assert!(store.operation_claim(&format!("agent-restart-completed:{}", bridge.id)).unwrap().is_none());
-        let other = request(&store, "agent/second", "one", "after-manual-restart");
+        let other = request(&store, "agent/node.second", "one", "after-manual-restart");
         assert!(store.admit_model_return(&other, now_ms()).is_ok());
     }
 
     #[test]
     fn model_return_writer_preserves_manual_request_inserted_after_preliminary_check() {
         let store = fixture();
-        let automatic = request(&store, "agent/first", "one", "racing-automatic-return");
-        assert!(crate::restart::latest_request(&store, "agent/first").unwrap().is_none());
+        let automatic = request(&store, "agent/node.first", "one", "racing-automatic-return");
+        assert!(crate::restart::latest_request(&store, "agent/node.first").unwrap().is_none());
         let manual = manual_fresh_restart(&store, "racing-manual-restart");
         assert_eq!(store.admit_model_return(&automatic, now_ms()).unwrap_err().code, "model-return-stale");
-        let selected = crate::restart::latest_request(&store, "agent/first").unwrap().unwrap();
+        let selected = crate::restart::latest_request(&store, "agent/node.first").unwrap().unwrap();
         assert_eq!(selected.id, manual.id);
         assert_eq!(selected.body["fields"]["fresh_session"], true);
-        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 0);
+        assert_eq!(store.model_return_attempt_count("agent/node.first", "one").unwrap(), 0);
         assert!(store.operation_claim("racing-automatic-return").unwrap().is_none());
     }
 }

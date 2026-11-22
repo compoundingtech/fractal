@@ -164,7 +164,7 @@ The selected agent declaration may override those values:
 
 ```kdl
 model-return {
-  enabled false
+  enabled #false
   max-drift 900
   max-per-hour 0
 }

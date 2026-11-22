@@ -255,9 +255,9 @@ mod tests {
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
         let drift = ModelDrift { declared: "claude-opus-5-5".into(), live: "gpt-6.1-sol".into(), since_ms: 100 };
-        store.record_failure(&model_drift_episode("agent/worker"), &AttentionRequest {
+        store.record_runtime_failure(&model_drift_episode("agent/worker"), &AttentionRequest {
             reviewer: "agent/worker".into(), title: MODEL_DRIFT_TITLE.into(), reason: drift.reason(),
-            severity: "error".into(), targets: vec!["agent/worker".into()], actor: "test".into(),
+            severity: "error".into(), targets: vec!["agent/worker".into()], actor: "requester".into(),
             idempotency_key: "drift-test".into(),
         }, MODEL_DRIFT_CONDITION).unwrap();
         assert_eq!(store.model_drift_since("agent/worker", "one", &drift.declared, &drift.live).unwrap(), Some(100));

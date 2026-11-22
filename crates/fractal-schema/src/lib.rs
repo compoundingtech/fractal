@@ -5774,6 +5774,7 @@ mod tests {
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
         current.claims.remove("harness.invocation-artifact").unwrap();
+        current.claims.remove("harness.model-fallback.observed").unwrap();
         for kind in [effects::KIND_INTENDED, effects::KIND_IN_FLIGHT, effects::KIND_CONFIRMED, effects::KIND_UNRESOLVED] {
             current.claims.remove(kind).unwrap();
         }
@@ -5808,6 +5809,7 @@ mod tests {
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("model_return_attempt").unwrap();
         for field in ["idle_declaration", "idle_after_ms", "idle_enabled_at_unix_ms",
             "idle_eligible_since_unix_ms", "idle_frontier", "suspend_operation_id",
             "idle_wake_lineage", "idle_wake_attempt"] {

@@ -3160,6 +3160,7 @@ fn agent_tree_nests_running_subagents_under_their_agent() {
              └─ crew\n\
              \x20  └─ worker  working · local\n\
              \x20     agent/crew/worker\n\
+             \x20     model declared unknown · live unknown · unknown · fallback unknown · returns unknown\n\
              \x20     ├─ map the code · Explore\n\
              \x20     └─ 019a-thread\n"
     );

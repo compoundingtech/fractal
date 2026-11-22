@@ -143,7 +143,7 @@ mod tests {
         fn new() -> Self {
             let store = Arc::new(Store::open_memory("node").unwrap());
             apply_source(&store, "version 2\nagent \"example\" { workspace \"/tmp\"; harness \"omp\" { model \"claude-opus-5-5\"; } }\n", "return-fixture");
-            let subject = store.desired_subjects().unwrap().into_iter().find(|subject| subject.subject == "agent/example").unwrap();
+            let subject = store.desired_subjects().unwrap().into_iter().find(|subject| subject.subject == "agent/node.example").unwrap();
             let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
             let fixture = Self { store, reconciler, subject, now: now_ms() };
             fixture.claim("runtime.observed", json!({"status":"running","incarnation_id":"one"}));
