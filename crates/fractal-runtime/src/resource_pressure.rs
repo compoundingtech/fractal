@@ -46,7 +46,11 @@ pub struct Policy {
     pub memory_available_floor_bytes: u64,
     /// Empty selects the service, system.slice and interactive app.slice automatically.
     pub protected_cgroups: Vec<PathBuf>,
-    /// Basenames match anywhere; absolute paths are relative to the cgroup mount.
+    /// Job-containing subtrees, excluded whole from observation. Basenames are
+    /// canonical systemd slice names resolved beneath the discovered
+    /// user-manager root; absolute paths are exact and mount-relative.
+    pub job_parent_cgroups: Vec<PathBuf>,
+    /// Additional excluded subtrees, resolved exactly like job parents.
     pub excluded_cgroups: Vec<PathBuf>,
 }
 
@@ -64,6 +68,9 @@ impl Default for Policy {
             freshness_ms: 10000,
             memory_available_floor_bytes: 2 << 30,
             protected_cgroups: Vec::new(),
+            job_parent_cgroups: vec!["gate.slice".into(), "app-lanes.slice".into(),
+                "app-capped.slice".into(), "app-capped-heavy.slice".into(),
+                "app-batch.slice".into(), "app-batch-heavy.slice".into()],
             excluded_cgroups: vec!["app-lanes.slice".into(), "gate.slice".into()],
         }
     }
@@ -80,7 +87,9 @@ impl Policy {
             "PSI brake requires one to twelve signal/window rules");
         ensure!(self.sustained_ms != 0 && self.resume_ms != 0 && self.freshness_ms != 0,
             "PSI brake durations must be positive");
-        for path in self.protected_cgroups.iter().chain(&self.excluded_cgroups) {
+        for path in self.protected_cgroups.iter()
+            .chain(&self.excluded_cgroups)
+            .chain(&self.job_parent_cgroups) {
             ensure!(!path.as_os_str().is_empty() && path.components().all(|part|
                 matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))),
                 "cgroup paths must stay within the cgroup mount");
@@ -88,6 +97,22 @@ impl Policy {
         ensure!(self.excluded_cgroups.iter().all(|path|
             path.is_absolute() || path.file_name() == Some(path.as_os_str())),
             "relative cgroup exclusions must be basenames");
+        ensure!(self.job_parent_cgroups.iter().all(|path|
+            path.is_absolute() || path.file_name() == Some(path.as_os_str())),
+            "relative job parent cgroups must be basenames");
+        for path in self.job_parent_cgroups.iter().chain(&self.excluded_cgroups)
+            .filter(|path| !path.is_absolute()) {
+            ensure!(path.to_str().is_some_and(|name| slice_segments(name)
+                .is_some_and(|segments| segments.len() <= MAX_CGROUPS as usize)),
+                "job parent and excluded cgroup basenames must be canonical systemd slice names");
+        }
+        ensure!(self.job_parent_cgroups.len() + self.excluded_cgroups.len() <= MAX_CGROUPS as usize,
+            "too many configured job parent and excluded cgroups");
+        for path in self.job_parent_cgroups.iter().chain(&self.excluded_cgroups)
+            .filter(|path| path.is_absolute()) {
+            ensure!(path.components().count() <= MAX_CGROUPS as usize,
+                "configured cgroup paths must stay within the enumeration bound");
+        }
         for (index, rule) in self.rules.iter().enumerate() {
             ensure!(rule.signal != Signal::MemoryAvailable,
                 "memory-available uses memoryAvailableFloorBytes, not a PSI rule");
@@ -128,8 +153,8 @@ pub enum ObservationCause {
         path: Option<Arc<str>>,
     },
     TooManyCgroups { path: Arc<str>, limit: u32 },
+    TooManyCgroupEntries { path: Arc<str>, limit: u32 },
     InvalidPressure { path: Arc<str> },
-    UnsupportedExclusion { path: Arc<str> },
     InvalidMemoryFloor,
 }
 
@@ -345,6 +370,11 @@ fn signal_pressure(source: &str, name: &str, window: Window) -> Result<u32> {
 }
 
 const MAX_CGROUPS: u32 = 256;
+const MAX_CGROUP_ENTRIES: u32 = 4096;
+
+/// Shared enumeration bounds across one observation's whole frontier walk.
+#[derive(Default)]
+struct Enumeration { directories: u32, entries: u32 }
 
 #[derive(Debug)]
 struct ObservationError {
@@ -376,6 +406,66 @@ fn rooted(root: &Path, path: &Path) -> PathBuf {
     root.join(path.strip_prefix("/").unwrap_or(path))
 }
 
+/// Canonical systemd slice hierarchy: `app-capped-heavy.slice` nests inside
+/// `app-capped.slice`, which nests inside `app.slice`. Segment names are
+/// non-empty runs of ASCII letters, digits and underscores joined by '-'.
+fn slice_segments(name: &str) -> Option<Vec<String>> {
+    let stem = name.strip_suffix(".slice")?;
+    let segments = stem.split('-').map(str::to_owned).collect::<Vec<_>>();
+    (segments.iter().all(|segment| !segment.is_empty()
+        && segment.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')))
+        .then_some(segments)
+}
+
+/// One configured job-parent or exclusion entry resolves to a cgroup path:
+/// basenames name canonical slices beneath the user-manager root, absolute
+/// paths are exact and mount-relative.
+fn configured_path(entry: &Path, manager: Option<&Path>, root: &Path) -> Option<PathBuf> {
+    if entry.is_absolute() {
+        return Some(rooted(root, entry));
+    }
+    let mut path = manager?.to_path_buf();
+    let mut nested = String::new();
+    for segment in slice_segments(entry.to_str()?)? {
+        if !nested.is_empty() { nested.push('-'); }
+        nested.push_str(&segment);
+        path.push(format!("{nested}.slice"));
+    }
+    Some(path)
+}
+
+/// The user-manager cgroup root anchors canonical slice resolution: a
+/// protected root inside `user@<uid>.service` names that service, otherwise a
+/// protected `app.slice` names its parent; a top-level app.slice means the
+/// mount root.
+fn user_manager_root(protected: &[PathBuf]) -> Option<PathBuf> {
+    for path in protected {
+        let mut prefix = PathBuf::new();
+        for part in path.components() {
+            prefix.push(part.as_os_str());
+            let Some(name) = part.as_os_str().to_str() else { continue; };
+            if name.strip_prefix("user@").and_then(|name| name.strip_suffix(".service"))
+                .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                return Some(prefix);
+            }
+        }
+    }
+    protected.iter().find(|path| path.file_name().is_some_and(|name| name == "app.slice"))
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+/// A discovered optional slice is skipped when absent and rediscovered each
+/// sample; an explicit protected root absent fails closed instead.
+fn push_if_present(protected: &mut Vec<PathBuf>, path: PathBuf) -> Result<()> {
+    match std::fs::metadata(&path) {
+        Ok(_) => protected.push(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(io_error(&path, error)),
+    }
+    Ok(())
+}
+
 /// Buffers are reused; each observation rediscovers the current cgroup children.
 #[derive(Default, Debug)]
 pub struct Reader {
@@ -401,17 +491,6 @@ impl Reader {
             Path::new("/sys/fs/cgroup"), Path::new("/proc/meminfo"))
     }
 
-    fn excluded(policy: &Policy, root: &Path, path: &Path) -> bool {
-        policy.excluded_cgroups.iter().any(|excluded| {
-            if excluded.is_absolute() {
-                path == rooted(root, excluded) || path.starts_with(rooted(root, excluded))
-            } else {
-                path.strip_prefix(root).unwrap_or(path).components()
-                    .any(|part| part.as_os_str() == excluded.as_os_str())
-            }
-        })
-    }
-
     fn protected(&mut self, policy: &Policy, placement_path: &Path, root: &Path) -> Result<Vec<PathBuf>> {
         if !policy.protected_cgroups.is_empty() {
             return Ok(policy.protected_cgroups.iter().map(|path| rooted(root, path)).collect());
@@ -432,21 +511,20 @@ impl Reader {
         let mut protected = vec![rooted(root, &service), root.join("system.slice")];
         if let Some(manager) = crate::lane::user_manager_cgroup_in(own, root) {
             protected.push(manager.join("app.slice"));
+            push_if_present(&mut protected, manager.join("interactive.slice"))?;
         } else {
             // A system service has no user-manager ancestor. Discover user
             // slices at depth one, then probe their conventional manager paths.
             let users = root.join("user.slice");
             match std::fs::metadata(&users) {
                 Ok(_) => {
-                    for user in Self::children(&users, &mut 0)? {
+                    for user in Self::children(&users, &mut Enumeration::default())? {
                         let Some(name) = user.file_name().and_then(|name| name.to_str()) else { continue; };
                         let Some(uid) = name.strip_prefix("user-").and_then(|name| name.strip_suffix(".slice"))
                             .filter(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())) else { continue; };
-                        let app = user.join(format!("user@{uid}.service/app.slice"));
-                        match std::fs::metadata(&app) {
-                            Ok(_) => protected.push(app),
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-                            Err(error) => return Err(io_error(&app, error)),
+                        for slice in ["app.slice", "interactive.slice"] {
+                            push_if_present(&mut protected,
+                                user.join(format!("user@{uid}.service/{slice}")))?;
                         }
                     }
                 }
@@ -454,9 +532,12 @@ impl Reader {
                 Err(error) => return Err(io_error(&users, error)),
             }
             if protected.len() == 2 {
-                // A top-level app.slice also supports non-user-manager layouts.
-                // If neither layout exists, reading this protected path fails closed.
+                // Top-level app.slice and interactive.slice also support
+                // non-user-manager layouts. app.slice fails closed when
+                // absent; the optional interactive.slice is rediscovered
+                // each sample.
                 protected.push(root.join("app.slice"));
+                push_if_present(&mut protected, root.join("interactive.slice"))?;
             }
         }
         protected.sort();
@@ -464,21 +545,30 @@ impl Reader {
         Ok(protected)
     }
 
-    fn children(path: &Path, count: &mut u32) -> Result<Vec<PathBuf>> {
+    fn children(path: &Path, bounds: &mut Enumeration) -> Result<Vec<PathBuf>> {
         let entries = std::fs::read_dir(path).map_err(|error| io_error(path, error))?;
         let mut children = Vec::new();
         for entry in entries {
-            // Bound enumeration itself, not just the number of directories retained.
-            *count += 1;
-            if *count > MAX_CGROUPS {
-                return Err(ObservationError { cause: ObservationCause::TooManyCgroups {
-                    path: path.to_string_lossy().into(), limit: MAX_CGROUPS,
+            // Bound raw snapshot entries as well as retained cgroup
+            // directories; control files count only toward the raw limit.
+            bounds.entries += 1;
+            if bounds.entries > MAX_CGROUP_ENTRIES {
+                return Err(ObservationError { cause: ObservationCause::TooManyCgroupEntries {
+                    path: path.to_string_lossy().into(), limit: MAX_CGROUP_ENTRIES,
                 } }.into());
             }
             let entry = entry.map_err(|error| io_error(path, error))?;
             let child = entry.path();
             match entry.file_type() {
-                Ok(kind) if kind.is_dir() => children.push(child),
+                Ok(kind) if kind.is_dir() => {
+                    bounds.directories += 1;
+                    if bounds.directories > MAX_CGROUPS {
+                        return Err(ObservationError { cause: ObservationCause::TooManyCgroups {
+                            path: path.to_string_lossy().into(), limit: MAX_CGROUPS,
+                        } }.into());
+                    }
+                    children.push(child);
+                }
                 Ok(_) => {},
                 Err(error) => {
                     if matches!(std::fs::metadata(&child),
@@ -537,6 +627,32 @@ impl Reader {
         Ok(())
     }
 
+    /// One level of the split frontier. Configured job-parent and excluded
+    /// endpoints are skipped whole; descent continues only along configured
+    /// paths; every other child is sampled directly.
+    fn sample_frontier(&mut self, policy: &Policy, root: &Path, children: &[PathBuf],
+        protected: &[PathBuf], job_parents: &[PathBuf], excluded: &[PathBuf], bounds: &mut Enumeration,
+    ) -> Result<()> {
+        for child in children {
+            if job_parents.iter().any(|job| job == child) { continue; }
+            if excluded.iter().any(|job| job == child) { continue; }
+            if protected.iter().any(|path| path == child) {
+                // An independently protected child is observed by its own plan.
+                continue;
+            }
+            if job_parents.iter().any(|job| job.starts_with(child) && job != child)
+                || excluded.iter().any(|job| job.starts_with(child) && job != child)
+            {
+                let descendants = Self::children(child, bounds)?;
+                self.sample_frontier(policy, root, &descendants,
+                    protected, job_parents, excluded, bounds)?;
+                continue;
+            }
+            self.sample_cgroup(policy, root, child, true)?;
+        }
+        Ok(())
+    }
+
     fn read_layout(&mut self, policy: &Policy, now_ms: u64, placement_path: &Path,
         cgroup_root: &Path, meminfo_path: &Path) -> Result<&[Reading]>
     {
@@ -553,45 +669,37 @@ impl Reader {
             memory_available_bytes: available, cgroup: None,
         }));
         let protected = self.protected(policy, placement_path, cgroup_root)?;
-        let mut count = 0;
+        // Job parents and excluded subtrees resolve lexically from the
+        // configured names: a missing endpoint still splits its protected
+        // ancestors, so a removed job can never resurface through a
+        // contaminated ancestor aggregate.
+        let manager = user_manager_root(&protected);
+        let job_parents: Vec<PathBuf> = policy.job_parent_cgroups.iter()
+            .filter_map(|entry| configured_path(entry, manager.as_deref(), cgroup_root)).collect();
+        let mut excluded: Vec<PathBuf> = policy.excluded_cgroups.iter()
+            .filter_map(|entry| configured_path(entry, manager.as_deref(), cgroup_root)).collect();
+        excluded.sort();
+        excluded.dedup();
+        let mut bounds = Enumeration::default();
         let mut groups = Vec::with_capacity(protected.len());
-        let mut excluded = Vec::new();
         for path in protected {
-            if Self::excluded(policy, cgroup_root, &path) { continue; }
-            let children = Self::children(&path, &mut count)?;
-            excluded.extend(children.iter().filter(|child|
-                Self::excluded(policy, cgroup_root, child)).cloned());
-            groups.push((path, children));
+            // A configured job parent or excluded subtree is never observed,
+            // even when it is itself protected.
+            if job_parents.iter().any(|job| job == &path)
+                || excluded.iter().any(|job| job == &path) { continue; }
+            groups.push(path);
         }
-        // Exact probes do not recursively enumerate an unbounded subtree.
-        for path in policy.excluded_cgroups.iter().filter(|path| path.is_absolute()) {
-            let path = rooted(cgroup_root, path);
-            match std::fs::metadata(&path) {
-                Ok(_) => excluded.push(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-                Err(error) => return Err(io_error(&path, error)),
-            }
-        }
-        for (path, children) in &groups {
-            if excluded.iter().any(|job| job.starts_with(path)) {
-                // Another protected root may have discovered excluded descendants
-                // of this ancestor. Never sample its contaminated aggregate.
-                for child in children {
-                    if Self::excluded(policy, cgroup_root, child) { continue; }
-                    if excluded.iter().any(|job| job.starts_with(child)) {
-                        if !groups.iter().any(|(protected, _)| protected == child) {
-                            let job = excluded.iter().find(|job| job.starts_with(child))
-                                .expect("excluded descendant was checked");
-                            return Err(ObservationError { cause: ObservationCause::UnsupportedExclusion {
-                                path: job.to_string_lossy().into(),
-                            } }.into());
-                        }
-                        // This independently protected child is split by its own plan.
-                        continue;
-                    }
-                    self.sample_cgroup(policy, cgroup_root, child, true)?;
-                }
+        for path in &groups {
+            if job_parents.iter().any(|job| job.starts_with(path) && job != path)
+                || excluded.iter().any(|job| job.starts_with(path) && job != path)
+            {
+                // Split along the configured paths: observe the remaining
+                // immediate children, never this contaminated ancestor.
+                let children = Self::children(path, &mut bounds)?;
+                self.sample_frontier(policy, cgroup_root, &children, &groups,
+                    &job_parents, &excluded, &mut bounds)?;
             } else {
+                // No configured path lives inside; observe it directly.
                 self.sample_cgroup(policy, cgroup_root, path, false)?;
             }
         }

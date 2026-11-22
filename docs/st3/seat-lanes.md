@@ -435,19 +435,29 @@ remaining, or unknown-observation cause). The existing `fractal resources show` 
 journal include its details without changing the client-v0 schema.
 
 Memory and I/O PSI are the maximum per signal/window over protected cgroups, not host PSI
-and not a sum. `psiBrake.protectedCgroups` configures cgroup-root-relative absolute paths;
-the empty default discovers the daemon's own cgroup, `system.slice`, and its user manager's
-interactive `app.slice`. `psiBrake.excludedCgroups` defaults to `app-lanes.slice` and
-`gate.slice`; basename exclusions match child cgroup names, and absolute exclusions identify
-specific cgroup-root-relative paths. Native jobs therefore cannot trip the brake solely by
-throttling themselves. The independent host `memoryAvailableFloorBytes` signal remains enabled.
+and not a sum. `psiBrake.protectedCgroups` configures cgroup-root-relative paths; the empty
+default discovers the daemon's own service, `system.slice`, and user-manager `app.slice`.
+An existing `interactive.slice` is also protected; an absent optional discovered slice is
+skipped and rediscovered on the next sample. Explicitly configured missing roots fail closed.
+The independent host `memoryAvailableFloorBytes` signal remains enabled.
 
-PSI aggregates descendants. When a protected ancestor contains excluded jobs, each sample
-re-enumerates its immediate non-job children rather than reading the contaminated ancestor.
-Enumeration is bounded to one level and 256 entries; an unrepresentable deeper exclusion or
-exceeded bound closes admission with a named reason. A child proven to have disappeared
-between enumeration and reading is skipped. Other unreadable protected pressure files close
-admission and retain the failing path. Pressure reasons identify the source cgroup and value.
+`psiBrake.jobParentCgroups` identifies job subtrees that must never contribute PSI. Defaults
+cover `gate.slice`, `app-lanes.slice`, `app-capped.slice`, `app-capped-heavy.slice`,
+`app-batch.slice`, and `app-batch-heavy.slice`. Slice unit names resolve to their canonical
+user-manager hierarchy: `app-capped-heavy.slice` means
+`app.slice/app-capped.slice/app-capped-heavy.slice`. Absolute paths identify exact cgroups
+relative to the cgroup v2 mount. `excludedCgroups` supplies additional excluded subtrees
+(defaults `app-lanes.slice` and `gate.slice`) using the same path rules.
+
+PSI aggregates descendants and retains averages after a job exits. A protected ancestor
+containing a configured job path is therefore never sampled, even when that job subtree is
+currently absent. Each sample follows only configured job paths, enumerating their siblings
+and sampling the non-job frontier; unrelated service descendants do not require traversal.
+Enumeration is bounded to 256 cgroup directories and 4096 raw directory entries, with
+distinct named failures. Invalid or unrepresentable configured paths are rejected when
+loading policy. A child proven to disappear between listing and
+reading is skipped. Other unreadable protected pressure files close admission and retain
+the failing path. Pressure reasons identify the source cgroup and measured value.
 
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start

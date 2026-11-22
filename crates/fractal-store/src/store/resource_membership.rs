@@ -384,11 +384,11 @@ fn pressure_description(reason: &fractal_runtime::resource_pressure::Reason) -> 
                     }
                 }
                 ObservationCause::TooManyCgroups { path, limit } =>
-                    format!("protected cgroup enumeration at {path} exceeds limit {limit}"),
+                    format!("protected cgroup directory enumeration at {path} exceeds directory limit {limit}"),
+                ObservationCause::TooManyCgroupEntries { path, limit } =>
+                    format!("protected cgroup entry enumeration at {path} exceeds entry limit {limit}"),
                 ObservationCause::InvalidPressure { path } =>
                     format!("invalid pressure data at {path}"),
-                ObservationCause::UnsupportedExclusion { path } =>
-                    format!("cannot isolate excluded cgroup at {path}; use an exclusion within the supported discovery depth"),
                 ObservationCause::InvalidMemoryFloor => "invalid memory floor".into(),
             };
             format!("host PSI brake: observation unavailable: {detail}")
@@ -1122,9 +1122,9 @@ mod tests {
             (Reason::UnknownObservation { cause: ObservationCause::NotYetSampled }, "not yet sampled"),
             (Reason::UnknownObservation { cause: ObservationCause::Io { os_error: Some(13), path: None } }, "IO error (OS error 13)"),
             (Reason::UnknownObservation { cause: ObservationCause::Io { os_error: Some(13), path: Some("/app.slice/editor.scope/memory.pressure".into()) } }, "IO error at /app.slice/editor.scope/memory.pressure (OS error 13)"),
-            (Reason::UnknownObservation { cause: ObservationCause::TooManyCgroups { path: "/app.slice".into(), limit: 4096 } }, "enumeration at /app.slice exceeds limit 4096"),
+            (Reason::UnknownObservation { cause: ObservationCause::TooManyCgroups { path: "/app.slice".into(), limit: 256 } }, "directory enumeration at /app.slice exceeds directory limit 256"),
+            (Reason::UnknownObservation { cause: ObservationCause::TooManyCgroupEntries { path: "/app.slice".into(), limit: 4096 } }, "entry enumeration at /app.slice exceeds entry limit 4096"),
             (Reason::UnknownObservation { cause: ObservationCause::InvalidPressure { path: "/system.slice/database.service/io.pressure".into() } }, "invalid pressure data at /system.slice/database.service/io.pressure"),
-            (Reason::UnknownObservation { cause: ObservationCause::UnsupportedExclusion { path: "/app.slice/session.scope/gate.slice".into() } }, "cannot isolate excluded cgroup at /app.slice/session.scope/gate.slice"),
             (Reason::UnknownObservation { cause: ObservationCause::InvalidMemoryFloor }, "invalid memory floor"),
         ];
         for (reason, expected) in cases {

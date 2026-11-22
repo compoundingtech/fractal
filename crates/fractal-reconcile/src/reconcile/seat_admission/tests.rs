@@ -135,6 +135,40 @@ async fn sampler_recovers_after_120_seconds_with_a_90_second_reconcile_stall() {
     assert!(!reconciler.seat_admission.pressure_dirty.load(Ordering::Acquire));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn discovered_interactive_slice_keeps_default_admission_quiet_when_present() {
+    use fractal_runtime::resource_pressure::Policy;
+
+    // Companion to the stall-recovery fixture above, which keeps passing without an
+    // interactive.slice: a present, quiet interactive.slice is sampled, never skipped
+    // as a failure, and default admission stays open.
+    let reconciler = reconciler();
+    let root = tempfile::tempdir().unwrap();
+    let cgroups = root.path().join("cgroups");
+    let protected = cgroups.join("system.slice/fractal.service");
+    std::fs::create_dir_all(&protected).unwrap();
+    std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+    std::fs::create_dir_all(cgroups.join("interactive.slice")).unwrap();
+    let placement = root.path().join("cgroup");
+    let meminfo = root.path().join("meminfo");
+    let quiet = "some avg10=0.00 avg60=0.00\nfull avg10=0.00 avg60=0.00\n";
+    for group in ["system.slice", "app.slice", "interactive.slice"] {
+        for name in ["memory.pressure", "io.pressure"] {
+            std::fs::write(cgroups.join(group).join(name), quiet).unwrap();
+        }
+    }
+    for name in ["memory.pressure", "io.pressure"] {
+        std::fs::write(protected.join(name), quiet).unwrap();
+    }
+    std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
+    std::fs::write(&meminfo, "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n").unwrap();
+    *reconciler.seat_admission.pressure.lock().unwrap() =
+        Some(fractal_runtime::resource_pressure::Observer::with_paths(
+            Policy::default(), placement, cgroups, meminfo).unwrap());
+    assert!(!reconciler.seat_admission.sample_pressure().unwrap().blocked);
+}
+
 #[test]
 fn changed_host_memory_observation_wakes_waiters_without_an_envelope_file() {
     use fractal_runtime::host::HostMemoryObservation;

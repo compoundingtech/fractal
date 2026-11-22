@@ -309,10 +309,12 @@ mod tests {
         let protected = cgroups.join("system.slice/fractal.service");
         std::fs::create_dir_all(&protected).unwrap();
         std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+        std::fs::create_dir_all(cgroups.join("interactive.slice")).unwrap();
         let placement = directory.path().join("cgroup");
         let meminfo = directory.path().join("meminfo");
         let quiet = "some avg10=0.00 avg60=0.00 avg300=0.00\nfull avg10=0.00 avg60=0.00 avg300=0.00\n";
-        for group in [protected, cgroups.join("system.slice"), cgroups.join("app.slice")] {
+        for group in [protected, cgroups.join("system.slice"), cgroups.join("app.slice"),
+            cgroups.join("interactive.slice")] {
             for name in ["memory.pressure", "io.pressure"] { std::fs::write(group.join(name), quiet).unwrap(); }
         }
         std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
