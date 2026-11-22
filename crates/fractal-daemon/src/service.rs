@@ -1224,6 +1224,22 @@ fn cached_worker_pid<I>(
     validate(identity)
 }
 
+/// Unit identities considered by the observer, including when resolution fails.
+pub(crate) fn replication_worker_supervisor() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let old = replication_service_name();
+        let mut names = vec![old.to_owned(), old.replacen("st3", "fractal", 1)];
+        if crate::instance::current().is_none() { names.push("smalltalk-replication.service".into()); }
+        format!("systemd-user: {}", names.join(", "))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        format!("launchd-user: {}, {}, org.nix-community.home.smalltalk-replication, org.nix-community.home.fractal-replication",
+            replication_service_label(), replication_service_label().replacen("st3", "fractal", 1))
+    }
+}
+
 /// Observe the worker through its supervisor, never through caller-supplied argv.
 pub(crate) fn replication_worker_pid() -> Result<u32> {
     #[cfg(target_os = "linux")]
@@ -1233,10 +1249,7 @@ pub(crate) fn replication_worker_pid() -> Result<u32> {
         let snapshot = fractal_runtime::systemd::snapshot()?;
         static WORKER: std::sync::Mutex<Option<WorkerResolution>> = std::sync::Mutex::new(None);
         let mut worker = WORKER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        cached_worker_pid(&mut worker, snapshot, |snapshot| {
-            let service = lookup::systemd(snapshot)?.replication;
-            snapshot.worker_identity(&service.name)
-        }, |identity| {
+        cached_worker_pid(&mut worker, snapshot, lookup::replication_worker_identity, |identity| {
             identity.validate()?;
             Ok(identity.pid())
         })
@@ -1758,6 +1771,7 @@ mod tests {
         changes: crate::changes::config::Config::default(),
         checkpoint: crate::config::CheckpointConfig::default(),
         trim: crate::config::TrimConfig::default(),
+        store: crate::config::StoreConfig::default(),
         limits: crate::config::LimitsConfig::default(),
         logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),

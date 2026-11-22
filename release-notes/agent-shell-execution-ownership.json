@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Agents retain access to shell executions from earlier live invocations after claiming work in the same harness incarnation.",
+  "replay": {
+    "status": "none",
+    "detail": "Existing native invocation receipts and execution ownership are read directly; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage, client schema or wire format changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Execution ownership and invocation receipts are written as before."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Agent execution reads, lists, waits, cancellation and request lookup accept any live invocation of the current incarnation. Immediate acceptance and cancellation transactions check sibling executions and cancellation evidence; cancellation always records every resolved owner key, even when an execution exists. Acknowledged cancellation prevents a paused sibling acceptance, including after tombstone expiry while a cancelled sibling execution remains. Concurrent new live owners outside cancellation's authorization snapshot return retryable resource-request-conflict (HTTP 503); retry the same cancellation to resolve and cancel the new owner's execution. Ended owners are permanently unauthorized (non-retryable resource-exec-owner) and cannot mask a live sibling. Other agents and other incarnations remain isolated. Run credentials retain exact step-attempt scope. Tombstone expiry removes at most 128 rows per operation while preserving seven-day cancellation semantics."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the change."
+  }
+}

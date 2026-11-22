@@ -1,9 +1,7 @@
 //! Measure the retired-identity ledger on a file-backed store: tombstone recording with and
-//! without the ledger triggers, adoption's keep-only deletion, the import's per-page writer
-//! hold, and the ledger's bytes. Usage: retired_ledger_bench [TOMBSTONES] [DIRECTORY]
+//! without the ledger triggers, the import's per-page writer hold, and the ledger's bytes. Usage: retired_ledger_bench [TOMBSTONES] [DIRECTORY]
 use smallclaims::Store;
 use smallclaims::store::checkpoint::{ClaimTombstone, EnvelopeTombstone, record_checkpoint_tombstones_tx};
-use smallclaims::store::checkpoint_trim::keep_only_tombstones_tx;
 use smallclaims::store::runtime::Plain;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,15 +61,6 @@ fn record(store: &Store, total: u64) -> Duration {
     started.elapsed()
 }
 
-fn keep_none(store: &Store) -> Duration {
-    let started = Instant::now();
-    let mut writer = store.connection.write();
-    let transaction = writer.transaction().unwrap();
-    keep_only_tombstones_tx(&transaction, &[], &[]).unwrap();
-    transaction.commit().unwrap();
-    started.elapsed()
-}
-
 fn ledger_bytes(store: &Store) -> Option<i64> {
     store
         .readers
@@ -115,19 +104,9 @@ fn main() {
     holds.sort();
     let percentile = |p: f64| holds[((holds.len() - 1) as f64 * p).round() as usize];
 
-    // Recording with the ledger triggers, then adoption withdrawing a tenth of it.
+    // Recording with the ledger triggers.
     let with = open(&directory, "bench-with.sqlite3");
     let record_with = record(&with, total);
-    let subset = (total / 10).max(1);
-    let small_without = open(&directory, "bench-small-without.sqlite3");
-    for trigger in TRIGGERS {
-        small_without.connection.write().execute_batch(&format!("DROP TRIGGER {trigger}")).unwrap();
-    }
-    record(&small_without, subset);
-    let keep_without = keep_none(&small_without);
-    let small_with = open(&directory, "bench-small-with.sqlite3");
-    record(&small_with, subset);
-    let keep_with = keep_none(&small_with);
 
     println!("tombstones (claims and envelopes each): {total}");
     println!("record without ledger: {record_without:?}; with ledger triggers: {record_with:?} (chunks of {CHUNK})");
@@ -145,8 +124,7 @@ fn main() {
         ),
         None => println!("ledger bytes: dbstat unavailable in this SQLite build"),
     }
-    println!("keep-only of {subset} without ledger: {keep_without:?}; with ledger triggers: {keep_with:?}");
-    for name in ["bench-without", "bench-with", "bench-small-without", "bench-small-with"] {
+    for name in ["bench-without", "bench-with"] {
         for suffix in ["sqlite3", "sqlite3-wal", "sqlite3-shm"] {
             let _ = std::fs::remove_file(directory.join(format!("{name}.{suffix}")));
         }

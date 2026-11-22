@@ -424,7 +424,10 @@ pub fn construct(source_copy: &Path, output: &Path, as_of_unix_ms: u128) -> Resu
     remove_private_database(&captured)?;
     let mut pinned = readonly(&pinned_path)?;
     let version: u32 = pinned.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    ensure!(version == smallclaims::store::CURRENT_SCHEMA_VERSION, "candidate construction requires current storage schema, found {version}");
+    ensure!(
+        (smallclaims::store::CURRENT_SCHEMA_VERSION..=smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+        "candidate construction requires current storage schema, found {version}"
+    );
     validate_wire_schema(&pinned)?;
     let source_wire_counts = wire_counts(&pinned)?;
     let expected_non_wire = non_wire_digests(&pinned)?;

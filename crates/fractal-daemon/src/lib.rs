@@ -19,6 +19,7 @@ pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;
 pub use fractal_store::blobs;
+pub use fractal_store::blob_restore;
 pub use fractal_store::owner_indexes;
 pub use fractal_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.

@@ -175,6 +175,7 @@ impl WriteWorkers {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
+        let context = crate::task_cpu::capture();
         let queued = self.inherited.is_none().then(|| self.queue.enqueue());
         let permit = match self.inherited {
             Some(permit) => permit,
@@ -203,7 +204,7 @@ impl WriteWorkers {
             if self.requester.is_some_and(|requester| requester.is_closed()) {
                 telemetry::METRICS.abandoned_callback_starts.add(1, &[opentelemetry::KeyValue::new("outcome", "ran")]);
             }
-            permit.run(work)
+            context.run(|| permit.run(work))
         }).await
     }
 }

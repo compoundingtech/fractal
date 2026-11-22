@@ -18,6 +18,7 @@ subagent on its parent seat, and lease renewals only while one runs:
 - a stopped seat and a removed (cancelled mission) seat: their subagents end.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -627,7 +628,7 @@ def kill_seat(seat):
 
 def restarted_scenarios(node, seat, checks):
     # With the default lease, the restart closes what a killed seat left running.
-    seat.control("spawn", id="r1", description="dies with its seat")
+    seat.control("spawn", id="r1", description="dies with its restarted seat")
     seat.appeared("r1")
     killed_at = time.time()
     kill_seat(seat)
@@ -640,7 +641,7 @@ def restarted_scenarios(node, seat, checks):
                     30, "the restarted parent retained its predecessor's child")
     card = node.cli("agents", "show", seat.subject)
     tree = node.cli("agents", "tree")
-    expect("dies with its seat" not in card and "dies with its seat" not in tree,
+    expect("dies with its restarted seat" not in card and "dies with its restarted seat" not in tree,
            "the restarted parent shows a phantom child")
     checks["restart_has_no_phantom_child"] = {
         "parent_activity": cleared["harness_state"], "subagents": cleared.get("subagents"),
@@ -744,10 +745,22 @@ mission "eval/subagents" state="ready" {{
         for seat in seats:
             seat.ready()
         checks["seats"] = [seat.subject for seat in seats]
-        old_settings_capture(node, old_settings, checks)
-        stopped_scenarios(node, stopped, checks)
-        killed_scenarios(node, killed, checks)
-        restarted_scenarios(node, restarted, checks)
+        # These scenarios own distinct seats, controls and ledgers. Keep their real observation
+        # windows, but overlap them instead of charging each seat's wait to the next seat.
+        # Join before worker_scenarios: its daemon restart must not interrupt another oracle.
+        with ThreadPoolExecutor(max_workers=4) as scenarios:
+            pending = []
+            for scenario, seat in (
+                    (old_settings_capture, old_settings),
+                    (stopped_scenarios, stopped),
+                    (killed_scenarios, killed),
+                    (restarted_scenarios, restarted)):
+                evidence_checks = {}
+                pending.append((scenarios.submit(scenario, node, seat, evidence_checks),
+                                evidence_checks))
+            for future, evidence_checks in pending:
+                future.result()
+                checks.update(evidence_checks)
         worker_scenarios(node, worker, run_subject, checks)
         claim_counts(seats, checks)
         checks["seconds"] = round(time.monotonic() - started_at)

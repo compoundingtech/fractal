@@ -146,7 +146,7 @@ export interface FreshnessProblem {
 
 /** Byte comparison of a freshly generated tree with `root`. */
 export const checkTree = (root: string, files: Map<string, string> = generate()): FreshnessProblem[] => {
-  const scratch = mkdtempSync(join(tmpdir(), 'st3-scenarios-'))
+  const scratch = mkdtempSync(join(tmpdir(), 'fractal-scenarios-'))
   try {
     writeTree(scratch, files)
     const expected = listFiles(scratch)

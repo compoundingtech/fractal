@@ -49,25 +49,25 @@ export const checkCoverage = (schema: unknown): { readonly lines: readonly strin
       fallback.push(...excluded)
     }
   }
-  const rows: readonly { readonly vocabulary: string; readonly st: readonly string[]; readonly app: readonly string[] }[] = [
-    { vocabulary: 'TimelineView.type', st: unreadableViews ? [] : views, app: Object.keys(viewCases) },
-    { vocabulary: 'TimelineView fallback not.enum (st self-consistency)', st: fallback, app: views },
-    { vocabulary: 'TimelineBlock.kind', st: openEnum(at(defs, 'TimelineBlock', 'properties', 'kind'), text =>
+  const rows: readonly { readonly vocabulary: string; readonly fractal: readonly string[]; readonly app: readonly string[] }[] = [
+    { vocabulary: 'TimelineView.type', fractal: unreadableViews ? [] : views, app: Object.keys(viewCases) },
+    { vocabulary: 'TimelineView fallback not.enum (st self-consistency)', fractal: fallback, app: views },
+    { vocabulary: 'TimelineBlock.kind', fractal: openEnum(at(defs, 'TimelineBlock', 'properties', 'kind'), text =>
       (text.split(';')[0] ?? '').split(',').map(value => value.trim()).filter(value => /^[a-z_]+$/u.test(value))), app: Object.keys(kindCases) },
-    { vocabulary: 'TimelineBlock.visibility', st: openEnum(at(defs, 'TimelineBlock', 'properties', 'visibility'), text =>
+    { vocabulary: 'TimelineBlock.visibility', fractal: openEnum(at(defs, 'TimelineBlock', 'properties', 'visibility'), text =>
       (text.replace(/^UI hint:\s*/u, '').split(';')[0] ?? '').replace(/\(default\)/gu, '').split(/,|\bor\b/u).map(value => value.trim()).filter(value => /^[a-z-]+$/u.test(value))), app: KNOWN_VISIBILITIES },
-    { vocabulary: 'TimelineEntry.type', st: openEnum(at(defs, 'TimelineEntry', 'properties', 'type'), () => []), app: Object.keys(entryCases) },
+    { vocabulary: 'TimelineEntry.type', fractal: openEnum(at(defs, 'TimelineEntry', 'properties', 'type'), () => []), app: Object.keys(entryCases) },
   ]
   const lines: string[] = []
   const errors: string[] = []
-  for (const { vocabulary, st, app } of rows) {
-    if (st.length === 0) {
+  for (const { vocabulary, fractal, app } of rows) {
+    if (fractal.length === 0) {
       errors.push(`FAIL ${vocabulary}: could not read st's list (schema shape changed?)`)
       continue
     }
-    const unmapped = st.filter(value => !app.includes(value))
-    const stale = app.filter(value => !st.includes(value))
-    if (unmapped.length === 0 && stale.length === 0) lines.push(`ok   ${vocabulary}: ${st.length} cases`)
+    const unmapped = fractal.filter(value => !app.includes(value))
+    const stale = app.filter(value => !fractal.includes(value))
+    if (unmapped.length === 0 && stale.length === 0) lines.push(`ok   ${vocabulary}: ${fractal.length} cases`)
     if (unmapped.length > 0) errors.push(`FAIL ${vocabulary}: st defines ${unmapped.map(value => `'${value}'`).join(', ')}; no matching case. Update the SDK and app case map.`)
     if (stale.length > 0) errors.push(`FAIL ${vocabulary}: the app maps ${stale.map(value => `'${value}'`).join(', ')}, which st no longer defines. Remove stale cases.`)
   }

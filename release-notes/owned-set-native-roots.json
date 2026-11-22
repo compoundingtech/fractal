@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Owned sets manage objectives, GitHub sources and GitHub scopes with declaration-only retirement",
+  "replay": {"status": "changed", "detail": "Owned-set receipt validation and replay accept native objective, github-source and github-scope members, including stopped declarations and omission retirement."},
+  "schema": {"status": "none", "detail": "No persistent schema migration; existing desired declarations and owned-set receipts carry the additional member families."},
+  "rules": {"status": "changed", "detail": "Native roots use ordinary owned-set create, update, adoption and omission retirement. Retirement keeps historical claims and facts, does not change acquisition authority or fabricate fencing, and allows source-controlled reintroduction. Mission runs cannot stop these roots."},
+  "compatibility": {"status": "changed", "detail": "Publication requires every admitted fleet member to advertise features.owned_set_native_roots=1 when the set contains live or retired native roots; older daemons reject these receipts."},
+  "downtime": {"status": "none", "detail": "Existing sets remain usable during the fleet upgrade."},
+  "manual": {"status": "changed", "detail": "Upgrade every admitted member before publishing native-root owned membership. Acquisition authority and transfers still require their existing explicit admission and fencing operations."},
+  "recovery": {"status": "none", "detail": "Until the whole fleet advertises support, native-root set publication remains blocked without changing existing membership."}
+}

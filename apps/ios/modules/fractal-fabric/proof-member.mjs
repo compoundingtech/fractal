@@ -23,7 +23,7 @@ if (process.argv[2] === 'grant') {
   if (mode && !['auto', 'direct', 'relay'].includes(mode)) throw new Error('Optional full-client mode must be auto, direct or relay');
   if (!file || !/^[a-f0-9]{64}$/i.test(phone ?? '')) throw new Error('grant requires the isolated member descriptor and phone NodeID');
   const member = JSON.parse(readFileSync(file, 'utf8'));
-  if (member.kind !== kind || !member.root.startsWith('/tmp/st-fabric-proof-')) throw new Error('This is not an isolated proof member');
+  if (member.kind !== kind || !member.root.startsWith('/tmp/fractal-fabric-proof-')) throw new Error('This is not an isolated proof member');
   if (member.version !== expectedVersion || command(member.fabric, ['--version']).trim() !== member.version) throw new Error('Isolated fabric binary changed');
   // The member serves the phone when it connects and never dials, probes or announces to it.
   command(member.fabric, ['--home', member.home, 'add', phone, 'demo-phone', '--inbound-only', '--allow', member.service]);
@@ -43,17 +43,17 @@ if (process.argv[2] === 'grant') {
   process.exit(0);
 }
 
-const st = process.argv[2], fabric = process.argv[3];
-if (!st || !fabric) throw new Error('Usage: node proof-member.mjs /path/to/st /path/to/fabric');
+const fractal = process.argv[2], fabric = process.argv[3];
+if (!fractal || !fabric) throw new Error('Usage: node proof-member.mjs /path/to/fractal /path/to/fabric');
 if (command(fabric, ['--version']).trim() !== expectedVersion) throw new Error(`This proof requires fabric ${expectedVersion}`);
-const root = mkdtempSync('/tmp/st-fabric-proof-');
+const root = mkdtempSync('/tmp/fractal-fabric-proof-');
 const home = join(root, 'fabric'), state = join(root, 'state');
 mkdirSync(home, { mode: 0o700 });
 const socket = join(root, 'st.sock'), gateway = join(root, 'client.sock');
 const config = join(root, 'config.toml');
 writeFileSync(config, 'node = "demo-member"\nperson = "person/demo"\n', { mode: 0o600 });
 const log = openSync(join(root, 'member.log'), 'a', 0o600);
-const member = spawn(st, ['up', '--config', config, '--state-dir', state, '--socket', socket, '--client-gateway-socket', gateway], { env: environment, stdio: ['ignore', log, log] });
+const member = spawn(fractal, ['up', '--config', config, '--state-dir', state, '--socket', socket, '--client-gateway-socket', gateway], { env: environment, stdio: ['ignore', log, log] });
 const transport = spawn(fabric, ['--home', home, 'up', '--foreground', '--server-session-detached-ttl-secs', '30'], { env: environment, stdio: ['ignore', log, log] });
 const stop = () => { member.kill('SIGTERM'); transport.kill('SIGTERM'); };
 process.once('SIGINT', stop); process.once('SIGTERM', stop);
@@ -71,7 +71,7 @@ try {
   const service = 'demo-client/0';
   command(fabric, ['--home', home, 'expose', service, '--socket', gateway, '--ephemeral']);
   const separateApp = process.env.FABRIC_PROOF_APP === 'separate';
-  const description = { kind, root, home, state, socket, gateway, node: addr.id, addr, service, st, fabric, version: expectedVersion, separateApp };
+  const description = { kind, root, home, state, socket, gateway, node: addr.id, addr, service, st: fractal, fabric, version: expectedVersion, separateApp };
   const descriptor = join(root, 'member.json');
   writeFileSync(descriptor, JSON.stringify(description), { mode: 0o600 });
   const link = new URL(scheme(separateApp));

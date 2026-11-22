@@ -1,5 +1,5 @@
 use crate::text::{self, Run};
-use ratatui::text::{Line, Span};
+use crate::text::{Line, Span};
 
 #[derive(Clone, Debug)]
 pub struct Target<H = crate::PaneIntent> {

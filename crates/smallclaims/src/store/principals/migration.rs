@@ -102,6 +102,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
     }
     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hdffe34d55f09 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ PRINCIPAL_SCHEMA)?;
     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h175963f1dc4a owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ dependencies::SCHEMA)?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h8010e801ec4f owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ ARRIVAL_SCHEMA)?;
     // Compatibility with the earlier unpublished candidate-schema revision.
     let has_model: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('claim_signature_migration') WHERE name='serving_legacy')", [], |row| row.get(0))?;
     if !has_model {

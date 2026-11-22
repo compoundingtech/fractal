@@ -1483,6 +1483,7 @@ fn output_for_start(
 fn isolation_name(mode: crate::Isolation) -> &'static str {
     match mode {
         crate::Isolation::Scope => "scope",
+        crate::Isolation::DarwinSlot { .. } => "darwin-slot",
         crate::Isolation::Detached => "detached",
         crate::Isolation::DegradedDetached => "degraded-detached",
     }

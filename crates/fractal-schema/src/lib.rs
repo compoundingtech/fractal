@@ -88,7 +88,7 @@ mod canonical_agent_actor_tests {
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb3804616e3d3 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1cd1ff5ae13a owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -155,16 +155,18 @@ since keeps the legacy value, which equals what would be stored.
 ## Retired identity ledger
 
 `retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
-checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
-`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
-background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
-per background writer loan with its cursor in `meta`, resting outside the loan for
-max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
-identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
-stays retired and is also labeled in `retired_claim_withdrawals` or
-`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
-the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
-would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+checkpoint tables that record a trim's tombstones. Until a member trims (`[trim] local`, the
+default), triggers union every identity a row of `checkpoint_claims` or `checkpoint_envelopes`
+gains, through INSERT, UPDATE or before DELETE. A background job
+(`maintenance.retired_identities`) unions rows that predate the triggers, 4,096 per background
+writer loan with its cursor in `meta`, resting outside the loan for max(100 ms, 4 x the loan's
+hold), capped at 5 s. Once that import has finished, a member that trims makes the ledger its
+authority, judging it once: an identity that only an uncommitted checkpoint recorded, or that an
+older build's adoption withdrew (labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals`), was no deletion and leaves it, and the labels are spent. From then
+on an identity enters only as a trim deletes it, in the deleting transaction, and admission refuses
+a retired envelope or claim. Retired claim IDs a peer reports are added too. The ledger has no cap
+and no reclamation. Evidence still reads the checkpoint tables. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
 
@@ -174,9 +176,8 @@ equates with a BLOB.
 batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
 newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
 maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
-and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
-this table existed), and the writer floor; the chain's previous hash is the higher of the newest
-batch and the stored head.
+and in `retired_envelopes` (heads trimmed before this table existed), and the writer floor; the
+chain's previous hash is the higher of the newest batch and the stored head.
 
 ## Repaired claim replacements
 
@@ -192,9 +193,9 @@ Readers still use the records and `projection_digest_repaired_claims`.
 (claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
 read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
 cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
-them, including rows adoption later withdraws, so they only grow. Claim identities use the
-ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
-activation stops those withdrawals.
+them, including rows an older build's adoption withdrew, so they only grow. Claim identities use
+the ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until a member that
+trims makes the ledger its authority.
 
 ## Claim range digests
 
@@ -1476,6 +1477,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("head", reference()),
                 ("state", string()),
                 ("pull_requests", array()),
+                ("await_prs_not_found", array()),
                 ("issues", array()),
                 ("repository_id", integer()),
                 ("main_performance_failures", array()),
@@ -1533,6 +1535,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("author", string()),
                 ("head", reference()),
                 ("head_sha", string()),
+                ("await_pr_observation", object()),
                 ("branch", string()),
                 ("opened_by", reference()),
                 ("opened_by_run", reference()),
@@ -2181,6 +2184,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             None,
             false,
             &["step", "program"],
+        ),
+        (
+            "program.turn.report",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            true,
+            &[],
         ),
         (
             "work.person-asked",
@@ -3535,7 +3547,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "resource.admission.observed" => &[
             ("id", required_string()),
             ("host", required_string()),
-            ("class", required_enum(&["landing", "check", "agent"])),
+            // Evidence retains newer class names; membership admission owns the authority fence.
+            ("class", required_string()),
             ("coverage", required_enum(&["logical", "enforced"])),
             ("epoch", required_string()),
             ("owner", required_object()),
@@ -3544,7 +3557,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_at", integer()),
             ("state", required_enum(&["queued", "admitted", "launched", "refused", "retiring", "retired", "uncertain"])),
             ("refusal", enumeration(&["admission-expired", "missing-profile", "unsupported-coverage", "impossible",
-                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state"])),
+                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state", "recovery-not-allowed"])),
             ("finite", required_boolean()),
             ("admission_timeout_ms", integer()),
             ("clock_uncertain", required_boolean()),
@@ -3568,8 +3581,23 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "resource.exec-receipt" => &[
             ("exec_id", required_string()),
+            ("argv", array()),
+            ("argv_sha256", string()),
+            ("launched", boolean()),
+            ("timed_out", boolean()),
+            ("refusal_code", string()),
+            ("request_id", string()),
+            ("profile_key", string()),
+            ("profile_estimate", object()),
+            ("disk_path", string()),
+            ("admissionDecision", object()),
+            ("learningDecision", object()),
+            ("preRetirementPopulated", boolean()),
+            ("learningCoverage", enumeration(&["full", "client-only", "unknown"])),
+            ("memoryEvents", object()),
+            ("ioStat", array()),
             ("host", required_string()),
-            ("class", required_enum(&["landing", "check", "agent"])),
+            ("class", required_enum(&["recovery", "landing", "check", "agent"])),
             ("owner", required_object()),
             ("coverage", required_enum(&["logical", "enforced"])),
             ("state", required_enum(&["completed", "refused", "cancelled"])),
@@ -3812,6 +3840,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "mission-run.created" => &[
             ("mission_spec", object()),
             ("ad_hoc_title", string()),
+            ("native_turn", object()),
+            ("native_turn_key", string()),
+            ("parent_attempt", integer()),
             ("status", string()),
             ("phase", string()),
             ("admission_publication", string()),
@@ -3956,6 +3987,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "mission.run.trace" => &[("trace", any())],
         "program.attempt.trace" => &[("attempt", required_integer()), ("trace", any())],
+        "program.turn.report" => &[("report", required_object())],
         "program.step" => &[
             ("key", required_string()),
             ("status", required_enum(&["started", "completed", "failed"])),
@@ -4534,6 +4566,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_signal", integer()),
             ("exit_evidence", object()),
             ("incarnation_id", string()),
+            ("workspace", FieldSpec { nullable: true, ..string() }),
             ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),
@@ -4648,6 +4681,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("code", string()),
             ("reason", string()),
             ("incarnation_id", string()),
+            ("message_id", string()),
             ("session_id", string()),
             ("selector_scope", string()),
             ("ownership_sequence", integer()),
@@ -5480,6 +5514,55 @@ mod tests {
     }
 
     #[test]
+    fn native_turn_creation_and_verified_report_are_registered_durable_system_claims() {
+        let subject = "mission-run/native-turn/episode";
+        let mut creation: BTreeMap<String, Value> = serde_json::from_value(serde_json::json!({
+            "native_turn": {
+                "agent": "agent/node.publisher", "instructions": "Produce an answer.",
+                "context": "Literal context.", "fresh_context": false,
+                "products": [{"path": "answer", "kind": "custom.test", "fields": {"head": "h1"}}]
+            },
+            "native_turn_key": "program:step-run/parent/program:1:turn", "parent_attempt": 1,
+            "status": "running", "mission": "mission/native-turn", "revision": "hash",
+            "current_generation": "run-generation/native-turn-hash",
+            "root_revision": "parent-hash", "root_mission_run": "mission-run/parent",
+            "parent_step_run": "step-run/parent/program", "workspace": ".",
+            "requester": "person/owner", "inputs": {}, "mode": "run"
+        })).unwrap();
+        registry().validate_claim(subject, "mission-run.created", &creation).unwrap();
+        for (name, value) in [
+            ("native_turn", serde_json::json!("not an object")),
+            ("native_turn_key", serde_json::json!(1)),
+            ("parent_attempt", serde_json::json!("1")),
+        ] {
+            let mut invalid = creation.clone();
+            invalid.insert(name.into(), value);
+            assert_eq!(registry().validate_claim(subject, "mission-run.created", &invalid)
+                .unwrap_err().code, "invalid-claim-field");
+        }
+        // Additive native metadata must not invalidate pre-existing graph creations.
+        for name in ["native_turn", "native_turn_key", "parent_attempt"] {
+            creation.remove(name);
+        }
+        registry().validate_claim("mission-run/graph", "mission-run.created", &creation).unwrap();
+        let report = BTreeMap::from([("report".into(), serde_json::json!({
+            "run": subject, "step": "step-run/native-turn-hash/turn",
+            "summary": "Actual worker summary", "evidence": [], "executions": [],
+            "products": {"answer": {"fields": {"kind": "custom.test", "head": "h1"}}}
+        }))]);
+        let spec = registry().validate_claim(subject, "program.turn.report", &report).unwrap();
+        assert_eq!(spec.write_policy, WritePolicy::SystemOnly);
+        assert_eq!(spec.cardinality, Cardinality::Once);
+        assert_eq!(spec.retention, Retention::Durable);
+        assert!(registry().validate_claim(subject, "program.turn.report", &BTreeMap::new()).is_err());
+        let invalid = BTreeMap::from([("report".into(), serde_json::json!("not an object"))]);
+        assert_eq!(registry().validate_claim(subject, "program.turn.report", &invalid)
+            .unwrap_err().code, "invalid-claim-field");
+        assert_eq!(registry().validate_public_claim(subject, "program.turn.report", &report, Some("agent/node.publisher"))
+            .unwrap_err().code, "claim-write-forbidden");
+    }
+
+    #[test]
     fn run_report_stall_policy_is_an_optional_boolean() {
         for kind in ["mission-run.created", "mission-run.report-to"] {
             let mut fields =
@@ -5686,6 +5769,7 @@ mod tests {
         current.subjects.remove("notice-owner").unwrap();
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("program.turn.report").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
@@ -5694,13 +5778,14 @@ mod tests {
             current.claims.remove(kind).unwrap();
         }
         current.subjects.remove("effect").unwrap();
-        for field in ["producer_version", "invocation_id"] {
+        for field in ["producer_version", "invocation_id", "message_id"] {
             current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
         }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
         current.claims.remove("mission-run.gate-carried").unwrap();
-        for field in ["phase", "admission_publication", "workspace_declaration"] {
+        for field in ["phase", "admission_publication", "workspace_declaration",
+            "native_turn", "native_turn_key", "parent_attempt"] {
             current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
         }
         for kind in ["work.person-asked", "work.person-done", "work.person-cancelled", "gate.requested"] {
@@ -5733,8 +5818,9 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        current.claims.get_mut("runtime.observed").unwrap()
-            .fields.remove("exit_evidence").unwrap();
+        for field in ["exit_evidence", "workspace"] {
+            current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
+        }
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }
@@ -5747,6 +5833,8 @@ mod tests {
         for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
             current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
+        current.resources.get_mut("vcs.repository").unwrap().fields.remove("await_prs_not_found").unwrap();
+        current.resources.get_mut("vcs.pull-request").unwrap().fields.remove("await_pr_observation").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
@@ -6207,6 +6295,32 @@ mod tests {
     }
 
     #[test]
+    fn native_pr_wait_observation_proofs_are_registered_resource_facts() {
+        for (kind, name, value) in [
+            ("vcs.repository", "await_prs_not_found", serde_json::json!([])),
+            (
+                "vcs.repository",
+                "await_prs_not_found",
+                serde_json::json!([{"pr": 42, "registrations": ["registration"]}]),
+            ),
+            (
+                "vcs.pull-request",
+                "await_pr_observation",
+                serde_json::json!({
+                    "registrations": ["registration"],
+                    "head": "exact-head",
+                    "merged": true,
+                    "merge_commit_sha": "merge-commit",
+                }),
+            ),
+        ] {
+            registry()
+                .validate_resource_facts(kind, &BTreeMap::from([(name.into(), value)]))
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn vcs_identity_and_resolution_fields_are_additive_and_typed() {
         for kind in ["vcs.repository", "vcs.issue", "vcs.pull-request"] {
             registry()
@@ -6414,6 +6528,12 @@ mod tests {
                 "epoch": "epoch-one", "owner": {"run": "mission-run/example", "step": "check", "attempt": 1, "invocation": null},
                 "queued_at": 100, "admitted_at": null, "retired_at": null, "state": "queued",
                 "refusal": null, "finite": true, "admission_timeout_ms": null, "clock_uncertain": false
+            })),
+            ("resource-admission/example-host/newer-request", "resource.admission.observed", serde_json::json!({
+                "id": "newer-request", "host": "example-host", "class": "future-class", "coverage": "logical",
+                "epoch": "epoch-one", "owner": {"run": "mission-run/example", "step": "check", "attempt": 1, "invocation": null},
+                "queued_at": 100, "admitted_at": null, "retired_at": null, "state": "refused",
+                "refusal": "recovery-not-allowed", "finite": true, "admission_timeout_ms": null, "clock_uncertain": false
             })),
             ("resource-admission/example-host", "resource.admission.coverage", serde_json::json!({
                 "host": "example-host", "epoch": "epoch-one", "complete": true

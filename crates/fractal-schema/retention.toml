@@ -194,6 +194,8 @@
 "principal.key-revoked" = { class = "durable" }
 # A program run's journal: replay reads every completed and failed entry of its step run.
 "program.step" = { class = "durable" }
+# Native turn replay returns this verified report after the finite episode ends.
+"program.turn.report" = { class = "durable" }
 # Invocation correlation must outlive collector sampling and trace-backend retention.
 "mission.run.trace" = { class = "durable" }
 "program.attempt.trace" = { class = "durable" }
@@ -304,6 +306,7 @@ local_codes = [
     "native-delivery-degraded",
     "native-delivery-recovered",
     "message-unforwarded",
+    "omp-channel-admission-fallback",
     "claude-handoff-status-unavailable",
     "claude-receipt-unavailable",
     "claude-handoff-unconfirmed",

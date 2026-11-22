@@ -43,6 +43,7 @@ pub struct FractalRuntime {
     pub actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
     pub(super) card_actuals: Mutex<HashMap<(String, bool), Arc<card_actual::Reduction>>>,
     pub observer_actuals: Arc<observer_actuals::Actuals>,
+    pub(super) mail_objective_inputs: Arc<observer_mail_inputs::Inputs>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
     pub placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
     /// Per-subject status reductions and current-view answers, until their claims change.
@@ -61,6 +62,8 @@ pub struct FractalRuntime {
     /// claims: readers serve it, under its own cut, until the roster refolds. A fold never
     /// starts from it, and a forget drops it.
     pub agent_roster_previous: Mutex<PreviousRoster>,
+    #[cfg(test)]
+    roster_retained_before_clear: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Acquire before opening a SQLite snapshot, never while pinning a WAL read mark.
     pub agent_resources_admission: Arc<tokio::sync::Mutex<()>>,
     pub agent_resources_admission_state: Mutex<roster_admission::AdmissionState>,
@@ -275,7 +278,10 @@ impl FractalRuntime {
 
 impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
-        Some(self.observer_actuals.clone())
+        Some(Arc::new(observer_mail_inputs::Observer {
+            actuals: self.observer_actuals.clone(),
+            mail: self.mail_objective_inputs.clone(),
+        }))
     }
     fn admit_writer_tx(
         &self,
@@ -288,6 +294,18 @@ impl Runtime for FractalRuntime {
         // A document a run binds is decided by its run authority, as its claims are.
         super::run_authority::admit_tx(transaction, origin, Some(writer), kind, subject, &BTreeMap::new())
     }
+    fn replay_safe_response_pinned(&self, _connection: &Connection, response: &str) -> Result<bool> {
+        // Only a lease renewal's receipt is shortened. A renewal writes a replay-safe step view,
+        // and a retry after the receipt is gone renews again, so its live run does not keep it.
+        // Every other replay-safe receipt (a run, revision or owned-set apply, a digest) stays
+        // for the ordinary 7-day cleanup and its in-use rule.
+        let renewal = serde_json::from_str::<Value>(response).is_ok_and(|view| {
+            view.get("mission_run").is_none()
+                && view.get("subject").and_then(Value::as_str).is_some_and(|subject| subject.starts_with("step-run/"))
+        });
+        Ok(!renewal)
+    }
+
     fn idempotency_response_in_use(&self, connection: &Connection, response: &str) -> Result<bool> {
         // Some local entries contain a digest, not JSON. They have no work lifetime to pin.
         let Ok(value) = serde_json::from_str::<Value>(response) else {
@@ -459,7 +477,9 @@ impl Runtime for FractalRuntime {
     }
 
     fn projection_versions(&self) -> BTreeMap<String, u64> {
-        BTreeMap::from([("mission_run_deadlines".into(), 3)])
+        // `blobs` left the projection digest at 2: a member that moved a blob's bytes to its
+        // blob file keeps an empty row, so peers compare it only by the claims naming it.
+        BTreeMap::from([("blobs".into(), 2), ("mission_run_deadlines".into(), 3)])
     }
 
     fn requires_keyed_envelope(&self, kind: &str) -> bool {
@@ -481,6 +501,26 @@ impl Runtime for FractalRuntime {
         claim: &ClaimRecord,
     ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
         Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
+    }
+
+    fn defer_replicated_batch(
+        &self,
+        connection: &Connection,
+        batch: &ReplicaBatch,
+    ) -> Result<bool> {
+        let mut statement = connection.prepare_cached(
+            "SELECT EXISTS(
+                 SELECT 1 FROM meta
+                 WHERE key='preparation_restarts/' || ?1 AND CAST(value AS INTEGER)>=4
+                   AND EXISTS(SELECT 1 FROM local_resource_preparation_deferred WHERE subject=?1)
+             )",
+        )?;
+        for claim in &batch.claims {
+            if statement.query_row(/* sqlite-large-value: allow-for-now lv-ha06e5aaeb4b9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ [&claim.subject], |row| row.get::<_, bool>(0))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn append_claim(
@@ -635,16 +675,17 @@ impl Runtime for FractalRuntime {
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
+        use smallclaims::receive_metrics::{Finalizer, finalizer};
         // Replication admission/import, repair and pruning can dirty preparation
         // without running APPEND (or can do so after its last claim projector).
         // The native connection signal makes the no-work boundary SQL-free.
-        resources::flush_preparation(transaction)?;
+        finalizer(Finalizer::Resources, || resources::flush_preparation(transaction))?;
         // Desired/liveness projections can change after the final claim projector.
         // The connection-local hint keeps unrelated commits SQL-free.
-        custom::flush(transaction)?;
-        completion_state::flush(transaction)?;
-        run_eta::flush(transaction)?;
-        let budget = client_messages::finalize_commit(transaction)?;
+        finalizer(Finalizer::Custom, || custom::flush(transaction))?;
+        finalizer(Finalizer::Completion, || completion_state::flush(transaction))?;
+        finalizer(Finalizer::RunEta, || run_eta::flush(transaction))?;
+        let budget = finalizer(Finalizer::ClientMessages, || client_messages::finalize_commit(transaction))?;
         #[cfg(any(test, feature = "test-support"))]
         {
             *self.client_message_commit_budget.lock().unwrap_or_else(PoisonError::into_inner) = budget;
@@ -662,7 +703,8 @@ impl Runtime for FractalRuntime {
             self.agent_roster_requested_at.store(0, std::sync::atomic::Ordering::Release);
             self.presented_agents.forget();
         }
-        self.forget_reductions();
+        self.forget_reductions(false);
+        self.mail_objective_inputs.invalidate();
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
         self.glass_list.forget();
@@ -680,9 +722,8 @@ impl Runtime for FractalRuntime {
     fn claims_trimmed(&self) {
         // A trim's run goes on: every list refolds, keeping its generation, so a fold under way
         // still publishes and readers keep their rows.
-        // Forgetting them here, after every chunk, restarted the roster's fold of seconds
-        // before it could publish, all through the run. The trim forgets the views once when
-        // the run stops, which also drops what the caches hold of the claims it deleted.
+        // Keep published rows throughout the run and at completion: each chunk proves that
+        // the graph is unchanged. Completion separately releases history-dependent reductions.
         self.presented_agents.refold();
         self.published_missions.refold();
         self.published_work.refold();
@@ -700,29 +741,19 @@ impl Runtime for FractalRuntime {
         }
     }
 
+    fn claims_trim_finished(&self) {
+        // Invalidate inputs before either the roster revision or attention-owner wake is sent.
+        self.summary_list.refold();
+        self.forget_reductions(true);
+        self.claims_trimmed();
+    }
+
     fn projection_advanced(&self, caught_up: bool) {
         // Readers keep the roster they had while it refolds from nothing: keep it before the
         // caches it lives in are cleared.
-        {
-            let resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
-            let refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut previous = self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner);
-            for history in [false, true] {
-                if let Some(entry) = resources.iter()
-                    .filter(|entry| entry.history == history && entry.covered.is_none())
-                    .max_by_key(|entry| (entry.index, entry.local))
-                {
-                    previous.resources.retain(|kept| kept.history != history);
-                    previous.resources.push(entry.clone());
-                }
-            }
-            if let Some(entry) = refs.iter().filter(|entry| !entry.history).max_by_key(|entry| entry.index) {
-                previous.page_refs = Some(entry.clone());
-            }
-        }
         // Reductions keyed by graph cut alone would answer from the prefix projected before:
         // the cut did not move. They go, as on a forget.
-        self.forget_reductions();
+        self.forget_reductions(true);
         // The missions, work, attention, glasses and arrangements lists read the projection
         // frontier and refold what it newly covers on their own; they keep serving meanwhile.
         self.summary_list.forget();
@@ -766,15 +797,6 @@ impl Runtime for FractalRuntime {
         checkpoint_rules::plan_staged(planner)
     }
 
-    fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        checkpoint_rules::clear_projections(transaction)
-    }
-
-    fn replay_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        checkpoint_rules::replay_from_nothing(transaction)?;
-        Ok(())
-    }
-
     fn checkpoint_subject_answers(
         &self,
         connection: &Connection,
@@ -784,18 +806,6 @@ impl Runtime for FractalRuntime {
         checkpoint_rules::subject_answers(connection, subject, cut)
     }
 
-    fn checkpoint_global_answers(&self, transaction: &Transaction<'_>) -> Result<Option<Value>> {
-        checkpoint_rules::global_answers(transaction).map(Some)
-    }
-
-    fn checkpoint_subject_answers_with_sources(
-        &self,
-        connection: &Connection,
-        subject: &str,
-        cut: u128,
-    ) -> Result<(Value, smallclaims::store::checkpoint::CheckpointAnswerSources)> {
-        checkpoint_rules::subject_answers_with_sources(connection, subject, cut)
-    }
 }
 
 /// The version of Fractal's shared projection layout, beside the claim vocabulary. Nodes whose
@@ -842,9 +852,45 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
 
 
 impl FractalRuntime {
+    /// Retention and clearing share the publication locks: a refresher must not publish
+    /// between copying the previous roster and clearing its claim-dependent cache.
+    fn forget_roster_reductions(&self, retain: bool) {
+        let mut resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if retain {
+            let mut previous = self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner);
+            for history in [false, true] {
+                if let Some(entry) = resources.iter()
+                    .filter(|entry| entry.history == history && entry.covered.is_none())
+                    .max_by_key(|entry| (entry.index, entry.local))
+                {
+                    previous.resources.retain(|kept| kept.history != history);
+                    previous.resources.push(entry.clone());
+                }
+            }
+            if let Some(entry) = refs.iter().filter(|entry| !entry.history).max_by_key(|entry| entry.index) {
+                // A bounded startup head needs its cards and matching page order.
+                if let Some(head) = resources.iter()
+                    .filter(|cards| !cards.history && cards.index == entry.index && cards.covered.is_some())
+                    .max_by_key(|cards| cards.local)
+                {
+                    previous.resources.retain(|kept| kept.history || kept.covered.is_none());
+                    previous.resources.push(head.clone());
+                }
+                previous.page_refs = Some(entry.clone());
+            }
+        }
+        #[cfg(test)]
+        if let Some(observe) = self.roster_retained_before_clear.lock().unwrap().take() {
+            observe();
+        }
+        resources.clear();
+        refs.clear();
+    }
+
     /// Drop every reduction kept by graph cut: statuses, views, conversation owners, agent
     /// cards and the roster built from them, usage folds and agent page order.
-    fn forget_reductions(&self) {
+    fn forget_reductions(&self, retain_roster: bool) {
         self.observer_actuals.invalidate();
         let mut cache = self
             .subject_cache
@@ -866,21 +912,14 @@ impl FractalRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
-        self.agent_resources_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
         self.exact_agent_resources_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
         self.card_actuals.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.forget_roster_reductions(retain_roster);
         self.agent_roster_published.send_modify(|revision| *revision += 1);
-        self.agent_page_refs_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
     }
 
     /// The roster's caches were cleared, and a refold from the log takes seconds on a large
@@ -1682,5 +1721,180 @@ mod extension_tests {
         assert_eq!(store.extension::<First>().0.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(*store.extension::<Second>().0.lock().unwrap(), vec![7]);
         assert!(Arc::ptr_eq(&store.extension::<First>(), &store.extension::<First>()));
+    }
+}
+
+#[cfg(test)]
+mod preparation_admission_tests {
+    use super::*;
+
+    #[test]
+    fn capped_preparation_holds_whole_envelope_until_drain_without_blocking_other_peers() {
+        smallclaims::sqlite::without_deferred_maintenance_for_test(check_capped_preparation_admission);
+    }
+
+    fn check_capped_preparation_admission() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        const CAPPED: &str = "resource/capped";
+        let source = Store::open_memory("capped-source").unwrap();
+        let other = Store::open_memory("unrelated-source").unwrap();
+        let target = Store::open_memory("admission-target").unwrap();
+        for store in [&source, &other, &target] {
+            store.bind_fleet(FLEET).unwrap();
+        }
+        // The uncapped claim comes first in the same envelope: checking only as claims
+        // are inserted would leak this claim and its batch before reaching the cap.
+        let append = |store: &Store, subjects: &[&str]| {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            let mut batch = None;
+            let mut ids = Vec::new();
+            for subject in subjects {
+                let claim = append_claim_tx(
+                    &tx, &store.origin, subject, "resource.observed", None,
+                    &json!({"fields":{"kind":"vcs.pull-request","facts":{"state":"open"}}}),
+                    &[], batch.as_deref(),
+                ).unwrap();
+                batch = Some(claim.batch_id);
+                ids.push(claim.id);
+            }
+            tx.commit().unwrap();
+            ids
+        };
+        let blocked_ids = append(&source, &["resource/same-envelope", CAPPED]);
+        let unrelated_ids = append(&other, &["resource/unrelated-peer"]);
+        {
+            let mut writer = target.connection.write();
+            let tx = writer.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO local_resource_preparation_deferred(subject) VALUES(?1)",
+                [CAPPED],
+            ).unwrap();
+            tx.execute(
+                "INSERT INTO meta(key,value) VALUES('preparation_restarts/' || ?1,'4')",
+                [CAPPED],
+            ).unwrap();
+            tx.commit().unwrap();
+        }
+        let deliver = |source: &Store| {
+            let exchange = source.export_replication_exchange_answering(
+                FLEET,
+                &target.replication_inventory().unwrap(),
+                &target.replication_signature_requests().unwrap(),
+            ).unwrap();
+            target.receive_replication_exchange(&source.origin, FLEET, &exchange).unwrap();
+        };
+        deliver(&source);
+        for _ in 0..3 {
+            let admission = target.validate_replication_backlog().unwrap();
+            assert_eq!(admission.held, 1);
+            assert_eq!(admission.invalid, 0);
+            assert_eq!(admission.valid, 0);
+            assert!(!admission.changed);
+            let reader = target.readers.get();
+            for table in ["claims", "batches", "replica_records"] {
+                let count: usize = reader.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {}=?1",
+                        if table == "replica_records" { "writer" } else { "origin" }),
+                    [&source.origin], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(count, 0, "held envelope partially admitted {table}");
+            }
+            let state: String = reader.query_row(
+                "SELECT receipt_state FROM replica_envelopes WHERE writer=?1",
+                [&source.origin], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(state, "pending");
+        }
+        deliver(&other);
+        let admission = target.validate_replication_backlog().unwrap();
+        assert_eq!(admission.held, 1);
+        assert_eq!(admission.invalid, 0);
+        for id in &unrelated_ids {
+            assert!(target.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [id], |row| row.get::<_, bool>(0),
+            ).unwrap());
+        }
+        // Use the actual bounded drain, not deletion of the admission marker.
+        {
+            let mut writer = target.connection.write();
+            let tx = writer.transaction().unwrap();
+            while resources::flush_deferred_preparation(&tx, std::time::Duration::from_secs(1)).unwrap() {}
+            tx.commit().unwrap();
+        }
+        let admission = target.validate_replication_backlog().unwrap();
+        assert_eq!(admission.held, 0);
+        assert_eq!(admission.invalid, 0);
+        assert_eq!(admission.valid, blocked_ids.len());
+        for id in &blocked_ids {
+            assert!(target.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [id], |row| row.get::<_, bool>(0),
+            ).unwrap());
+        }
+        let reader = target.readers.get();
+        let state: String = reader.query_row(
+            "SELECT receipt_state FROM replica_envelopes WHERE writer=?1",
+            [&source.origin], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state, "validated");
+        let quarantined: usize = reader.query_row(
+            "SELECT COUNT(*) FROM replica_restore_quarantine", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(quarantined, 0);
+    }
+}
+
+#[cfg(test)]
+mod roster_retention_tests {
+    use super::*;
+
+    fn publication(index: u64, history: bool) -> AgentResourcesEntry {
+        AgentResourcesEntry {
+            index, local: index, history,
+            idle_residency: crate::config::idle_residency_policy(),
+            covered: None, valid_until_unix_ms: None,
+            items: Arc::new(vec![json!({"id": format!("agent/publication-{index}")})]),
+            published_at_unix_ms: u128::from(index),
+        }
+    }
+
+    #[test]
+    fn trim_and_projection_retention_clear_atomically_with_new_publications() {
+        for trim in [true, false] {
+            let runtime = Arc::new(FractalRuntime::default());
+            runtime.agent_resources_cache.lock().unwrap().push_back(publication(1, false));
+            runtime.agent_page_refs_cache.lock().unwrap().push_back(publication(1, false));
+            let (publish, ready) = std::sync::mpsc::channel();
+            let observer = Arc::clone(&runtime);
+            *runtime.roster_retained_before_clear.lock().unwrap() = Some(Box::new(move || {
+                // This exact seam used to release these locks after copying the retained
+                // rows, letting a first history publication be erased by the later clear.
+                assert!(observer.agent_resources_cache.try_lock().is_err());
+                assert!(observer.agent_page_refs_cache.try_lock().is_err());
+                publish.send(()).unwrap();
+            }));
+            let writer = Arc::clone(&runtime);
+            let publisher = std::thread::spawn(move || {
+                ready.recv().unwrap();
+                let mut resources = writer.agent_resources_cache.lock().unwrap();
+                resources.push_back(publication(2, false));
+                resources.push_back(publication(2, true));
+                drop(resources);
+                writer.agent_page_refs_cache.lock().unwrap().push_back(publication(2, false));
+            });
+            if trim {
+                runtime.claims_trim_finished();
+            } else {
+                runtime.projection_advanced(true);
+            }
+            publisher.join().unwrap();
+            let resources = runtime.agent_resources_cache.lock().unwrap();
+            assert_eq!(resources.len(), 2, "the newly published current and history rosters survive");
+            assert!(resources.iter().all(|entry| entry.index == 2));
+            assert_eq!(runtime.agent_page_refs_cache.lock().unwrap().front().unwrap().index, 2);
+            let previous = runtime.agent_roster_previous.lock().unwrap();
+            assert_eq!(previous.resources[0].index, 1);
+            assert_eq!(previous.page_refs.as_ref().unwrap().index, 1);
+        }
     }
 }

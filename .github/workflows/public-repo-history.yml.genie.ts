@@ -15,8 +15,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
   },
   permissions: { contents: 'read' },
   concurrency: {
-    group: 'public-repo-history-${{ github.run_id }}-${{ github.event_name }}',
-    'cancel-in-progress': false,
+    group: 'public-repo-history-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name }}',
+    'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
   },
   jobs: {
     'public-repo-history': {
