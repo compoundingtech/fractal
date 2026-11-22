@@ -369,15 +369,18 @@ fn ensure_tracked_file_is_unchanged(
     Ok(())
 }
 
+/// Whether committing this write would change its destination.
+pub fn write_needed(write: &PlannedWrite) -> bool {
+    let bytes_match = fs::read(&write.destination).is_ok_and(|bytes| bytes == write.bytes);
+    let mode_matches = fs::metadata(&write.destination)
+        .is_ok_and(|metadata| metadata.permissions().mode() & 0o7777 == write.mode);
+    !bytes_match || !mode_matches
+}
+
 pub fn commit_transaction(writes: &[PlannedWrite]) -> Result<()> {
     let changes = writes
         .iter()
-        .filter(|write| {
-            let bytes_match = fs::read(&write.destination).is_ok_and(|bytes| bytes == write.bytes);
-            let mode_matches = fs::metadata(&write.destination)
-                .is_ok_and(|metadata| metadata.permissions().mode() & 0o7777 == write.mode);
-            !bytes_match || !mode_matches
-        })
+        .filter(|write| write_needed(write))
         .collect::<Vec<_>>();
     let mut originals = Vec::with_capacity(changes.len());
     for write in &changes {
