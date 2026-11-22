@@ -21,6 +21,12 @@ pub struct EventMigrationReport {
     pub max_chunk_call_ms: f64,
     pub retries: u64,
 }
+/// Test-only attempt signal: a failed busy BEGIN commits nothing, so waiting tests
+/// synchronize on the reported attempt rather than a commit publication.
+#[cfg(test)]
+#[derive(Default)]
+struct MigrationAttempts(tokio::sync::Notify);
+
 
 /// Drain admitted legacy membership, at most 64 rows per commit and with a 20 ms pause.
 /// Daemon startup and the load fixture call this worker, rather than separate drain loops.
@@ -45,6 +51,8 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
             Err(error) if contention(&error) => {
                 report.retries += 1;
                 eprintln!("fractal: event migration read contention; retrying in {retry:?}: {error:#}");
+                #[cfg(test)]
+                store.extension::<MigrationAttempts>().0.notify_one();
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
                 continue;
@@ -73,6 +81,8 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
             Err(error) if contention(&error) => {
                 report.retries += 1;
                 eprintln!("fractal: event migration contention; retrying in {retry:?}: {error:#}");
+                #[cfg(test)]
+                store.extension::<MigrationAttempts>().0.notify_one();
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
             }
@@ -639,11 +649,17 @@ mod tests {
         let _observer = store.observe_commits(move |_| {
             notice.send_replace(());
         });
+        // A failed busy BEGIN commits nothing, so synchronize on the reported attempt
+        // instead of waiting for a commit publication that must not exist.
+        let attempted = store.extension::<MigrationAttempts>().0.clone();
         let task = tokio::spawn(migrate_event_payloads(store.clone()));
-        tokio::time::timeout(Duration::from_secs(5), changed.changed())
+        tokio::time::timeout(Duration::from_secs(5), attempted.notified())
             .await
-            .unwrap()
-            .unwrap();
+            .expect("the busy migration attempt is reported without a no-op commit publication");
+        assert!(
+            !changed.has_changed().unwrap(),
+            "a failed busy BEGIN must not publish a commit hint"
+        );
         assert!(!task.is_finished());
         assert!(store.event_payload_migration_pending().unwrap());
         blocker.execute_batch("ROLLBACK").unwrap();

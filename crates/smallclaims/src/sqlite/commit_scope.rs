@@ -372,6 +372,10 @@ pub(super) fn boundary(changes: &Changes) {
 }
 
 pub(super) fn install_trace(connection: &Connection, ledger: &Mutex<Ledger>) {
+    // sqlite3_trace_v2 replaces the trace callback but leaves the legacy xProfile
+    // pointer installed. This dispatcher records PROFILE itself; retaining both
+    // callbacks would double-count every writer statement and its elapsed time.
+    connection.profile(None);
     // SAFETY: MutationState owns this mutex and is retained by the connection's installed
     // hooks until SQLite closes. The callback never executes SQL or retains SQLite pointers.
     unsafe {
@@ -504,6 +508,21 @@ mod tests {
         assert_eq!(calls(&claims), 2);
         let connection = writer.write();
         assert_eq!(writer.committed_index.load(Ordering::Acquire), crate::store::current_index(&connection).unwrap());
+    }
+
+    #[test]
+    fn native_trace_records_each_profile_once_after_legacy_observation() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT)"
+        ).unwrap();
+        crate::sqlite::observe(&mut connection);
+        let writer = WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+        let connection = writer.write();
+        crate::sqlite::STATEMENTS_RUN.with(|count| count.set(0));
+        assert_eq!(connection.query_row("SELECT 42", [], |row| row.get::<_, u64>(0)).unwrap(), 42);
+        drop(connection);
+        assert_eq!(crate::sqlite::STATEMENTS_RUN.with(std::cell::Cell::get), 1);
     }
 
     #[test]
