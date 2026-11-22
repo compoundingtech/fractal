@@ -708,7 +708,7 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
     fixture.passes(3);
     let subject = format!("exec/{}/check", run.id);
     let (desired, _) = fixture.store.desired_subject_with_writer(&subject).unwrap().unwrap();
-    let member = desired.member.unwrap();
+    let member = desired.member.as_ref().unwrap();
     let receipt = fixture.store.latest_observation(&subject, "runtime.action.succeeded").unwrap().unwrap();
     let incarnation = receipt.body["fields"]["incarnation_id"].as_str().unwrap().to_owned();
     fixture.reconciler.runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), RuntimeObservation {
@@ -716,10 +716,15 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
         terminal: false,
         status: "running".into(),
         exit_code: None,
-        incarnation_id: Some(incarnation),
+        incarnation_id: Some(incarnation.clone()),
     });
     let run = fixture.store.mission_run(&run.id).unwrap().unwrap();
     let since = crate::reconcile::run_report::run_activity(&run);
+    // FakeRuntime has no physical executor registry. Supply the executor's native
+    // phase evidence explicitly; running observations alone do not prove an overrun.
+    fixture.reconciler.record_step_exec_phase(
+        &run.steps[0], &desired, "exec-started", since, Some(&incarnation), None,
+    ).unwrap();
     let now = since + 31 * MINUTE;
     let _later = Clock::at(&fixture.store, now);
     let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
@@ -728,6 +733,10 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
 
     // A live process must not suppress its independent execution deadline.
     let _expired = Clock::at(&fixture.store, since + 121 * MINUTE);
+    fixture.reconciler.record_step_exec_phase(
+        &run.steps[0], &desired, "execution-timeout", since + 121 * MINUTE,
+        Some(&incarnation), None,
+    ).unwrap();
     // Deliver the step timer's wake explicitly: this synchronous fixture has no Tokio timers.
     fixture.reconciler.incremental.touch(&run.steps[0].subject);
     fixture.passes(4);

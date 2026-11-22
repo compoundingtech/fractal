@@ -10,6 +10,8 @@ pub enum Signal {
     MemorySome,
     IoFull,
     IoSome,
+    /// Diagnostic-only signal, measured in bytes rather than milli-percent.
+    MemoryAvailable,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -67,7 +69,7 @@ impl Default for Policy {
 impl Policy {
     /// Leave room for scheduling jitter without weakening the freshness contract.
     pub fn sample_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_millis((self.freshness_ms / 4).max(1))
+        std::time::Duration::from_millis((self.freshness_ms / 2).max(1))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -76,6 +78,8 @@ impl Policy {
         ensure!(self.sustained_ms != 0 && self.resume_ms != 0 && self.freshness_ms != 0,
             "PSI brake durations must be positive");
         for (index, rule) in self.rules.iter().enumerate() {
+            ensure!(rule.signal != Signal::MemoryAvailable,
+                "memory-available uses memoryAvailableFloorBytes, not a PSI rule");
             ensure!(rule.threshold_millipercent <= 100000
                 && rule.resume_millipercent < rule.threshold_millipercent,
                 "PSI resume threshold must be below trip threshold, both within 0..100%");
@@ -96,13 +100,40 @@ pub struct Reading {
     pub observed_at_ms: u64,
     /// Fresh host MemAvailable is below the independent configured floor.
     pub memory_shortage: bool,
+    pub memory_available_bytes: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ObservationCause {
+    MissingOrInvalid,
+    ObservationGap,
+    StaleDecision,
+    NotYetSampled,
+    Io { os_error: Option<i32> },
+    InvalidMemoryFloor,
+}
+
+impl ObservationCause {
+    fn from_error(error: &anyhow::Error) -> Self {
+        if error.is::<InvalidMemoryFloor>() {
+            Self::InvalidMemoryFloor
+        } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            Self::Io { os_error: error.raw_os_error() }
+        } else {
+            Self::MissingOrInvalid
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Reason {
-    Pressure(Signal),
-    UnknownObservation,
-    Recovering,
+    /// PSI values use milli-percent; MemoryAvailable values use bytes.
+    Pressure { signal: Signal, value: u64, threshold: u64 },
+    /// Remaining healthy observation time, in milliseconds.
+    Recovering { remaining: u64 },
+    UnknownObservation { cause: ObservationCause },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,7 +150,7 @@ pub struct Brake {
     last_observation: Option<u64>,
     recovering_since: Option<u64>,
     tripped: bool,
-    trip_signal: Option<Signal>,
+    trip_pressure: Option<Reason>,
 }
 
 impl Brake {
@@ -128,7 +159,7 @@ impl Brake {
         Ok(Self {
             over_since: vec![None; policy.rules.len()], policy,
             last_observation: None, recovering_since: None, floor_over_since: None,
-            tripped: false, trip_signal: None,
+            tripped: false, trip_pressure: None,
         })
     }
 
@@ -143,16 +174,16 @@ impl Brake {
                 reading.signal == rule.signal && reading.window == rule.window);
             let Some(reading) = matches.next() else { return false; };
             matches.next().is_none() && reading.millipercent <= 100000
+                && (!reading.memory_shortage || reading.memory_available_bytes.is_some())
                 && reading.observed_at_ms <= now_ms
                 && now_ms - reading.observed_at_ms <= self.policy.freshness_ms
         });
         if !complete {
-            self.over_since.fill(None);
-            self.floor_over_since = None;
-            self.recovering_since = None;
-            self.tripped = true;
-            self.trip_signal = None;
-            return Decision { blocked: true, reason: Some(Reason::UnknownObservation) };
+            return self.unknown(if gap {
+                ObservationCause::ObservationGap
+            } else {
+                ObservationCause::MissingOrInvalid
+            });
         }
         let shortage = self.policy.memory_available_floor_bytes > 0
             && readings.iter().any(|reading| reading.memory_shortage);
@@ -160,7 +191,12 @@ impl Brake {
             let since = self.floor_over_since.get_or_insert(now_ms);
             if now_ms - *since >= self.policy.sustained_ms {
                 self.tripped = true;
-                self.trip_signal = Some(Signal::MemoryFull);
+                self.trip_pressure = Some(Reason::Pressure {
+                    signal: Signal::MemoryAvailable,
+                    value: readings.iter().find_map(|reading| reading.memory_available_bytes)
+                        .expect("validated memory shortage has an available-byte observation"),
+                    threshold: self.policy.memory_available_floor_bytes,
+                });
             }
         } else {
             self.floor_over_since = None;
@@ -177,7 +213,10 @@ impl Brake {
                 let since = self.over_since[index].get_or_insert(now_ms);
                 if now_ms - *since >= self.policy.sustained_ms {
                     self.tripped = true;
-                    self.trip_signal = Some(rule.signal);
+                    self.trip_pressure = Some(Reason::Pressure {
+                        signal: rule.signal, value: u64::from(reading.millipercent),
+                        threshold: u64::from(rule.threshold_millipercent),
+                    });
                 }
             } else {
                 self.over_since[index] = None;
@@ -190,7 +229,7 @@ impl Brake {
             let since = self.recovering_since.get_or_insert(now_ms);
             if now_ms - *since >= self.policy.resume_ms {
                 self.tripped = false;
-                self.trip_signal = None;
+                self.trip_pressure = None;
                 self.recovering_since = None;
                 self.over_since.fill(None);
                 return Decision { blocked: false, reason: None };
@@ -198,11 +237,24 @@ impl Brake {
         } else {
             self.recovering_since = None;
         }
+        let recovering = Reason::Recovering {
+            remaining: self.policy.resume_ms.saturating_sub(
+                self.recovering_since.map_or(0, |since| now_ms - since)),
+        };
         Decision { blocked: true, reason: Some(if all_below_resume {
-            Reason::Recovering
+            recovering
         } else {
-            self.trip_signal.map_or(Reason::Recovering, Reason::Pressure)
+            self.trip_pressure.unwrap_or(recovering)
         }) }
+    }
+
+    fn unknown(&mut self, cause: ObservationCause) -> Decision {
+        self.over_since.fill(None);
+        self.floor_over_since = None;
+        self.recovering_since = None;
+        self.tripped = true;
+        self.trip_pressure = None;
+        Decision { blocked: true, reason: Some(Reason::UnknownObservation { cause }) }
     }
 }
 
@@ -378,12 +430,14 @@ impl Reader {
         let needs_io = policy.rules.iter().any(|rule|
             matches!(rule.signal, Signal::IoSome | Signal::IoFull));
         let mut shortage = false;
+        let mut available = None;
         let mut lane_absent = memory_path.is_none();
         if policy.memory_available_floor_bytes > 0 {
             self.meminfo.clear();
             std::fs::File::open(meminfo_path)?.read_to_string(&mut self.meminfo)?;
             validate_memory_floor(policy, &self.meminfo)?;
-            shortage = meminfo_bytes(&self.meminfo, "MemAvailable:")? < policy.memory_available_floor_bytes;
+            available = Some(meminfo_bytes(&self.meminfo, "MemAvailable:")?);
+            shortage = available.is_some_and(|bytes| bytes < policy.memory_available_floor_bytes);
         }
         if needs_memory {
             self.memory.clear();
@@ -435,6 +489,7 @@ impl Reader {
                 Signal::MemorySome => (&self.memory, "some"),
                 Signal::IoFull => (&self.io, "full"),
                 Signal::IoSome => (&self.io, "some"),
+                Signal::MemoryAvailable => unreachable!("memory floor is not a PSI rule"),
             };
             let memory_rule = matches!(rule.signal, Signal::MemoryFull | Signal::MemorySome);
             let pressure = if lane_absent && memory_rule {
@@ -452,6 +507,7 @@ impl Reader {
                 millipercent: pressure,
                 observed_at_ms: now_ms,
                 memory_shortage: shortage,
+                memory_available_bytes: available,
             });
         }
         Ok(&self.readings)
@@ -463,8 +519,9 @@ pub struct Observer {
     policy: Policy,
     brake: Brake,
     reader: Reader,
-    origin: std::time::Instant,
+    origin: tokio::time::Instant,
     sampled_at: Option<u64>,
+    cached: Decision,
     paths: Option<[std::path::PathBuf; 5]>,
 }
 
@@ -478,7 +535,10 @@ impl Observer {
         let reader = Reader::new(&policy, std::path::Path::new("/proc/meminfo"))?;
         Ok(Self {
             brake: Brake::new(policy.clone())?, policy, reader,
-            origin: std::time::Instant::now(), sampled_at: None, paths: None,
+            origin: tokio::time::Instant::now(), sampled_at: None, paths: None,
+            cached: Decision { blocked: true, reason: Some(Reason::UnknownObservation {
+                cause: ObservationCause::NotYetSampled,
+            }) },
         })
     }
 
@@ -487,41 +547,65 @@ impl Observer {
         let reader = Reader::new(&policy, &paths[2])?;
         Ok(Self {
             brake: Brake::new(policy.clone())?, policy, reader,
-            origin: std::time::Instant::now(), sampled_at: None, paths: Some(paths),
+            origin: tokio::time::Instant::now(), sampled_at: None, paths: Some(paths),
+            cached: Decision { blocked: true, reason: Some(Reason::UnknownObservation {
+                cause: ObservationCause::NotYetSampled,
+            }) },
         })
     }
 
+    /// Read the sampler's cached decision without kernel I/O or advancing hysteresis.
+    /// A stopped sampler cannot leave admission open after its freshness deadline.
+    pub fn decision(&self) -> Decision {
+        let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if self.sampled_at.is_some_and(|at| now.saturating_sub(at) > self.policy.freshness_ms) {
+            Decision { blocked: true, reason: Some(Reason::UnknownObservation {
+                cause: ObservationCause::StaleDecision,
+            }) }
+        } else {
+            self.cached
+        }
+    }
+
+    /// Sample kernel observations; only the independent sampler may advance the brake.
     pub fn observe(&mut self, policy: &Policy) -> Result<Decision> {
         if &self.policy != policy {
             self.brake = Brake::new(policy.clone())?;
             self.policy = policy.clone();
             self.sampled_at = None;
+            self.cached = Decision { blocked: true, reason: Some(Reason::UnknownObservation {
+                cause: ObservationCause::NotYetSampled,
+            }) };
             self.reader.previous_allocstall = None;
             self.reader.last_allocstall_at_ms = None;
         }
         let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-        if self.sampled_at.is_none_or(|at|
-            u128::from(now.saturating_sub(at)) >= self.policy.sample_interval().as_millis())
-        {
-            self.sampled_at = Some(now);
-            let readings = match &self.paths {
-                Some([memory, io, meminfo, root_memory, vmstat]) =>
-                    self.reader.read_paths(&self.policy, now, KernelPaths {
-                        memory_path: Some(memory), io_path: io, meminfo_path: meminfo,
-                        root_memory_path: root_memory, vmstat_path: vmstat,
-                    }),
-                None => self.reader.read(&self.policy, now),
-            };
-            return Ok(match readings {
-                Ok(readings) => self.brake.observe(readings, now),
-                Err(error) if error.is::<InvalidMemoryFloor>() => {
+        // The daemon interval owns cadence. A second throttle here would discard a
+        // slightly early tick and turn scheduling jitter into a freshness gap.
+        self.sampled_at = Some(now);
+        let readings = match &self.paths {
+            Some([memory, io, meminfo, root_memory, vmstat]) =>
+                self.reader.read_paths(&self.policy, now, KernelPaths {
+                    memory_path: Some(memory), io_path: io, meminfo_path: meminfo,
+                    root_memory_path: root_memory, vmstat_path: vmstat,
+                }),
+            None => self.reader.read(&self.policy, now),
+        };
+        self.cached = match readings {
+            Ok(readings) => self.brake.observe(readings, now),
+            Err(error) => {
+                self.reader.readings.clear();
+                self.brake.last_observation = Some(now);
+                let decision = self.brake.unknown(ObservationCause::from_error(&error));
+                if error.is::<InvalidMemoryFloor>() {
                     self.sampled_at = None;
+                    self.cached = decision;
                     return Err(error);
                 }
-                Err(_) => { self.reader.readings.clear(); self.brake.observe(&[], now) },
-            });
-        }
-        Ok(self.brake.observe(&self.reader.readings, now))
+                decision
+            }
+        };
+        Ok(self.decision())
     }
 }
 

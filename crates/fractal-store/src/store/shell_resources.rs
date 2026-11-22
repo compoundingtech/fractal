@@ -707,6 +707,7 @@ impl Store {
     /// Both acceptance and cancellation refresh its owner keys inside the transaction.
     fn agent_request_incarnation(&self, owner: &resource_membership::Owner) -> Result<Option<AgentRequestIncarnation>> {
         let Some(invocation) = owner.invocation.as_deref().filter(|id| id.starts_with("invocation/")) else { return Ok(None); };
+        // This owner carries only an invocation ID, so this is intentionally a global read.
         let receipts = self.invocation_receipts(invocation)?;
         let receipt = receipts.iter().rev().find(|receipt| receipt.incarnation.is_some())
             .context("shell owner has no native invocation evidence")?;
@@ -732,6 +733,7 @@ impl Store {
     /// Recheck the real invocation/attempt before admission and physical payload release.
     pub fn shell_resource_owner_live(&self, owner: &resource_membership::Owner) -> Result<()> {
         if let Some(invocation) = owner.invocation.as_deref().filter(|id| id.starts_with("invocation/")) {
+            // This owner carries only an invocation ID, so this is intentionally a global read.
             let receipts = self.invocation_receipts(invocation)?;
             use fractal_schema::invocation::InvocationPhase;
             anyhow::ensure!(!receipts.iter().any(|receipt| matches!(receipt.phase,

@@ -85,7 +85,7 @@ impl Store {
             receipt.event_key = Some(message.into());
             if receipt.trace_context.is_none() {
                 let links = receipt.parent_invocation_id.as_deref()
-                    .map(|parent| self.invocation_receipts(parent))
+                    .map(|parent| self.agent_invocation_receipts_for(agent, parent))
                     .transpose()?.unwrap_or_default().into_iter()
                     .find_map(|receipt| receipt.trace_context
                         .and_then(|context| serde_json::from_value(context).ok()))

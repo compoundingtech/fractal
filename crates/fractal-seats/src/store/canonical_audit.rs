@@ -180,6 +180,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_seat_accounts",
         "account_limit_readings",
         "account_limit_seats",
+        // Rebuildable member-local usage boundary lookup and bounded backfill cursor.
+        "local_usage_period_v1",
+        "local_usage_period_v1_progress",
         "local_latest_slots",
         // Member-local timestamp seeks and capture queue, rebuilt from authoritative claim bodies.
         "local_objective_times_v1",
