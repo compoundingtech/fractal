@@ -2804,6 +2804,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
         },
         loop_state: NativeLoopState {
             paths: None,
+            provider_started_at_ms: 10,
             mailbox_fence: None,
             ready: true,
             harness_record_started: true,
@@ -8453,6 +8454,22 @@ fn predecessor_layout_survives_resume_without_rewriting_catalogs() {
             .paths
             .is_none()
     );
+}
+
+#[test]
+fn native_provider_launch_boundary_survives_driver_reexec() {
+    let state = NativeLoopState {
+        provider_started_at_ms: 10,
+        ..NativeLoopState::default()
+    };
+    let mut encoded = serde_json::to_value(&state).unwrap();
+    let back: NativeLoopState = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(back.provider_started_at_ms, 10);
+    // Older re-exec state already has an adopted ledger for the same incarnation. A missing
+    // launch boundary must not replace it with a later clock reading and expire live children.
+    encoded.as_object_mut().unwrap().remove("provider_started_at_ms");
+    let back: NativeLoopState = serde_json::from_value(encoded).unwrap();
+    assert_eq!(back.provider_started_at_ms, 0);
 }
 
 #[test]
