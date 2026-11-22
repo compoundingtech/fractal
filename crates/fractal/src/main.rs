@@ -7976,6 +7976,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "resource_recovery_observations": 1,
                     "idle_residency": 1,
                     "per_run_missions": 1,
+                    "work_rebind_v1": 1,
                     "shell_resource_exec": 2,
                     "runtime_workspace": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),

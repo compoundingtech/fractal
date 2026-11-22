@@ -628,3 +628,30 @@ Native execution wait accounting is shared through
 `fractal_kernel::step_execution::execution_wait`; both the store's timing fold
 and the reconciler's executor attestation use that leaf helper after the crate split.
 
+
+## Native-session work lease continuity
+
+`claims-v44.json` adds the durable `work.rebound` evidence kind to main's v43
+registry. Versions 1 through 43 remain frozen. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v44.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, freshness check, and audit
+reports select v44. Rebound inputs identify an agent claimant, a positive attempt, distinct
+old and new harness incarnations, and the native session resumed by the new incarnation.
+The focused `the_corpus_generates_valid_work_rebound_inputs` regression checks the
+specification against the live registry, validates and admits the generated input, and
+replicates it to the oracle.
+
+The complete owning serialization was captured byte-for-byte from the strict registry
+freshness assertion in hosted run
+[45039725615](https://github.com/compoundingtech/fractal/actions/runs/45039725615)
+at source `1653f03a265710ea65d0f3a4d1bb5afddb97cb61`; all three attempts emitted identical
+335,746-byte outputs (SHA-256
+`9464faa501cd654dec87b75744009d595661acefb1bad944d1995565092548d1`).
+After integrating main's final v43, the entire `fractal-schema` crate tree and `Cargo.lock`
+were identical to that captured source before promoting the output as the new v44.
+No historical JSON was hand-merged. Main's local-trim semantics remain unchanged: no
+shared checkpoint agreement, old-build excusal continuation, or historical never-trim
+expectations are reintroduced. Retained claim equality, oracle reader comparisons,
+person-authored claim preservation, invalid/pending-record checks, retired-ledger
+sabotage coverage, and complete active-corpus freshness remain enforced.
+
