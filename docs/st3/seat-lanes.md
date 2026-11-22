@@ -450,6 +450,9 @@ relative to the cgroup v2 mount. `excludedCgroups` supplies additional excluded 
 (defaults `app-lanes.slice` and `gate.slice`) using the same path rules.
 Names resolve independently for every discovered user manager. A protected root inside a
 job-parent or excluded subtree is excluded too; matching uses path components, not string prefixes.
+Explicit protected roots must identify their managers when using relative slice names.
+Ancestor-only roots such as `/` or `/user.slice` require absolute job-parent and exclusion
+paths (or empty lists); unresolved relative names are rejected at policy load, never ignored.
 
 PSI aggregates descendants and retains averages after a job exits. A protected ancestor
 containing a configured job path is therefore never sampled, even when that job subtree is

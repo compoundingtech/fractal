@@ -181,7 +181,7 @@ impl PressureFixture {
         fixture.available(8 << 30);
         for path in ["system.slice", "system.slice/fractal.service", "app.slice",
             "interactive.slice", "app.slice/editor.service", "app.slice/app-lanes.slice",
-            "app.slice/gate.slice"]
+            "gate.slice"]
         {
             fixture.cgroup(path, "0", "0");
         }
@@ -228,7 +228,7 @@ impl PressureFixture {
 fn admitted_high_24_5_job_does_not_contaminate_protected_memory_or_io() {
     let mut fixture = PressureFixture::new();
     fixture.cgroup("app.slice/app-lanes.slice", "24.5", "98");
-    fixture.cgroup("app.slice/gate.slice", "80", "90");
+    fixture.cgroup("gate.slice", "80", "90");
     // Ancestor PSI aggregates the jobs and must never be used for either signal.
     fixture.cgroup("app.slice", "24.5", "98");
     fixture.write("cgroup/app.slice/app-lanes.slice/memory.high", "1073741824\n");
@@ -282,7 +282,7 @@ fn nested_heavy_job_parent_with_polluted_ancestors_stays_quiet_through_removal_a
 #[test]
 fn empty_job_parent_with_high_aggregate_emits_zero_without_failing_closed() {
     let mut fixture = PressureFixture::new();
-    for child in ["app-lanes.slice", "editor.service", "gate.slice"] {
+    for child in ["app-lanes.slice", "editor.service"] {
         std::fs::remove_dir_all(fixture.root.path().join(format!("cgroup/app.slice/{child}"))).unwrap();
     }
     // No configured job-parent endpoint exists under the high protected ancestor.
@@ -400,10 +400,34 @@ fn vanished_snapshot_child_is_skipped_only_when_its_cgroup_is_gone() {
 }
 
 #[test]
+fn vanished_intermediate_frontier_child_is_skipped_only_when_gone() {
+    let mut fixture = PressureFixture::new();
+    assert!(!fixture.observe(0).blocked);
+    fixture.cgroup("custom.slice", "99", "99");
+    fixture.cgroup("custom.slice/nested/jobs", "99", "99");
+    let root = fixture.root.path().join("cgroup");
+    let nested = root.join("custom.slice/nested");
+    let children = Reader::children(&root.join("custom.slice"), &mut Enumeration::default()).unwrap();
+    let excluded = [nested.join("jobs")];
+    std::fs::remove_dir_all(&nested).unwrap();
+    fixture.reader.sample_frontier(&fixture.policy, &root, &children,
+        &[], &excluded, &mut Enumeration::default()).unwrap();
+    assert!(fixture.reader.readings.iter().all(|reading|
+        reading.millipercent == 0 && reading.cgroup.as_deref() != Some("/custom.slice")));
+    // An existing but unreadable intermediate must still fail closed.
+    std::fs::write(&nested, "not a cgroup directory").unwrap();
+    let error = fixture.reader.sample_frontier(&fixture.policy, &root, &children,
+        &[], &excluded, &mut Enumeration::default()).unwrap_err();
+    assert_eq!(ObservationCause::from_error(&error), ObservationCause::Io {
+        os_error: Some(libc::ENOTDIR), path: Some(nested.to_string_lossy().into()),
+    });
+}
+
+#[test]
 fn every_sample_rediscovers_new_children_and_exclusions() {
     let mut fixture = PressureFixture::new();
     std::fs::remove_dir_all(fixture.root.path().join("cgroup/app.slice/app-lanes.slice")).unwrap();
-    std::fs::remove_dir_all(fixture.root.path().join("cgroup/app.slice/gate.slice")).unwrap();
+    std::fs::remove_dir_all(fixture.root.path().join("cgroup/gate.slice")).unwrap();
     assert!(!fixture.observe(0).blocked);
     fixture.cgroup("app.slice/app-lanes.slice", "24.5", "90");
     fixture.cgroup("app.slice", "24.5", "90");
@@ -420,6 +444,7 @@ fn cgroup_enumeration_is_bounded_and_names_the_limit() {
     fixture.policy.protected_cgroups = vec!["bounded.slice".into()];
     // Only the job-parent frontier enumerates children; keep the depth-one bound meaningful.
     fixture.policy.job_parent_cgroups = vec!["/bounded.slice/jobs".into()];
+    fixture.policy.excluded_cgroups.clear();
     for index in 0..=MAX_CGROUPS {
         std::fs::create_dir_all(fixture.root.path().join(format!("cgroup/bounded.slice/child{index}"))).unwrap();
     }
@@ -436,6 +461,7 @@ fn frontier_enumeration_is_bounded_by_raw_entries_too() {
     let mut fixture = PressureFixture::new();
     fixture.policy.protected_cgroups = vec!["bounded.entries.slice".into()];
     fixture.policy.job_parent_cgroups = vec!["/bounded.entries.slice/jobs".into()];
+    fixture.policy.excluded_cgroups.clear();
     let root = fixture.root.path().join("cgroup/bounded.entries.slice");
     std::fs::create_dir_all(&root).unwrap();
     // Control files count toward the raw-entry budget, not the directory budget.
@@ -480,6 +506,7 @@ fn configured_protection_and_absolute_job_parents_use_mount_relative_paths() {
     fixture.policy.protected_cgroups = vec!["/custom.slice".into()];
     // Absolute job parents are mount-relative exact paths of arbitrary depth.
     fixture.policy.job_parent_cgroups = vec!["/custom.slice/nested/jobs".into()];
+    fixture.policy.excluded_cgroups.clear();
     fixture.cgroup("custom.slice", "99", "99");
     fixture.cgroup("custom.slice/nested/jobs", "99", "99");
     fixture.cgroup("custom.slice/editor", "0.1", "0.2");
@@ -496,6 +523,7 @@ fn deep_absolute_exclusion_is_honored_by_descent_without_failing_closed() {
     let mut fixture = PressureFixture::new();
     fixture.policy.protected_cgroups = vec!["/custom.slice".into()];
     fixture.policy.excluded_cgroups = vec!["/custom.slice/nested/jobs".into()];
+    fixture.policy.job_parent_cgroups.clear();
     fixture.cgroup("custom.slice", "99", "99");
     fixture.cgroup("custom.slice/nested/jobs", "99", "99");
     fixture.cgroup("custom.slice/editor", "0.1", "0.2");
@@ -505,6 +533,51 @@ fn deep_absolute_exclusion_is_honored_by_descent_without_failing_closed() {
     assert_eq!(fixture.reader.readings[0].millipercent, 100);
     assert_eq!(fixture.reader.readings[1].millipercent, 200);
     assert_eq!(fixture.reader.readings[0].cgroup.as_deref(), Some("/custom.slice/editor"));
+}
+
+#[test]
+fn ancestor_only_protection_rejects_relative_names_at_policy_load() {
+    for protected in ["/", "/user.slice", "/user.slice/user-1000.slice"] {
+        for relative_job_parent in [true, false] {
+            let policy = Policy {
+                protected_cgroups: vec![protected.into()],
+                job_parent_cgroups: if relative_job_parent { vec!["gate.slice".into()] } else { Vec::new() },
+                excluded_cgroups: if relative_job_parent { Vec::new() } else { vec!["app-lanes.slice".into()] },
+                ..Policy::default()
+            };
+            let error = policy.validate().unwrap_err();
+            assert!(error.to_string().contains("manager-qualified protected roots"));
+            let mut fixture = PressureFixture::new();
+            fixture.policy = policy;
+            assert!(fixture.observer().is_err());
+            assert!(fixture.observe(0).blocked, "unresolved names must never open admission");
+        }
+    }
+    let policy = Policy {
+        protected_cgroups: vec!["/user.slice".into()],
+        job_parent_cgroups: vec!["/user.slice/user-1000.slice/user@1000.service/gate.slice".into()],
+        excluded_cgroups: Vec::new(),
+        ..Policy::default()
+    };
+    assert!(policy.validate().is_ok(), "absolute paths support ancestor-only protection");
+}
+
+#[test]
+fn canonical_gate_parent_is_excluded_when_user_manager_is_protected() {
+    let mut fixture = PressureFixture::new();
+    let manager = "user.slice/user-1000.slice/user@1000.service";
+    fixture.policy.protected_cgroups = vec![format!("/{manager}").into()];
+    assert!(fixture.policy.validate().is_ok());
+    fixture.cgroup(manager, "99", "99");
+    fixture.cgroup(&format!("{manager}/gate.slice"), "80", "90");
+    fixture.cgroup(&format!("{manager}/app.slice"), "24.5", "98");
+    fixture.cgroup(&format!("{manager}/app.slice/app-lanes.slice"), "24.5", "98");
+    fixture.cgroup(&format!("{manager}/app.slice/editor.service"), "0", "0");
+    fixture.cgroup(&format!("{manager}/interactive.slice"), "0", "0");
+    for now in (0..=120000).step_by(5000) {
+        assert!(!fixture.observe(now).blocked);
+        assert!(fixture.reader.readings.iter().all(|reading| reading.millipercent == 0));
+    }
 }
 
 #[test]

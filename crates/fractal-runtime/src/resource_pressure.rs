@@ -113,6 +113,14 @@ impl Policy {
             ensure!(path.components().count() <= MAX_CGROUPS as usize,
                 "configured cgroup paths must stay within the enumeration bound");
         }
+        if !self.protected_cgroups.is_empty()
+            && self.job_parent_cgroups.iter().chain(&self.excluded_cgroups)
+                .any(|path| !path.is_absolute())
+        {
+            ensure!(self.protected_cgroups.iter().all(|path|
+                !user_manager_roots(std::slice::from_ref(path)).is_empty()),
+                "relative job-parent and exclusion names require manager-qualified protected roots; use explicit user-manager/app.slice roots or absolute job-parent and exclusion paths for ancestor roots");
+        }
         for (index, rule) in self.rules.iter().enumerate() {
             ensure!(rule.signal != Signal::MemoryAvailable,
                 "memory-available uses memoryAvailableFloorBytes, not a PSI rule");
@@ -648,7 +656,12 @@ impl Reader {
                 continue;
             }
             if excluded.iter().any(|job| job.starts_with(child)) {
-                let descendants = Self::children(child, bounds)?;
+                let descendants = match Self::children(child, bounds) {
+                    Ok(descendants) => descendants,
+                    Err(_) if matches!(std::fs::metadata(child),
+                        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound) => continue,
+                    Err(error) => return Err(error),
+                };
                 self.sample_frontier(policy, root, &descendants, protected, excluded, bounds)?;
                 continue;
             }
@@ -678,6 +691,10 @@ impl Reader {
         // ancestors, so a removed job can never resurface through a
         // contaminated ancestor aggregate.
         let managers = user_manager_roots(&protected);
+        ensure!(!managers.is_empty()
+            || policy.job_parent_cgroups.iter().chain(&policy.excluded_cgroups)
+                .all(|path| path.is_absolute()),
+            "relative job-parent and exclusion names cannot be resolved without a user manager");
         let mut excluded = Vec::new();
         for entry in policy.job_parent_cgroups.iter().chain(&policy.excluded_cgroups) {
             if entry.is_absolute() {
