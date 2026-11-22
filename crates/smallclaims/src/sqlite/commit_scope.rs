@@ -191,6 +191,10 @@ impl Ledger {
     }
 
     fn finished(&mut self, key: usize, total_changes: i64, autocommit: bool, resetting: bool) {
+        // Reset/finalize callbacks can follow one another without a new TRACE_STMT.
+        // The preceding reset has now completed and advanced its counter: resolve its
+        // hints before another still-busy PROFILE replaces the single deferred slot.
+        self.resolve_deferred(total_changes);
         if self.statement != Some(key) {
             let Some(index) = self.suspended.iter().position(|statement| statement.key == key) else { return; };
             let statement = self.suspended.remove(index);
@@ -783,5 +787,48 @@ mod returning_reset_tests {
         assert_eq!(beta.load(Ordering::Relaxed), 0);
         assert_eq!(globals.load(Ordering::Relaxed), 1);
         assert_eq!(writer.write().query_row("SELECT count(*) FROM alpha", [], |row| row.get::<_, u64>(0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn consecutive_returning_resets_preserve_every_committed_table() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT);
+             CREATE TABLE alpha(id INTEGER PRIMARY KEY);
+             CREATE TABLE beta(id INTEGER PRIMARY KEY);"
+        ).unwrap();
+        let writer = WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+        let alpha = Arc::new(AtomicU64::new(0));
+        let observed = alpha.clone();
+        let _alpha = writer.observe_tables(&["alpha"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let beta = Arc::new(AtomicU64::new(0));
+        let observed = beta.clone();
+        let _beta = writer.observe_tables(&["beta"], move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        let globals = Arc::new(AtomicU64::new(0));
+        let observed = globals.clone();
+        let _global = writer.observe_commits(move |_| { observed.fetch_add(1, Ordering::Relaxed); });
+        {
+            let connection = writer.write();
+            connection.execute_batch("BEGIN").unwrap();
+            let mut alpha_statement = connection.prepare("INSERT INTO alpha VALUES(1) RETURNING id").unwrap();
+            let mut alpha_rows = alpha_statement.query([]).unwrap();
+            assert!(alpha_rows.next().unwrap().is_some());
+            let mut beta_statement = connection.prepare("INSERT INTO beta VALUES(1) RETURNING id").unwrap();
+            let mut beta_rows = beta_statement.query([]).unwrap();
+            assert!(beta_rows.next().unwrap().is_some());
+            drop(beta_rows);
+            drop(beta_statement);
+            // No SQL between the two resets: beta's deferred hint must survive alpha's
+            // PROFILE even though alpha creates a second deferred completion.
+            drop(alpha_rows);
+            drop(alpha_statement);
+            connection.execute_batch("COMMIT").unwrap();
+        }
+        assert_eq!(alpha.load(Ordering::Relaxed), 1);
+        assert_eq!(beta.load(Ordering::Relaxed), 1);
+        assert_eq!(globals.load(Ordering::Relaxed), 1);
+        let connection = writer.write();
+        assert_eq!(connection.query_row("SELECT count(*) FROM alpha", [], |row| row.get::<_, u64>(0)).unwrap(), 1);
+        assert_eq!(connection.query_row("SELECT count(*) FROM beta", [], |row| row.get::<_, u64>(0)).unwrap(), 1);
     }
 }
