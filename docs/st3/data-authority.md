@@ -480,6 +480,7 @@ order from the same admitted claims.
 | `local_seat_accounts` | Local operational fact | The account chosen for each pooled seat on this node; retained across restarts, never replicated |
 | `local_subscription_mission_deferrals` | Local | Local reconciler capacity backoff/retry scheduling. |
 | `local_stop_deferral_backfill` | Local cache | Trigger-maintained claim ids, subjects and recovered-failure references of retained-stop diagnostics, faults and recoveries, plus the ceiling and completion of the one-time copy of older claims. Rebuildable from claims; never replicated; excluded from shared projection digests. |
+| `local_usage_period_v1`, `local_usage_period_v1_progress` | Local derived state | Claim IDs, cumulative-series keys and observed-time boundary seeks, plus the ceiling and cursor of the bounded historical copy. Rebuildable from retained usage claims; never replicated or included in shared projection digests. Exact historical reads remain active until the copy is complete. |
 | `local_usage_provenance` | Local | Pricing contributions for the local spend slots. |
 | `local_usage_responses` | Local | Counted provider response IDs and times; deduplicates replay across harness incarnations. |
 | `local_usage_spend` | Local | Cumulative token and cost buckets; retained across observation-log trimming. |
