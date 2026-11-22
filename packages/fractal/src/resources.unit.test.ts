@@ -433,15 +433,18 @@ describe('mission-owned native scratch', () => {
 
   it.effect('returns typed bounded dry-run rows including unknown owners', () => Effect.gen(function* () {
     const row = { handle, state: 'held', ownerObservation: 'unknown', consumerObservation: 'unknown' }
-    const program = Fractal.mission(intent, () => Fractal.resources.scratchInventory({
-      host: 'executor', after: 'earlier', limit: 10,
+    const program = Fractal.mission(intent, () => Effect.gen(function* () {
+      const rows = yield* Fractal.resources.scratchInventory({
+        host: 'executor', after: 'earlier', limit: 10,
+      })
+      expect(rows).toEqual([row])
     }))
     const requests: ResourceRequest[] = []
     const host = fakeHost({ resource: async (request) => {
       requests.push(request)
       return { _tag: 'Success', value: [row] }
     } })
-    expect(yield* start(program, host)).toEqual({ _tag: 'Success', value: [row] })
+    expect(yield* start(program, host)).toEqual({ _tag: 'Success', value: null })
     expect(requests).toMatchObject([{
       operation: 'resource.scratch.inventory', payload: { host: 'executor', after: 'earlier', limit: 10 },
     }])
