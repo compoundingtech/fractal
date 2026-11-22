@@ -2141,6 +2141,63 @@ fn eta_shared_step_completion_republishes_other_missions_open_run() {
     assert_eq!(eta["remaining_high_ms"], 700);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_missions_refresh_eta_after_a_projection_only_commit_at_the_same_claim_index() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    publish(
+        store,
+        "version 2\nmission \"eta\" state=\"ready\" { goal \"Finish.\"; step \"work\" { agentless; } }",
+        "eta",
+    );
+    let waiting = start(store, "eta", "waiting");
+    let list = store.published_missions_list();
+    let mut publications = list.subscribe();
+    missions_refresher().start(store);
+    tokio::time::timeout(Duration::from_secs(5), publications.changed())
+        .await.expect("the initial mission publication").unwrap();
+    let before = list.newest().unwrap();
+    let index = store.index().unwrap();
+    assert_eq!(before.cut, index);
+    assert!(before.rows.cards["mission/eta"]["run_details"][0]["eta"].is_null());
+
+    // Install a repaired historical sample and its consumer invalidation atomically. Neither
+    // table appends claims, and only the mission-change table is a refresher dependency.
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h37d8605f8522 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_run_eta_samples
+             SELECT subject||'/sample',run_id||'/sample',definition_hash,step_path,1000,100
+             FROM step_runs WHERE subject=?1",
+            [&waiting.steps[0].subject],
+        ).unwrap(), 1);
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-ha9ebd81a804a owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_run_eta_mission_changes(mission_id,changed_index)
+             VALUES('eta',(SELECT COALESCE(MAX(changed_index),0)+1 FROM local_run_eta_mission_changes))
+             ON CONFLICT(mission_id) DO UPDATE SET changed_index=excluded.changed_index",
+            [],
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(store.index().unwrap(), index, "projection repair appends no claim");
+    tokio::time::timeout(Duration::from_secs(5), publications.changed())
+        .await.expect("the projection-only commit must wake the mission refresher").unwrap();
+    let after = list.newest().unwrap();
+    assert_eq!(after.cut, before.cut);
+    assert!(after.rows.eta_generation > before.rows.eta_generation);
+    let eta = &after.rows.cards["mission/eta"]["run_details"][0]["eta"];
+    assert_eq!(eta["basis"]["samples"], 1);
+    assert_eq!(eta["remaining_low_ms"], 100);
+    assert_eq!(eta["remaining_high_ms"], 100);
+    assert_eq!(
+        Some(eta.clone()),
+        store.mission_run_eta(&waiting.subject, eta["as_of"].as_u64().unwrap().into()).unwrap(),
+    );
+    assert!(before.rows.cards["mission/eta"]["run_details"][0]["eta"].is_null());
+}
+
 #[test]
 fn eta_v3_trigger_layout_preserves_samples_and_published_card_values() {
     let _clock = Clock::at(start_time());

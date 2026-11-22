@@ -14,6 +14,18 @@ const PREFIX: &str = "resource/fleet/roll-completion/";
 // The next byte after the trailing slash bounds the reserved subject prefix.
 const PREFIX_END: &str = "resource/fleet/roll-completion0";
 
+// Receipt proofs depend on canonical authority, declaration and envelope state, not on
+// local maintenance, mailbox cursors or unrelated materialized-view transactions.
+const INPUT_TABLES: &[&str] = &[
+    "claims", "claim_positions", "batches", "replica_records", "replica_record_rows",
+    "replica_envelopes", "released_envelopes", "checkpoint_envelopes",
+    "desired", "identity_names", "identity_heads", "meta",
+    "claim_signature_migration", "claim_verdicts", "claim_signature_judging",
+    "claim_verdict_queue", "expected_claim_signatures",
+    "replica_envelope_signatures", "replica_restore_quarantine",
+    "projection_digest_repaired_claims", "operations",
+];
+
 #[derive(Default)]
 struct Started(OnceLock<()>);
 
@@ -134,7 +146,7 @@ pub fn start(store: &Arc<Store>) {
     if store.extension::<Started>().0.set(()).is_err() { return; }
     let wake = Arc::new(Notify::new());
     let committed = Arc::clone(&wake);
-    let observer = store.observe_commits(move |_| committed.notify_one());
+    let observer = store.observe_tables(INPUT_TABLES, move |_| committed.notify_one());
     #[cfg(test)]
     let refreshed = store.extension::<Refreshed>();
     let store = Arc::downgrade(store);
