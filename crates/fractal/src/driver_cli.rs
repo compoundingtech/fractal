@@ -1219,7 +1219,7 @@ async fn drive_st2_native_loop(
                                 loop_state.ready = true;
                             }
                             publish_harness_activity(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 if driver == "claude" {
@@ -1256,7 +1256,7 @@ async fn drive_st2_native_loop(
                             if let Some(context) = fractal_drivers::harness_context::read(
                                 &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 &incarnation,
@@ -1265,7 +1265,7 @@ async fn drive_st2_native_loop(
                             )
                             .await?;
                             publish_harness_limits(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 &incarnation,
@@ -1420,7 +1420,7 @@ async fn publish_harness_timeline(
         // fields here; the client projection joins the exact desired owner run/generation/step at
         // its snapshot index and overwrites attribution on every explicit usage entry.
         let claim = native_timeline_claim(client, subject, incarnation, operation).await?;
-        let _: ClaimRecord = ObservationClient { client, event: None }
+        let _: ClaimRecord = ObservationClient { client, event: None, source_runtime: None }
             .post(
                 "/v1/claims",
                 &claim,
@@ -2887,7 +2887,7 @@ async fn drive_codex_native_loop(
                         .flatten()
                     {
                         publish_harness_activity(
-                            &ObservationClient { client, event: None },
+                            &ObservationClient { client, event: None, source_runtime: None },
                             subject,
                             "codex",
                             "app-server",
@@ -2923,7 +2923,7 @@ async fn drive_codex_native_loop(
                     if let Some(context) = fractal_drivers::harness_context::read(
                         &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
-                        &ObservationClient { client, event: None },
+                        &ObservationClient { client, event: None, source_runtime: None },
                         subject,
                         "codex",
                         &incarnation,
@@ -2932,7 +2932,7 @@ async fn drive_codex_native_loop(
                     )
                     .await?;
                     publish_harness_limits(
-                        &ObservationClient { client, event: None },
+                        &ObservationClient { client, event: None, source_runtime: None },
                         subject,
                         "codex",
                         &incarnation,

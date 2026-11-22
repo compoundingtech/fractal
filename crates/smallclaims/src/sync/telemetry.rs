@@ -36,6 +36,7 @@ struct Instruments {
     round_duration: Histogram<f64>,
     batch_size: Histogram<u64>,
     errors: Counter<u64>,
+    wakes: Counter<u64>,
 }
 static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
     let meter = opentelemetry::global::meter("smallclaims.replication");
@@ -57,8 +58,30 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
             .u64_counter("st.replication.errors")
             .with_unit("{error}")
             .build(),
+        wakes: meter
+            .u64_counter("st.replication.wakes")
+            .with_unit("{wake}")
+            .build(),
     }
 });
+
+/// Filesystem events received, or coalesced broadcasts sent to replication followers.
+#[derive(Clone, Copy)]
+pub enum WakeStage {
+    Raw,
+    Paced,
+}
+
+/// Count wake amplification without peer labels or allocation on the disabled path.
+pub fn record_wake(stage: WakeStage) {
+    if METRICS_ENABLED.load(Ordering::Relaxed) {
+        let stage = match stage {
+            WakeStage::Raw => "raw",
+            WakeStage::Paced => "paced",
+        };
+        METRICS.wakes.add(1, &[KeyValue::new("stage", stage)]);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ErrorReason {

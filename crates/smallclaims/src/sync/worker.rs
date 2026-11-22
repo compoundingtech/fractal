@@ -271,6 +271,19 @@ struct ExchangeShard {
 }
 
 const REPLICATION_WAKE_COALESCE: Duration = Duration::from_secs(1);
+
+/// Coalesce filesystem events before graph, shard and membership followers see them.
+/// The first event is immediate; events during the next second produce one trailing wake.
+pub async fn coalesce_replication_wakes(
+    mut raw: watch::Receiver<u64>,
+    paced: watch::Sender<u64>,
+) {
+    while raw.changed().await.is_ok() {
+        paced.send_modify(|generation| *generation = generation.saturating_add(1));
+        super::telemetry::record_wake(super::telemetry::WakeStage::Paced);
+        tokio::time::sleep(REPLICATION_WAKE_COALESCE).await;
+    }
+}
 const PEER_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -1738,10 +1751,15 @@ async fn dial_peer<B: Backend>(
     // Retain the connection pool across both phases and later wakeups for this peer.
     let mut http = replication_http_client();
     let mut backoff = PeerBackoff::default();
+    let mut idle = IdleBackoff::default();
+    let idle_max = super::replication_idle_max();
     let mut inbound_changes = fleet.inbound_changed.subscribe();
     let mut activity_changes = fleet.activity_changed.subscribe();
     let mut connectivity = fleet.connectivity_changed.subscribe();
     let mut must_send = false;
+    let mut guard_not_before = tokio::time::Instant::now();
+    let mut guard_wake = None;
+    let mut guard_in_sync_at = None;
     // The last exchange moved envelopes, so more may wait on either side: exchange again at
     // once, even though the peer dialed in recently.
     let mut moving = false;
@@ -1757,6 +1775,9 @@ async fn dial_peer<B: Backend>(
     // set changes. A refused preferred route is never held: see the refusal below.
     let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
     loop {
+        if notify.has_changed().unwrap_or(false) {
+            idle.reset();
+        }
         // A removed node stops dialing; `fractal doctor` says what to do next.
         if fleet.is_removed() {
             tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
@@ -1768,6 +1789,7 @@ async fn dial_peer<B: Backend>(
             connectivity.borrow_and_update();
             backoff = PeerBackoff::default();
             must_send = true;
+            idle.reset();
         }
         if fleet
             .online
@@ -1778,6 +1800,7 @@ async fn dial_peer<B: Backend>(
         {
             backoff = PeerBackoff::default();
             must_send = true;
+            idle.reset();
         }
         let inbound_at = fleet
             .inbound
@@ -1785,26 +1808,34 @@ async fn dial_peer<B: Backend>(
             .expect("inbound lock poisoned")
             .get(&name)
             .copied();
+        idle.observe_inbound(inbound_at);
         let continuing = std::mem::take(&mut moving);
         if let Some(at) = inbound_at.filter(|_| !continuing) {
             if must_send && at.elapsed() < worker_interval(Duration::from_secs(30)) {
-                let offered = fleet
-                    .inbound_authority
-                    .read()
-                    .expect("inbound inventory lock poisoned")
-                    .get(&name)
-                    .cloned();
-                if let Some(offered) = offered
-                    && let Ok(current) = backend
-                        .authority_digest(auth.fleet_id())
-                        .await
-                {
-                    // The other side already knows this inventory and is draining both
-                    // queues. Notifications from that exchange must not trigger a reverse
-                    // connection. A genuinely new local envelope still requests a push.
-                    if !current.is_empty() && current == offered {
-                        must_send = false;
+                // A matching witness remains valid only for this paced generation
+                // and inbound cut. Other notifications must not repeat the guard read.
+                let wake = *notify.borrow();
+                let now = tokio::time::Instant::now();
+                if guard_wake != Some(wake) && now >= guard_not_before {
+                    let offered = fleet
+                        .inbound_authority
+                        .read()
+                        .expect("inbound inventory lock poisoned")
+                        .get(&name)
+                        .cloned();
+                    if let Some(offered) = offered {
+                        guard_not_before = now + REPLICATION_WAKE_COALESCE;
+                        guard_wake = Some(wake);
+                        guard_in_sync_at = None;
+                        if let Ok(current) = backend.authority_digest(auth.fleet_id()).await
+                            && !current.is_empty() && current == offered
+                        {
+                            guard_in_sync_at = Some(at);
+                        }
                     }
+                }
+                if guard_wake == Some(wake) && guard_in_sync_at == Some(at) {
+                    must_send = false;
                 }
             }
             let window = if must_send {
@@ -1815,10 +1846,10 @@ async fn dial_peer<B: Backend>(
             if at.elapsed() < window {
                 tokio::select! {
                     _ = tokio::time::sleep_until(at + window) => {}
-                    _ = notify.changed() => { must_send = true; }
-                    _ = routes.changed() => { must_send = true; }
+                    _ = notify.changed() => { idle.reset(); must_send = true; }
+                    _ = routes.changed() => { idle.reset(); must_send = true; }
                     _ = inbound_changes.changed() => {}
-                    _ = connectivity.changed() => { backoff = PeerBackoff::default(); must_send = true; }
+                    _ = connectivity.changed() => { idle.reset(); backoff = PeerBackoff::default(); must_send = true; }
                 }
                 continue;
             }
@@ -1919,12 +1950,13 @@ async fn dial_peer<B: Backend>(
                 early_spent.remove(&peer.url);
                 backoff = PeerBackoff::default();
                 must_send = false;
+                let idle_delay = idle.round(moved, idle_max).map(worker_interval);
                 record_worker(
                     &backend,
                     &name,
                     "idle",
                     attempt_unix_ms,
-                    None,
+                    idle_delay,
                     preferred_route.map(|preferred| (preferred, preferred_retry)),
                 )
                 .await;
@@ -1939,20 +1971,21 @@ async fn dial_peer<B: Backend>(
                     answers_check::check_answers(&http, &backend, &node, &peer, &auth, &fleet).await;
                     // A busy harness can write several observations while one exchange is in
                     // flight. Keep the first exchange immediate, then coalesce the resulting
-                    // wake burst without disabling the 30-second retry path. The window stays
+                    // wake burst without disabling the bounded idle retry path. The window stays
                     // short so a publish is startable on every peer within seconds.
                     let not_before = tokio::time::Instant::now() + REPLICATION_WAKE_COALESCE;
                     tokio::select! {
-                        _ = notify.changed() => { must_send = true; }
-                        _ = routes.changed() => { must_send = true; }
+                        _ = notify.changed() => { idle.reset(); must_send = true; }
+                        _ = routes.changed() => { idle.reset(); must_send = true; }
                         _ = inbound_changes.changed() => {}
-                        _ = connectivity.changed() => { backoff = PeerBackoff::default(); must_send = true; }
-                        _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
+                        _ = connectivity.changed() => { idle.reset(); backoff = PeerBackoff::default(); must_send = true; }
+                        _ = tokio::time::sleep(idle_delay.expect("in_sync idle delay")) => {}
                     }
                     tokio::time::sleep_until(not_before).await;
                 }
             }
             Err(mut error) => {
+                idle.reset();
                 if let Some(removed) = error.downcast_ref::<RemovedFromFleet>() {
                     fleet.mark_removed(&peer.name, removed).await;
                     continue;
@@ -2250,6 +2283,36 @@ fn exchange_unanswered(error: &anyhow::Error) -> bool {
             error.is_connect()
                 || (error.is_request() && error.status().is_none() && !error.is_timeout())
         })
+}
+
+/// Quiet rounds back off independently for each dialer's (store, peer).
+#[derive(Default)]
+struct IdleBackoff {
+    rounds: u32,
+    inbound: Option<tokio::time::Instant>,
+}
+
+impl IdleBackoff {
+    fn reset(&mut self) {
+        self.rounds = 0;
+    }
+
+    fn observe_inbound(&mut self, inbound: Option<tokio::time::Instant>) {
+        if inbound != self.inbound {
+            self.reset();
+            self.inbound = inbound;
+        }
+    }
+
+    fn round(&mut self, moved: bool, ceiling: Duration) -> Option<Duration> {
+        if moved {
+            self.reset();
+            return None;
+        }
+        let delay = Duration::from_secs(30 * (1_u64 << self.rounds.min(7))).min(ceiling);
+        self.rounds = self.rounds.saturating_add(1);
+        Some(delay)
+    }
 }
 
 /// Failed connections have no graph wake dependency: unrelated local writes must not

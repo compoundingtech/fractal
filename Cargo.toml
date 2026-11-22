@@ -14,6 +14,7 @@ members = [
   "crates/fractal-drivers",
   "crates/fractal-fabric-adapter",
   "crates/fractal-runtime",
+  "crates/fractal-mac-custody",
   "crates/fractal-storage-version",
   "crates/fractal-socket-discovery",
   "crates/fractal-tiles-registry",
