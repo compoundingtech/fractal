@@ -2279,6 +2279,51 @@ pub mod work {
         }) };
     }
 
+    thread_local! {
+        /// The capture this thread started, if any. `traced` copies a statement's expanded
+        /// SQL into it, so no per-statement allocation happens unless a capture is running.
+        static CAPTURED_SQL: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The expanded SQL of every statement this thread starts while the guard lives, with the
+    /// same thread attribution as [`SqliteWorkScope`]: writer loans and readers this thread
+    /// runs are captured, and other threads' work is not. Layered into `traced`, it keeps
+    /// working under the native mutation dispatcher, which installs and reinstalls that one
+    /// callback; a raw `Connection::trace` would be clobbered by it.
+    pub struct SqlCapture {
+        buffer: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        previous: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    }
+
+    impl SqlCapture {
+        pub fn start() -> Self {
+            let buffer = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let previous = CAPTURED_SQL
+                .with(|capture| capture.borrow_mut().replace(std::rc::Rc::clone(&buffer)));
+            Self { buffer, previous }
+        }
+
+        /// The statements captured so far, emptying the buffer and leaving the capture running.
+        pub fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.buffer.borrow_mut())
+        }
+    }
+
+    impl Drop for SqlCapture {
+        fn drop(&mut self) {
+            CAPTURED_SQL.with(|capture| {
+                let mut capture = capture.borrow_mut();
+                if capture
+                    .as_ref()
+                    .is_some_and(|active| std::rc::Rc::ptr_eq(active, &self.buffer))
+                {
+                    *capture = self.previous.take();
+                }
+            });
+        }
+    }
+
     /// Completed traced statements on this thread within one explicit scope. It counts every
     /// traced connection used by this thread (including writer-return callbacks), not work
     /// done by other threads while this caller waits for a lend. Start before the first phase
@@ -2362,6 +2407,18 @@ pub mod work {
         let now = COUNTERS.map(|counter| u64::try_from(read(counter)).unwrap_or(0));
         let mut started = STARTED.lock().unwrap_or_else(PoisonError::into_inner);
         if event == ffi::SQLITE_TRACE_STMT as c_uint {
+            if let Some(captured) = CAPTURED_SQL.with(|capture| capture.borrow().as_ref().map(std::rc::Rc::clone)) {
+                // SQLITE_TRACE_STMT detail contains unexpanded SQL (or a trigger
+                // comment). Expand the live statement explicitly for EXPLAIN fixtures.
+                // SAFETY: SQLite owns the live statement; its allocated expansion is
+                // copied while valid and released with SQLite's matching allocator.
+                let raw = unsafe { ffi::sqlite3_expanded_sql(statement) };
+                if !raw.is_null() {
+                    let sql = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+                    unsafe { ffi::sqlite3_free(raw.cast()) };
+                    captured.borrow_mut().push(sql);
+                }
+            }
             // A trigger's start reports the statement again; the first start counts.
             started.entry(key).or_insert(now);
             return 0;

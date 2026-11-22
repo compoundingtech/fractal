@@ -91,7 +91,6 @@ mod tests {
     use super::*;
     use crate::claim::ClaimInput;
     use crate::fleet::MemberKey;
-    use std::sync::Mutex;
 
     fn signed_store(notes: usize) -> (Store, Vec<String>) {
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
@@ -211,19 +210,15 @@ mod tests {
         assert_eq!(store.claim_verdict(&ids[1]).unwrap(), crate::principal::Verdict::Verified);
     }
 
-    static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-    fn capture(sql: &str) {
-        CAPTURED.lock().unwrap().push(sql.to_owned());
-    }
-
-    /// Every statement `work` runs on the writer.
-    fn statements(store: &Store, work: impl FnOnce()) -> Vec<String> {
-        CAPTURED.lock().unwrap().clear();
-        store.connection.write().trace(Some(capture));
+    /// Every statement `work` runs on this thread, captured through the native trace the
+    /// mutation dispatcher keeps installed on its loans; a raw `connection.trace` would be
+    /// clobbered by that reinstall, leaving nothing captured.
+    fn statements(work: impl FnOnce()) -> Vec<String> {
+        let capture = crate::sqlite::work::SqlCapture::start();
         work();
-        store.connection.write().trace(None);
-        std::mem::take(&mut *CAPTURED.lock().unwrap())
+        let ran = capture.take();
+        drop(capture);
+        ran
     }
 
     /// The plan lines that walk all of claim_verdict_links, for each statement that names it.
@@ -249,17 +244,17 @@ mod tests {
         assert!(!index, "the index by claim is gone");
         let link: String = store.readers.get().query_row(
             "SELECT link FROM claim_verdict_links WHERE claim_id=?1 LIMIT 1", [&ids[1]], |row| row.get(0)).unwrap();
-        let mut ran = statements(&store, || delete_claim(&store, &ids[0]));
-        ran.extend(statements(&store, || {
+        let mut ran = statements(|| delete_claim(&store, &ids[0]));
+        ran.extend(statements(|| {
             let connection = store.connection.write();
             dependencies::queue_page(&connection, &link, "").unwrap();
         }));
-        ran.extend(statements(&store, || {
+        ran.extend(statements(|| {
             while store.verdicts_pending().unwrap() {
                 store.advance_signature_judgment().unwrap();
             }
         }));
-        ran.extend(statements(&store, || { sweep(&store, 1); }));
+        ran.extend(statements(|| sweep(&store, 1)));
         assert!(ran.iter().any(|sql| sql.contains("claim_verdict_links")), "the traced work touched the links");
         assert_eq!(link_scans(&store, &ran), Vec::<String>::new());
     }

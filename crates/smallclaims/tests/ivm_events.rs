@@ -796,15 +796,28 @@ fn unfinished_lent_transaction_never_publishes_a_committed_frontier() {
         w.execute_batch("BEGIN; UPDATE ivm_views SET ready=0 WHERE name='values'")
             .unwrap();
     }
-    let notice = receiver.try_recv().unwrap();
+    // The unfinished loan has no committed frontier to advertise: nothing publishes.
     // Restore the misused raw writer before any assertion can unwind the test. This is
     // an integration misuse control, not an admitted claim or a supported source mutation.
+    assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(capture(&store, &views), before);
     {
         let w = store.connection.write();
         if !w.is_autocommit() {
             w.execute_batch("ROLLBACK").unwrap();
         }
     }
-    assert!(matches!(notice, Notice::Unavailable(_)));
+    // The rollback also publishes nothing; the earlier boundary is unchanged.
+    assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
     assert_eq!(capture(&store, &views), before);
+    // A later real commit is observed and publishes its actual committed frontier.
+    let claim = append(&store, &views, "key/after-loan", 7);
+    let Notice::Committed(notice) = receiver.try_recv().unwrap() else {
+        panic!("expected a committed notice after the restored writer committed");
+    };
+    assert_eq!(notice.source_cut.projected, claim.store_index);
+    assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
+    let after = capture(&store, &views);
+    assert_ne!(after.keys, before.keys);
+    assert!(after.status.sequence > before.status.sequence);
 }
