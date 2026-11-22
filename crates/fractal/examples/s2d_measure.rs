@@ -168,6 +168,9 @@ fn main() -> anyhow::Result<()> {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let job = Instant::now();
                 let _ = store.connection.batched(|tx| tx.execute("INSERT INTO measure_control VALUES (1)", []));
+                if job.elapsed() >= Duration::from_millis(100) {
+                    println!("slow_job=control at_unix_ms={} hold_ms={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), job.elapsed().as_millis());
+                }
                 control.lock().unwrap().push(job.elapsed());
                 std::thread::sleep(Duration::from_millis(50));
             }

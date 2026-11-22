@@ -100,6 +100,15 @@ const PENDING_SQL: &str = "SELECT claims.id, claims.subject, claims.kind, claims
 /// page, and a page of them would stop the deletion. Empty once a page reaches the end.
 const PENDING_AFTER: &str = "peer_retired_claims_after";
 
+/// The waiting retirements whose claim is gone, after the ID ?1 and through ?2 (to the end when
+/// ?2 is empty): the stretch one page read.
+const GONE_SQL: &str = "SELECT learned.id FROM peer_retired_claims AS learned INDEXED BY peer_retired_claims_state
+     WHERE learned.state='pending' AND learned.id > ?1 AND (?2 = '' OR learned.id <= ?2)
+       AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=learned.id)";
+
+/// The most waiting retirements one writer turn forgets.
+const CLEANUP_CHUNK: usize = 500;
+
 impl Store {
     /// Whether this member deletes what its peers retired: [`RETIREMENT_WINS`], or what a test
     /// set.
@@ -265,14 +274,31 @@ impl Store {
             // A cut of time zero: the cut this member's own trim compares is never moved by it.
             self.trim_checkpoint(&checkpoint, 0, &digest, &[], &claims, actions)?;
         }
-        // What is gone now, by this deletion or any other, no longer waits.
+        // What is gone now in the stretch this page read, by this deletion or any other, no
+        // longer waits: found on a reader, deleted by key a chunk at a time, so the writer is
+        // never held for a scan of every waiting retirement. A full cycle of the cursor covers
+        // them all.
+        let gone = self.readers.get()
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-he754c9f35e28 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ GONE_SQL)?
+            .query_map(params![after, next], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for chunk in gone.chunks(CLEANUP_CHUNK) {
+            let mut connection = self.connection.write_background();
+            connection.commit_without_fsync()?;
+            let transaction = connection.transaction()?;
+            {
+                let mut forget = transaction.prepare_cached(
+                    /* sqlite-large-value: allow-for-now lv-hf0070c539c4d owner=smallclaims::store::retirement_wins TODO=prepare-body-and-predecessor-values */ "DELETE FROM peer_retired_claims WHERE id=?1 AND state='pending'
+                       AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=?1)",
+                )?;
+                for id in chunk {
+                    forget.execute(/* sqlite-large-value: allow-for-now lv-h28391341bc83 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ [id])?;
+                }
+            }
+            transaction.commit()?;
+        }
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h48a82e903143 owner=smallclaims::store::retirement_wins TODO=prepare-body-and-predecessor-values */ "DELETE FROM peer_retired_claims WHERE state='pending'
-               AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=peer_retired_claims.id)",
-            [],
-        )?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h029d27f2492e owner=smallclaims::store::retirement_wins TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![PENDING_AFTER, next])?;
         transaction.commit()?;
         Ok(())
