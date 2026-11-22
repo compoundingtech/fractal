@@ -1,8 +1,0 @@
-#!/usr/bin/python3 -I
-# arn:lmig:smalltalk:2026-10-27-script-paths
-import os
-from pathlib import Path
-import sys
-
-os.execv(sys.executable, [sys.executable, *(["-I"] if sys.flags.isolated else []),
-                         str(Path(__file__).with_name("fractal-discord-bridge")), *sys.argv[1:]])
