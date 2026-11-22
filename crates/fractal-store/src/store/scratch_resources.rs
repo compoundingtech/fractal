@@ -328,12 +328,11 @@ impl Store {
         let mut rows = Vec::new();
         for body in statement.query_map(params![host, after.unwrap_or(""), limit], |row| row.get::<_, String>(0))? {
             let record: Record = serde_json::from_str(&body?)?;
-            let observed = consumers(&connection, &record)?;
-            // Inventory has no fresh native-runtime quiescence proof. Absence of
-            // shell/membership rows alone is not physical retirement evidence.
-            let consumer_observation = if observed == OwnerObservation::Terminal && record.state != "released" {
-                OwnerObservation::Unknown
-            } else { observed };
+            // Inventory does not scan unbounded host execution history or perform native
+            // retirement probes. Only a persisted release receipt proves retirement here.
+            let consumer_observation = if record.state == "released" {
+                OwnerObservation::Terminal
+            } else { OwnerObservation::Unknown };
             rows.push(ScratchInventoryRow { owner_observation: owner_observation(&connection, &record)?,
                 consumer_observation, handle: record.handle, state: record.state });
         }

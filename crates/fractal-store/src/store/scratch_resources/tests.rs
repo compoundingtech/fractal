@@ -27,11 +27,15 @@ fn save(store: &Store, record: &Record) {
 }
 
 fn owner(store: &Store, status: &str, phase: &str, generation: &str) {
-    store.connection.write().execute("INSERT INTO mission_runs
-        (id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
-        VALUES('owner','mission/test','revision',?1,'revision','owner','workspace/test','person/test','{}','once',?2,?3,'1','1')
-        ON CONFLICT(id) DO UPDATE SET current_generation_id=excluded.current_generation_id,status=excluded.status,phase=excluded.phase",
+    let connection = store.connection.write();
+    let updated = connection.execute("UPDATE mission_runs SET current_generation_id=?1,status=?2,phase=?3 WHERE id='owner'",
         params![generation, status, phase]).unwrap();
+    if updated == 0 {
+        connection.execute("INSERT INTO mission_runs
+            (id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
+            VALUES('owner','mission/test','revision',?1,'revision','owner','workspace/test','person/test','{}','once',?2,?3,'1','1')",
+            params![generation, status, phase]).unwrap();
+    }
 }
 
 #[test]

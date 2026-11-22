@@ -478,7 +478,9 @@ empty continuation. Reading inventory never creates, releases or deletes an allo
 
 Program authors can also read `Fractal.resources.scratchInventory({ host, after, limit })`,
 which returns a bounded page of the same records (maximum 1,000). Each record separates its
-custody state from `ownerObservation` and `consumerObservation`. An unreleased allocation
+custody state from `ownerObservation` and `consumerObservation`. Inventory does not probe
+processes or scan host execution history: consumers remain `unknown` until a persisted release
+receipt proves retirement. An unreleased allocation
 with a positively observed terminal owner **of the recorded generation** is an orphan
 candidate, not deletion authorization. Missing owners, different generations and unavailable
 observations are `unknown`, never terminal-owner proof. Live or uncertain consumers and stale
