@@ -865,14 +865,17 @@ fn operation_audit_repair_commits_at_most_sixteen_keys_per_writer_transaction() 
     execute(&store, "UPDATE operations SET request_digest='d/corrupt'", []);
     let drift = store.operation_projection_drift().unwrap();
     assert!(drift.len() > 32, "the fixture must need several repair batches");
+    // The mutation dispatcher owns the connection's commit hook and reinstalls it at every
+    // loan boundary, so a test-installed replacement hook observes nothing. Count the
+    // writer's real owned commit boundaries instead: each repair batch's loan publishes
+    // its committed changes to commit observers before the guard returns.
     let commits = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&commits);
-    store.connection.write().commit_hook(Some(move || {
+    let observer = store.connection.observe_commits(move |_| {
         observed.fetch_add(1, Ordering::Relaxed);
-        false
-    }));
+    });
     assert!(store.repair_operation_projection_drift_from_audit(&drift).unwrap());
-    store.connection.write().commit_hook(None::<fn() -> bool>);
+    drop(observer);
     assert_eq!(commits.load(Ordering::Relaxed), drift.len().div_ceil(16));
     assert!(old_drift(&store).is_empty());
     assert!(store.operation_projection_drift().unwrap().is_empty());
