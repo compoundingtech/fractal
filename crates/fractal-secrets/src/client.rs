@@ -2407,6 +2407,7 @@ mod tests {
         for path in [
             "/v1/internal/replication/revision",
             "/v1/internal/replication/shard/messages/revision",
+            "/v1/internal/replication/shard/messages/peers/revision",
         ] {
             assert_eq!(request_deadline(path, deadlines), Duration::MAX);
         }
