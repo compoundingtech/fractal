@@ -3950,6 +3950,64 @@ version 2
         assert_eq!(ready.attempt, before.attempt, "the step is not reset");
     }
 
+    #[test]
+    fn mission_read_reconstruction_is_scoped_to_the_changed_run() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, r#"
+version 2
+resource "elsewhere" { kind "custom.st3.document-source" }
+mission "counted" state="ready" {
+  goal "Wait for an explicitly named seat."
+  concurrent-runs
+  step "work" { assigned-to "agent/absent" }
+}
+"#, "counted-mission");
+        let create = |key: &str| store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "counted".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let first = create("first-counted-run");
+        let second = create("second-counted-run");
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).skipping_unneeded(true);
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        // Drain preceding self-writes before attributing an individual commit.
+        for _ in 0..MISSION_READS_CONTINUATIONS {
+            if !reconciler.evaluate_changed_mission_runs().unwrap().1 { break; }
+        }
+        assert!(!reconciler.evaluate_changed_mission_runs().unwrap().1);
+        let count = || store.mission_read_work()["reconstructions"].as_u64().unwrap();
+        let before = count();
+        observe_state(&store, "resource/elsewhere", "resumed", "unrelated-counted-change");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+        assert_eq!(count() - before, 0, "unrelated commits reconstruct no missions");
+
+        // This is the same seat the runs read for eligibility and actual state, but
+        // neither query consumes harness reports. Re-stamping it changes no input.
+        store.append_claim(&ClaimInput {
+            subject: "agent/absent".into(), kind: "harness.observed".into(),
+            actor: Some("agent/absent".into()),
+            fields: BTreeMap::from([("state".into(), Value::String("working".into()))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some("heartbeat-counted".into()),
+        }).unwrap();
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+        assert_eq!(count() - before, 0, "unconsumed heartbeat inputs reconstruct no missions");
+
+        store.set_mission_run_state(&first.id, "running", "normal", None).unwrap();
+        let before = count();
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap().0, 1);
+        assert_eq!(count() - before, 1, "one changed run has one full reconstruction");
+        assert_eq!(store.mission_run(&second.id).unwrap().unwrap().steps[0].status, "blocked");
+    }
+
     #[tokio::test]
     async fn the_post_commit_feed_wakes_the_runs_a_change_touched() {
         // On disk, so this test's reads wait for the follower's writes rather than fail.
@@ -8120,6 +8178,39 @@ agent "import/omp/fixture" {{
         tokio::time::timeout(Duration::from_secs(5), notify.notified())
             .await
             .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn cached_file_observation_retains_scoped_mission_dependency() {
+        use futures_util::FutureExt as _;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate.txt");
+        std::fs::write(&path, "ready").unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let reconciler = Reconciler::new(
+            store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert!(reconciler.file_observations.lock().unwrap().contains_key(&subject));
+        let ((), reads) = smallclaims::touched::record(|| {
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert!(reconciler.subject_value(&subject).unwrap().is_some());
+        });
+        assert!(reads.contains(&subject), "cached observations still read the external input");
+        assert!(reads.contains(&format!("actual:{subject}")));
+        reconciler.incremental.evaluated("mission-run/file-reader", reads, None);
+        reconciler.incremental.evaluated(
+            "mission-run/unrelated", BTreeSet::from(["file/unrelated".into()]), None,
+        );
+        let global = Notify::new();
+        reconciler.file_changes.invalidate(&reconciler.incremental, &subject, false, &global);
+        assert!(global.notified().now_or_never().is_none());
+        assert!(reconciler.file_changes.notify.notified().now_or_never().is_some());
+        assert_eq!(
+            *reconciler.file_changes.runs.lock().unwrap(),
+            BTreeSet::from(["mission-run/file-reader".into()]),
+        );
     }
 
     #[test]
