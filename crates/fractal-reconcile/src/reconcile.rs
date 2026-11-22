@@ -84,6 +84,8 @@ pub mod waits;
 mod schedule_standby_selection_tests;
 #[cfg(test)]
 mod schedule_admission_tests;
+#[cfg(test)]
+mod runtime_workspace_tests;
 mod schedule_replication_block;
 pub mod member_admission;
 mod idle_residency_evidence;
@@ -8887,6 +8889,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(format!("start-failed:{operation_id}")),
             };
             let mut absent = member_fields(member, "absent", None, false);
+            self.runtime_workspace_fields(&mut absent, None, None)?;
             if self.store.latest_actual_value(&subject.subject)?.is_some_and(|actual| {
                 actual_field(&actual, "restarting_from").is_some_and(Value::is_string)
             }) {
@@ -8982,6 +8985,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             incarnation.as_deref(),
             observation.is_some(),
         );
+        // Only this operation's exact physical incarnation proves the launch cwd.
+        // A current declaration is not evidence for an incumbent or adopted process.
+        let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
+        self.runtime_workspace_fields(
+            &mut starting,
+            previous.as_ref(),
+            observation.as_ref().map(|_| prepared.launch_member.cwd.as_str()),
+        )?;
         if let Some(observation) = &observation {
             if let Some(code) = observation.exit_code {
                 starting.insert("exit_code".into(), Value::from(code));
@@ -11625,14 +11636,42 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.record_once_with_previous(subject, kind, fields, evidence, previous.as_ref())
     }
 
+    /// Workspace is invocation evidence, never desired-state or preparation evidence.
+    /// Keep unknown launches incomplete and clear a predecessor's folded path explicitly.
+    fn runtime_workspace_fields(
+        &self,
+        fields: &mut BTreeMap<String, Value>,
+        previous: Option<&crate::model::ClaimRecord>,
+        launch_cwd: Option<&str>,
+    ) -> Result<()> {
+        if !self.store.runtime_workspace_publication_ready()? {
+            return Ok(());
+        }
+        let incarnation = fields.get("incarnation_id").and_then(Value::as_str);
+        let workspace = incarnation.and_then(|incarnation| {
+            launch_cwd.filter(|cwd| Path::new(cwd).is_absolute()).map(Value::from)
+                .or_else(|| {
+                    let previous = previous.filter(|claim| claim_incarnation(claim) == Some(incarnation))?;
+                    previous.body.pointer("/fields/workspace")
+                        .filter(|value| value.as_str().is_some_and(|cwd| Path::new(cwd).is_absolute()))
+                        .cloned()
+                })
+        });
+        fields.insert("workspace".into(), workspace.unwrap_or(Value::Null));
+        Ok(())
+    }
+
     fn record_once_with_previous(
         &self,
         subject: &str,
         kind: &str,
-        fields: BTreeMap<String, Value>,
+        mut fields: BTreeMap<String, Value>,
         evidence: Vec<String>,
         previous: Option<&crate::model::ClaimRecord>,
     ) -> Result<()> {
+        if kind == "runtime.observed" {
+            self.runtime_workspace_fields(&mut fields, previous, None)?;
+        }
         if previous.is_some_and(|claim| {
                 claim.body.get("fields")
                     == Some(&serde_json::to_value(&fields).unwrap_or(Value::Null))

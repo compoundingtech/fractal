@@ -97,8 +97,11 @@ The native page cache retains the same snapshot cut across those pages.
 `min_cut` guarantees only that this answering store has reached that local index;
 it does not establish replication freshness or that remote observations are current.
 
-There is one row per known live incarnation, not one row per agent. The `id` remains
-the agent ID and may repeat; use `(id, incarnation_id)` as the row identity.
+There is one row per known live incarnation, origin and witnessed workspace path,
+not one row per agent. The `id` may repeat; use `(id, incarnation_id, host, workspace)`
+as the complete-row identity. Every witnessed path is retained until matching end
+evidence, rather than silently replaced by a newer path. If the same incarnation ID
+resurrects after an end, its earlier paths are conservatively retained again.
 An incarnation remains live once it has `running` evidence, until a matching named
 end or an unnamed end from the same observing host. A newer different incarnation
 does not implicitly end it. Instead, an older retained row has the advisory
@@ -112,7 +115,7 @@ matching the runtime-incarnation reader. Administrative or unfamiliar statuses
 alone are not end evidence.
 
 The first page reads with `history=true` and is proportional to every retained
-agent subject and its runtime/workspace observations. This work is cooperatively
+agent subject and its runtime observations. This work is cooperatively
 cancellable under the request's read deadline and budget.
 
 Activity status reads that incarnation's own runtime `status` using the existing `AgentState` values:
@@ -120,11 +123,19 @@ Activity status reads that incarnation's own runtime `status` using the existing
 `suspended`, and `retired`. Unrecognized values become `unknown` with the original
 value in `status_raw`; missing status becomes `unknown` without `status_raw`.
 These are not the harness's ready/idle/working states.
-The host is the observing claim's origin. Its workspace comes only from observations
-attributed to the same incarnation and origin, never from a cross-origin merged fold
-or a declaration. It is an absolute filesystem path on that host, exactly as observed:
-not a URI, a local checkout path, or a reconstructed desired path. An unscoped workspace
-observation cannot be assigned to an incarnation and is incomplete.
+The host is the observing runtime claim's origin. Its workspace comes only from
+`runtime.observed.workspace` attributed to that same incarnation and origin, never
+from `workspace.observed`, a cross-origin merged fold, or a declaration. It is an
+absolute filesystem path on that host, exactly as observed: not a URI, a local
+checkout path, or a reconstructed desired path.
+
+The optional runtime workspace field is emitted only after every active fleet
+reader advertises `runtime_workspace=1` through its signed `daemon.started` feature
+advertisement. Unknown, ambiguous or unsupported membership prevents emission.
+The route becomes useful once this fleet floor is satisfied and running producers
+have observed authoritative launch paths. Before then, legacy or un-emitted
+observations remain safely incomplete; temporal proximity to a desired checkout
+observation never fills the gap.
 
 Incomplete reasons are `no-actual`, `indeterminate-authority`, `missing-workspace`,
 `missing-host`, `missing-incarnation`, and `unresolved-liveness`. Incomplete entries

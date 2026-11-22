@@ -367,7 +367,7 @@ async fn unrelated_fold_status_does_not_change_incarnation_runtime_status() {
     observe(&state.store, "live-incarnation", running());
     state.store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
     state_claim(&state, "agent/activity/live-incarnation", "workspace.observed",
-        json!({"host":"node", "workspace":"/actual/../workspace", "incarnation_id":"one", "status":"failed"}));
+        json!({"host":"node", "workspace":"/next-desired-checkout"}));
     for suffix in ["", "?host=host%2Fnode"] {
         let body = activity(&state, suffix).await;
         assert_eq!(body["agents"].as_array().unwrap().len(), 1, "{body}");
@@ -501,7 +501,7 @@ async fn unattributed_workspace_never_fills_a_running_incarnations_missing_path(
         assert_eq!(body["agents"], json!([]));
         let reasons = body["incomplete"].as_array().unwrap().iter()
             .filter_map(|row| row["reason"].as_str()).collect::<BTreeSet<_>>();
-        assert_eq!(reasons, BTreeSet::from(["missing-incarnation", "missing-workspace"]));
+        assert_eq!(reasons, BTreeSet::from(["missing-workspace"]));
         assert_eq!(body["complete"], false);
     }
 }
@@ -520,5 +520,91 @@ async fn nonterminal_evidence_without_a_running_witness_remains_unresolved() {
         assert_eq!(body["incomplete"][0]["incarnation_id"], "one");
         assert!(body["incomplete"][0]["host"].is_null());
         assert_eq!(body["complete"], false);
+    }
+}
+
+#[tokio::test]
+async fn changing_workspace_retains_every_path_until_the_incarnation_ends() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    declare(&state, "paths");
+    for workspace in ["/first", "/second", "/first"] {
+        observe(&state.store, "paths",
+            json!({"status":"running", "incarnation_id":"same", "workspace":workspace}));
+    }
+    let body = activity(&state, "").await;
+    let paths = body["agents"].as_array().unwrap().iter()
+        .map(|row| row["workspace"].as_str().unwrap()).collect::<BTreeSet<_>>();
+    assert_eq!(paths, BTreeSet::from(["/first", "/second"]));
+    assert_eq!(body["complete"], true);
+    observe(&state.store, "paths", json!({"status":"stopped", "incarnation_id":"same"}));
+    let ended = activity(&state, "").await;
+    assert_eq!(ended["agents"], json!([]));
+    assert_eq!(ended["complete"], true);
+}
+
+#[tokio::test]
+async fn same_identifier_resurrection_restores_all_previously_witnessed_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    declare(&state, "resurrected");
+    observe(&state.store, "resurrected",
+        json!({"status":"running", "incarnation_id":"same", "workspace":"/old"}));
+    observe(&state.store, "resurrected", json!({"status":"stopped", "incarnation_id":"same"}));
+    observe(&state.store, "resurrected",
+        json!({"status":"running", "incarnation_id":"same", "workspace":"/new"}));
+    for suffix in ["", "?host=host%2Fnode"] {
+        let body = activity(&state, suffix).await;
+        let rows = body["agents"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{body}");
+        assert!(rows.iter().all(|row| row["incarnation_id"] == "same"));
+        let paths = rows.iter().map(|row| row["workspace"].as_str().unwrap()).collect::<BTreeSet<_>>();
+        assert_eq!(paths, BTreeSet::from(["/new", "/old"]));
+        assert_eq!(body["complete"], true);
+    }
+}
+
+#[tokio::test]
+async fn real_runtime_producer_obeys_the_signed_reader_floor() {
+    use fractal_reconcile::reconcile::{Reconciler, tests::FakeRuntime};
+    for supported in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        state.store.bind_fleet(crate::test_support::PAUSE_FLEET).unwrap();
+        state.store.pin_fleet_anchor(key.public()).unwrap();
+        state.store.set_member_key(Some(key.clone())).unwrap();
+        state.store.admit_fleet_anchor(crate::test_support::PAUSE_FLEET, key.public(), "listening").unwrap();
+        state_claim(&state, "daemon/node", "daemon.started",
+            json!({"status":"running", "features":{"runtime_workspace":u8::from(supported)}}));
+        state.store.replication_snapshot().unwrap();
+        assert_eq!(state.store.runtime_workspace_publication_ready().unwrap(), supported);
+
+        let source = format!(
+            "version 2\nagent \"activity/producer\" {{ workspace {:?}; command \"true\"; restart \"never\"; }}\n",
+            root.path().to_str().unwrap(),
+        );
+        let intent = parse_intent(&source, state.store.origin()).unwrap();
+        state.store.apply_internal(&intent, "producer-declaration").unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(state.store.clone(), runtime, state.node.clone(), state.notify.clone());
+        reconciler.reconcile_once().unwrap();
+        let observed = state.store.latest_observation("agent/activity/producer", "runtime.observed").unwrap().unwrap();
+        assert_eq!(observed.body["fields"]["status"], "running");
+        let body = activity(&state, "").await;
+        if supported {
+            assert_eq!(observed.body["fields"]["workspace"], root.path().to_str().unwrap());
+            assert_eq!(body["agents"].as_array().unwrap().len(), 1, "{body}");
+            assert_eq!(body["agents"][0]["workspace"], root.path().to_str().unwrap());
+            assert_eq!(body["incomplete"], json!([]));
+            assert_eq!(body["complete"], true);
+            println!("ACTIVITY_PRODUCER_SAMPLE={body}");
+        } else {
+            assert!(observed.body["fields"].get("workspace").is_none());
+            assert_eq!(body["agents"], json!([]));
+            assert!(body["incomplete"].as_array().unwrap().iter()
+                .any(|row| row["reason"] == "missing-workspace"), "{body}");
+            assert_eq!(body["complete"], false);
+        }
     }
 }

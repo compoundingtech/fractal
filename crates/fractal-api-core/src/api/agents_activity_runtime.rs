@@ -15,7 +15,8 @@ struct OriginEvidence {
     liveness: Liveness,
     status: Option<String>,
     claim: Option<String>,
-    workspace: Option<String>,
+    workspaces: std::collections::BTreeSet<String>,
+    unresolved_workspace: bool,
 }
 
 #[derive(Default)]
@@ -38,7 +39,6 @@ struct Observation {
     subject: String,
     claim: String,
     origin: String,
-    runtime: bool,
     incarnation: Option<String>,
     status: Option<String>,
     workspace_present: bool,
@@ -53,7 +53,7 @@ impl AgentEvidence {
             self.missing_host = true;
             return;
         }
-        if observation.runtime && observation.status.as_deref().is_some_and(crate::store::is_incarnation_end_status) {
+        if observation.status.as_deref().is_some_and(crate::store::is_incarnation_end_status) {
             if let Some(incarnation) = observation.incarnation {
                 // A named end matches only this incarnation, on any observing host.
                 let evidence = self.incarnations.entry(incarnation).or_default();
@@ -74,13 +74,13 @@ impl AgentEvidence {
             return;
         }
         let Some(incarnation) = observation.incarnation else {
-            // A workspace without incarnation attribution is not a declaration fallback.
+            // Unattributed runtime evidence cannot establish a specific incarnation.
             // Preserve the gap until an unnamed end on this host resolves its copies.
             self.anonymous.insert(observation.origin, Liveness::Unknown);
             return;
         };
         let entry = self.incarnations.entry(incarnation);
-        if observation.runtime && observation.status.as_deref() == Some("running")
+        if observation.status.as_deref() == Some("running")
             && !matches!(&entry, std::collections::btree_map::Entry::Occupied(known) if known.get().ever_ran)
         {
             self.newest_incarnation = Some(entry.key().clone());
@@ -91,20 +91,25 @@ impl AgentEvidence {
             liveness: default_liveness,
             ..Default::default()
         });
-        if observation.runtime {
-            evidence.named_end = false;
-            if observation.status.as_deref() == Some("running") {
-                origin.liveness = Liveness::Running;
-                evidence.ever_ran = true;
-            } else if origin.liveness == Liveness::Ended {
-                origin.liveness = Liveness::Unknown;
-            }
-            origin.status = observation.status;
-            origin.claim = Some(observation.claim);
+        evidence.named_end = false;
+        if observation.status.as_deref() == Some("running") {
+            origin.liveness = Liveness::Running;
+            evidence.ever_ran = true;
+        } else if origin.liveness == Liveness::Ended {
+            origin.liveness = Liveness::Unknown;
         }
+        origin.status = observation.status;
+        origin.claim = Some(observation.claim);
         if observation.workspace_present {
-            // Only this incarnation AND this origin can supply or clear this path.
-            origin.workspace = observation.workspace;
+            // Retain every witnessed path. Reusing an incarnation identifier after
+            // an end cannot prove that its earlier workspace is no longer in use.
+            match observation.workspace {
+                Some(workspace) if Path::new(&workspace).is_absolute() => {
+                    origin.workspaces.insert(workspace);
+                    origin.unresolved_workspace = false;
+                }
+                _ => origin.unresolved_workspace = true,
+            }
         }
     }
 }
@@ -150,44 +155,59 @@ fn append_rows(rows: &mut Vec<Value>, subject: &crate::model::SubjectStatus, evi
         let mut origins = evidence_for_incarnation.origins.into_iter()
             .filter(|(_, evidence)| evidence.liveness != Liveness::Ended);
         let Some((origin, observation)) = origins.next() else { continue; };
-        let mut row = if origins.next().is_some() {
-            gap(subject, Some(&incarnation), IncompleteReason::IndeterminateAuthority, None, host)
-        } else if observation.liveness != Liveness::Running {
-            gap(subject, Some(&incarnation), IncompleteReason::UnresolvedLiveness, None, host)
-        } else {
-            let observed_host = client_host_id(&origin);
-            if host.is_some_and(|host| host != observed_host.as_str()) {
-                continue;
+        let mut emit = |mut row: Value| {
+            if let Some(newer) = evidence.newest_incarnation.as_deref()
+                .filter(|newer| *newer != incarnation.as_str())
+            {
+                // Advisory only: another start is not matching end evidence.
+                row["superseded_by"] = json!(newer);
             }
-            match (observation.claim, observation.workspace) {
-                (Some(claim), Some(workspace)) if Path::new(&workspace).is_absolute() => {
-                    let (status, status_raw) = ActivityStatus::from_actual(observation.status.as_deref());
-                    let mut row = json!({
-                        "id": subject.subject,
-                        "layer": layer(subject),
-                        "incarnation_id": &incarnation,
-                        "host": observed_host,
-                        "workspace": workspace,
-                        "status": status,
-                        "actual_claim": claim,
-                        "actual_origin": origin,
-                    });
-                    if let Some(raw) = status_raw {
-                        row["status_raw"] = json!(raw);
-                    }
-                    Some(row)
-                }
-                (None, _) => gap(subject, Some(&incarnation), IncompleteReason::NoActual, None, host),
-                (_, _) => gap(subject, Some(&incarnation), IncompleteReason::MissingWorkspace, Some(&origin), host),
-            }
+            rows.push(row);
         };
-        if let Some(row) = row.as_mut()
-            && let Some(newer) = evidence.newest_incarnation.as_deref().filter(|newer| *newer != incarnation.as_str())
-        {
-            // Advisory only: another start is not matching end evidence.
-            row["superseded_by"] = json!(newer);
+        if origins.next().is_some() {
+            if let Some(row) = gap(subject, Some(&incarnation), IncompleteReason::IndeterminateAuthority, None, host) {
+                emit(row);
+            }
+            continue;
         }
-        rows.extend(row);
+        if observation.liveness != Liveness::Running {
+            if let Some(row) = gap(subject, Some(&incarnation), IncompleteReason::UnresolvedLiveness, None, host) {
+                emit(row);
+            }
+            continue;
+        }
+        let observed_host = client_host_id(&origin);
+        if host.is_some_and(|host| host != observed_host.as_str()) {
+            continue;
+        }
+        let Some(claim) = observation.claim else {
+            if let Some(row) = gap(subject, Some(&incarnation), IncompleteReason::NoActual, None, host) {
+                emit(row);
+            }
+            continue;
+        };
+        if observation.workspaces.is_empty() || observation.unresolved_workspace {
+            if let Some(row) = gap(subject, Some(&incarnation), IncompleteReason::MissingWorkspace, Some(&origin), host) {
+                emit(row);
+            }
+        }
+        let (status, status_raw) = ActivityStatus::from_actual(observation.status.as_deref());
+        for workspace in observation.workspaces {
+            let mut row = json!({
+                "id": subject.subject,
+                "layer": layer(subject),
+                "incarnation_id": &incarnation,
+                "host": observed_host,
+                "workspace": workspace,
+                "status": status,
+                "actual_claim": claim,
+                "actual_origin": origin,
+            });
+            if let Some(raw) = status_raw {
+                row["status_raw"] = json!(raw);
+            }
+            emit(row);
+        }
     }
 }
 
@@ -202,7 +222,7 @@ pub(super) fn read(
     }
     let connection = store.readers.get();
     let sql = smallclaims::store::canonical_sql(&format!(
-        "SELECT claims.subject, claims.id, claims.origin, claims.kind='runtime.observed',
+        "SELECT claims.subject, claims.id, claims.origin,
                 json_extract(claims.body, '$.fields.incarnation_id'),
                 json_extract(claims.body, '$.fields.status'),
                 json_type(claims.body, '$.fields.workspace') IS NOT NULL,
@@ -210,7 +230,7 @@ pub(super) fn read(
                      THEN json_extract(claims.body, '$.fields.workspace') END
          FROM json_each(?1) subjects
          JOIN claims INDEXED BY claims_subject_kind_index ON claims.subject=subjects.value
-         WHERE claims.store_index<=?2 AND claims.kind IN ('runtime.observed','workspace.observed')
+         WHERE claims.store_index<=?2 AND claims.kind='runtime.observed'
            AND {}
          ORDER BY claims.subject, CANONICAL_ASC(claims)",
         crate::store::UNREPAIRED_CLAIM,
@@ -222,9 +242,9 @@ pub(super) fn read(
         let names = chunk.iter().map(|subject| &subject.subject).collect::<Vec<_>>();
         let mut observations = query.query_map(rusqlite::params![serde_json::to_string(&names)?, cut], |row| {
             Ok(Observation {
-                subject: row.get(0)?, claim: row.get(1)?, origin: row.get(2)?, runtime: row.get(3)?,
-                incarnation: row.get::<_, Option<String>>(4)?.filter(|id| !id.is_empty()),
-                status: row.get(5)?, workspace_present: row.get(6)?, workspace: row.get(7)?,
+                subject: row.get(0)?, claim: row.get(1)?, origin: row.get(2)?,
+                incarnation: row.get::<_, Option<String>>(3)?.filter(|id| !id.is_empty()),
+                status: row.get(4)?, workspace_present: row.get(5)?, workspace: row.get(6)?,
             })
         })?.peekable();
         for subject in chunk {
