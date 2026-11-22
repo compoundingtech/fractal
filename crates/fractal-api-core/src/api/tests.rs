@@ -10914,9 +10914,12 @@ fn agent_roster_heartbeat_only_local_stream_hit_rate() {
         assert_eq!(store.index().unwrap(), index);
         for (history, original) in [false, true].into_iter().zip(&pinned) {
             store.read_snapshot(|_| {
+                assert!(store.agent_resources_cached_at(index, history, Some(&selected))?.is_none(),
+                    "every local append changes the direct-hit token");
+                store.cached_agent_resources(index, history, |_| panic!("heartbeat delta must refold zero cards"))?;
                 let hit = store.agent_resources_cached_at(index, history, Some(&selected))?;
-                let hit = hit.expect("heartbeat-only append must reuse the roster");
-                assert!(Arc::ptr_eq(&hit, original), "read-only hits must pin the same rows");
+                let hit = hit.expect("empty heartbeat delta must republish the same roster");
+                assert!(Arc::ptr_eq(&hit, original), "incremental reuse must pin the same rows");
                 assert_eq!(hit.len(), 2, "selected coverage must not filter the pinned Arc");
                 hits += 1;
                 Ok(())
@@ -10925,7 +10928,7 @@ fn agent_roster_heartbeat_only_local_stream_hit_rate() {
     }
     let probes = APPENDS * pinned.len();
     println!(
-        "roster heartbeat fixture: appends={APPENDS} probes={probes} hits={hits} hit_rate={:.1}% elapsed_ms={:.3}",
+        "roster heartbeat fixture: appends={APPENDS} probes={probes} incremental_reuses={hits} reuse_rate={:.1}% elapsed_ms={:.3}",
         100.0 * hits as f64 / probes as f64,
         started.elapsed().as_secs_f64() * 1000.0,
     );

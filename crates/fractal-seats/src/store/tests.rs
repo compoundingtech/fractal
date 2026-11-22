@@ -360,9 +360,8 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         let connection = store.connection.lock().unwrap();
         let run = || {
             let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbcbc0ab76ff4 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS).unwrap();
-            let rows = statement.query_map(params![local - 1, local, later], |row| row.get::<_, String>(0))
-                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            rows
+            statement.query_map(params![local - 1, local, later], |row| row.get::<_, String>(0))
+                .map(|rows| rows.collect::<rusqlite::Result<Vec<_>>>()).unwrap().unwrap()
         };
         assert!(run().is_empty());
         let before = smallclaims::sqlite::work::total().vm_steps;
