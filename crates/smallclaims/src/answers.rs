@@ -367,11 +367,28 @@ fn summary_with_verdicts(
 /// see [`differing_kinds`] and `served_verdicts`.
 /// `unsigned` answers are not listed: a signature can arrive apart from its claim, and listing
 /// them would hold one key for every unsigned answer.
-pub const VERDICTS: &str = "verdicts";
+///
+/// It is named as a slot reader because every earlier build compares a `reader/slots/` kind only
+/// when both summaries carry it, while it compares any other reader kind against a peer that
+/// lacks it. For the same reason a member sends it only beside fold readers (see
+/// [`without_lone_verdicts`]): an earlier build takes any reader kind to mean that the peer runs
+/// the fold readers, and would compare its own against none. A claim kind named `verdicts` would
+/// not be compared between members that both carry it.
+pub const VERDICTS: &str = "slots/verdicts";
 
 /// The summary kind of [`VERDICTS`].
 pub fn verdicts_kind() -> String {
     format!("{READER_PREFIX}{VERDICTS}")
+}
+
+/// Leave the verdict reader out of a summary that carries no other reader, so an earlier build
+/// never takes it as running the fold readers; see [`VERDICTS`].
+fn without_lone_verdicts(summary: &mut AnswersSummary, readers: &mut Vec<KindBuckets>) {
+    let kind = verdicts_kind();
+    if !summary.kinds.keys().any(|other| other.starts_with(READER_PREFIX) && *other != kind) {
+        summary.kinds.remove(&kind);
+        readers.retain(|every| every.kind != kind);
+    }
 }
 
 fn verdict_key(served: &crate::store::principals::ServedVerdicts, kind: &str, key: &AnswerKey) -> Result<Option<AnswerKey>> {
@@ -501,7 +518,7 @@ pub fn differing_kinds(
             !(ours.kinds.contains_key(&replacement) && theirs.kinds.contains_key(&replacement))
         })
         .filter(|kind| {
-            !(kind.starts_with("reader/slots/") || **kind == verdicts)
+            !kind.starts_with("reader/slots/")
                 || (ours.kinds.contains_key(*kind) && theirs.kinds.contains_key(*kind))
         })
         .filter_map(|kind| {
@@ -622,7 +639,12 @@ impl Store {
     /// a daemon answers through an [`AnswersCache`].
     pub fn answer(&self, request: &AnswersRequest) -> Result<AnswersReply> {
         Ok(match &request.kind {
-            None => AnswersReply { summary: Some(self.answers_summary(request.cut_unix_ms)?), ..AnswersReply::default() },
+            None => {
+                // A store answering at once runs no fold reader, so it sends no verdict reader.
+                let (mut summary, mut readers) = self.answers_summary_and_readers(request.cut_unix_ms)?;
+                without_lone_verdicts(&mut summary, &mut readers);
+                AnswersReply { summary: Some(summary), ..AnswersReply::default() }
+            }
             Some(kind) => AnswersReply {
                 buckets: Some(self.answer_buckets(kind, request.cut_unix_ms, &request.buckets)?),
                 ..AnswersReply::default()
@@ -922,8 +944,9 @@ impl CacheState {
     fn remark_moving(&mut self, moved: &BTreeSet<String>, slots: &ReaderMoves) {
         let Some(summary) = self.summary.as_mut() else { return };
         for every in &mut self.readers {
+            let verdicts = every.kind == verdicts_kind();
             let moves = |key: &AnswerKey| {
-                if every.kind.starts_with("reader/slots/") {
+                if every.kind.starts_with("reader/slots/") && !verdicts {
                     slots.get(&every.kind).and_then(|keys| keys.get(&key.subject))
                         .is_some_and(|slots| slots.contains(&key.origin))
                 } else {
@@ -1082,6 +1105,7 @@ impl AnswersCache {
                             every.push(buckets);
                         }
                     }
+                    without_lone_verdicts(&mut summary, &mut every);
                     Ok(Computed::Summary(summary, every, mark, invalid))
                 }
                 Some(kind) => store

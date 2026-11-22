@@ -353,6 +353,40 @@ fn settled(cache: &Arc<AnswersCache>, store: &Arc<Store>, request: &AnswersReque
     panic!("the cache never answered {request:?}");
 }
 
+/// A cache that runs one fold reader, as every daemon's does: a member sends the verdict reader
+/// only beside fold readers.
+fn cache_with_a_fold_reader() -> Arc<AnswersCache> {
+    let cache = Arc::new(AnswersCache::default());
+    cache.set_readers(Arc::new(|_: &Connection, _: u128| {
+        Ok(BTreeMap::from([(
+            "status_history".to_owned(),
+            vec![AnswerKey { subject: "agent/alder.worker".into(), origin: String::new(), claim: "answer".into(), moving: false }],
+        )]))
+    }));
+    cache
+}
+
+/// The kinds the previous release's `differing_kinds` finds different, by its rules: every reader
+/// kind is compared once both summaries carry any, except a `reader/slots/` kind one lacks.
+fn previous_release_differs(ours: &AnswersSummary, theirs: &AnswersSummary) -> Vec<String> {
+    let runs_readers = |summary: &AnswersSummary| summary.kinds.keys().any(|kind| kind.starts_with(READER_PREFIX));
+    let readers = runs_readers(ours) && runs_readers(theirs);
+    let kinds = ours.kinds.keys().chain(theirs.kinds.keys()).collect::<BTreeSet<_>>();
+    kinds
+        .into_iter()
+        .filter(|kind| readers || !kind.starts_with(READER_PREFIX))
+        .filter(|kind| !kind.starts_with("reader/slots/") || (ours.kinds.contains_key(*kind) && theirs.kinds.contains_key(*kind)))
+        .filter(|kind| {
+            let answers = |side: Option<&KindAnswers>| {
+                let side = side.cloned().unwrap_or_default();
+                (side.keys, if side.keys == 0 { String::new() } else { side.digest })
+            };
+            answers(ours.kinds.get(*kind)) != answers(theirs.kinds.get(*kind))
+        })
+        .cloned()
+        .collect()
+}
+
 #[test]
 fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
     let store = Arc::new(node("alder"));
@@ -608,7 +642,7 @@ fn a_verdict_judged_again_after_the_summary_moves_rather_than_differs() {
     let cut = cut();
     let kind = verdicts_kind();
     let every: BTreeSet<usize> = (0..BUCKETS).collect();
-    let cache = Arc::new(AnswersCache::default());
+    let cache = cache_with_a_fold_reader();
     let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
     let ask = AnswersRequest { cut_unix_ms: cut, kind: Some(kind.clone()), buckets: every.clone() };
     let invalid = |store: &Store, claim: &str| {
@@ -654,7 +688,7 @@ fn a_kept_verdict_that_waits_again_moves_and_a_requeue_leaves_the_reader_out() {
     let cut = cut();
     let kind = verdicts_kind();
     let every: BTreeSet<usize> = (0..BUCKETS).collect();
-    let cache = Arc::new(AnswersCache::default());
+    let cache = cache_with_a_fold_reader();
     let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
     let ask = AnswersRequest { cut_unix_ms: cut, kind: Some(kind.clone()), buckets: every.clone() };
     alder
@@ -681,4 +715,48 @@ fn a_kept_verdict_that_waits_again_moves_and_a_requeue_leaves_the_reader_out() {
     let served = settled(&cache, &alder, &summary).summary.unwrap();
     assert!(!served.kinds.contains_key(&kind), "no verdicts while a requeue pages");
     assert!(differing_kinds(&served, &birch.answers_summary(cut).unwrap(), false).is_empty());
+}
+
+#[test]
+fn a_member_on_the_previous_release_finds_no_difference_in_the_verdict_reader() {
+    let alder = Arc::new(node("alder"));
+    let claim = state(&alder, "item/a", "one");
+    let cut = cut();
+    let kind = verdicts_kind();
+    alder
+        .connection
+        .write()
+        .execute(
+            "INSERT OR REPLACE INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+            [&claim],
+        )
+        .unwrap();
+    let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
+    let new = settled(&cache_with_a_fold_reader(), &alder, &summary).summary.unwrap();
+    assert_eq!(new.kinds[&kind].keys, 1);
+    // The same member on the previous release: the same fold reader, no verdict reader.
+    let mut previous = new.clone();
+    previous.kinds.remove(&kind);
+    assert!(previous_release_differs(&previous, &new).is_empty(), "{:?}", previous_release_differs(&previous, &new));
+    assert!(previous_release_differs(&new, &previous).is_empty());
+    assert!(differing_kinds(&new, &previous, false).is_empty());
+
+    // A member that runs no fold reader sends no verdict reader, so the previous release never
+    // takes it as running fold readers it lacks.
+    let alone = alder.answer(&summary).unwrap().summary.unwrap();
+    assert!(!alone.kinds.keys().any(|kind| kind.starts_with(READER_PREFIX)), "{:?}", alone.kinds.keys());
+    let birch = Arc::new(node("birch"));
+    push(&alder, &birch);
+    birch
+        .connection
+        .write()
+        .execute(
+            "INSERT OR REPLACE INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+            [&claim],
+        )
+        .unwrap();
+    assert!(birch.answers_summary(cut).unwrap().kinds[&kind].keys == 1, "birch judges it invalid too");
+    let uncached = settled(&Arc::new(AnswersCache::default()), &birch, &summary).summary.unwrap();
+    assert!(!uncached.kinds.contains_key(&kind), "{:?}", uncached.kinds.keys());
+    assert!(previous_release_differs(&previous, &alone).is_empty());
 }

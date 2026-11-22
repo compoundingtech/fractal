@@ -1590,7 +1590,7 @@ seats: a seat whose held usage readings were flushed late moves on both.
 
 Each member judges every signed claim itself (see [device signing](device-signing.md)), so two
 members can serve different verdicts for one claim, for example when the batch order a verdict
-depends on arrived differently. The summary therefore also carries `reader/verdicts`. It holds
+depends on arrived differently. The summary therefore also carries `reader/slots/verdicts`. It holds
 one key per answer whose claim this member judges `invalid`, keyed by the answer's subject and
 `[kind, origin]` and answering `CLAIM invalid: REASON`. A `verified` or `unsigned` answer is no
 key, so a member serving `verified` where its peer serves `invalid` differs in that key. An answer
@@ -1602,7 +1602,12 @@ verdicts come from the current signature tables (not during the signature migrat
 legacy cache) and no requeue is paging, when any claim linked to it may still wait on it. It
 reads the claims still to be judged and the verdicts other than `verified` and `unsigned` once a
 pass, so it adds a few index reads to the pass rather than reads for each answer. It does not
-make a member count as running the fold readers.
+make a member count as running the fold readers. It is named as a slot reader, and a member sends
+it only beside fold readers, so that earlier builds, which compare a `reader/slots/` kind only
+when both members carry it and take any other reader kind to mean the peer runs the fold
+readers, compare nothing for it. A kept summary reads the verdicts again each time it is served:
+a key whose claim is no longer judged `invalid` for the same reason, or that was judged `invalid`
+since, moves, and the reader is left out while the member could not compute it now.
 
 ### First sync
 
