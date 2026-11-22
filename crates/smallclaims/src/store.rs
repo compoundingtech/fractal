@@ -8356,13 +8356,11 @@ impl Store {
         let versions_key = format!("peer_projection_versions:{relay}");
         let registry_key = format!("peer_projection_registry:{relay}");
         let inventory_key = format!("peer_projection_inventory:{relay}");
-        let (received, duplicate, signatures, received_at, checkpoint_at) = 'receipt: {
-            let mut connection = self.connection.write_background_before(deadline_unix_ms)?;
-            let received_at = now_ms();
-            // Compare under the writer loan so concurrent failures and acknowledgements remain
-            // ordered. Unchanged receipts open no transaction and run no managed finalizers.
-            let checkpoint_at: Option<i64> = if input.envelopes.is_empty() && input.signatures.is_empty() {
-                connection.prepare_cached(
+        let unchanged_checkpoint = |connection: &Connection, received_at: u128| -> Result<Option<i64>, FractalError> {
+            if !input.envelopes.is_empty() || !input.signatures.is_empty() {
+                return Ok(None);
+            }
+            connection.prepare_cached(
                 "SELECT CAST(last_success_at_unix_ms AS INTEGER) FROM replication_peers
                  WHERE peer=?1 AND status='up' AND last_error IS NULL
                    AND schema_digest IS ?2 AND authority_digest IS ?3 AND graph_digest IS ?4
@@ -8383,8 +8381,21 @@ impl Store {
                     &registry_key, projection_registry,
                     &inventory_key, input.inventory.digest, asks],
                 |row| row.get(0),
-            ).optional().map_err(internal)?
-            } else { None };
+            ).optional().map_err(internal)
+        };
+        let (received, duplicate, signatures, received_at, checkpoint_at) = 'receipt: {
+            let received_at = now_ms();
+            // An unchanged receipt linearizes at this committed reader snapshot. Concurrent
+            // changes stay durable and are checked by the next exchange or freshness refresh;
+            // latest_peer_receipt accepts local last-seen only for its matching checkpoint.
+            // Changed state is rechecked under the writer before deciding whether to commit.
+            if let Some(checkpoint_at) = unchanged_checkpoint(&self.readers.get(), received_at)? {
+                crate::replication::check_receive_deadline(deadline_unix_ms)?;
+                break 'receipt (0, 0, 0, received_at, checkpoint_at as u128);
+            }
+            let mut connection = self.connection.write_background_before(deadline_unix_ms)?;
+            let received_at = now_ms();
+            let checkpoint_at = unchanged_checkpoint(&connection, received_at)?;
             if let Some(checkpoint_at) = checkpoint_at {
                 break 'receipt (0, 0, 0, received_at, checkpoint_at as u128);
             }
