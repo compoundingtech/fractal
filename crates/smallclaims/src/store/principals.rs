@@ -1807,11 +1807,18 @@ impl Store {
         if !self.signature_migration()?.done() {
             return Ok(SignatureCompaction::default());
         }
+        // Once the walk is done, look for a settled claim left whole on a reader: nothing found
+        // takes no writer loan.
+        let restart = match compaction::settled_left(&self.readers.get())? {
+            Some(false) => return Ok(SignatureCompaction { finished: true, ..SignatureCompaction::default() }),
+            Some(true) => true,
+            None => false,
+        };
         let mut connection = self.connection.write_background();
         let lent = std::time::Instant::now();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let (examined, compacted, finished) = compaction::compact_page_tx(&transaction)?;
+        let (examined, compacted, finished) = compaction::compact_page_tx(&transaction, restart)?;
         transaction.commit()?;
         drop(connection);
         Ok(SignatureCompaction { examined, compacted, finished, held: lent.elapsed() })

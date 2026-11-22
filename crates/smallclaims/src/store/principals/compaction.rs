@@ -86,16 +86,12 @@ pub(super) fn compact_settled_tx(connection: &Connection, claim_id: &str) -> Res
 /// One page of the compaction of settled claims that earlier releases kept whole: walk the
 /// candidate rows in claim order from the cursor and compact each settled claim. Returns
 /// `(examined, compacted, finished)`. A claim that settles behind the cursor is compacted when
-/// it settles. Once done, only unsettled claims keep candidate rows, so a cheap scan of that
-/// remainder finds a settled one a release without this writer left after a rollback, and the
-/// walk starts over.
-pub(super) fn compact_page_tx(connection: &Connection) -> Result<(usize, usize, bool)> {
+/// it settles. Once done, the walk starts over only when [`settled_left`] found a settled claim
+/// that a release without this writer left after a rollback (`restart`).
+pub(super) fn compact_page_tx(connection: &Connection, restart: bool) -> Result<(usize, usize, bool)> {
     let mut cursor = super::super::fleet_meta(connection, COMPACTION_CURSOR)?.unwrap_or_default();
     if cursor == "done" {
-        let left: bool = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3a201afcb2b7 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 {SETTLED_FROM} WHERE {SETTLED})"))?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h6c9a3ed04989 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
-        if !left {
+        if !restart {
             return Ok((0, 0, true));
         }
         cursor = String::new();
@@ -120,6 +116,19 @@ pub(super) fn compact_page_tx(connection: &Connection) -> Result<(usize, usize, 
     let next = if finished { "done" } else { last.unwrap_or(cursor.as_str()) };
     set_meta_tx(connection, COMPACTION_CURSOR, next)?;
     Ok((examined, compacted, finished))
+}
+
+/// Whether the walk is done, and if so whether a settled claim is still kept whole. Once done,
+/// only claims that do not settle keep candidate rows, and on a member with many held claims
+/// that remainder is large: so this reads it on a reader, before any writer loan, and the
+/// caller takes the writer only to compact what it finds.
+pub(super) fn settled_left(connection: &Connection) -> Result<Option<bool>> {
+    if super::super::fleet_meta(connection, COMPACTION_CURSOR)?.as_deref() != Some("done") {
+        return Ok(None);
+    }
+    Ok(Some(connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3a201afcb2b7 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 {SETTLED_FROM} WHERE {SETTLED})"))?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h6c9a3ed04989 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?))
 }
 
 /// The facade of a compacted claim: counted, without candidate rows.

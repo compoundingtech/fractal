@@ -428,6 +428,10 @@ fn the_paced_pass_compacts_what_an_earlier_release_kept_whole() {
     drain(&store);
     assert_eq!(verdicts(&store), before);
     assert_eq!(pace(&store), (1, 0), "once done, a pass is one cheap look");
+    // That look is a read: with nothing left whole it takes no writer loan, however many claims
+    // stay unsettled.
+    let page = store.compact_settled_signatures().unwrap();
+    assert!(page.finished && page.held.is_zero(), "{page:?}");
 }
 
 #[test]

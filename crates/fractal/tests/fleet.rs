@@ -7261,6 +7261,9 @@ async fn previous_release_verdicts_survive_signature_compaction_across_upgrade_a
         assert!(Instant::now() < deadline, "the rolled-back member neither starts nor exits:\n{}", o.logs());
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
+    // The pinned baseline (the oldest deployed release) has no version 26 reader and refuses; the
+    // reader release reads. Say which ran, so a run against the reader release shows it.
+    eprintln!("rollback to {}: {}", o.binary.display(), if refused { "refused by the fence" } else { "read the store" });
     if refused {
         let logs = o.logs();
         assert!(logs.contains("unsupported st schema version 26"), "{logs}");
