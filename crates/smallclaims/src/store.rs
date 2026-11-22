@@ -8261,7 +8261,7 @@ impl Store {
         Ok(receipt)
     }
 
-    pub /* sqlite-large-value-flow: allow-for-now flow-h7818827323a6 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_via(
+    pub fn receive_replication_exchange_via(
         &self,
         relay: &str,
         fleet_id: &str,
@@ -8277,7 +8277,7 @@ impl Store {
 
     /// The local connector's optional answer deadline. Admission may refuse the page;
     /// once its receipt transaction starts, it commits atomically without cancellation.
-    pub fn receive_replication_exchange_before(
+    pub /* sqlite-large-value-flow: allow-for-now flow-h9e43d13e01a3 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_before(
         &self,
         relay: &str,
         fleet_id: &str,
