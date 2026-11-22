@@ -799,6 +799,29 @@ mod tests {
     use crate::backup;
     use std::path::PathBuf;
 
+    // Closing the last writer does not guarantee that read-only pooled connections
+    // removed its WAL. Prepare a genuinely stopped, checkpointed fixture explicitly.
+    fn checkpoint_offline_fixture(path: &Path) {
+        let blob = PathBuf::from(smallclaims::store::blob_file::location(path));
+        for database in [path, blob.as_path()] {
+            let connection = Connection::open(database).unwrap();
+            let busy: u64 = connection.query_row(
+                "PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(busy, 0, "fixture checkpoint is busy: {}", database.display());
+            connection.close().unwrap();
+            let wal = sidecar(database, "-wal");
+            if wal.exists() {
+                assert_eq!(fs::metadata(&wal).unwrap().len(), 0, "fixture WAL must be fully checkpointed");
+                fs::remove_file(wal).unwrap();
+            }
+            let shm = sidecar(database, "-shm");
+            if shm.exists() {
+                fs::remove_file(shm).unwrap();
+            }
+        }
+    }
+
     fn offline_fixture(path: &Path, seal: bool) {
         let source = Store::open(path, "alder").unwrap();
         diagnostic(&source, "offline-source");
@@ -810,6 +833,8 @@ mod tests {
         connection.execute(
             "INSERT INTO meta(key,value) VALUES('local_node_writer','alder')", [],
         ).unwrap();
+        connection.close().unwrap();
+        checkpoint_offline_fixture(path);
     }
 
     // Include every filename (directories too) and every file's content digest, including
@@ -849,6 +874,7 @@ mod tests {
              VALUES('message/offline','message.read','agent/reader','{}',1)", [],
         ).unwrap();
         drop(shard);
+        checkpoint_offline_fixture(&path);
         path
     }
 
@@ -992,16 +1018,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("claims.sqlite3");
         offline_fixture(&database, true);
-        let shard_path = super::super::backup_shards::database_path(root.path()).unwrap();
-        let shard = GraphStore::open(
-            &shard_path, "alder",
-            Arc::new(super::super::messages_shard::MessagesRuntime::default()),
-        ).unwrap();
-        shard.connection.write().execute(
-            "INSERT INTO stream_lifecycle(subject,kind,actor,fields,recorded_at_unix_ms)
-             VALUES('message/offline','message.read','agent/reader','{}',1)", [],
-        ).unwrap();
-        drop(shard);
+        let shard_path = offline_shard(root.path());
         let before = Sha256::digest(fs::read(&shard_path).unwrap());
         let source = Store::open_backup_read_only(&database).unwrap();
         let mut output = Vec::new();
