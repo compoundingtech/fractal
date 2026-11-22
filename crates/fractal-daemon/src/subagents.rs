@@ -103,7 +103,9 @@ fn refused(error: &anyhow::Error) -> bool {
 }
 
 impl Publisher {
-    /// The publisher of driver incarnation `incarnation`, which started at `started_at_ms`.
+    /// The publisher of driver incarnation `incarnation`, whose provider launched at `started_at_ms`.
+    /// Capture that boundary before spawning the provider, not when initializing this publisher:
+    /// its current harness may already have started children while the driver was attaching.
     /// Subagents an earlier harness of this seat started end as `harness-exited`.
     pub fn start(
         subject: &str,

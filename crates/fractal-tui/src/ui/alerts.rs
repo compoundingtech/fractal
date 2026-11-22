@@ -987,7 +987,7 @@ impl Ui {
                 Span::styled(left, bar(theme::strong(theme::PERSON))),
                 Span::styled(" ".repeat(gap), bar(Style::default())),
                 Span::styled(right, bar(theme::dim())),
-            ]),
+            ]).decoration(),
             hits: vec![(
                 0,
                 width as u16,
@@ -1030,7 +1030,7 @@ impl Ui {
                             Span::styled(label, bar(theme::strong(theme::PERSON))),
                             Span::styled(" ".repeat(gap), bar(Style::default())),
                             Span::styled(right, bar(theme::dim())),
-                        ]),
+                        ]).decoration(),
                         hits: vec![
                             (0, cut as u16, Hit::Alert(item.id.clone(), AlertTap::Open)),
                             (cut as u16, width.saturating_sub(cut) as u16, Hit::Alert(agent.to_owned(), AlertTap::Toggle)),
