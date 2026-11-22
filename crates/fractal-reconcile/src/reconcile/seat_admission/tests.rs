@@ -114,7 +114,7 @@ async fn sampler_recovers_after_120_seconds_with_a_90_second_reconcile_stall() {
     let start = Instant::now();
     let mut release = Some(release);
     let mut observer = Some(observer);
-    for elapsed in (0..=125).step_by(5) {
+    for elapsed in (0..=120).step_by(5) {
         if elapsed != 0 {
             tokio::time::advance(Duration::from_secs(5)).await;
         }
@@ -125,15 +125,15 @@ async fn sampler_recovers_after_120_seconds_with_a_90_second_reconcile_stall() {
         assert_eq!(at.duration_since(start), Duration::from_secs(elapsed));
         assert!(!matches!(decision.reason,
             Some(Reason::UnknownObservation { cause: ObservationCause::ObservationGap | ObservationCause::StaleDecision })));
-        if (5..125).contains(&elapsed) {
-            assert_eq!(decision.reason, Some(Reason::Recovering { remaining: (125 - elapsed) * 1000 }));
+        if elapsed < 120 {
+            assert_eq!(decision.reason, Some(Reason::Recovering { remaining: (120 - elapsed) * 1000 }));
         }
         assert_eq!(reconciler.seat_admission.pressure_decision(), decision);
         if elapsed == 90 {
             release.take().unwrap().send(()).unwrap();
             observer.take().unwrap().join().unwrap();
         }
-        if elapsed == 125 {
+        if elapsed == 120 {
             assert!(!decision.blocked, "120 seconds of healthy samples must recover");
         }
     }

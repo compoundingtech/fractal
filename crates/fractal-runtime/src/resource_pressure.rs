@@ -580,33 +580,31 @@ impl Observer {
             self.reader.last_allocstall_at_ms = None;
         }
         let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-        if self.sampled_at.is_none_or(|at|
-            u128::from(now.saturating_sub(at)) >= self.policy.sample_interval().as_millis())
-        {
-            self.sampled_at = Some(now);
-            let readings = match &self.paths {
-                Some([memory, io, meminfo, root_memory, vmstat]) =>
-                    self.reader.read_paths(&self.policy, now, KernelPaths {
-                        memory_path: Some(memory), io_path: io, meminfo_path: meminfo,
-                        root_memory_path: root_memory, vmstat_path: vmstat,
-                    }),
-                None => self.reader.read(&self.policy, now),
-            };
-            self.cached = match readings {
-                Ok(readings) => self.brake.observe(readings, now),
-                Err(error) => {
-                    self.reader.readings.clear();
-                    self.brake.last_observation = Some(now);
-                    let decision = self.brake.unknown(ObservationCause::from_error(&error));
-                    if error.is::<InvalidMemoryFloor>() {
-                        self.sampled_at = None;
-                        self.cached = decision;
-                        return Err(error);
-                    }
-                    decision
+        // The daemon interval owns cadence. A second throttle here would discard a
+        // slightly early tick and turn scheduling jitter into a freshness gap.
+        self.sampled_at = Some(now);
+        let readings = match &self.paths {
+            Some([memory, io, meminfo, root_memory, vmstat]) =>
+                self.reader.read_paths(&self.policy, now, KernelPaths {
+                    memory_path: Some(memory), io_path: io, meminfo_path: meminfo,
+                    root_memory_path: root_memory, vmstat_path: vmstat,
+                }),
+            None => self.reader.read(&self.policy, now),
+        };
+        self.cached = match readings {
+            Ok(readings) => self.brake.observe(readings, now),
+            Err(error) => {
+                self.reader.readings.clear();
+                self.brake.last_observation = Some(now);
+                let decision = self.brake.unknown(ObservationCause::from_error(&error));
+                if error.is::<InvalidMemoryFloor>() {
+                    self.sampled_at = None;
+                    self.cached = decision;
+                    return Err(error);
                 }
-            };
-        }
+                decision
+            }
+        };
         Ok(self.decision())
     }
 }

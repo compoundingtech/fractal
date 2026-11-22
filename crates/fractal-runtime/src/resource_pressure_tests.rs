@@ -653,8 +653,9 @@ async fn stopped_sampler_expires_cached_admission_without_reading_or_advancing_t
     let cached = observer.decision();
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
     assert_eq!(observer.decision(), cached);
-    assert_eq!(observer.observe(&policy).unwrap(), cached,
-        "a throttled sampler call must not count a second observation");
+    assert_eq!(observer.observe(&policy).unwrap().reason,
+        Some(Reason::Recovering { remaining: policy.resume_ms - 1 }),
+        "every sampler invocation must count its fresh observation");
 }
 
 #[tokio::test(start_paused = true)]
@@ -674,13 +675,14 @@ async fn observation_error_cause_survives_cached_reads_and_recovers_only_from_sa
     }));
     fixture.write("proc/pressure/io", "some avg60=0.0\n");
     assert_eq!(observer.decision(), missing);
-    assert_eq!(observer.observe(&policy).unwrap(), missing);
-    for elapsed in (5000..=125000).step_by(5000) {
+    assert_eq!(observer.observe(&policy).unwrap().reason,
+        Some(Reason::Recovering { remaining: policy.resume_ms }));
+    for elapsed in (5000..=120000).step_by(5000) {
         tokio::time::advance(policy.sample_interval()).await;
         let decision = observer.observe(&policy).unwrap();
-        if elapsed < 125000 {
+        if elapsed < 120000 {
             assert_eq!(decision.reason,
-                Some(Reason::Recovering { remaining: 125000 - elapsed }));
+                Some(Reason::Recovering { remaining: 120000 - elapsed }));
         } else {
             assert!(!decision.blocked);
         }
@@ -691,6 +693,37 @@ async fn observation_error_cause_survives_cached_reads_and_recovers_only_from_sa
     assert_eq!(invalid.reason,
         Some(Reason::UnknownObservation { cause: ObservationCause::MissingOrInvalid }));
     assert_eq!(observer.decision(), invalid);
+}
+
+#[tokio::test(start_paused = true)]
+async fn jittered_sampler_ticks_do_not_skip_observations_or_reset_recovery() {
+    let fixture = PressureFixture::new();
+    let root = fixture.root.path();
+    let policy = fixture.policy.clone();
+    let mut observer = Observer::with_paths(policy.clone(), [
+        root.join("sys/fs/cgroup/app.slice/app-lanes.slice/memory.pressure"),
+        root.join("proc/pressure/io"), root.join("proc/meminfo"),
+        root.join("proc/pressure/memory"), root.join("proc/vmstat"),
+    ]).unwrap();
+    std::fs::remove_file(root.join("proc/pressure/io")).unwrap();
+    assert!(observer.observe(&policy).unwrap().blocked);
+    fixture.write("proc/pressure/io", "some avg60=0.0\n");
+    assert_eq!(observer.observe(&policy).unwrap().reason,
+        Some(Reason::Recovering { remaining: policy.resume_ms }));
+    let mut elapsed = 0;
+    for tick in 0..24 {
+        let spacing = if tick % 2 == 0 { 4999 } else { 5001 };
+        elapsed += spacing;
+        tokio::time::advance(std::time::Duration::from_millis(spacing)).await;
+        let decision = observer.observe(&policy).unwrap();
+        if elapsed < policy.resume_ms {
+            assert_eq!(decision.reason,
+                Some(Reason::Recovering { remaining: policy.resume_ms - elapsed }));
+        } else {
+            assert!(!decision.blocked, "jitter must not interrupt healthy recovery");
+        }
+    }
+    assert_eq!(elapsed, policy.resume_ms);
 }
 
 #[test]
