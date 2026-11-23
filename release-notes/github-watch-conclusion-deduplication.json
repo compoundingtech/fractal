@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "GitHub watches deduplicate unchanged check results across observations and restarts, distinguish Actions reruns by run and attempt, and label cancelled checks accurately.",
+  "replay": {"status": "none", "detail": "No replay changes. Existing observation facts and persisted message subjects provide deduplication."},
+  "schema": {"status": "none", "detail": "No new claim fields, tables, indexes or store version changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Check wake identity uses the head, producer-selected aggregate state, sorted failed names and counted workflow (run ID, attempt) pairs, excluding raw display checks, readiness and suite metadata. Foreign-app checks and superseded suites do not affect identity. Changes preserving aggregate state, failed names and attempts (such as success to skipped) intentionally do not wake. No-ID checks include commit statuses, non-workflow third-party apps (possibly Mergemaster depending on its reporting), and Actions runs whose databaseId is null: identical recurring results at the same head remain suppressed. Existing observation-key messages remain readable; upgrade may send at most one extra wake for an unchanged result, then persisted result keys deduplicate repeats. Watches distinguish cancelled while github.event retains checks-failed and cancelled required checks retain active refresh cadence. Optional checks remain excluded when required-check rules are available."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "An older build restores observation-based wake identity and treats cancellation as failure; previously delivered messages are retained."}
+}
