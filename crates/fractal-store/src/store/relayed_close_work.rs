@@ -28,34 +28,44 @@ CREATE INDEX IF NOT EXISTS desired_member_host_subject ON desired(
  CASE WHEN json_valid(member) THEN json_extract(member,'$.host') END,subject);
 CREATE INDEX IF NOT EXISTS relayed_close_selector_recipient ON local_client_message_selectors_v1(recipient,subject)
  WHERE born_index>=0 AND retired_index IS NULL AND closed=0;
+-- Replace the original conflict-policy-sensitive triggers on existing stores too.
+DROP TRIGGER IF EXISTS relayed_close_desired_insert;
+DROP TRIGGER IF EXISTS relayed_close_desired_delete;
+DROP TRIGGER IF EXISTS relayed_close_desired_update;
+DROP TRIGGER IF EXISTS relayed_close_selector_insert;
+DROP TRIGGER IF EXISTS relayed_close_selector_delete;
+DROP TRIGGER IF EXISTS relayed_close_selector_update;
+DROP TRIGGER IF EXISTS relayed_close_daemon_insert;
+DROP TRIGGER IF EXISTS relayed_close_daemon_delete;
+DROP TRIGGER IF EXISTS relayed_close_daemon_update;
 CREATE TRIGGER IF NOT EXISTS relayed_close_desired_insert AFTER INSERT ON desired WHEN NEW.member IS NOT NULL BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('recipient',NEW.subject);
+ INSERT INTO local_relayed_close_work(kind,key) VALUES('recipient',NEW.subject) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 CREATE TRIGGER IF NOT EXISTS relayed_close_desired_delete AFTER DELETE ON desired WHEN OLD.member IS NOT NULL BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('recipient',OLD.subject);
+ INSERT INTO local_relayed_close_work(kind,key) VALUES('recipient',OLD.subject) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 CREATE TRIGGER IF NOT EXISTS relayed_close_desired_update AFTER UPDATE OF member ON desired WHEN OLD.member IS NOT NEW.member BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('recipient',NEW.subject);
+ INSERT INTO local_relayed_close_work(kind,key) VALUES('recipient',NEW.subject) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 CREATE TRIGGER IF NOT EXISTS relayed_close_selector_insert AFTER INSERT ON local_client_message_selectors_v1 WHEN NEW.born_index>=0 BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('message',NEW.subject);
+ INSERT INTO local_relayed_close_work(kind,key) VALUES('message',NEW.subject) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 CREATE TRIGGER IF NOT EXISTS relayed_close_selector_delete AFTER DELETE ON local_client_message_selectors_v1 WHEN OLD.born_index>=0 BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('message',OLD.subject);
+ INSERT INTO local_relayed_close_work(kind,key) VALUES('message',OLD.subject) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 CREATE TRIGGER IF NOT EXISTS relayed_close_selector_update AFTER UPDATE ON local_client_message_selectors_v1
  WHEN (OLD.born_index>=0 OR NEW.born_index>=0) AND (OLD.born_index IS NOT NEW.born_index OR OLD.recipient IS NOT NEW.recipient OR OLD.closed IS NOT NEW.closed OR OLD.retired_index IS NOT NEW.retired_index) BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('message',NEW.subject);
+ INSERT INTO local_relayed_close_work(kind,key) VALUES('message',NEW.subject) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 CREATE TRIGGER IF NOT EXISTS relayed_close_daemon_insert AFTER INSERT ON claims WHEN NEW.kind='daemon.started' BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('host',substr(NEW.subject,8));
+ INSERT INTO local_relayed_close_work(kind,key) VALUES('host',substr(NEW.subject,8)) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 CREATE TRIGGER IF NOT EXISTS relayed_close_daemon_delete AFTER DELETE ON claims WHEN OLD.kind='daemon.started' BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('host',substr(OLD.subject,8));
+ INSERT INTO local_relayed_close_work(kind,key) VALUES('host',substr(OLD.subject,8)) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 CREATE TRIGGER IF NOT EXISTS relayed_close_daemon_update AFTER UPDATE ON claims WHEN OLD.kind='daemon.started' OR NEW.kind='daemon.started' BEGIN
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) SELECT 'host',substr(OLD.subject,8) WHERE OLD.kind='daemon.started';
- INSERT OR REPLACE INTO local_relayed_close_work(kind,key) SELECT 'host',substr(NEW.subject,8) WHERE NEW.kind='daemon.started';
+ INSERT INTO local_relayed_close_work(kind,key) SELECT 'host',substr(OLD.subject,8) WHERE OLD.kind='daemon.started' ON CONFLICT(kind,key) DO UPDATE SET after_key='';
+ INSERT INTO local_relayed_close_work(kind,key) SELECT 'host',substr(NEW.subject,8) WHERE NEW.kind='daemon.started' ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
 INSERT OR IGNORE INTO local_relayed_close_work(kind,key)
  SELECT 'recipient',recipient FROM local_client_message_selectors_v1
@@ -462,5 +472,45 @@ mod tests {
         assert_eq!(discovery_at(&connection, "local", 1).unwrap().len(), 1);
         let retry: (u32,u64) = connection.query_row("SELECT attempts,next_attempt_ms FROM local_relayed_close_reads", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
         assert_eq!(retry, (0,0));
+    }
+
+    #[test]
+    fn trigger_upserts_reset_cursors_under_outer_conflict_policies() {
+        let connection = database();
+        connection.execute_batch("
+            CREATE TABLE outer_writes(id INTEGER PRIMARY KEY, value INTEGER);
+            CREATE TRIGGER outer_scope_insert AFTER INSERT ON outer_writes BEGIN
+                INSERT INTO desired(subject,kind,member,body)
+                VALUES('pty/a','pty','{}','{}')
+                ON CONFLICT(subject) DO UPDATE SET member=excluded.member;
+                INSERT INTO local_client_message_selectors_v1 VALUES('message/a',NEW.id,'pty/a',NULL,0);
+                INSERT INTO claims VALUES('daemon/remote','daemon.started','{}');
+            END;
+            CREATE TRIGGER outer_scope_update AFTER UPDATE ON outer_writes BEGIN
+                UPDATE desired SET member='{\"host\":\"changed\"}' WHERE subject='pty/a';
+                UPDATE local_client_message_selectors_v1 SET closed=1 WHERE subject='message/a';
+                UPDATE claims SET body='{\"changed\":true}' WHERE kind='daemon.started';
+            END;
+            INSERT INTO local_relayed_close_work(kind,key,after_key) VALUES
+                ('recipient','pty/a','stale'),('message','message/a','stale'),('host','remote','stale');
+            INSERT OR IGNORE INTO outer_writes VALUES(1,0);
+        ").unwrap();
+        let cursors: usize = connection.query_row("SELECT count(*) FROM local_relayed_close_work WHERE after_key!=''", [], |row| row.get(0)).unwrap();
+        assert_eq!(cursors, 0);
+        connection.execute_batch("
+            UPDATE local_relayed_close_work SET after_key='stale';
+            INSERT INTO outer_writes VALUES(1,1) ON CONFLICT(id) DO UPDATE SET value=excluded.value;
+        ").unwrap();
+        let cursors: usize = connection.query_row("SELECT count(*) FROM local_relayed_close_work WHERE after_key!=''", [], |row| row.get(0)).unwrap();
+        assert_eq!(cursors, 0);
+        connection.execute_batch("
+            UPDATE local_relayed_close_work SET after_key='stale';
+            DELETE FROM desired;
+            DELETE FROM local_client_message_selectors_v1;
+            DELETE FROM claims;
+        ").unwrap();
+        let cursors: usize = connection.query_row("SELECT count(*) FROM local_relayed_close_work WHERE after_key!=''", [], |row| row.get(0)).unwrap();
+        assert_eq!(cursors, 0);
+        assert_eq!(pending(&connection), 3);
     }
 }
