@@ -161,9 +161,11 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
                     view.blocked_reason.clone().unwrap_or_else(|| "waits for another run to finish".into()),
                 );
             }
-            Some("predicate") => {
+            // Nested steps have no gate_kind in the published work row: resolve their
+            // predicate eligibility from the same pinned definition as their gates.
+            Some("predicate") | None => {
                 wait.kind = WaitKind::Verifying;
-                wait.detail = Some("st checks its predicate gates".into());
+                wait.detail = row.value["gate_kind"].as_str().map(|_| "st checks its predicate gates".into());
                 if let Some(detail) = predicate_wait(store, view)? {
                     wait.kind = WaitKind::Hold;
                     wait.since_unix_ms = view.execution_started_at_unix_ms;

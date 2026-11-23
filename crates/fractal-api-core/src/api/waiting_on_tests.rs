@@ -398,6 +398,10 @@ fn predicate_waits_name_the_gate_without_turning_elapsed_waits_into_stalls() {
         let subject = &run.steps.iter().find(|step| step.step == "retire").unwrap().subject;
         store.set_step_state(subject, "working", None).unwrap();
         let (work, missions) = published(&store);
+        if selector == "agentless" {
+            assert_eq!(work.rows.rows[subject].value["gate_kind"], "predicate",
+                "top-level predicates keep the published-metadata path");
+        }
         store.latest_actual_value("mission/garden/schedule").unwrap();
         let steps = store.run_step_states(&run.subject).unwrap().unwrap();
         let cut = store.index().unwrap();
@@ -453,11 +457,27 @@ mission "garden/nested" state="ready" {
             &step.subject, if step.step == path { "working" } else { "completed" }, None,
         ).unwrap();
     }
+    // Republish a satisfied gate: the existing generation must still use its false pinned gate.
+    publish(&store, r#"version 2
+mission "garden/nested" state="ready" {
+  goal "The newer definition is not the running generation."
+  step "parent" {
+    mission "child/group" {
+      goal "Keep the nested schedule open."
+      step "retire" {
+        agentless
+        gate "already ready" { field "state" "mission/garden/nested" is "ready" }
+      }
+    }
+  }
+}"#, "nested-predicate-new-revision");
     let (work, missions) = published(&store);
+    assert!(work.rows.rows[subject].value["gate_kind"].is_null(),
+        "nested work rows omit gate metadata; waiting-on must read the pinned definition");
     store.latest_actual_value("mission/garden/nested").unwrap();
     let steps = store.run_step_states(&run.subject).unwrap().unwrap();
     let waiting = run_waiting_on(&store, &steps, &work, &missions.rows, t0 + 12 * 60 * MINUTE, QUIET).unwrap();
-    assert_eq!(waiting.verdict, RunVerdict::Waiting);
+    assert_eq!(waiting.verdict, RunVerdict::Waiting, "{waiting:#?}");
     let retire = open(&waiting, path);
     assert_eq!(retire.kind, WaitKind::Hold);
     assert_eq!(retire.step, *subject);

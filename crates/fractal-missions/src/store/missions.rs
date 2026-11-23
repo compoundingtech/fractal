@@ -2642,6 +2642,17 @@ impl MissionsStore for Store {
         fn find(mission: MissionSpec, path: &str) -> Vec<crate::model::GateSpec> {
             for (_, mut step) in mission.steps {
                 if step.path == path {
+                    // Missing work-row metadata must not turn programs, run waits or mixed
+                    // gate steps into predicate holds.
+                    if step.program.is_some() || step.after_run.is_some()
+                        || step.gates.iter().any(|gate| matches!(gate,
+                            crate::model::GateSpec::Mechanical { .. }
+                                | crate::model::GateSpec::Llm { .. }
+                                | crate::model::GateSpec::Human { .. }
+                        ))
+                    {
+                        return Vec::new();
+                    }
                     step.gates.truncate(4);
                     return step.gates;
                 }

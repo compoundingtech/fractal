@@ -32,6 +32,8 @@ Neither read folds claims or replays history. They read state Fractal already ke
   Each peek checks freshness with a covering seek on `claims_subject_index`, reading no claim
   body. Cold or stale entries are unavailable; the peek never fills the cache or folds history.
   These reads do not run gates, refresh observations, walk launch lineage or write diagnostics.
+  Nested work rows omit gate-kind metadata; waiting-on resolves predicate eligibility and gates
+  from the pinned definition without changing the work row's client representation.
 
 `fractal missions show RUN` builds a presentation from each step's whole history. On a large store that
 costs minutes of daemon CPU, so it is the wrong tool for "why is this stuck".
