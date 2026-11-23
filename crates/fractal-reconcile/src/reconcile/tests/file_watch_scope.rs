@@ -174,3 +174,81 @@ async fn missing_nested_watch_does_not_collapse_to_first_component() {
     assert!(reconciler.incremental.needs("launch-inputs:agent/selected", now_ms()));
     assert!(global.notified().now_or_never().is_none());
 }
+
+#[test]
+fn scoped_render_ignores_lifecycle_inactive_conflicting_owners() {
+    use super::*;
+
+    for lifecycle in ["terminal-owner", "pending-owner", "stopped-root-task"] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, r#"version 2
+mission "roster-owner" state="ready" {
+  goal "Own the declaration."
+  step "work" { assigned-to "agent/node.selected" }
+}
+"#, &format!("mission-{lifecycle}"));
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "roster-owner".into(), revision: None,
+            workspace: root.path().display().to_string(),
+            requester: Some("person/test".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: format!("run-{lifecycle}"),
+        }).unwrap();
+        let stale_kind = if lifecycle == "stopped-root-task" { "exec" } else { "agent" };
+        let source = format!(r#"version 2
+agent "selected" {{
+  workspace {workspace:?}
+  command "true"
+  lifecycle "adopt-only"
+  render {{ file "shared.txt" "selected" }}
+}}
+{stale_kind} "stale" {{
+  workspace {workspace:?}
+  command "true"
+  lifecycle "adopt-only"
+  render {{ file "shared.txt" "stale" }}
+}}
+"#, workspace = root.path().display().to_string());
+        let mut intent = parse_intent(&source, "node").unwrap();
+        let stale = intent.subjects.values_mut()
+            .find(|subject| subject.subject.ends_with(".stale")).unwrap();
+        let stale_subject = stale.subject.clone();
+        if lifecycle == "stopped-root-task" {
+            stale.member.as_mut().unwrap().tags.insert("st3.agent".into(), "agent/node.root".into());
+        } else {
+            stale.owner_run = Some(run.subject.clone());
+        }
+        store.apply_internal(&intent, &format!("members-{lifecycle}")).unwrap();
+        if lifecycle == "stopped-root-task" {
+            apply_source(&store, "version 2\nstop \"agent/node.root\"\n", "stop-root");
+        } else if lifecycle == "terminal-owner" {
+            store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+            assert!(store.terminal_owned_runtime_subjects().unwrap().contains(&stale_subject));
+        } else {
+            // Retain the published declaration while its owner's replacement
+            // projection is pending, as in the dispatch-deferral regression.
+            let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
+            store.connection.write().execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+            ).unwrap();
+            assert!(store.run_projection_pending(&run.subject).unwrap());
+        }
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(),
+            "node".into(), Arc::new(Notify::new()));
+        reconciler.file_changes.launches.lock().unwrap().insert("agent/node.selected".into());
+        *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(|| {
+            panic!("scoped render must not execute a full pass");
+        }));
+        assert_eq!(reconciler.evaluate_changed_launch_inputs().unwrap(), 1, "{lifecycle}");
+        assert_eq!(std::fs::read_to_string(root.path().join("shared.txt")).unwrap(),
+            "selected", "{lifecycle}: inactive declarations must not retain render ownership");
+        assert!(store.member_reconcile_fault("agent/node.selected", None).unwrap().is_none(),
+            "{lifecycle}");
+        assert!(store.observations_for(&stale_subject, "render.applied").unwrap().is_empty(),
+            "{lifecycle}: an inactive declaration must not publish a render receipt");
+        assert!(runtime.started_members.lock().unwrap().is_empty(),
+            "adopt-only declarations must not start");
+    }
+}

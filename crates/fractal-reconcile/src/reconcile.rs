@@ -1594,6 +1594,12 @@ fn reconcile_decision_admitted(subject: &str) -> bool {
     !subject.starts_with("gate-operation/")
 }
 
+struct MemberRoster {
+    pending_subjects: BTreeSet<String>,
+    task_stops: BTreeSet<String>,
+    root_tasks: BTreeMap<String, Vec<RootTask>>,
+}
+
 struct MemberEvaluation {
     work_message_agents: Vec<MemberWake>,
     deferred_member_faults: BTreeMap<String, anyhow::Error>,
@@ -1865,6 +1871,9 @@ struct FileChanges {
     runs: Mutex<BTreeSet<String>>,
     launches: Mutex<BTreeSet<String>>,
     pending_measurements: Mutex<BTreeMap<String, PendingLaunchMeasurements>>,
+    // Full passes and scoped dispatch share incremental reader state. Hold through observation
+    // and evaluated(), not just map updates, so neither can retire the other's registration.
+    launch_input_registration: Mutex<()>,
     notify: Notify,
 }
 impl FileChanges {
@@ -3705,6 +3714,71 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// Resolve lifecycle participation before either full or scoped member planning.
+    /// This is read-only apart from transforming this snapshot's retired members
+    /// into stops; scoped render validation must not resurrect their ownership.
+    fn prepare_member_roster(&self, desired: &mut [DesiredSubject]) -> Result<MemberRoster> {
+        let mut pending_subjects = BTreeSet::new();
+        for declaration in desired.iter() {
+            if let Some(run) = &declaration.owner_run
+                && self.store.run_projection_pending(run)?
+            {
+                pending_subjects.insert(declaration.subject.clone());
+            }
+        }
+        let terminal_owned = self.store.terminal_owned_runtime_subjects()?;
+        for subject in desired.iter_mut() {
+            if terminal_owned.contains(&subject.subject)
+                && subject
+                    .member
+                    .as_ref()
+                    .is_some_and(|member| member.host == self.host)
+            {
+                subject.kind = "stop".into();
+            }
+        }
+        // A stopped root ends every task it declared: each runs the exec's own stop below and is
+        // not launched or restarted meanwhile. Starting the root again declares them again.
+        let stopped_roots = desired
+            .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
+            .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
+            .map(|subject| subject.subject.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut root_tasks = BTreeMap::<String, Vec<RootTask>>::new();
+        let mut task_stops = BTreeSet::new();
+        if !stopped_roots.is_empty() {
+            for subject in desired.iter() {
+                if pending_subjects.contains(&subject.subject) {
+                    continue;
+                }
+                let Some(member) = subject.member.as_ref().filter(|_| {
+                    matches!(subject.kind.as_str(), "exec" | "pty")
+                }) else {
+                    continue;
+                };
+                let Some(root) = member.tags.get("st3.agent") else {
+                    continue;
+                };
+                if !stopped_roots.contains(root.as_str()) {
+                    continue;
+                }
+                task_stops.insert(subject.subject.clone());
+                if member.host == self.host {
+                    root_tasks
+                        .entry(root.clone())
+                        .or_default()
+                        .push(RootTask {
+                            subject: subject.subject.clone(),
+                            runtime_id: member.runtime_id.clone(),
+                            terminal: member.terminal,
+                        });
+                }
+            }
+        }
+        Ok(MemberRoster { pending_subjects, task_stops, root_tasks })
+    }
+
     fn reconcile_pass(&self) -> Result<()> {
         self.refresh_seat_admission();
         // Before any room is judged: the raised slices a restart left (lane_bursts.rs).
@@ -3803,70 +3877,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             "desired:",
             desired.iter().map(|declaration| declaration.subject.clone()).collect(),
         );
-        let mut pending_subjects = BTreeSet::new();
-        for declaration in &desired {
-            if let Some(run) = &declaration.owner_run
-                && self.store.run_projection_pending(run)?
-            {
-                pending_subjects.insert(declaration.subject.clone());
-            }
-        }
         if crate::otel::export_enabled() {
             tracing::Span::current().record("st.reconcile.items", desired.len() as i64);
         }
         self.incoming_resumes(&desired)?;
-        let terminal_owned = self.store.terminal_owned_runtime_subjects()?;
+        let MemberRoster { pending_subjects, task_stops, root_tasks } =
+            self.prepare_member_roster(&mut desired)?;
         drop(desired_span);
-        for subject in &mut desired {
-            if terminal_owned.contains(&subject.subject)
-                && subject
-                    .member
-                    .as_ref()
-                    .is_some_and(|member| member.host == self.host)
-            {
-                subject.kind = "stop".into();
-            }
-        }
         self.cancel_invalid_admissions(&desired)?;
-        // A stopped root ends every task it declared: each runs the exec's own stop below and is
-        // not launched or restarted meanwhile. Starting the root again declares them again.
-        let stopped_roots = desired
-            .iter()
-            .filter(|subject| !pending_subjects.contains(&subject.subject))
-            .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
-            .map(|subject| subject.subject.as_str())
-            .collect::<BTreeSet<_>>();
-        let mut root_tasks = BTreeMap::<String, Vec<RootTask>>::new();
-        let mut task_stops = BTreeSet::new();
-        if !stopped_roots.is_empty() {
-            for subject in &desired {
-                if pending_subjects.contains(&subject.subject) {
-                    continue;
-                }
-                let Some(member) = subject.member.as_ref().filter(|_| {
-                    matches!(subject.kind.as_str(), "exec" | "pty")
-                }) else {
-                    continue;
-                };
-                let Some(root) = member.tags.get("st3.agent") else {
-                    continue;
-                };
-                if !stopped_roots.contains(root.as_str()) {
-                    continue;
-                }
-                task_stops.insert(subject.subject.clone());
-                if member.host == self.host {
-                    root_tasks
-                        .entry(root.clone())
-                        .or_default()
-                        .push(RootTask {
-                            subject: subject.subject.clone(),
-                            runtime_id: member.runtime_id.clone(),
-                            terminal: member.terminal,
-                        });
-                }
-            }
-        }
         *self
             .stopped_root_tasks
             .lock()
@@ -4284,9 +4302,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         }).collect(), scoped);
         // Shared destinations still need all owners' plans for conflict detection and
         // additive excludes. Only selected declarations may commit or publish receipts.
-        let roster = if scoped { self.store.desired_subjects()? } else { Vec::new() };
+        let mut roster = if scoped { self.store.desired_subjects()? } else { Vec::new() };
         let render_subjects = if scoped {
-            roster.iter().collect::<Vec<_>>()
+            let lifecycle = self.prepare_member_roster(&mut roster)?;
+            roster.iter()
+                .filter(|subject| !lifecycle.pending_subjects.contains(&subject.subject))
+                .filter(|subject| !lifecycle.task_stops.contains(&subject.subject))
+                .collect::<Vec<_>>()
         } else {
             active.to_vec()
         };
@@ -21935,6 +21957,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn watch_launch_inputs(&self, subject: &DesiredSubject) -> Result<()> {
+        let _registration = self.file_changes.launch_input_registration.lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let item = format!("launch-inputs:{}", subject.subject);
         if !self.incremental.needs(&item, now_ms()) {
             for key in self.incremental.reads_of(&item).into_iter().filter(|key| key.starts_with("launch-input/")) {

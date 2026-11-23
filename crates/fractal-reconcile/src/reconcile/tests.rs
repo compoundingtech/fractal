@@ -8289,6 +8289,55 @@ agent "import/omp/fixture" {{
     }
 
     #[test]
+    fn overlapping_launch_registration_keeps_ownership_until_read_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let desired = crate::graph::parse_test_intent(&format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}",
+            root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        let first = AtomicBool::new(true);
+        let member = desired.member.clone().unwrap();
+        crate::contract::install(&store, Box::new({
+            let entered = entered.clone();
+            let resume = resume.clone();
+            move |_| {
+                if first.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    entered.wait();
+                    resume.wait();
+                }
+                Ok(member.clone())
+            }
+        }));
+        let scoped_started = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let full_pass = scope.spawn(|| reconciler.watch_launch_inputs(&desired));
+            entered.wait(); // The first evaluation owns a map entry but has not registered reads.
+            let scoped = scope.spawn(|| {
+                scoped_started.wait();
+                reconciler.watch_launch_inputs(&desired)
+            });
+            scoped_started.wait();
+            // Deterministically exercise admission while the first evaluation is in capture.
+            // Without this gate, a scoped evaluation can replace/remove its pending map entry.
+            let protected = match reconciler.file_changes.launch_input_registration.try_lock() {
+                Err(std::sync::TryLockError::WouldBlock) => true,
+                _ => false,
+            };
+            resume.wait();
+            let _ = full_pass.join().unwrap();
+            let _ = scoped.join().unwrap();
+            assert!(protected, "overlapping capture must not acquire registration ownership");
+        });
+        // Both evaluations have finished; no registration guard is retained by pending work.
+        assert!(reconciler.file_changes.launch_input_registration.try_lock().is_ok());
+        assert!(!reconciler.incremental.reads_of(&format!("launch-inputs:{}", desired.subject)).is_empty());
+    }
+
+    #[test]
     fn managed_launch_inputs_remain_watched_when_profile_or_wrapper_is_missing() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
