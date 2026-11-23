@@ -4,6 +4,7 @@
     #[cfg(test)]
     mod file_watch_scope;
     mod environment_capture;
+    mod capture_restart;
 
 mod native_effect_convergence {
     use super::*;
@@ -1157,6 +1158,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
         capture_timeouts: Mutex<(u32, u32)>,
+        capture_error: Mutex<Option<String>>,
         start_closure_unavailable: AtomicBool,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -2061,6 +2063,9 @@ mission "cancel-driver" state="ready" {
         fn launch_contract(&self, store: &Store, desired: &DesiredSubject, launch: &MemberSpec) -> Result<crate::launch_contract::Contract> {
             let mut capture = self.capture_timeouts.lock().unwrap();
             capture.1 += 1;
+            if let Some(error) = self.capture_error.lock().unwrap().as_ref() {
+                anyhow::bail!("{error}");
+            }
             if capture.0 > 0 {
                 capture.0 -= 1;
                 return Err(fractal_runtime::ShellStartupTimeout {

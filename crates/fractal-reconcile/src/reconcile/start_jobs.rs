@@ -473,6 +473,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     runtime_before_start = store.latest_claim(&subject, Some("runtime.observed"))?
                         .map(|claim| claim.id);
                 }
+                // The durable advance must succeed before either backend can run.
+                // Keep backend_entered false on write failure so completion proves non-launch.
+                store.enter_runtime_start_backend(&id, &owner)?;
                 backend_entered = true;
                 let operation = fractal_runtime::LaunchOperation(id.clone());
                 if resource_lanes::request(&prepared.launch_member)?.is_some() {
@@ -861,13 +864,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .store
                     .pending_runtime_starts()?
                     .into_iter()
-                    .any(|fresh| fresh.id == operation.id && !fresh.finished);
-                if unfinished {
+                    .find(|fresh| fresh.id == operation.id && !fresh.finished);
+                if let Some(unfinished) = unfinished {
                     self.revoke_start(&operation.subject)?;
-                    self.store.finish_runtime_start(
-                        &operation.id,
-                        &serde_json::json!({"error": "launch owner ended before its result"}),
-                    )?;
+                    let result = if unfinished.before_backend() {
+                        serde_json::json!({
+                            "error": "launch owner ended before entering the runtime backend",
+                            "producer_closed": true,
+                            "closure_kind": "before-backend",
+                            "verification": "producer-closed",
+                        })
+                    } else {
+                        // Legacy, mismatched and already-entered markers prove nothing.
+                        serde_json::json!({"error": "launch owner ended before its result"})
+                    };
+                    self.store.finish_runtime_start(&operation.id, &result)?;
                     self.start_changed(&operation.subject);
                 }
             }
