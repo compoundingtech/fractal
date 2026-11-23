@@ -753,6 +753,26 @@ describe('cancellation', () => {
       ])
     }),
   )
+  for (const nack of [undefined, 'finalizer journal refused']) {
+    it.effect(`preserves finalizer ${nack === undefined ? 'defects' : 'journal refusals'} after cancellation`, () =>
+      Effect.gen(function* () {
+        const host = fakeHost({ ...(nack === undefined ? {} : { nack }) })
+        const waiting = Fractal.mission(
+          { meta, id: 'factory/test', goal: 'Report failed cleanup.', reportTo, input: Change },
+          () => Fractal.step({ id: 'work' },
+            Effect.sync(() => host.cancel()).pipe(Effect.andThen(Effect.never)),
+          ).pipe(Effect.ensuring(
+            Fractal.step({ id: 'drain' },
+              nack === undefined ? Effect.die('drain failed') : Effect.void,
+            ).pipe(Effect.orDie),
+          )),
+        )
+        expect(yield* start(waiting, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'FinalizerFailed' },
+        })
+      }),
+    )
+  }
 })
 
 describe('commands', () => {

@@ -304,6 +304,20 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
 }
 
 #[test]
+fn a_request_backed_operation_cannot_overwrite_the_finalizer_control_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "reserved-finalizer-key");
+    let step = &run.steps[0].subject;
+    running_attempt(&engine, &run, 1, 1);
+    engine.request(step, 1, 1, &"a".repeat(64),
+        &json!({"t": "run", "key": "$finalizers", "mission": "child", "input": {}, "seq": 1})).unwrap();
+    assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "failed");
+    assert!(engine.requests(&run.subject).is_empty());
+    assert!(!engine.journal_claims(step).unwrap().iter().any(|claim| claim.body["fields"]["key"] == "$finalizers"));
+}
+
+#[test]
 fn host_ending_survives_outcome_and_requires_each_exact_termination_acknowledgement() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("node").unwrap());

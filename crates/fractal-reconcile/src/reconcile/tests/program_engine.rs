@@ -29,8 +29,12 @@ export default {
       })
       await step(ctx, 'drain', async () => {
         if (ctx.payload.mode === 'finalizer-timeout') await new Promise(() => {})
-        const result = await ctx.spawn(['sh', '-c', 'printf drained'])
+        const script = ctx.payload.mode === 'finalizer-gated'
+          ? 'while [ ! -e "$GATE" ]; do sleep 0.05; done; printf drained'
+          : 'printf drained'
+        const result = await ctx.spawn(['sh', '-c', script], { env: { GATE: ctx.payload.gate } })
         if (result.stdout !== 'drained') throw new Error('finalizer command did not execute')
+        if (ctx.payload.mode === 'finalizer-failure') throw new Error('drain failed')
         return result.stdout
       })
       return { _tag: 'Failure', error: { _tag: 'Interrupted' } }
@@ -414,11 +418,18 @@ fn a_step_that_leaves_its_attempt_stops_its_program_and_effects_at_once() {
 #[test]
 fn cancellation_keeps_the_program_credential_live_until_the_finalizer_step_and_command_finish() {
     let fixture = fixture(Liveness::default());
-    let started = fixture.start("finalizer-cancel", "finalizer");
+    let started = fixture.start("finalizer-cancel", "finalizer-gated");
     fixture.until("the program is waiting", || fixture.journal(&started.step).contains(&("working".into(), "started".into())));
     let credential = fixture.store.issue_run_credential(&started.step, 1, u64::MAX).unwrap();
     fixture.store.request_mission_run_cancellation(&started.run, "cancel with cleanup").unwrap();
     assert!(fixture.store.run_binding(&credential).is_ok(), "cancellation must not revoke finalizer authority");
+    fixture.until("the finalizer step runs under the same live attempt", || {
+        fixture.journal(&started.step).contains(&("drain".into(), "started".into()))
+    });
+    let finalizing = fixture.store.mission_run(&started.run).unwrap().unwrap();
+    assert_eq!((finalizing.status.as_str(), finalizing.phase.as_str()), ("running", "cleanup-cancelled"));
+    assert!(fixture.store.run_binding(&credential).is_ok(), "the finalizer command still owns its live credential");
+    std::fs::write(&started.gate, "").unwrap();
     fixture.until("drain is durable and the run is cancelled", || {
         fixture.journal(&started.step).contains(&("drain".into(), "completed".into()))
             && fixture.store.mission_run(&started.run).unwrap().unwrap().status == "cancelled"
@@ -426,6 +437,23 @@ fn cancellation_keeps_the_program_credential_live_until_the_finalizer_step_and_c
     assert_eq!(fixture.store.run_binding(&credential).unwrap_err().code, "run-credential-ended");
     let claims = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap();
     assert!(claims.iter().any(|claim| claim.body["fields"]["value"]["outcome"] == "completed"));
+}
+
+#[test]
+fn a_failed_finalizer_preserves_cancellation_and_records_its_cause_for_the_operator() {
+    let fixture = fixture(Liveness::default());
+    let started = fixture.start("failed-finalizer", "finalizer-failure");
+    fixture.until("the program is waiting", || fixture.journal(&started.step).contains(&("working".into(), "started".into())));
+    fixture.store.request_mission_run_cancellation(&started.run, "cancel despite a failed drain").unwrap();
+    fixture.until("failed finalization ends cancellation", || {
+        fixture.store.mission_run(&started.run).unwrap().unwrap().status == "cancelled"
+    });
+    let claims = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap();
+    let result = claims.iter().find(|claim| claim.body["fields"]["key"] == "$finalizers"
+        && claim.body["fields"]["status"] == "failed").unwrap();
+    assert_eq!(result.body["fields"]["error"]["outcome"], "failed");
+    assert!(result.body["fields"]["error"]["cause"]["message"].as_str().unwrap().contains("drain failed"));
+    assert!(fixture.store.operational_failure(&format!("program-finalizers:{}:1", started.step)).unwrap().is_some());
 }
 
 #[test]
@@ -491,6 +519,7 @@ fn a_finalizer_exceeding_its_configured_grace_is_journaled_as_timed_out() {
         && entry.error.as_deref().is_some_and(|error| error.contains("timed-out"))));
     assert!(fixture.engine.fence_left_effects(&fixture.store.mission_run(&started.run).unwrap().unwrap()).unwrap());
     assert!(!fixture.journal(&started.step).contains(&("drain".into(), "completed".into())));
+    assert!(fixture.store.operational_failure(&format!("program-finalizers:{}:1", started.step)).unwrap().is_some());
 }
 
 #[test]
@@ -512,6 +541,7 @@ fn a_host_restart_during_finalization_records_interrupted_by_restart_without_rep
     assert!(view.entries.iter().any(|entry| entry.key == "$finalizers"
         && entry.error.as_deref().is_some_and(|error| error.contains("interrupted-by-restart"))));
     assert!(!fixture.journal(&started.step).contains(&("drain".into(), "completed".into())));
+    assert!(fixture.store.operational_failure(&format!("program-finalizers:{}:1", started.step)).unwrap().is_some());
 }
 
 #[cfg(target_os = "linux")]

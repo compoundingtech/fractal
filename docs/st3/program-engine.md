@@ -197,9 +197,12 @@ which the SDK passes to Effect, rather than immediately terminating its worker. 
 their normal started/result journal acknowledgements remain authoritative during cleanup.
 Existing command groups are stopped at interruption; finalizer commands get their own groups.
 
-The `$finalizers` result is tagged `Finalizers`, with `outcome: completed | timed-out |
+The `$finalizers` result is tagged `Finalizers`, with `outcome: completed | failed | timed-out |
 interrupted-by-restart | worker-failed` and the effective `grace_ms`. Incomplete finalization is
 a failed journal entry with that typed error, visible in `missions show`, not a failed run.
+Finalizer defects and journal refusals remain `FinalizerFailed` across the SDK/worker boundary;
+the result's optional `cause` preserves that failure rather than treating every interrupted
+root exit as successful cleanup. `$finalizers` is reserved for both steps and request-backed operations.
 A timed-out worker is forcibly terminated,
 and its command groups are killed. Worker-thread termination can still await blocking native
 I/O: the timeout is recorded immediately, but the run's execution fence waits for actual exit,

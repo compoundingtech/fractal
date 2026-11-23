@@ -17,8 +17,8 @@ export default Fractal.mission(
     Fractal.step({ id: 'drain', success: Schema.String },
       hang === 'yes'
         ? Effect.never
-        : Fractal.command(['sh', '-c', 'printf drained']).pipe(
-          Effect.map((result) => result.stdout),
+        : Fractal.command(['sh', '-c', hang === 'fail' ? 'exit 7' : 'printf drained']).pipe(
+          Effect.flatMap((result) => result.code === 0 ? Effect.succeed(result.stdout) : Effect.die('drain failed')),
           Effect.orDie,
         ),
     ).pipe(Effect.orDie),

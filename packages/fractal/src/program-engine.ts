@@ -388,7 +388,11 @@ export const programEntry =
       host.signal.removeEventListener('abort', cancel),
     )
     const message = Exit.isSuccess(exit) ? '' : Cause.pretty(exit.cause).slice(0, 2000)
-    if (host.signal.aborted) return { _tag: 'Failure', error: { _tag: 'Interrupted', message } }
+    if (host.signal.aborted) {
+      const failedFinalizer = refused !== undefined || (Exit.isFailure(exit)
+        && (Cause.hasDies(exit.cause) || Option.isSome(Cause.findErrorOption(exit.cause))))
+      return { _tag: 'Failure', error: { _tag: failedFinalizer ? 'FinalizerFailed' : 'Interrupted', message: refused ?? message } }
+    }
     if (refused !== undefined)
       return { _tag: 'Failure', error: { _tag: 'Defect', message: refused } }
     if (Exit.isSuccess(exit)) return exit.value

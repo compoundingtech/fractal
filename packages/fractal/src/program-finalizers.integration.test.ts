@@ -10,8 +10,8 @@ import { expect, it } from '@effect/vitest'
 const fixture = fileURLToPath(new URL('../fixtures/programs/cancel-finalizers/mission.ts', import.meta.url))
 const host = fileURLToPath(new URL('../../../crates/fractal-reconcile/src/reconcile/program_host.mjs', import.meta.url))
 
-for (const hang of ['no', 'yes']) {
-  it(`real Effect ensuring step and command ${hang === 'yes' ? 'time out explicitly' : 'are journaled after cancellation'}`, async () => {
+for (const hang of ['no', 'yes', 'fail']) {
+  it(`real Effect ensuring step and command: ${hang === 'yes' ? 'explicit timeout' : hang === 'fail' ? 'preserved finalizer failure' : 'journaled cleanup'}`, async () => {
     const root = fileURLToPath(new URL('../../../tmp/', import.meta.url))
     mkdirSync(root, { recursive: true })
     const dir = mkdtempSync(join(root, 'program-finalizers-'))
@@ -33,6 +33,7 @@ for (const hang of ['no', 'yes']) {
     const ids = { step: 'step-run/test/program', attempt: 1 }
     const send = (message: object) => child.stdin.write(`${JSON.stringify({ ...ids, ...message })}\n`)
     const journal: { key: string; status: string; value?: unknown }[] = []
+    let finalizerFailure: unknown
     let outcome: string | undefined
     let stderr = ''
     child.stderr.on('data', (chunk) => { stderr += String(chunk) })
@@ -52,6 +53,7 @@ for (const hang of ['no', 'yes']) {
             if (message.key === 'work' && message.status === 'started') send({ t: 'cancel', reason: 'test cancellation' })
           } else if (message.t === 'finalizers') {
             outcome = message.outcome
+            finalizerFailure = message.error
           } else if (message.t === 'cancelled') {
             resolve()
           }
@@ -66,10 +68,11 @@ for (const hang of ['no', 'yes']) {
       })
       await promise
       expect(journal).toContainEqual({ key: 'drain', status: 'started', value: undefined })
-      expect(outcome).toBe(hang === 'yes' ? 'timed-out' : 'completed')
+      expect(outcome).toBe(hang === 'yes' ? 'timed-out' : hang === 'fail' ? 'failed' : 'completed')
       expect(journal.filter((entry) => entry.key === 'drain' && entry.status === 'completed')).toEqual(
-        hang === 'yes' ? [] : [{ key: 'drain', status: 'completed', value: 'drained' }],
+        hang === 'no' ? [{ key: 'drain', status: 'completed', value: 'drained' }] : [],
       )
+      if (hang === 'fail') expect(finalizerFailure).toMatchObject({ _tag: 'FinalizerFailed', message: expect.stringContaining('drain failed') })
     } finally {
       child.stdin.end()
       child.kill('SIGKILL')

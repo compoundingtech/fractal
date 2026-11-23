@@ -175,7 +175,9 @@ const main = () => {
           return spawnEffect(run, message)
         case 'done':
           if (run.interrupted) {
-            send({ t: 'finalizers', ...ids, outcome: 'completed' })
+            const completed = message.exit?._tag === 'Failure' && message.exit.error?._tag === 'Interrupted'
+            send({ t: 'finalizers', ...ids, outcome: completed ? 'completed' : 'failed',
+              ...(completed ? {} : { error: message.exit?.error ?? defect('finalizer returned without an interrupted exit').error }) })
             return end(run)
           }
           end(run)

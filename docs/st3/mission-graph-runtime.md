@@ -391,7 +391,7 @@ and publication refuses nonpositive durations or values above 15 minutes with
 `invalid-finalizer-grace`. Only after finalizers complete or exhaust that grace does cleanup end
 the attempt and remove run-owned runtime state; the timeout remains the failure reason,
 including for evals. The reserved `$finalizers` journal result records `completed`, `timed-out`,
-`interrupted-by-restart`, or `worker-failed`; incomplete finalization raises operator attention.
+`failed`, `interrupted-by-restart`, or `worker-failed`; incomplete finalization raises operator attention.
 A worker lost during finalization is not replayed (see [program-engine.md](program-engine.md)
 and [#7079](https://github.com/compoundingtech/fractal/issues/7079)).
 

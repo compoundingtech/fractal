@@ -53,9 +53,19 @@ const JOURNAL_PAGE: usize = 500;
 #[serde(rename_all = "kebab-case")]
 enum FinalizerOutcome {
     Completed,
+    Failed,
     TimedOut,
     InterruptedByRestart,
     WorkerFailed,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(tag = "_tag", rename = "Finalizers")]
+struct FinalizerResult {
+    outcome: FinalizerOutcome,
+    grace_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cause: Option<Value>,
 }
 
 /// The liveness deadlines of DQ8.
@@ -476,7 +486,10 @@ impl ProgramEngine {
                     || inner.terminating.iter().any(|(_, subject, attempt)| subject == &step.subject && *attempt == step.attempt)
             };
             if !live {
-                self.finish_finalizers(&step.subject, step.attempt, &program.bundle_hash, self.finalizer_grace(program), FinalizerOutcome::InterruptedByRestart)?;
+                self.finish_finalizers(&step.subject, step.attempt, &program.bundle_hash, FinalizerResult {
+                    outcome: FinalizerOutcome::InterruptedByRestart,
+                    grace_ms: self.finalizer_grace(program).as_millis(), cause: None,
+                })?;
             }
         }
         Ok(())
@@ -486,21 +499,18 @@ impl ProgramEngine {
         program.finalizer_grace_ms.map(Duration::from_millis).unwrap_or(self.liveness.finalizer_grace)
     }
 
-    fn finish_finalizers(&self, step: &str, attempt: u32, program: &str, grace: Duration, outcome: FinalizerOutcome) -> Result<()> {
+    fn finish_finalizers(&self, step: &str, attempt: u32, program: &str, result: FinalizerResult) -> Result<()> {
         // A crash between the durable result and ending the step must adopt that
         // result, not replace it with an interrupted-by-restart outcome.
         let existing = self.journal(step, attempt)?.into_iter().find(|entry| entry["key"] == "$finalizers");
-        let (outcome, grace) = match &existing {
-            Some(entry) => {
-                let result = if entry["_tag"] == "Success" { &entry["value"] } else { &entry["error"] };
-                (serde_json::from_value::<FinalizerOutcome>(result["outcome"].clone())?,
-                    Duration::from_millis(result["grace_ms"].as_u64().context("finalizer result without a grace")?))
-            }
-            None => (outcome, grace),
+        let result = match &existing {
+            Some(entry) => serde_json::from_value::<FinalizerResult>(
+                if entry["_tag"] == "Success" { entry["value"].clone() } else { entry["error"].clone() },
+            )?,
+            None => result,
         };
-        let completed = outcome == FinalizerOutcome::Completed;
+        let completed = result.outcome == FinalizerOutcome::Completed;
         if existing.is_none() {
-            let result = json!({"_tag": "Finalizers", "outcome": outcome, "grace_ms": grace.as_millis()});
             self.write_journal(step, attempt, program, "$finalizers", if completed { "completed" } else { "failed" },
                 &if completed { json!({"value": result}) } else { json!({"error": result}) }, None)?;
         }
@@ -514,7 +524,7 @@ impl ProgramEngine {
             self.store.record_runtime_failure(&episode, &crate::model::AttentionRequest {
                 reviewer: "person/operator".into(),
                 title: "A program's finalizers did not complete".into(),
-                reason: format!("{step} attempt {attempt}: finalizers {outcome:?}; inspect the run journal and reconcile any unreleased resources before restarting work."),
+                reason: format!("{step} attempt {attempt}: finalizers {:?}; inspect the run journal and reconcile any unreleased resources before restarting work.", result.outcome),
                 severity: "error".into(),
                 targets: run.iter().map(|run| run.subject.clone()).chain(std::iter::once(step.to_owned())).collect(),
                 actor: super::RECONCILER_ACTOR.into(),
@@ -1038,7 +1048,9 @@ impl ProgramEngine {
             Some("finalizers") => {
                 let outcome = serde_json::from_value::<FinalizerOutcome>(message["outcome"].clone())
                     .context("invalid finalizer outcome")?;
-                self.finish_finalizers(step, attempt, &program, grace, outcome)?;
+                self.finish_finalizers(step, attempt, &program, FinalizerResult {
+                    outcome, grace_ms: grace.as_millis(), cause: message.get("error").cloned(),
+                })?;
                 Ok(())
             }
             Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
@@ -1057,8 +1069,8 @@ impl ProgramEngine {
         if self.stop_if_left(step, attempt, generation)? {
             return Ok(());
         }
-        let Some(key) = message["key"].as_str().filter(|key| !key.is_empty() && *key != RESULT_KEY) else {
-            return self.fail(step, attempt, &format!("the program made a request without a key or with the reserved key {RESULT_KEY}"));
+        let Some(key) = message["key"].as_str().filter(|key| !key.is_empty() && *key != RESULT_KEY && *key != "$finalizers") else {
+            return self.fail(step, attempt, &format!("the program made a request without a key or with a reserved key ({RESULT_KEY}, $finalizers)"));
         };
         let wait = match wait(step, attempt, key, message) {
             Ok(wait) => wait,
@@ -1367,7 +1379,10 @@ impl ProgramEngine {
             if let Ok(Some(run)) = self.store.mission_run(&dispatch.run)
                 && (run.phase.starts_with("cleanup-") || run.phase == "final-cancelled")
             {
-                if let Err(error) = self.finish_finalizers(&step, attempt, &dispatch.program.bundle_hash, self.finalizer_grace(&dispatch.program), FinalizerOutcome::InterruptedByRestart) {
+                if let Err(error) = self.finish_finalizers(&step, attempt, &dispatch.program.bundle_hash, FinalizerResult {
+                    outcome: FinalizerOutcome::InterruptedByRestart,
+                    grace_ms: self.finalizer_grace(&dispatch.program).as_millis(), cause: None,
+                }) {
                     eprintln!("fractal: cannot record interrupted finalizers for {step}: {error:#}");
                 }
                 continue;
