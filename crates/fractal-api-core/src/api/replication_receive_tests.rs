@@ -710,7 +710,12 @@ async fn shard_receive_and_wake_do_not_wait_for_projection_and_preserve_admitted
         peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
         round_trip_ms: None, carrier: Default::default(), authenticated_member_key: None,
     };
-    let frontier = target.projection_frontier().unwrap();
+    // The shard is a smallclaims store, not the graph's published-list wrapper.
+    let projection_frontier = || target.readers.get().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap();
+    let frontier = projection_frontier();
     let gate = target.projection.lock();
     let shard_path = || AxumPath(crate::store::messages_shard::SHARD_ID.to_owned());
     // The gate is acquired before polling the handler and released only after its
@@ -722,7 +727,7 @@ async fn shard_receive_and_wake_do_not_wait_for_projection_and_preserve_admitted
     assert!(response.changed);
     assert_eq!(response.store_index, target.index().unwrap());
     assert!(target.index().unwrap() > frontier);
-    assert_eq!(target.projection_frontier().unwrap(), frontier);
+    assert_eq!(projection_frontier(), frontier);
     assert!(target.replication_projection_deferred());
     let generation = target.projection_contention_generation();
     assert!(generation > 0);
@@ -738,12 +743,12 @@ async fn shard_receive_and_wake_do_not_wait_for_projection_and_preserve_admitted
     assert_eq!(duplicate.receipt.received, 0);
     assert_eq!(target.projection_contention_generation(), generation);
     shard_replication_wake(State(state.clone()), shard_path()).await.unwrap();
-    assert_eq!(target.projection_frontier().unwrap(), frontier);
+    assert_eq!(projection_frontier(), frontier);
     assert_eq!(target.projection_contention_generation(), generation);
     drop(gate);
     assert!(target.project_replication_backlog().unwrap());
     assert!(!target.replication_projection_deferred());
-    assert_eq!(target.projection_frontier().unwrap(), target.index().unwrap());
+    assert_eq!(projection_frontier(), target.index().unwrap());
     assert_eq!(target.claims_for("message/0123456789abcdef", None).unwrap().len(), 1);
     assert_eq!(target.claims_for("message/0123456789abcdee", None).unwrap().len(), 1);
 }
