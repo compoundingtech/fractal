@@ -150,7 +150,20 @@ fn background_guard_retains_prepare_finalize_rollback_and_return_observer_order(
         tx.execute(/* sqlite-large-value: allow-for-now lv-h411c31509178 owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO values_ VALUES(3)", []).unwrap();
         tx.rollback().unwrap();
     }
-    assert_eq!(observed.recv().unwrap(), 0);
+    // The guard notifies observers inside its own drop on this thread before returning,
+    // so a notification from the rolled-back loan would already be in the channel here.
+    assert!(
+        observed.try_recv().is_err(),
+        "a rolled-back loan must not notify any observer"
+    );
+    assert_eq!(
+        writer
+            .write()
+            .query_row("SELECT COUNT(*) FROM values_", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        0,
+        "prepare and the rolled-back write left no rows"
+    );
     {
         let mut connection = writer.write_background();
         let tx = connection.transaction().unwrap();

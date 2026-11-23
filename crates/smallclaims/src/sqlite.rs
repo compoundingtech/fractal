@@ -50,7 +50,10 @@ pub mod transport_bench {
 }
 
 pub(crate) mod writer_observer;
+mod commit_scope;
+pub use commit_scope::{WriterObserverStats, writer_observer_stats};
 pub use writer_observer::WriterObserver;
+pub use writer_observer::observe_transaction_resolution;
 
 use crate::store::current_index;
 
@@ -179,6 +182,7 @@ pub struct CommitObserver {
 
 struct CommitObserverCallback {
     state: Mutex<CommitObserverState>,
+    tables: Option<&'static [&'static str]>,
     completed: Condvar,
 }
 
@@ -220,9 +224,11 @@ struct CommitObservers {
 impl CommitObservers {
     fn register(
         self: &Arc<Self>,
+        tables: Option<&'static [&'static str]>,
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
         let callback = Arc::new(CommitObserverCallback {
+            tables,
             state: Mutex::new(CommitObserverState {
                 run: Some(Arc::new(callback)),
                 running: None,
@@ -241,7 +247,7 @@ impl CommitObservers {
         }
     }
 
-    fn notify(&self, connection: &Connection) {
+    fn notify(&self, connection: &Connection, changes: &commit_scope::Changes) {
         // The common case takes no lock and allocates nothing.
         if !self.active.load(Ordering::Acquire) {
             return;
@@ -253,6 +259,9 @@ impl CommitObservers {
             .clone();
         let current = std::thread::current().id();
         for callback in callbacks.iter() {
+            if callback.tables.is_some_and(|tables| !changes.matches(tables)) {
+                continue;
+            }
             let run = {
                 let mut state = callback
                     .state
@@ -266,6 +275,11 @@ impl CommitObservers {
                 run
             };
             let _invocation = CommitObserverInvocation { callback };
+            if callback.tables.is_some() {
+                commit_scope::SCOPED_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                commit_scope::GLOBAL_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            }
             run(connection);
         }
     }
@@ -547,9 +561,10 @@ impl WriterConnection {
             policy.install(&connection)?;
         }
         let handler_policy = Arc::new(Mutex::new(policy.map(Arc::new)));
-        let mutation_observer = observer
-            .map(|observer| writer_observer::MutationState::new(&connection, observer))
-            .transpose()?;
+        let mutation_observer = Some(writer_observer::MutationState::new(
+            &connection,
+            observer.unwrap_or_else(|| Arc::new(writer_observer::NoPhysicalObserver)),
+        )?);
         let mutations = mutation_observer.clone();
         let (jobs, queue) = std::sync::mpsc::channel::<WriterJob>();
         let index = committed_index.clone();
@@ -608,8 +623,9 @@ impl WriterConnection {
         })
     }
 
-    /// Observe every successfully committed batch and every returned lent writer, synchronously
-    /// after its committed index is updated and before its write can acknowledge success.
+    /// Observe boundaries containing committed DML/DDL, synchronously after the committed
+    /// index is updated and before the write can acknowledge success. Empty/read-only work
+    /// and rolled-back mutations do not evaluate callbacks; lost native coverage fails closed.
     /// A callback may read authority from this same connection, but must not write or acquire the
     /// writer. Dropping its own observer handle is safe and disables future invocations.
     /// Batched callbacks run on the writer thread; lent callbacks run on the returning thread.
@@ -626,7 +642,19 @@ impl WriterConnection {
         &self,
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
-        self.observers.register(callback)
+        self.observers.register(None, callback)
+    }
+
+    /// Observe committed mutations of declared main-database tables, including WITHOUT
+    /// ROWID tables. DDL and a native-hook coverage gap conservatively invalidate all
+    /// dependencies. Read-only loans, zero-row writes and rolled-back mutations do not
+    /// evaluate callbacks. Registration and handle lifetime match `observe_commits`.
+    pub fn observe_tables(
+        &self,
+        tables: &'static [&'static str],
+        callback: impl Fn(&Connection) + Send + Sync + 'static,
+    ) -> CommitObserver {
+        self.observers.register(Some(tables), callback)
     }
 
     /// Install exactly one transaction-owned adapter, explicitly and before attesting source
@@ -1044,13 +1072,7 @@ fn write_queue(
                     }
                 };
                 if run {
-                    if let Ok(index) = current_index(&connection) {
-                        committed_index.store(index, Ordering::Release);
-                    }
-                    if let Some(observer) = callbacks.2 {
-                        observer.resolved(&connection);
-                    }
-                    callbacks.0.notify(&connection);
+                    publish_writer_boundary(&connection, committed_index, callbacks.0, callbacks.2);
                 }
                 // Rest outside every writer loan. Foreground dispatch continues during this
                 // interval; a busy queue cannot postpone a due maintenance turn forever.
@@ -1317,15 +1339,7 @@ fn run_write_batch(
         }
         telemetry::METRICS.batch.record(started.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
         telemetry::METRICS.batch_size.record(answers.len() as u64, telemetry::SQLITE.as_slice());
-        if let Ok(index) = current_index(connection) {
-            committed_index.store(index, Ordering::Release);
-        }
-        if let Some(observer) = mutation_observer {
-            observer.resolved(connection);
-        }
-        if committed.is_ok() {
-            observers.notify(connection);
-        }
+        publish_writer_boundary(connection, committed_index, observers, mutation_observer);
         if let (Some(batch), Some(post_commit_started)) = (attribution, post_commit_started) {
             batch.finish(started.elapsed(), post_commit_started.elapsed(), op_count);
         }
@@ -1397,13 +1411,7 @@ impl Drop for WriterGuard<'_> {
         let Some(connection) = self.connection.take() else {
             return;
         };
-        if let Ok(index) = current_index(&connection) {
-            self.committed_index.store(index, Ordering::Release);
-        }
-        if let Some(observer) = self.mutation_observer {
-            observer.resolved(&connection);
-        }
-        self.observers.notify(&connection);
+        publish_writer_boundary(&connection, self.committed_index, self.observers, self.mutation_observer);
         crate::touched::note_writes(
             connection
                 .total_changes()
@@ -1416,6 +1424,36 @@ impl Drop for WriterGuard<'_> {
         let _ = self.give_back.send(connection);
         // The loan remains held through finalization, observer notification and return.
         drop(self.writer_operation.take());
+    }
+}
+
+/// Native coverage publication is unconditional. Confirmed write commits also check the
+/// claims index: SQLite can advance AUTOINCREMENT without row hooks or total_changes.
+/// Read-only loans and rollbacks do not probe it; callbacks require committed changes.
+fn publish_writer_boundary(
+    connection: &Connection,
+    committed_index: &AtomicU64,
+    observers: &CommitObservers,
+    mutations: Option<&Arc<writer_observer::MutationState>>,
+) {
+    let Some(mutations) = mutations else { return; };
+    mutations.resolved(connection);
+    let mut changes = mutations.take_committed(connection);
+    if changes.changed() || changes.committed {
+        commit_scope::INDEX_REFRESHES.fetch_add(1, Ordering::Relaxed);
+        match current_index(connection) {
+            Ok(index) => {
+                if index != committed_index.load(Ordering::Acquire) {
+                    changes.index_changed();
+                }
+                committed_index.store(index, Ordering::Release);
+            }
+            Err(_) => changes.unknown = true,
+        }
+    }
+    commit_scope::boundary(&changes);
+    if changes.changed() {
+        observers.notify(connection, &changes);
     }
 }
 
@@ -2241,6 +2279,51 @@ pub mod work {
         }) };
     }
 
+    thread_local! {
+        /// The capture this thread started, if any. `traced` copies a statement's expanded
+        /// SQL into it, so no per-statement allocation happens unless a capture is running.
+        static CAPTURED_SQL: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The expanded SQL of every statement this thread starts while the guard lives, with the
+    /// same thread attribution as [`SqliteWorkScope`]: writer loans and readers this thread
+    /// runs are captured, and other threads' work is not. Layered into `traced`, it keeps
+    /// working under the native mutation dispatcher, which installs and reinstalls that one
+    /// callback; a raw `Connection::trace` would be clobbered by it.
+    pub struct SqlCapture {
+        buffer: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        previous: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    }
+
+    impl SqlCapture {
+        pub fn start() -> Self {
+            let buffer = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let previous = CAPTURED_SQL
+                .with(|capture| capture.borrow_mut().replace(std::rc::Rc::clone(&buffer)));
+            Self { buffer, previous }
+        }
+
+        /// The statements captured so far, emptying the buffer and leaving the capture running.
+        pub fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.buffer.borrow_mut())
+        }
+    }
+
+    impl Drop for SqlCapture {
+        fn drop(&mut self) {
+            CAPTURED_SQL.with(|capture| {
+                let mut capture = capture.borrow_mut();
+                if capture
+                    .as_ref()
+                    .is_some_and(|active| std::rc::Rc::ptr_eq(active, &self.buffer))
+                {
+                    *capture = self.previous.take();
+                }
+            });
+        }
+    }
+
     /// Completed traced statements on this thread within one explicit scope. It counts every
     /// traced connection used by this thread (including writer-return callbacks), not work
     /// done by other threads while this caller waits for a lend. Start before the first phase
@@ -2311,7 +2394,7 @@ pub mod work {
     /// its runs until someone resets them, and tests read them too, so this never resets them.
     static STARTED: Mutex<BTreeMap<usize, [u64; 4]>> = Mutex::new(BTreeMap::new());
 
-    unsafe extern "C" fn traced(
+    pub(super) unsafe extern "C" fn traced(
         event: c_uint,
         _context: *mut c_void,
         statement: *mut c_void,
@@ -2324,6 +2407,18 @@ pub mod work {
         let now = COUNTERS.map(|counter| u64::try_from(read(counter)).unwrap_or(0));
         let mut started = STARTED.lock().unwrap_or_else(PoisonError::into_inner);
         if event == ffi::SQLITE_TRACE_STMT as c_uint {
+            if let Some(captured) = CAPTURED_SQL.with(|capture| capture.borrow().as_ref().map(std::rc::Rc::clone)) {
+                // SQLITE_TRACE_STMT detail contains unexpanded SQL (or a trigger
+                // comment). Expand the live statement explicitly for EXPLAIN fixtures.
+                // SAFETY: SQLite owns the live statement; its allocated expansion is
+                // copied while valid and released with SQLite's matching allocator.
+                let raw = unsafe { ffi::sqlite3_expanded_sql(statement) };
+                if !raw.is_null() {
+                    let sql = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+                    unsafe { ffi::sqlite3_free(raw.cast()) };
+                    captured.borrow_mut().push(sql);
+                }
+            }
             // A trigger's start reports the statement again; the first start counts.
             started.entry(key).or_insert(now);
             return 0;
@@ -2411,12 +2506,19 @@ pub mod work {
                 statement.query_row([],|row|row.get::<_,u64>(0)).unwrap();
                 capture.store(statement.get_status(rusqlite::StatementStatus::VmStep) as u64,Ordering::Relaxed);
             });
+            // The native contract publishes nothing for an unchanged loan, so the fixture
+            // commits an actual mutation; the loan's whole return, including the observer
+            // the dispatcher publishes at guard return, stays inside the one scope.
             let scope = SqliteWorkScope::start();
-            drop(writer.write());
+            let guard = writer.write();
+            guard
+                .execute("INSERT INTO claims(store_index) VALUES (1)", [])
+                .unwrap();
+            drop(guard);
             let work = scope.finish();
             assert_eq!(
-                work.statements, 2,
-                "committed index read plus returned-guard observer"
+                work.statements, 3,
+                "the committed mutation, its index read and the returned-guard observer"
             );
             assert!(observed_vm.load(Ordering::Relaxed) > 0);
             assert!(work.vm_steps > observed_vm.load(Ordering::Relaxed));

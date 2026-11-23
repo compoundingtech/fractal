@@ -29,7 +29,7 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
         store.judge_claims(true).unwrap();
         assert_eq!(verdict(&store, &claim), Verdict::Verified);
         {
-            let mut connection = store.connection.write();
+            let connection = store.connection.write();
             if tampered {
                 // Rejudgment must use the current transaction's body, never the earlier one.
                 connection.execute(
@@ -45,19 +45,24 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
                 "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
                 [&claim.id],
             ).unwrap();
+            drop(connection);
             BODY_READS.with(|reads| reads.borrow_mut().clear());
-            connection.trace(Some(|sql| {
-                if sql.starts_with("SELECT id, subject, kind, actor, body FROM claims WHERE id=") {
-                    BODY_READS.with(|reads| reads.borrow_mut().push(sql.to_owned()));
+            // The native mutation dispatcher reinstalls its one trace callback on every loan,
+            // so a raw connection.trace would be clobbered; the capture is layered into it.
+            let capture = smallclaims::sqlite::work::SqlCapture::start();
+            store.judge_claims(false).unwrap();
+            let ran = capture.take();
+            drop(capture);
+            BODY_READS.with(|reads| {
+                for sql in &ran {
+                    if sql.starts_with("SELECT id, subject, kind, actor, body FROM claims WHERE id=") {
+                        reads.borrow_mut().push(sql.clone());
+                    }
                 }
-            }));
+                let reads = reads.borrow();
+                assert_eq!(reads.len(), 1, "tampered={tampered}: {reads:?}");
+            });
         }
-        store.judge_claims(false).unwrap();
-        store.connection.write().trace(None);
-        BODY_READS.with(|reads| {
-            let reads = reads.borrow();
-            assert_eq!(reads.len(), 1, "tampered={tampered}: {reads:?}");
-        });
         let result = verdict(&store, &claim);
         if tampered {
             assert!(matches!(result, Verdict::Invalid(_)), "{result:?}");
