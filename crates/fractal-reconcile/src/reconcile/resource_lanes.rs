@@ -3,6 +3,7 @@
 //! custody of every root through retirement.
 use super::*;
 use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+use super::host_executor::resource_commands as host_resources;
 
 use crate::model::RESOURCE_LANE_REQUEST_TAG as REQUEST_TAG;
 
@@ -52,7 +53,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             // An inherited root ends here; its owning program scope retains membership custody.
             return Ok(true);
         }
-        if !self.runtime.retire_resource_lane(&self.store, &request)? {
+        if !(host_resources::RetireCommand::Lane { request: &request })
+            .execute(&self.store, self.runtime.as_ref(), &self.host_observations)? {
             // Unknown retirement retains custody; native events or explicit recovery wake it.
             return Ok(false);
         }
@@ -103,7 +105,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
             });
             if retained && active { continue; }
-            if self.runtime.retire_resource_lane(&self.store, &record.request)? {
+            if (host_resources::RetireCommand::Lane { request: &record.request })
+                .execute(&self.store, self.runtime.as_ref(), &self.host_observations)? {
                 self.incremental.touch(&crate::store::resource_membership::dependency(&record.request.host, &record.request.name));
                 self.incremental.touch("seat-admission");
                 self.signal_changed();

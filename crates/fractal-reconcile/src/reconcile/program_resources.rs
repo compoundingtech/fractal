@@ -2,6 +2,7 @@
 use super::*;
 use crate::store::resource_membership::{Admission, Coverage, Grant, LaneRequest, Membership, Owner};
 use serde::Deserialize;
+use super::host_executor::resource_commands as host_resources;
 pub(super) const RETRY_RETIREMENT_FAULT_SCOPE: &str = "program/retry-resource-retirement";
 
 #[derive(Deserialize)]
@@ -101,7 +102,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 // remove their cgroups or turn their memberships into admission refusals.
                 self.prepare_shell_resource_recovery()?;
                 self.store.start_resource_authority(&self.host, &uuid::Uuid::now_v7().to_string())?;
-                self.runtime.recover_resource_lanes(&self.store, &self.host, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
+                host_resources::RecoverCommand {
+                    host: &self.host, now_ms: u64::try_from(now_ms()).unwrap_or(u64::MAX),
+                }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
                 Ok(())
             })().map_err(|error| format!("resource authority recovery failed: {error:#}"))
         });
@@ -142,7 +145,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Err(error) = cancellation { retirement_errors.push(format!("{child}: {error:#}")); }
         }
         // A child cancellation failure must not prevent cleanup of the remaining execution roots.
-        let retired = match self.runtime.retire_resource_lane(&self.store, &record.request) {
+        let retired = match (host_resources::RetireCommand::Lane { request: &record.request })
+            .execute(&self.store, self.runtime.as_ref(), &self.host_observations) {
             Ok(retired) => retired,
             Err(error) => { retirement_errors.push(format!("{error:#}")); false }
         };
@@ -293,7 +297,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let base = execution_id(request);
                     let prefix = format!("{base}-");
                     for root in record.roots.iter().filter(|root| root.runtime_id == base || root.runtime_id.starts_with(&prefix)) {
-                        self.runtime.retire_resource_exec(&self.store, &record.request, &root.runtime_id)?;
+                        host_resources::RetireCommand::Execution {
+                            request: &record.request, runtime_id: &root.runtime_id,
+                        }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
                         self.resource_changed(&record.request);
                     }
                     engine.resolve_resource(request, failure("cancelled", "Resource execution was cancelled."))?;
@@ -379,12 +385,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let mut member = member;
             resource_lanes::set_request(&mut member, &record.request)?;
-            self.runtime.start_resource_guarded(&self.store, &member, None, &|| {
-                let current = self.store.step_run(&request.step)?.context("program step disappeared before payload release")?;
-                anyhow::ensure!(current.attempt == request.attempt && program::RUNNING_STATES.contains(&current.status.as_str()),
-                    "program attempt was cancelled before payload release");
-                Ok(())
-            })?;
+            host_resources::StartCommand::Program {
+                member: &member, step: &request.step, attempt: request.attempt,
+            }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
             self.resource_changed(&record.request);
             return Ok(true);
         }
@@ -409,7 +412,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &runtime_id, u64::try_from(now_ms()).unwrap_or(u64::MAX))?
                     .context("resource execution has no payload release clock")?;
                 if elapsed >= timeout {
-                    self.runtime.retire_resource_exec(&self.store, &record.request, &runtime_id)?;
+                    host_resources::RetireCommand::Execution {
+                        request: &record.request, runtime_id: &runtime_id,
+                    }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
                     self.resource_changed(&record.request);
                     engine.resolve_resource(request, failure("execution-timeout", "Resource command exceeded its payload budget."))?;
                     return Ok(true);
