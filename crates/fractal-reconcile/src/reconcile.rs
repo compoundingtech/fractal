@@ -1684,6 +1684,8 @@ pub struct Reconciler<R = NativeRuntime> {
     gate_poll_runtimes: Arc<Mutex<BTreeSet<String>>>,
     /// What each item's last evaluation read, so a pass can tell what a change affects.
     pub incremental: crate::incremental::Incremental,
+    /// Native desired-row changes update the retained pass inputs in place.
+    common_inputs: Mutex<crate::store::DesiredInputs>,
     /// How far [`Self::observe_stream`] has read the messages shard; `None` until the first pass.
     stream_seen: Mutex<Option<crate::store::messages_shard::mailbox_reads::StreamPosition>>,
     /// Independent effect feed cursor; `None` bootstraps durable subjects once.
@@ -1804,11 +1806,6 @@ pub struct Reconciler<R = NativeRuntime> {
     disk_check: Mutex<(Option<u128>, bool)>,
     disk_observations: Mutex<BTreeMap<u64, crate::disk::DiskSpace>>,
     disk_check_every_ms: u128,
-    /// When the fault stage last sent faults to their owning agents.
-    fault_delivery: Mutex<Option<u128>>,
-    fault_delivery_every_ms: u128,
-    /// The wall time of the last fault snapshot, which spaces the next delivery.
-    fault_snapshot_ms: std::sync::atomic::AtomicU64,
     /// The claim the subagent stage starts its next look from; see `SubagentSweep::low_water`.
     subagent_low_water: Mutex<u64>,
     /// How long run cleanup waits for its runtimes to stop before the run ends without them.
@@ -1991,6 +1988,7 @@ impl Reconciler<NativeRuntime> {
             gate_poll_armed: Arc::new(AtomicBool::new(false)),
             gate_poll_runtimes: Arc::new(Mutex::new(BTreeSet::new())),
             incremental: Default::default(),
+            common_inputs: Default::default(),
             stream_seen: Default::default(),
             effect_seen: Default::default(),
             strict_incremental: false,
@@ -2054,9 +2052,6 @@ impl Reconciler<NativeRuntime> {
             disk_check: Mutex::new((None, false)),
             disk_observations: Mutex::new(BTreeMap::new()),
             disk_check_every_ms: DISK_CHECK_EVERY_MS,
-            fault_delivery: Mutex::new(None),
-            fault_delivery_every_ms: FAULT_DELIVERY_EVERY_MS,
-            fault_snapshot_ms: Default::default(),
             screen_poll_every_ms: SCREEN_POLL_EVERY_MS,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
@@ -2233,6 +2228,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             gate_poll_armed: Arc::new(AtomicBool::new(false)),
             gate_poll_runtimes: Arc::new(Mutex::new(BTreeSet::new())),
             incremental: Default::default(),
+            common_inputs: Default::default(),
             stream_seen: Default::default(),
             effect_seen: Default::default(),
             strict_incremental: true,
@@ -2296,9 +2292,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             disk_check: Mutex::new((None, false)),
             disk_observations: Mutex::new(BTreeMap::new()),
             disk_check_every_ms: 0,
-            fault_delivery: Mutex::new(None),
-            fault_delivery_every_ms: 0,
-            fault_snapshot_ms: Default::default(),
             screen_poll_every_ms: 0,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
@@ -2937,40 +2930,16 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         let now = now_ms();
-        // The snapshot rebuilds every fault in the fleet. Where that is slow, deliver at most
-        // every ten times its wall time (up to ten minutes) rather than every 30 seconds.
-        let every = match self.fault_delivery_every_ms {
-            0 => 0,
-            every => crate::incremental::cost_scaled_interval(
-                every,
-                u128::from(self.fault_snapshot_ms.load(std::sync::atomic::Ordering::Relaxed)),
-                FAULT_DELIVERY_MAX_MS,
-            ),
-        };
-        {
-            let mut last = self
-                .fault_delivery
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(at) = *last
-                && now.saturating_sub(at) < every
-            {
-                // A fault raised since then still reaches its agent without another change.
-                self.arm_restart("stage/faults", at.saturating_add(every));
-                return Ok(());
-            }
-            *last = Some(now);
-        }
-        let faults = {
+        let (faults, due) = smallclaims::touched::record_due(|| {
             let mut phase = crate::reconcile_telemetry::phase("fault_snapshot");
             let faults = self.store.fault_delivery_snapshot(now)?;
             phase.items(faults.len());
-            faults
-        };
-        self.fault_snapshot_ms.store(
-            u64::try_from(now_ms().saturating_sub(now)).unwrap_or(u64::MAX),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+            Ok::<_, anyhow::Error>(faults)
+        });
+        let faults = faults?;
+        if let Some(due) = due.into_iter().chain(self.store.fault_delivery_next_due()).min() {
+            self.arm_restart("stage/faults", due);
+        }
         for fault in faults {
             let Some(owner) = fault.owner.as_deref() else {
                 continue;
@@ -3724,41 +3693,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         drop(_runners_span);
         let mut desired_span = crate::reconcile_telemetry::phase("pass/desired");
-        let mut desired = self.store.desired_subjects()?;
+        let mut common_inputs = self.common_inputs.lock().unwrap_or_else(PoisonError::into_inner);
+        let desired_changed = common_inputs.refresh(&self.store)?;
+        for subject in &common_inputs.changed_subjects {
+            self.incremental.touch_subject(subject);
+        }
+        let pending_subjects = common_inputs.pending_subjects(&self.store)?;
+        let terminal_owned = self.store.terminal_owned_runtime_subjects()?;
+        common_inputs.stop_terminal_members(&terminal_owned, &self.host);
+        let desired = &common_inputs.desired;
         desired_span.items(desired.len());
-        // Eval cleanup can delete desired rows without appending a claim. Watch selection must
-        // see those removals through the complete roster this pass already reads, not only the
-        // claim/local-observation feed or the host/authority-filtered active member list.
-        self.incremental.observe_membership(
-            "desired-subject-membership",
-            "desired:",
-            desired.iter().map(|declaration| declaration.subject.clone()).collect(),
-        );
-        let mut pending_subjects = BTreeSet::new();
-        for declaration in &desired {
-            if let Some(run) = &declaration.owner_run
-                && self.store.run_projection_pending(run)?
-            {
-                pending_subjects.insert(declaration.subject.clone());
-            }
+        // Native desired-row notifications include cleanup removals without claims.
+        if desired_changed {
+            self.incremental.observe_membership(
+                "desired-subject-membership",
+                "desired:",
+                desired.iter().map(|declaration| declaration.subject.clone()).collect(),
+            );
         }
         if crate::otel::export_enabled() {
             tracing::Span::current().record("st.reconcile.items", desired.len() as i64);
         }
-        self.incoming_resumes(&desired)?;
-        let terminal_owned = self.store.terminal_owned_runtime_subjects()?;
+        self.incoming_resumes(desired)?;
         drop(desired_span);
-        for subject in &mut desired {
-            if terminal_owned.contains(&subject.subject)
-                && subject
-                    .member
-                    .as_ref()
-                    .is_some_and(|member| member.host == self.host)
-            {
-                subject.kind = "stop".into();
-            }
-        }
-        self.cancel_invalid_admissions(&desired)?;
+        self.cancel_invalid_admissions(desired)?;
         // A stopped root ends every task it declared: each runs the exec's own stop below and is
         // not launched or restarted meanwhile. Starting the root again declares them again.
         let stopped_roots = desired
@@ -3770,7 +3728,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut root_tasks = BTreeMap::<String, Vec<RootTask>>::new();
         let mut task_stops = BTreeSet::new();
         if !stopped_roots.is_empty() {
-            for subject in &desired {
+            for subject in desired {
                 if pending_subjects.contains(&subject.subject) {
                     continue;
                 }
@@ -3864,7 +3822,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| !task_stops.contains(&subject.subject))
             .collect::<Vec<_>>();
-        let eligible = match self.store.owned_desired_subjects(&desired) {
+        let eligible = match self.store.owned_desired_subjects(desired) {
             Ok(eligible) => {
                 self.prune_stop_state(&gate_runners, &eligible);
                 eligible
@@ -3874,7 +3832,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 BTreeSet::new()
             }
         };
-        if let Err(error) = self.publish_model_drift_metrics(&desired, &eligible) {
+        if let Err(error) = self.publish_model_drift_metrics(desired, &eligible) {
             tracing::warn!(%error, "model drift metrics snapshot failed");
         }
         let eligible = |subject: &DesiredSubject| eligible.contains(&subject.subject);
@@ -4856,7 +4814,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         });
         if let Some(intake) = intake {
             self.isolate("stage/observers", &daemon, || {
-                self.reconcile_resource_observers(&intake, &desired)
+                self.reconcile_resource_observers(&intake, desired)
             });
             self.isolate("stage/schedules", &daemon, || {
                 self.reconcile_schedules(&intake)
@@ -4869,17 +4827,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             });
         }
         self.isolate("stage/provider-capacity-retries", &daemon, || {
-            self.reconcile_provider_capacity_retries(&desired)
+            self.reconcile_provider_capacity_retries(desired)
         });
         self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
         self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
-            self.reconcile_disk_space(&desired)
+            self.reconcile_disk_space(desired)
         });
         self.isolate("stage/replication-health", &daemon, || {
             self.reconcile_replication_health()
         });
-        self.isolate("stage/faults", &daemon, || self.deliver_faults(&desired));
+        self.isolate("stage/faults", &daemon, || self.deliver_faults(desired));
         self.isolate("stage/subagents", &daemon, || self.end_stale_subagents());
         self.reconcile_github_watches_stage();
         self.file_watchers_used
@@ -22240,9 +22198,6 @@ fn permanent_observation_error(code: &str) -> bool {
 
 /// How often the disk stage reads free space.
 const DISK_CHECK_EVERY_MS: u128 = 30_000;
-/// How often a host sends new faults to the agents it runs.
-const FAULT_DELIVERY_EVERY_MS: u128 = 30_000;
-const FAULT_DELIVERY_MAX_MS: u128 = 10 * 60_000;
 
 type DiskProbe = Arc<dyn Fn(&Path) -> std::io::Result<crate::disk::DiskSpace> + Send + Sync>;
 const RECONCILER_FAILING_TITLE: &str = "The reconciler is failing";

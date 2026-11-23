@@ -134,6 +134,8 @@ pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
 mod observer_mail_inputs;
+mod observer_reconcile_inputs;
+pub use observer_reconcile_inputs::DesiredInputs;
 pub mod completion_state;
 #[cfg(test)]
 pub mod resource_preparation_fence_tests;
@@ -7115,17 +7117,25 @@ impl Store {
     pub fn fault_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
         // One read cut for every family, so a run, step, declaration or failure that many
         // faults share is read once.
-        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, false)))
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, None)))
     }
 
     /// The faults whose notices the generic reconciler owns.
     pub fn fault_delivery_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
-        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, true)))
+        // Capture the native journal before establishing the SQL cut. A newer journal
+        // generation cannot be consumed by a reader still pinned to an older projection.
+        let desired_generation = self.desired_changes_since(None).0;
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, Some(desired_generation))))
     }
 
-    fn fault_snapshot_in_cut(&self, as_of: u128, generic_delivery_only: bool) -> Result<Vec<FaultView>> {
+    fn fault_snapshot_in_cut(&self, as_of: u128, desired_generation: Option<u64>) -> Result<Vec<FaultView>> {
+        let generic_delivery_only = desired_generation.is_some();
         let mut items = self.subscription_fault_items(as_of)?;
-        items.extend(self.operational_fault_families(None, as_of)?);
+        items.extend(if let Some(generation) = desired_generation {
+            self.cached_operational_fault_families(as_of, generation)?
+        } else {
+            self.operational_fault_families(None, as_of)?
+        });
         // Failure episodes come from the fault cache, read again only where something changed.
         let (operational, gates) = self.cached_failure_faults(as_of)?;
         let mut explicit_reviewers = BTreeSet::new();
@@ -7140,6 +7150,11 @@ impl Store {
         }
         items.extend(gates);
         items.extend(self.signature_attention_items()?);
+        for item in &items {
+            if item.requested_at_unix_ms > as_of {
+                smallclaims::touched::note_due(item.requested_at_unix_ms);
+            }
+        }
         let fallback = self.fleet_fault_agent()?;
         let dismissed = self.dismissed_faults()?;
         self.current_attention(items, as_of)?
@@ -17394,6 +17409,7 @@ fn generation_run_tx(
     transaction: &Connection,
     generation: &str,
 ) -> Result<Option<String>, FractalError> {
+    smallclaims::touched::note_read(|| format!("run-generation/{generation}"));
     if let Some(run) = transaction
         .query_row(
             "SELECT run_id FROM run_generations WHERE id=?1",
@@ -17506,6 +17522,7 @@ fn run_of_subject_tx(
 
 /// The root a run names, or the owner of an ask run, or the run itself.
 fn run_root_tx(transaction: &Connection, run: &str) -> Result<String, FractalError> {
+    smallclaims::touched::note_read(|| format!("mission-run/{run}"));
     if let Some(root) = transaction
         .query_row(
             "SELECT root_run_id FROM mission_runs WHERE id=?1",
@@ -17568,6 +17585,7 @@ fn parent_step_of_run_tx(
     transaction: &Connection,
     run: &str,
 ) -> Result<Option<String>, FractalError> {
+    smallclaims::touched::note_read(|| format!("mission-run/{run}"));
     if let Some(parent) = transaction
         .query_row(
             "SELECT parent_step_run FROM mission_runs WHERE id=?1",
@@ -17601,6 +17619,7 @@ fn step_generation(parent: &str) -> Option<&str> {
 
 /// Whether a root run has ended, or any claim ends it: projected so, or claimed so in any order.
 fn run_ever_ended_tx(transaction: &Connection, run: &str) -> Result<bool, FractalError> {
+    smallclaims::touched::note_read(|| format!("mission-run/{run}"));
     transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1

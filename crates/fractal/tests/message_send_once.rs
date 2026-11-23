@@ -52,23 +52,14 @@ async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()
     ).unwrap();
     store.apply_internal(&intent, "fixture-recipients").unwrap();
     let server_socket = socket.clone();
+    let (ready, started) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
-            .await
-            .unwrap();
+        fractal_daemon::api::serve_unix_with_ready(
+            &server_socket, fractal_daemon::api::router(state), move || { let _ = ready.send(()); },
+        ).await.unwrap();
     });
-    wait_for(&socket).await;
+    started.await.unwrap();
     (socket, store, server)
-}
-
-async fn wait_for(socket: &Path) {
-    for _ in 0..200 {
-        if socket.exists() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    panic!("{} did not start", socket.display());
 }
 
 /// Answers the proxy loses while the daemon still applies the request, as under load.
@@ -82,6 +73,13 @@ struct Losses {
     page_reads_after_a_send: AtomicBool,
     blob_uploads: AtomicUsize,
     recipient_route_missing: AtomicBool,
+    /// Fail the optional post-send status read without changing durable send acceptance.
+    delivery_reads_fail: AtomicBool,
+    delivery_reads: AtomicUsize,
+    delivery_reads_hold: AtomicBool,
+    delivery_reads_malformed: AtomicBool,
+    release_delivery: Notify,
+    held_delivery_finished: Notify,
 }
 
 /// Forward every request on `front` to the daemon on `back`, and close the connection without a
@@ -102,6 +100,19 @@ async fn lossy_proxy(
                 let line = String::from_utf8_lossy(&request[..request.len().min(64)]).to_string();
                 if line.starts_with("POST /v1/client/blobs ") {
                     losses.blob_uploads.fetch_add(1, Ordering::SeqCst);
+                }
+                if line.starts_with("GET /v1/messages/delivery/") {
+                    losses.delivery_reads.fetch_add(1, Ordering::SeqCst);
+                    if losses.delivery_reads_hold.load(Ordering::SeqCst) {
+                        losses.release_delivery.notified().await;
+                        drop(caller);
+                        losses.held_delivery_finished.notify_one();
+                        return;
+                    }
+                    if losses.delivery_reads_malformed.load(Ordering::SeqCst) {
+                        caller.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+                        return;
+                    }
                 }
                 if line.starts_with("GET /v1/messages/recipient?")
                     && losses.recipient_route_missing.load(Ordering::SeqCst)
@@ -126,6 +137,8 @@ async fn lossy_proxy(
                     lose
                 } else if line.starts_with("GET /v1/messages/page") {
                     losses.page_reads.load(Ordering::SeqCst)
+                } else if line.starts_with("GET /v1/messages/delivery/") {
+                    losses.delivery_reads_fail.load(Ordering::SeqCst)
                 } else {
                     false
                 };
@@ -161,33 +174,26 @@ async fn read_request(stream: &mut UnixStream) -> Vec<u8> {
 
 /// Run the st CLI against `socket` with none of this process's st environment, so a harness
 /// running the suite lends it no seat identity, projection root or incarnation.
-async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
-    let binary = test_bin!("fractal-fixture").to_path_buf();
-    let socket = socket.to_path_buf();
-    let env = env
-        .iter()
-        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-        .collect::<Vec<_>>();
-    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-    tokio::task::spawn_blocking(move || {
-        let mut command = fractal_daemon::test_support::command(binary);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("ST_") || name.starts_with("ST3_") {
-                command.env_remove(name.as_ref());
-            }
+fn st_command(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> tokio::process::Command {
+    let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
+    command.kill_on_drop(true);
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy();
+        if name.starts_with("ST_") || name.starts_with("ST3_") {
+            command.env_remove(name.as_ref());
         }
-        command
-            .envs(env)
-            .arg("--endpoint")
-            .arg(socket)
-            .args(["--daemon-wait", "0"])
-            .args(args)
-            .output()
-            .unwrap()
-    })
-    .await
-    .unwrap()
+    }
+    command
+        .envs(env.iter().copied())
+        .arg("--endpoint")
+        .arg(socket)
+        .args(["--daemon-wait", "0"])
+        .args(args);
+    command
+}
+
+async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    st_command(socket, env, args).output().await.unwrap()
 }
 
 /// Run the st CLI as [`st`] does, with `input` on its stdin.
@@ -282,9 +288,10 @@ async fn running_the_same_send_twice_sends_one_message() {
     let human = st(&socket, &[], &SEND[1..]).await;
     assert!(human.status.success(), "{}", stderr(&human));
     assert_eq!(
-        String::from_utf8_lossy(&human.stdout).trim(),
-        first["subject"].as_str().unwrap()
+        String::from_utf8_lossy(&human.stdout),
+        format!("{}\n", first["subject"].as_str().unwrap())
     );
+    assert!(stderr(&human).contains("delivery: queued: "), "{}", stderr(&human));
     assert!(
         stderr(&human).contains("confirmed on retry"),
         "{}",
@@ -464,10 +471,11 @@ async fn a_lost_send_answer_confirms_success_on_retry() {
     let sent = st(&front, &[], &SEND[1..]).await;
     assert!(sent.status.success(), "{}", stderr(&sent));
     assert_eq!(message_count(&store), 1);
-    let subject = std::str::from_utf8(&sent.stdout).unwrap();
-    assert!(subject.trim().starts_with("message/"), "{subject}");
+    let output = std::str::from_utf8(&sent.stdout).unwrap();
+    let subject = output.lines().next().unwrap();
+    assert!(subject.starts_with("message/"), "{output}");
     let confirmation = stderr(&sent);
-    assert!(confirmation.contains(subject.trim()), "{confirmation}");
+    assert!(confirmation.contains(subject), "{confirmation}");
     assert!(confirmation.contains("confirmed on retry"), "{confirmation}");
     assert!(!confirmation.contains("nothing new was sent"), "{confirmation}");
     assert!(!confirmation.contains("already sent"), "{confirmation}");
@@ -718,11 +726,124 @@ async fn a_landed_send_succeeds_when_the_projection_cannot_be_refreshed() {
         stderr(&sent)
     );
     let subject = store.messages(None, true).unwrap()[0].subject.clone();
-    assert_eq!(String::from_utf8_lossy(&sent.stdout).trim(), subject);
+    assert_eq!(String::from_utf8_lossy(&sent.stdout), format!("{subject}\n"));
     let warning = stderr(&sent);
     assert!(warning.contains(&subject), "{warning}");
     assert!(warning.contains("st3-message:v1:"), "{warning}");
     proxy.abort();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_send_reports_current_delivery_but_status_failure_keeps_acceptance_successful() {
+    for outcome in ["queued", "stopped", "status-error", "timeout", "malformed"] {
+        let root = tempfile::tempdir().unwrap();
+        let (back, store, server) = daemon(root.path()).await;
+        if outcome == "stopped" {
+            store.append_claim(&fractal_daemon::model::ClaimInput {
+                subject: WORKER.into(), kind: "runtime.observed".into(), actor: Some(WORKER.into()),
+                fields: serde_json::from_value(serde_json::json!({
+                    "status":"stopped", "runtime_id":WORKER, "incarnation_id":"fixture",
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let front = root.path().join("front.sock");
+        let losses = Arc::new(Losses::default());
+        losses.delivery_reads_fail.store(outcome == "status-error", Ordering::SeqCst);
+        losses.delivery_reads_hold.store(outcome == "timeout", Ordering::SeqCst);
+        losses.delivery_reads_malformed.store(outcome == "malformed", Ordering::SeqCst);
+        let proxy = lossy_proxy(front.clone(), back, losses.clone()).await;
+        let started = std::time::Instant::now();
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(5), st(&front, &[], &SEND[1..]),
+        ).await.expect("an optional status read must not hold the send open");
+        if outcome == "timeout" {
+            assert!(started.elapsed() < std::time::Duration::from_secs(5),
+                "the optional two-second status read took {:?}", started.elapsed());
+        }
+        assert!(sent.status.success(), "{}", stderr(&sent));
+        assert_eq!(message_count(&store), 1);
+        assert_eq!(losses.delivery_reads.load(Ordering::SeqCst), 1);
+        let subject = store.messages(None, true).unwrap()[0].subject.clone();
+        assert_eq!(String::from_utf8_lossy(&sent.stdout), format!("{subject}\n"));
+        let diagnostic = stderr(&sent);
+        let delivery = diagnostic.lines().filter(|line| line.starts_with("delivery: ")).collect::<Vec<_>>();
+        if matches!(outcome, "status-error" | "timeout" | "malformed") {
+            assert!(delivery.is_empty(), "{diagnostic}");
+        } else {
+            assert_eq!(delivery.len(), 1, "{diagnostic}");
+            assert!(delivery[0].starts_with("delivery: queued: "), "{diagnostic}");
+            if outcome == "stopped" {
+                assert!(delivery[0].contains("recipient stopped"), "{diagnostic}");
+            } else {
+                assert!(delivery[0].contains("waiting for delivery"), "{diagnostic}");
+            }
+        }
+        // JSON keeps the existing receipt and does not perform an optional delivery read.
+        let json_output = st(&front, &[], SEND).await;
+        let json = value(&json_output);
+        assert!(!stderr(&json_output).contains("delivery: "));
+        assert_eq!(json["subject"], subject);
+        assert_eq!(json["already_sent"], true);
+        assert!(json.get("delivery").is_none());
+        assert_eq!(losses.delivery_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(message_count(&store), 1);
+        // The timeout fixture never answers until the command has returned and assertions finish.
+        losses.release_delivery.notify_waiters();
+        if outcome == "timeout" {
+            tokio::time::timeout(std::time::Duration::from_secs(1), losses.held_delivery_finished.notified())
+                .await.expect("the held status request must close at test cleanup");
+        }
+        proxy.abort();
+        server.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_send_keeps_the_id_last_when_stderr_is_merged_into_stdout() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    for retry in [false, true] {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let mut reader = UnixStream::from_std(reader).unwrap();
+        let stderr: std::os::fd::OwnedFd = writer.try_clone().unwrap().into();
+        let stdout: std::os::fd::OwnedFd = writer.into();
+        let mut command = st_command(&socket, &[], &SEND[1..]);
+        command.stdout(std::process::Stdio::from(stdout)).stderr(std::process::Stdio::from(stderr));
+        let mut child = command.spawn().unwrap();
+        drop(command);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await.expect("a send must finish after its bounded status read").unwrap();
+        assert!(status.success());
+        let mut merged = String::new();
+        reader.read_to_string(&mut merged).await.unwrap();
+        let subject = store.messages(None, true).unwrap()[0].subject.clone();
+        assert!(merged.contains("delivery: queued: "), "{merged}");
+        assert_eq!(merged.lines().last(), Some(subject.as_str()), "{merged}");
+        assert_eq!(merged.contains("confirmed on retry"), retry, "{merged}");
+        assert_eq!(message_count(&store), 1);
+    }
+    server.abort();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_send_keeps_durable_acceptance_when_stderr_is_full() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let mut command = st_command(&socket, &[], &SEND[1..]);
+    command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::from(full));
+    let child = command.spawn().unwrap();
+    drop(command);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+        .await.expect("an unwritable diagnostic sink cannot block accepted mail").unwrap();
+    assert!(output.status.success(), "{:?}", output.status);
+    assert_eq!(message_count(&store), 1);
+    let subject = store.messages(None, true).unwrap()[0].subject.clone();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{subject}\n"));
     server.abort();
 }
 

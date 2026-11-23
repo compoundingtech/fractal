@@ -2,7 +2,6 @@ use crate::MailboxWakesStore;
 use crate::CoordinationStore;
 use crate::LimitsStore;
 use crate::SeatsStore;
-use crate::SeatsStoreCore;
 use crate::RuntimeStartsStore;
 use super::*;
 
