@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Maintain message-mark rollout barriers from changed members instead of minute scans",
+  "replay": {"status": "none", "detail": "No claim interpretation or replay changes."},
+  "schema": {"status": "changed", "detail": "Daemon startup installs a local changed-member key set and source triggers. The key set is rebuildable maintenance state, not replicated data."},
+  "rules": {"status": "none", "detail": "The existing strict membership, configured-peer, legacy-writer and capability barriers are preserved for both lifecycle and staging marks."},
+  "compatibility": {"status": "changed", "detail": "Initial convergence reads the roster once. Native committed-table notifications then react to fleet-generation, first/last writer and daemon-capability changes. Only new or changed member requirements are reevaluated; no periodic safety scan, debounce or TTL is used."},
+  "downtime": {"status": "none", "detail": "Restart to activate reactive maintenance; ordinary writers continue reading the switches transactionally."},
+  "manual": {"status": "changed", "detail": "/v1/performance exposes marks_switch_work.roster_refreshes, member_reevaluations and switch_changes as cumulative work counters. Idle operation and unrelated existing-writer appends perform no member reevaluations."},
+  "recovery": {"status": "changed", "detail": "Failed maintenance retains durable keys and prior decisions. It registers a committed-writer recovery observer, rechecks once to close the registration race, then retries only on actual writer activity, without a retry timer or daemon exit. A binary rollback can ignore the key set; each new consumer reconstructs its roster and decisions on startup."}
+}
