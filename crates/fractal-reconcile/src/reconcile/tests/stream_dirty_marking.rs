@@ -40,4 +40,23 @@ fn a_stream_message_marks_the_items_reading_its_mailbox_without_a_full_pass() {
     reconciler.incremental.evaluated(ITEM, reads(), None);
     reconciler.observe_stream().unwrap();
     assert!(!reconciler.incremental.needs(ITEM, now_ms()));
+    // Local receipt custody uses this same durable lifecycle feed. A new receipt
+    // invalidates the reader once; replaying its stable ID is no new observation.
+    let receipt = ClaimInput {
+        subject: "message/stream-dirty".into(),
+        kind: "message.read".into(),
+        actor: Some(to.into()),
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("example-physical-read-receipt".into()),
+    };
+    shard.append_claim(&receipt).unwrap();
+    reconciler.observe_stream().unwrap();
+    assert!(reconciler.incremental.needs(ITEM, now_ms()));
+    reconciler.incremental.evaluated(ITEM, reads(), None);
+    shard.append_claim(&receipt).unwrap();
+    reconciler.observe_stream().unwrap();
+    assert!(!reconciler.incremental.needs(ITEM, now_ms()),
+        "a duplicate durable receipt causes zero downstream evaluations");
 }

@@ -2954,3 +2954,111 @@ fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
         }
     }
 }
+
+#[tokio::test]
+async fn host_executor_duplicate_command_retains_the_original_durable_receipt() {
+    let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let subject = "agent/example/queued";
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "executor-duplicate");
+    assert!(launch(&reconciler, subject));
+    workers_done(&reconciler).await;
+    let completed = store.runtime_start_for(subject).unwrap().unwrap();
+    assert!(completed.finished);
+    let before = completed.result.clone().unwrap();
+    let starts = runtime.inner.starts.lock().unwrap().len();
+    let _lock = store.try_runtime_start_lock(subject).unwrap().unwrap();
+    let command = host_executor::StartCommand::recovered(&completed, completed.owner.clone()).unwrap();
+    assert!(matches!(
+        host_executor::StartCommand::admit(&store, completed, start_jobs::MAX_START_JOBS).unwrap(),
+        host_executor::StartAdmission::Refused,
+    ));
+    assert!(matches!(
+        command.execute(&store, runtime.as_ref(), &reconciler.host_observations, 0).unwrap(),
+        host_executor::StartReceipt::Persisted,
+    ));
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), starts);
+    assert_eq!(store.runtime_start_for(subject).unwrap().unwrap().result, Some(before));
+}
+
+#[tokio::test]
+async fn host_executor_cancel_before_physical_admission_survives_restart_and_stale_dispatch() {
+    let (directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let subject = "agent/example/queued";
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "executor-cancel");
+    store.set_launch_freeze("person/operator", "activation", "hold physical admission", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, subject));
+    let queued = store.runtime_start_for(subject).unwrap().unwrap();
+    assert!(!queued.dispatched);
+    reconciler.revoke_start(subject).unwrap();
+    drop(reconciler);
+    let reopened = Arc::new(Store::open(&directory.path().join("claims.db"), "node").unwrap());
+    reopened.clear_launch_freeze("person/operator", "activation").unwrap();
+    let restarted = Arc::new(Reconciler::new(
+        reopened.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ));
+    restarted.wait_for_test_starts.store(false, Ordering::Release);
+    // The caller deliberately holds an old immutable command snapshot. The journal, not
+    // that snapshot or the new daemon owner, decides whether it may enter a backend.
+    restarted.start_queued_job(&queued).unwrap();
+    workers_done(&restarted).await;
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+    assert!(runtime.inner.stops.lock().unwrap().is_empty());
+    assert!(runtime.inner.kills.lock().unwrap().is_empty());
+    let result: String = reopened.readers.get().query_row(
+        "SELECT result FROM local_runtime_starts WHERE id=?1",
+        [&queued.id], |row| row.get(0),
+    ).unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["closure_kind"], "never-dispatched");
+    assert_eq!(result["producer_closed"], true);
+}
+
+#[tokio::test]
+async fn host_executor_cancel_before_durable_admission_preserves_failed_start_custody() {
+    let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let subject = "agent/example/queued";
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "executor-cancel-admission");
+    store.set_launch_freeze("person/operator", "activation", "hold physical admission", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, subject));
+    let mut replacement = store.runtime_start_for(subject).unwrap().unwrap();
+    let failed_id = replacement.id.clone();
+    store.finish_runtime_start(&failed_id,
+        &serde_json::json!({"error": "unverified failure", "producer_closed": false})).unwrap();
+    store.runtime_start_applied(&failed_id).unwrap();
+    let restart = store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "runtime.action.requested".into(),
+        actor: Some("person/example".into()),
+        fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+        evidence: store.selected_desired_token(subject).unwrap().into_iter().collect(),
+        expected_subject: None, idempotency_key: Some("executor-stale-restart".into()),
+    }).unwrap();
+    replacement.id = uuid::Uuid::now_v7().to_string();
+    replacement.body["request"] = serde_json::to_value(&restart).unwrap();
+    replacement.body["stale_failed_start"] = Value::from(failed_id.clone());
+    store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "runtime.action.requested".into(), actor: None,
+        fields: BTreeMap::from([
+            ("action".into(), Value::from("terminate")),
+            ("runtime_id".into(), replacement.body["member"]["runtime_id"].clone()),
+            ("terminal".into(), replacement.body["member"]["terminal"].clone()),
+        ]),
+        evidence: vec![restart.id.clone()], expected_subject: None,
+        idempotency_key: Some("executor-cancel-before-admission".into()),
+    }).unwrap();
+    assert!(matches!(
+        host_executor::StartCommand::admit(&store, replacement, start_jobs::MAX_START_JOBS).unwrap(),
+        host_executor::StartAdmission::Refused,
+    ));
+    let retained = store.runtime_start_for(subject).unwrap().unwrap();
+    assert_eq!(retained.id, failed_id);
+    assert!(!retained.cleanup_verified);
+    assert!(store.operation_claim(&format!("agent-restart-attempt:{}", restart.id)).unwrap().is_none());
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+}
