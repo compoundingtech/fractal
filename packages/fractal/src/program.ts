@@ -187,6 +187,8 @@ export interface ProgramIntent<
   readonly timeout?: string
   /** How long the program may go without a journal entry before its run reports it stalled. */
   readonly stalledAfter?: string
+  /** Grace for Effect finalizers on cancel or deadline; positive, at most 15 minutes. Defaults to 30 seconds. */
+  readonly finalizerGrace?: string
   /** Engine-side retries start a fresh attempt with a fresh journal and cancel old children. */
   readonly retry?: {
     /** Typed error tags eligible for retry; empty matches every failure. */

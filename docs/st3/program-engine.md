@@ -150,9 +150,10 @@ can run an effect to its end but can never journal it.
 | host → daemon | `journal` | `step`, `attempt`, `seq`, `key`, `status` (`started`/`completed`/`failed`), `value`/`error`, `ms` | an inner step began or ended |
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
-| daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
+| daemon → host | `cancel` | `step`, `attempt`, `reason` | interrupt the program's Effect root fiber; stop existing effect groups, but admit finalizer steps and commands during the configured grace |
 | host → daemon | `ending` | `step`, `attempt` | this attempt began termination for any reason; precedes its terminal notification and is not proof of worker exit |
 | host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups after explicit or host-initiated termination; matched to the host incarnation and attempt, not another host's acknowledgement |
+| host → daemon | `finalizers` | `step`, `attempt`, `outcome` | root finalization completed, or exhausted its grace (`timed-out`); not proof of worker exit |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
 | host → daemon | `await-pr` | `step`, `attempt`, `seq`, `key`, `repo`, `pr`, `head` | register or adopt a native pull-request outcome wait for `key` (§6) |
@@ -181,6 +182,44 @@ without either cannot run program steps. Cancellation is eager: every evaluation
 engine which of the run's program attempts left their step (ended, failed, timed out, retried,
 cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
 cancels the child runs and asks the attempt still waits on (§6).
+
+Cancellation and mission deadline expiry enter the existing non-terminal cleanup phase
+(`cleanup-cancelled` or `cleanup-failed`). A live program attempt stays live, with its unchanged
+run credential, until its root fiber's finalizers finish or exhaust the published program's
+`finalizer-grace`. Author it with `Fractal.mission({ ..., finalizerGrace: '5m' }, body)`;
+the loader carries it into `program "/bundle.mjs" sha256="..." finalizer-grace="5m"`.
+It must be positive and no greater than 15 minutes; publication refuses other values with
+`invalid-finalizer-grace`. When omitted, the engine's `Liveness.finalizer_grace` defaults to
+30 seconds. The engine records the effective grace and reason under the reserved
+`$finalizers` journal key before sending the interrupt. The host aborts the root's `AbortSignal`,
+which the SDK passes to Effect, rather than immediately terminating its worker. `ensuring`,
+`acquireRelease` and `onInterrupt` can therefore run `Fractal.step` and `Fractal.command`;
+their normal started/result journal acknowledgements remain authoritative during cleanup.
+Existing command groups are stopped at interruption; finalizer commands get their own groups.
+The SDK preserves the finalizer's interruption mask when executing its activities: the workflow
+suspension wrapper's explicit interruptible region must not reinstate the pending root interrupt.
+Interruption detaches preexisting child/ask waits; late results cannot become finalizer results.
+Finalizer requests remain admitted under the same live attempt.
+
+The `$finalizers` result is tagged `Finalizers`, with `outcome: completed | failed | timed-out |
+interrupted-by-restart | worker-failed` and the effective `grace_ms`. Incomplete finalization is
+a failed journal entry with that typed error, visible in `missions show`, not a failed run.
+Finalizer defects and journal refusals remain `FinalizerFailed` across the SDK/worker boundary;
+the result's optional `cause` preserves that failure rather than treating every interrupted
+root exit as successful cleanup. `$finalizers` is reserved for both steps and request-backed operations.
+A timed-out worker is forcibly terminated,
+and its command groups are killed. Worker-thread termination can still await blocking native
+I/O: the timeout is recorded immediately, but the run's execution fence waits for actual exit,
+not merely a queued `Worker.terminate()`. Finalization never changes cancellation into program
+failure: the terminal outcome remains cancelled, or the original mission-timeout failure.
+`missions show` retains the journal outcome; incomplete finalization also raises operator
+attention. The run cannot become terminal and revoke its attempt credential ahead of finalization.
+
+Known limit: losing the daemon or host during cleanup cannot reconstruct an arbitrary Effect
+finalizer. Recovery records `interrupted-by-restart`, ends the attempt without replaying normal
+work, and raises operator attention. Durable finalization replay is tracked in
+[#7079](https://github.com/compoundingtech/fractal/issues/7079).
+
 
 #### Native retries and resource retirement
 
@@ -302,8 +341,8 @@ a program compensates inside its body.
 
 `sha256` is the bundle's 64 lowercase hex digits; the path must be absolute. The optional
 `stalled-after` is how long the program may go without a new journal entry before its run reports
-it stalled (§8). The step definition stores them as `program {bundle, bundle_hash,
-stalled_after_ms?}`.
+it stalled (§8). `finalizer-grace` bounds cancellation finalization (§2). The step definition
+stores these as `program {bundle, bundle_hash, stalled_after_ms?, finalizer_grace_ms?}`.
 
 Steps act as the run (R07). The engine starts every effect with a run credential scoped to
 `(run, step run, attempt)`; the daemon binds a request carrying it to the actor
