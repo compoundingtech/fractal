@@ -5191,8 +5191,8 @@ mod tests {
                     receipt(first, "delivered");
                     // The receipt is routed to this seat although it wrote no graph claim.
                     let (_, dependencies, _) = store.mailbox_wake_batch(cursor).unwrap();
-                    assert!(dependencies.contains(&crate::store::mailbox_wakes::Dependency::Recipient(
-                        fence.subject.clone()
+                    assert!(dependencies.contains(&crate::store::mailbox_wakes::Dependency::Message(
+                        first.to_owned(), fence.subject.clone()
                     )));
                 }
                 "sent" => {

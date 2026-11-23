@@ -97,7 +97,7 @@ impl Wakes {
 
     pub fn notify(&self, dependencies: impl IntoIterator<Item = Dependency>) {
         let registry = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut notified = HashSet::new();
+        let mut notified = HashMap::new();
         for dependency in dependencies {
             let (first, second, message) = match dependency {
                 Dependency::Message(subject, recipient) => (
@@ -124,13 +124,16 @@ impl Wakes {
                             pending.durable = true;
                             pending.messages.clear();
                         }
-                        if notified.insert(*id) {
-                            observer.work.notifications.fetch_add(1, Ordering::Relaxed);
-                            observer.sender.send_modify(|generation| *generation = generation.wrapping_add(1));
-                        }
+                        notified.insert(*id, observer);
                     }
                 }
             }
+        }
+        // Publish only after the entire batch is staged. A stream may immediately
+        // consume its pending identities on another runtime thread.
+        for observer in notified.into_values() {
+            observer.work.notifications.fetch_add(1, Ordering::Relaxed);
+            observer.sender.send_modify(|generation| *generation = generation.wrapping_add(1));
         }
     }
 
