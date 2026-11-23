@@ -13579,7 +13579,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // handle never reached the worker. A mission deadline deliberately skips final release;
         // read-only inventory retains that terminal owner's evidence for operator review.
         if scratch_pending && scratch_quiescent && live.is_empty() && shells_live.is_empty() {
-            self.finalize_mission_scratch(run)?;
+            self.finalize_mission_scratch(run, &owned)?;
         } else if scratch_pending && !run.deadline_at_unix_ms.is_some_and(|deadline| deadline <= now_ms()) {
             self.record_fault(&run.subject, "final-scratch-release", Err(anyhow::anyhow!(
                 "scratch final release skipped: execution quiescence unconfirmed; custody retained"

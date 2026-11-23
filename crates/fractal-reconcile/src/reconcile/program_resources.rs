@@ -108,11 +108,34 @@ fn command_environment(
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Reuse exact-generation native work-scope receipts, never payload-exit
+    /// observations, as the owning runtime's terminal-tree evidence.
+    pub(super) fn scratch_runtime_tree_retired(&self, subject: &str) -> Result<bool> {
+        let Some(actual) = self.store.latest_actual_value(subject)? else { return Ok(false); };
+        let (Some(runtime_id), Some(incarnation), Some(terminal), Some(host)) = (
+            actual_field(&actual, "runtime_id").and_then(Value::as_str),
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            actual_field(&actual, "terminal").and_then(Value::as_bool),
+            actual_field(&actual, "host").and_then(Value::as_str),
+        ) else { return Ok(false); };
+        if host != self.host { return Ok(false); }
+        if self.store.runtime_cleanup_settled(runtime_id, incarnation)? { return Ok(true); }
+        let settled = if terminal {
+            self.runtime.stop_with_retirement_proof(runtime_id, true, incarnation)?
+        } else {
+            self.runtime.end_leftovers(runtime_id, false);
+            self.runtime.leftovers_settled(runtime_id, incarnation)?
+        };
+        if settled { self.store.settle_runtime_cleanup(subject, runtime_id, incarnation)?; }
+        Ok(settled)
+    }
+
     /// Native mission-final work, after authored finalizers and execution quiescence.
     /// Refusal is a durable fault and retains custody without replacing the normal outcome.
     pub(super) fn finalize_mission_scratch(
         &self,
         run: &MissionRunView,
+        owned: &[DesiredSubject],
     ) -> Result<()> {
         if run.deadline_at_unix_ms.is_some_and(|deadline| deadline <= now_ms()) {
             return Ok(());
@@ -127,6 +150,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     anyhow::ensure!(self.retire_program_membership(&membership)?,
                         "scratch owner execution tree retirement unconfirmed; custody retained");
                 }
+            }
+            for subject in owned {
+                anyhow::ensure!(self.scratch_runtime_tree_retired(&subject.subject)?,
+                    "scratch owner runtime scope retirement unconfirmed; custody retained");
             }
             let proof = crate::store::scratch_resources::ScratchReleaseProof::after_quiescence(
                 &run.subject, &run.generation,

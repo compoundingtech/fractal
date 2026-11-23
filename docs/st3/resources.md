@@ -471,8 +471,9 @@ normal-work outcome.
 
 Dedicated scratch may be consumed **only by the owning run's execution tree**. Release
 requires positive terminal evidence for that tree, including native cgroup/scope retirement;
-payload exit alone is not enough. The existing native retirement operation closes owned
-membership scopes before creating the scratch release proof. Processes outside this owner
+payload exit alone is not enough. Existing native retirement operations close owned
+membership scopes and confirm exact-generation work-scope receipts for other owned runtimes
+before creating the scratch release proof. Processes outside this owner
 tree are out of contract; scratch is not a shared workspace or cross-run exchange.
 
 As defense in depth, Linux performs one sequential host check before removal: inspect the
@@ -480,7 +481,7 @@ current `/proc` cwd and open-fd links of same-UID processes, matching the held a
 canonical path with component boundaries. Kernel paths catch directories renamed into the
 allocation. Exempt only the exact allocation descriptor held by the releasing process,
 not that process's other descriptors. A hit or a failed host observation retains custody.
-Processes that vanish during the scan are skipped. Other UIDs, including privileged system
+Processes or descriptors that vanish during the scan are skipped. Other UIDs, including privileged system
 services, are outside this contract. Same-UID non-dumpable processes are also outside the
 contract: they are skipped and counted as `uninspectable` in the durable receipt and inventory.
 This snapshot is a backstop, not a security sandbox or a replacement for owner-tree retirement.
