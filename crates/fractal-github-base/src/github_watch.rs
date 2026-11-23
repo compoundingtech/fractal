@@ -4,7 +4,7 @@
 //! `github.repository` observer of the repository. That observer records every item's newest
 //! comments and reviews, its state, and how the checks its base requires stand, and the write
 //! that records an observation decides each watch's wakes from the item's prior facts: one for
-//! each new comment or review, one for each move of the required checks into pass or fail on the
+//! each new comment or review, one for each distinct terminal check conclusion set on the
 //! current head, changes to a PR's head, draft state or queue membership, and a final one when
 //! the thread closes or merges, which ends that watch. No
 //! thread has a poller of its own.
@@ -263,7 +263,7 @@ pub fn stop_source(subject: &str) -> Option<String> {
 pub enum WatchEvent {
     /// A comment or review it did not know: `{kind, id, author, at}`, and a review's `state`.
     Comment(Value),
-    /// The checks the base requires moved into `pass` or `fail` on the current head.
+    /// The counted checks changed to a passing, failing or cancelled conclusion set.
     Checks(Value),
     /// A PR changed head, draft state, or merge-queue membership while still open.
     PullRequestChanged(Vec<String>),
@@ -272,25 +272,48 @@ pub enum WatchEvent {
 }
 
 impl WatchEvent {
-    /// What tells this event from every other one the watch hears. The checks key names the item
-    /// observation that saw the move, so a rerun that fails again on the same head is new, and
-    /// a replay of that observation is not.
-    fn key(&self, observation: &str) -> String {
+    /// Checks are identified by head, conclusions and counted workflow run/attempt identities,
+    /// never by observer IDs or incidental suite/readiness metadata.
+    fn key(&self, observation: &str, facts: &Value) -> Value {
         match self {
             Self::Comment(entry) => {
                 let (kind, id) = crate::resource::recent_comment_key(entry);
-                format!("{kind}:{id}")
+                json!(format!("{kind}:{id}"))
             }
-            Self::Checks(_) => format!("checks:{observation}"),
-            Self::PullRequestChanged(_) => format!("pull-request:{observation}"),
-            Self::Ended { .. } => "ended".into(),
+            Self::Checks(_) => check_state(facts, true),
+            Self::PullRequestChanged(_) => json!(format!("pull-request:{observation}")),
+            Self::Ended { .. } => json!("ended"),
         }
     }
 }
 
+/// A stable projection using existing facts. Counted workflow tuples are
+/// (app, workflow, suite, run, attempt, event): only run and attempt identify a rerun.
+/// Checks without a numeric workflow run ID (external apps, or Actions runs whose databaseId
+/// is null) fall back to conclusions: an identical recurring result at the same head is suppressed.
+fn check_state(facts: &Value, include_runs: bool) -> Value {
+    let checks = &facts["required_checks"];
+    let counted = checks["checks"].as_array();
+    let conclusions = facts["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|check| counted.is_some_and(|names| names.contains(&check["name"])))
+        .map(|check| (check["name"].as_str(), check["conclusion"].as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let runs = include_runs.then(|| checks.pointer("/execution/workflows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|execution| Some((execution.get(3)?.as_u64()?, execution.get(4)?.as_u64()?)))
+        .collect::<std::collections::BTreeSet<_>>());
+    json!(["checks", facts["head_sha"], checks["state"], checks["checks"],
+        checks["failed"], conclusions, runs])
+}
+
 /// The events one observation of a watched item holds, oldest first: the comments and reviews
 /// `seen` names that `prior` did not, made no earlier than five minutes before the watch
-/// began; a move of the required checks into pass or fail, or a new head first seen there; and
+/// began; a change to a terminal check conclusion set, or a new head first seen there; and
 /// changes to an open PR's head, draft state or queue membership; and the thread closing.
 /// With no prior facts the item is new to the observer, so it holds no
 /// check move and no close.
@@ -395,12 +418,9 @@ pub fn watch_events(
             events.push(WatchEvent::PullRequestChanged(changes));
         }
     }
-    if let Some(now) = state(facts).filter(|state| state == "pass" || state == "fail")
-        && (head(prior) != head(facts)
-            || state(prior).as_deref() != Some(now.as_str())
-            || (prior.pointer("/required_checks/execution").is_some()
-                && prior.pointer("/required_checks/execution")
-                    != facts.pointer("/required_checks/execution")))
+    if state(facts).is_some_and(|state| matches!(state.as_str(), "pass" | "fail" | "cancelled"))
+        && check_state(prior, prior.pointer("/required_checks/execution").is_some())
+            != check_state(facts, prior.pointer("/required_checks/execution").is_some())
     {
         events.push(WatchEvent::Checks(
             facts.get("required_checks").cloned().unwrap_or(Value::Null),
@@ -485,7 +505,7 @@ pub fn wake(
         WATCH_TAG,
         watch_subject,
         watch.since_unix_ms.to_string(),
-        event.key(observation),
+        event.key(observation, facts),
     ))
     .map_err(|error| FractalError::new("internal-error", error.to_string()))?;
     let pull = facts.get("head_sha").is_some()
@@ -561,11 +581,7 @@ pub fn wake(
                 .get("state")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let which = if checks.get("source").and_then(Value::as_str) == Some("all") {
-                "All checks"
-            } else {
-                "Required checks"
-            };
+            let all = checks.get("source").and_then(Value::as_str) == Some("all");
             let names = |name: &str| {
                 checks
                     .get(name)
@@ -576,10 +592,30 @@ pub fn wake(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let (verb, named) = if state == "fail" {
-                ("failed", names("failed"))
+            let cancelled = facts["checks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|check| check["conclusion"] == "cancelled")
+                .filter_map(|check| check["name"].as_str())
+                .filter(|name| {
+                    checks["checks"].as_array().is_some_and(|checks| {
+                        checks.iter().any(|check| check.as_str() == Some(*name))
+                    })
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let total = checks["checks"].as_array().map_or(0, Vec::len);
+            let (verb, named, affected) = match state {
+                "fail" => ("failed", names("failed"), checks["failed"].as_array().map_or(0, Vec::len)),
+                "cancelled" => ("cancelled", cancelled.iter().copied().collect::<Vec<_>>().join(", "), cancelled.len()),
+                _ => ("passed", names("checks"), total),
+            };
+            let which = if !all {
+                "Required checks"
+            } else if affected == total {
+                "All checks"
             } else {
-                ("passed", names("checks"))
+                "Checks"
             };
             (
                 format!("{which} {verb} on {thread}"),
@@ -1441,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn required_checks_notify_a_new_ready_execution_even_when_pending_was_not_observed() {
+    fn workflow_attempts_distinguish_reruns_but_ignore_incidental_metadata() {
         let facts = |execution: u64, state: &str| {
             json!({"state":"open", "head_sha":"same",
             "draft":false, "required_checks":{"state":state, "source":"rules", "checks":["build"],
@@ -1469,15 +1505,87 @@ mod tests {
         assert!(watch_events(&watch(), Some(&previous), &json!({}), &pending).is_empty());
         let completed = facts(20, "pass");
         let events = watch_events(&watch(), Some(&previous), &json!({}), &completed);
-        assert_eq!(
-            events,
-            [WatchEvent::Checks(completed["required_checks"].clone())]
-        );
+        assert_eq!(events, [WatchEvent::Checks(completed["required_checks"].clone())]);
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let subject = thread.watch("agent/example/planner");
+        let make_wake = |facts: &Value, observation: &str| {
+            wake(&subject, &watch(), &thread, facts,
+                &WatchEvent::Checks(facts["required_checks"].clone()), observation, None).unwrap()
+        };
+        assert_ne!(make_wake(&previous, "one").subject, make_wake(&completed, "two").subject);
+        let mut metadata = completed.clone();
+        metadata["required_checks"]["execution"]["ready_since"] = json!(123);
+        metadata["required_checks"]["execution"]["workflows"][0][2] = json!(999);
+        assert!(watch_events(&watch(), Some(&completed), &json!({}), &metadata).is_empty());
+        assert_eq!(make_wake(&completed, "before-restart").subject,
+            make_wake(&metadata, "after-restart").subject);
+        let mut changed = completed.clone();
+        changed["checks"] = json!([{"name":"build", "conclusion":"success"}]);
+        let mut failed = changed.clone();
+        failed["checks"][0]["conclusion"] = json!("failure");
+        assert_ne!(make_wake(&changed, "one").subject, make_wake(&failed, "two").subject);
+        assert_eq!(watch_events(&watch(), Some(&changed), &json!({}), &failed).len(), 1);
+        let mut other_head = changed.clone();
+        other_head["head_sha"] = json!("another");
+        assert_ne!(make_wake(&changed, "one").subject, make_wake(&other_head, "one").subject);
+        let mut optional_changed = changed.clone();
+        optional_changed["checks"].as_array_mut().unwrap()
+            .push(json!({"name":"optional", "conclusion":"cancelled"}));
+        assert_eq!(make_wake(&changed, "one").subject, make_wake(&optional_changed, "two").subject);
+        assert!(watch_events(&watch(), Some(&changed), &json!({}), &optional_changed).is_empty());
         assert!(watch_events(&watch(), Some(&completed), &json!({}), &completed).is_empty());
         assert_eq!(
             watch_events(&watch(), Some(&pending), &json!({}), &completed).len(),
             1
         );
+    }
+
+    #[test]
+    fn external_checks_without_run_identity_deduplicate_recurring_identical_results() {
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let subject = thread.watch("agent/example/planner");
+        let passed = json!({"head_sha":"same", "state":"open",
+            "required_checks":{"state":"pass", "checks":["external"], "failed":[]},
+            "checks":[{"name":"external", "conclusion":"success"}]});
+        let mut failed = passed.clone();
+        failed["required_checks"]["state"] = json!("fail");
+        failed["required_checks"]["failed"] = json!(["external"]);
+        failed["checks"][0]["conclusion"] = json!("failure");
+        let make_wake = |facts: &Value, observation: &str| {
+            wake(&subject, &watch(), &thread, facts,
+                &WatchEvent::Checks(facts["required_checks"].clone()), observation, None).unwrap()
+        };
+        let first = make_wake(&passed, "first");
+        let failure = make_wake(&failed, "second");
+        let recovery = make_wake(&passed, "third");
+        assert_ne!(first.subject, failure.subject);
+        // Known limitation: without workflow identity the persisted subject guard suppresses
+        // this recurrence, because no existing per-check fact identifies a new external run.
+        assert_eq!(first.subject, recovery.subject);
+        assert_eq!(watch_events(&watch(), Some(&failed), &json!({}), &passed).len(), 1);
+    }
+
+    #[test]
+    fn check_labels_distinguish_cancellation_and_partial_failure() {
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let subject = thread.watch("agent/example/planner");
+        for (state, failed, conclusions, expected) in [
+            ("cancelled", json!([]), ["success", "cancelled"], "Checks cancelled"),
+            ("fail", json!(["build"]), ["failure", "success"], "Checks failed"),
+            ("fail", json!(["build", "lint"]), ["failure", "failure"], "All checks failed"),
+            ("cancelled", json!([]), ["cancelled", "cancelled"], "All checks cancelled"),
+        ] {
+            let facts = json!({"head_sha":"same", "state":"open",
+                "required_checks":{"state":state, "source":"all", "checks":["build","lint"], "failed":failed},
+                "checks":[{"name":"build", "conclusion":conclusions[0]},
+                    {"name":"lint", "conclusion":conclusions[1]}]});
+            let event = WatchEvent::Checks(facts["required_checks"].clone());
+            let message = wake(&subject, &watch(), &thread, &facts, &event, "one", None).unwrap();
+            assert_eq!(message.title, format!("{expected} on {thread}"));
+            if state == "cancelled" {
+                assert!(!message.content.contains("failed"));
+            }
+        }
     }
 
     #[test]

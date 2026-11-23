@@ -823,10 +823,11 @@ enum CheckOutcome {
     Pending,
     Passed,
     Failed,
+    Cancelled,
 }
 
 /// One check run or commit status on a head: its name, the app that reported a check run, and how
-/// it stands. Success, neutral and skipped pass; any other finished result fails.
+/// it stands. Success, neutral and skipped pass; cancellation is distinct from failure.
 fn check_outcome(context: &Value) -> (String, Option<u64>, CheckOutcome) {
     let upper = |name: &str| {
         context
@@ -865,6 +866,8 @@ fn check_outcome(context: &Value) -> (String, Option<u64>, CheckOutcome) {
                 "SUCCESS" | "NEUTRAL" | "SKIPPED"
             ) {
                 CheckOutcome::Passed
+            } else if upper("conclusion") == "CANCELLED" {
+                CheckOutcome::Cancelled
             } else {
                 CheckOutcome::Failed
             },
@@ -1049,8 +1052,9 @@ fn required_checks_for_pull_request(
 /// counts, as GitHub requires; a commit status carries no app, so it counts only for a rule that
 /// names none.
 /// Without them, because the base requires none or its rules could not be read, every check on
-/// the head counts. `fail` needs one counted check finished and failing, `pass` needs every one
-/// finished and passing, and anything else is `pending`; `none` says there is nothing to count.
+/// the head counts. `fail` needs one counted failure; otherwise unfinished checks are `pending`,
+/// finished cancellations are `cancelled`, and every counted check passing is `pass`.
+/// `none` says there is nothing to count.
 fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Value {
     let checks = contexts.iter().map(check_outcome).collect::<Vec<_>>();
     // Every check and status that shares a counted name must pass, so one that finished and
@@ -1061,6 +1065,8 @@ fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Va
             CheckOutcome::Failed
         } else if outcomes.is_empty() || outcomes.contains(&CheckOutcome::Pending) {
             CheckOutcome::Pending
+        } else if outcomes.contains(&CheckOutcome::Cancelled) {
+            CheckOutcome::Cancelled
         } else {
             CheckOutcome::Passed
         }
@@ -1107,6 +1113,8 @@ fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Va
         .any(|outcome| *outcome == CheckOutcome::Pending)
     {
         "pending"
+    } else if counted.values().any(|outcome| *outcome == CheckOutcome::Cancelled) {
+        "cancelled"
     } else {
         "pass"
     };
@@ -1235,17 +1243,17 @@ fn open_pull_request(
 }
 
 /// A pull request is settling while a check has not finished, while a check its base requires
-/// has failed, or while it waits in the merge queue. A rerun of a failed check changes nothing the
-/// REST reads see, so only reading again finds it running and then passing.
+/// has failed or been cancelled, or while it waits in the merge queue. A rerun changes nothing
+/// the REST reads see, so only reading again finds it running and then passing.
 fn settling(facts: &serde_json::Map<String, Value>) -> bool {
     matches!(
         facts.get("checks_state").and_then(Value::as_str),
         Some("pending" | "expected")
-    ) || facts
+    ) || matches!(facts
         .get("required_checks")
         .and_then(|checks| checks.get("state"))
-        .and_then(Value::as_str)
-        == Some("fail")
+        .and_then(Value::as_str),
+        Some("fail" | "cancelled"))
         || facts
             .get("merge_queue")
             .is_some_and(|entry| !entry.is_null())
@@ -4794,6 +4802,78 @@ mod tests {
         assert_eq!(first["state"], "pass");
         assert_eq!(second["state"], "pass");
         assert_ne!(first["execution"], second["execution"]);
+    }
+
+    #[test]
+    fn null_workflow_run_database_id_produces_no_execution_and_uses_conclusion_identity() {
+        let rules = [RequiredCheck { context: "build".into(), app: Some(15368) }];
+        let produce = |suite_id: u64, conclusion: &str| {
+            let mut suite = workflow_suite(suite_id, "2026-10-13T09:01:00Z");
+            suite["workflowRun"]["databaseId"] = Value::Null;
+            assert!(WorkflowExecution::from_suite(&suite).is_none());
+            let mut pull = open_pull(12, &"a".repeat(40), "SUCCESS");
+            pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] = json!([suite]);
+            pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"] =
+                json!([workflow_check("build", Some(conclusion), &suite)]);
+            let mut facts = open_pull_request(&pull, Some(&rules));
+            // Item normalization uses head_sha; keep the producer's other fields unchanged.
+            facts.insert("head_sha".into(), facts["head"].clone());
+            let facts = Value::Object(facts);
+            assert!(facts["required_checks"].get("execution").is_none());
+            facts
+        };
+        let passed = produce(10, "SUCCESS");
+        let failed = produce(20, "FAILURE");
+        let recovery = produce(30, "SUCCESS");
+        assert_eq!(passed["required_checks"]["state"], "pass");
+        assert_eq!(failed["required_checks"]["state"], "fail");
+        let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+        let watch = crate::model::WatchSpec { item: 12, since_unix_ms: 0, until_unix_ms: None };
+        let subject = thread.watch("agent/example/planner");
+        let message = |facts: &Value, observation: &str| crate::github_watch::wake(
+            &subject, &watch, &thread, facts,
+            &crate::github_watch::WatchEvent::Checks(facts["required_checks"].clone()),
+            observation, None,
+        ).unwrap();
+        let first = message(&passed, "first");
+        assert_ne!(first.subject, message(&failed, "second").subject);
+        // Nullable numeric Actions IDs have the same known limitation as external checks:
+        // a different suite alone cannot distinguish an identical recurring conclusion.
+        assert_eq!(first.subject, message(&recovery, "third").subject);
+    }
+
+    #[test]
+    fn cancelled_checks_are_not_failures_and_optional_checks_do_not_count() {
+        let run = |name: &str, conclusion: &str| json!({
+            "__typename":"CheckRun", "name":name, "status":"COMPLETED",
+            "conclusion":conclusion, "checkSuite":{"app":{"databaseId":15368}}
+        });
+        let contexts = [run("build", "SUCCESS"), run("optional", "CANCELLED")];
+        let rules = [RequiredCheck { context: "build".into(), app: Some(15368) }];
+        let required = required_checks(&contexts, Some(&rules));
+        assert_eq!(required["state"], "pass");
+        assert_eq!(required["failed"], json!([]));
+        let all = required_checks(&contexts, None);
+        assert_eq!(all["state"], "cancelled");
+        assert_eq!(all["failed"], json!([]));
+        let cancelled = required_checks(&[run("build", "CANCELLED")], Some(&rules));
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["failed"], json!([]));
+        let failed = required_checks(&[run("build", "FAILURE"), run("optional", "CANCELLED")], None);
+        assert_eq!(failed["state"], "fail");
+        assert_eq!(failed["failed"], json!(["build"]));
+    }
+
+    #[test]
+    fn cancelled_required_checks_stay_on_the_active_refresh_cadence() {
+        for state in ["fail", "cancelled"] {
+            let facts = json!({"checks_state":"failure",
+                "required_checks":{"state":state}, "merge_queue":null});
+            assert!(settling(facts.as_object().unwrap()));
+        }
+        let passed = json!({"checks_state":"success",
+            "required_checks":{"state":"pass"}, "merge_queue":null});
+        assert!(!settling(passed.as_object().unwrap()));
     }
 
     #[tokio::test]
