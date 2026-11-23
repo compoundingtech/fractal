@@ -6740,7 +6740,7 @@ impl Store {
     /// even below another store's snapshot.
     /// The latest claim of a subject, or of one kind of it, in canonical order.
     pub fn latest_claim(&self, subject: &str, kind: Option<&str>) -> Result<Option<ClaimRecord>> {
-        crate::touched::note_read(|| subject.to_owned());
+        crate::touched::note_claim_read(subject, kind);
         let connection = self.readers.get();
         // With a kind, walk the accepted-time index newest first and sort only claims accepted in
         // the same millisecond, as `newest_claims_of_kind_query` does. Sorting every claim of the
@@ -6774,7 +6774,7 @@ impl Store {
         newest_first: bool,
         mut visit: impl FnMut(&ClaimRecord) -> bool,
     ) -> Result<()> {
-        crate::touched::note_read(|| subject.to_owned());
+        crate::touched::note_claim_read(subject, Some(kind));
         let caller = std::panic::Location::caller();
         crate::profile::tagged(
             || format!("claims_in_order {kind} at {}:{}", caller.file(), caller.line()),
@@ -6848,7 +6848,7 @@ impl Store {
         end: u128,
         mut visit: impl FnMut(&ClaimRecord) -> bool,
     ) -> Result<()> {
-        crate::touched::note_read(|| subject.to_owned());
+        crate::touched::note_claim_read(subject, Some(kind));
         let connection = self.readers.get();
         let end = end.to_string();
         // SQLite cannot seek a row-value inequality whose first element is an indexed
@@ -7313,7 +7313,7 @@ impl Store {
     }
 
     fn claims_for_untagged(&self, subject: &str, kind: Option<&str>) -> Result<Vec<ClaimRecord>> {
-        crate::touched::note_read(|| subject.to_owned());
+        crate::touched::note_claim_read(subject, kind);
         let connection = self.readers.get();
         // One statement with `(?2 IS NULL OR kind=?2)` hides the kind from the planner, which then
         // reads every claim of the subject to test it. A busy agent holds thousands of observations,
