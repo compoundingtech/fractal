@@ -823,10 +823,11 @@ enum CheckOutcome {
     Pending,
     Passed,
     Failed,
+    Cancelled,
 }
 
 /// One check run or commit status on a head: its name, the app that reported a check run, and how
-/// it stands. Success, neutral and skipped pass; any other finished result fails.
+/// it stands. Success, neutral and skipped pass; cancellation is distinct from failure.
 fn check_outcome(context: &Value) -> (String, Option<u64>, CheckOutcome) {
     let upper = |name: &str| {
         context
@@ -865,6 +866,8 @@ fn check_outcome(context: &Value) -> (String, Option<u64>, CheckOutcome) {
                 "SUCCESS" | "NEUTRAL" | "SKIPPED"
             ) {
                 CheckOutcome::Passed
+            } else if upper("conclusion") == "CANCELLED" {
+                CheckOutcome::Cancelled
             } else {
                 CheckOutcome::Failed
             },
@@ -1049,8 +1052,9 @@ fn required_checks_for_pull_request(
 /// counts, as GitHub requires; a commit status carries no app, so it counts only for a rule that
 /// names none.
 /// Without them, because the base requires none or its rules could not be read, every check on
-/// the head counts. `fail` needs one counted check finished and failing, `pass` needs every one
-/// finished and passing, and anything else is `pending`; `none` says there is nothing to count.
+/// the head counts. `fail` needs one counted failure; otherwise unfinished checks are `pending`,
+/// finished cancellations are `cancelled`, and every counted check passing is `pass`.
+/// `none` says there is nothing to count.
 fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Value {
     let checks = contexts.iter().map(check_outcome).collect::<Vec<_>>();
     // Every check and status that shares a counted name must pass, so one that finished and
@@ -1061,6 +1065,8 @@ fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Va
             CheckOutcome::Failed
         } else if outcomes.is_empty() || outcomes.contains(&CheckOutcome::Pending) {
             CheckOutcome::Pending
+        } else if outcomes.contains(&CheckOutcome::Cancelled) {
+            CheckOutcome::Cancelled
         } else {
             CheckOutcome::Passed
         }
@@ -1107,6 +1113,8 @@ fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Va
         .any(|outcome| *outcome == CheckOutcome::Pending)
     {
         "pending"
+    } else if counted.values().any(|outcome| *outcome == CheckOutcome::Cancelled) {
+        "cancelled"
     } else {
         "pass"
     };
@@ -4794,6 +4802,28 @@ mod tests {
         assert_eq!(first["state"], "pass");
         assert_eq!(second["state"], "pass");
         assert_ne!(first["execution"], second["execution"]);
+    }
+
+    #[test]
+    fn cancelled_checks_are_not_failures_and_optional_checks_do_not_count() {
+        let run = |name: &str, conclusion: &str| json!({
+            "__typename":"CheckRun", "name":name, "status":"COMPLETED",
+            "conclusion":conclusion, "checkSuite":{"app":{"databaseId":15368}}
+        });
+        let contexts = [run("build", "SUCCESS"), run("optional", "CANCELLED")];
+        let rules = [RequiredCheck { context: "build".into(), app: Some(15368) }];
+        let required = required_checks(&contexts, Some(&rules));
+        assert_eq!(required["state"], "pass");
+        assert_eq!(required["failed"], json!([]));
+        let all = required_checks(&contexts, None);
+        assert_eq!(all["state"], "cancelled");
+        assert_eq!(all["failed"], json!([]));
+        let cancelled = required_checks(&[run("build", "CANCELLED")], Some(&rules));
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["failed"], json!([]));
+        let failed = required_checks(&[run("build", "FAILURE"), run("optional", "CANCELLED")], None);
+        assert_eq!(failed["state"], "fail");
+        assert_eq!(failed["failed"], json!(["build"]));
     }
 
     #[tokio::test]

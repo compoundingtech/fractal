@@ -851,6 +851,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn check_wakes_deduplicate_unchanged_conclusions_after_store_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("watch.sqlite3");
+        let store = Store::open(&database, "watch-test").unwrap();
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let agent = "agent/example-watch/worker";
+        let intent = crate::graph::parse_internal_intent(
+            "version 2\nagent \"example-watch/worker\" { workspace \"/tmp\"; command \"true\" }\n",
+            store.origin(),
+        ).unwrap();
+        store.apply_internal(&intent, "watch-test-seat").unwrap();
+        store.declare_watch(&thread, agent, None).unwrap();
+        let subscriptions = store.desired_subjects().unwrap().into_iter().filter_map(|item| {
+            crate::graph::subscription_spec(&item.desired).map(|spec| (item.subject, spec))
+        }).collect::<Vec<_>>();
+        let revision = store.selected_desired_revision(&thread.observer()).unwrap().unwrap();
+        let record = |store: &Store, facts: &Value| {
+            store.record_resource_observation(
+                &thread.observer(), &revision, None, &thread.resource(), None,
+                facts, smallclaims::store::now_ms(), &subscriptions, None,
+            ).unwrap().message_subjects
+        };
+        let mut facts = json!({"repository_id":7, "pull_requests":[{
+            "number":12, "head":"a".repeat(40), "state":"open",
+            "required_checks":{"state":"pending", "source":"rules", "checks":["build"], "failed":[],
+                "execution":{"workflows":[[15368,77,10,10,1]]}},
+            "checks":[{"name":"build", "status":"in_progress", "conclusion":null}]
+        }]});
+        assert!(record(&store, &facts).is_empty());
+        facts["pull_requests"][0]["required_checks"]["state"] = json!("pass");
+        facts["pull_requests"][0]["checks"][0] =
+            json!({"name":"build", "status":"completed", "conclusion":"success"});
+        let first = record(&store, &facts);
+        assert_eq!(first.len(), 1);
+        facts["pull_requests"][0]["required_checks"]["execution"]["workflows"] =
+            json!([[15368,77,20,20,1]]);
+        assert!(record(&store, &facts).is_empty());
+        let completed = facts.clone();
+        facts["pull_requests"][0]["required_checks"]["state"] = json!("pending");
+        facts["pull_requests"][0]["checks"][0]["conclusion"] = Value::Null;
+        assert!(record(&store, &facts).is_empty());
+        drop(store);
+        let reopened = Store::open(&database, "watch-test").unwrap();
+        // Even when pending was observed before the restart, the same terminal result
+        // resolves to the persisted message subject rather than delivering a second wake.
+        assert!(record(&reopened, &completed).is_empty());
+        assert_eq!(reopened.messages(Some(agent), false).unwrap().len(), 1);
+        assert_eq!(reopened.claims_for(&first[0], Some("message.sent")).unwrap().len(), 1);
+        let mut failed = completed;
+        failed["pull_requests"][0]["required_checks"]["state"] = json!("fail");
+        failed["pull_requests"][0]["required_checks"]["failed"] = json!(["build"]);
+        failed["pull_requests"][0]["checks"][0]["conclusion"] = json!("failure");
+        assert_eq!(record(&reopened, &failed).len(), 1);
+        assert_eq!(reopened.messages(Some(agent), false).unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn only_an_open_thread_that_github_shows_can_be_watched() {
         let github = fake_github().await;
