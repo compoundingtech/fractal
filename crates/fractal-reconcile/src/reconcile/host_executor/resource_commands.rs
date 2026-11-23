@@ -23,7 +23,7 @@ pub(in crate::reconcile) enum StartCommand<'a> {
     Shell { member: &'a MemberSpec, execution: &'a str, owner: &'a Owner },
 }
 impl StartCommand<'_> {
-    pub(in crate::reconcile) fn execute<R: RuntimeControl>(
+    pub(in crate::reconcile) fn dispatch<R: RuntimeControl>(
         self, store: &Store, runtime: &R, observations: &host_observations::HostObservations,
     ) -> Result<()> {
         let _mutation = PhysicalMutation::begin(observations);
@@ -62,7 +62,7 @@ pub(in crate::reconcile) enum RetireCommand<'a> {
 }
 impl RetireCommand<'_> {
     /// `true` is positive lane retirement proof, never merely an accepted execution signal.
-    pub(in crate::reconcile) fn execute<R: RuntimeControl>(
+    pub(in crate::reconcile) fn dispatch<R: RuntimeControl>(
         self, store: &Arc<Store>, runtime: &R, observations: &Arc<host_observations::HostObservations>,
     ) -> Result<bool> {
         let _mutation = PhysicalMutation::begin(observations);
@@ -92,7 +92,7 @@ pub(in crate::reconcile) enum SignalCommand<'a> {
     Kill { runtime_id: &'a str, generation: &'a str },
 }
 impl SignalCommand<'_> {
-    pub(in crate::reconcile) fn execute<R: RuntimeControl>(
+    pub(in crate::reconcile) fn dispatch<R: RuntimeControl>(
         self, runtime: &R, observations: &host_observations::HostObservations,
     ) -> Result<()> {
         let _mutation = PhysicalMutation::begin(observations);
@@ -110,7 +110,7 @@ pub(in crate::reconcile) struct RecoverCommand<'a> {
     pub now_ms: u64,
 }
 impl RecoverCommand<'_> {
-    pub(in crate::reconcile) fn execute<R: RuntimeControl>(
+    pub(in crate::reconcile) fn dispatch<R: RuntimeControl>(
         self, store: &Store, runtime: &R, observations: &host_observations::HostObservations,
     ) -> Result<usize> {
         let _mutation = PhysicalMutation::begin(observations);

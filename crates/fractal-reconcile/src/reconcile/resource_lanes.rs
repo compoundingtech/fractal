@@ -54,7 +54,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(true);
         }
         if !(host_resources::RetireCommand::Lane { request: &request })
-            .execute(&self.store, self.runtime.as_ref(), &self.host_observations)? {
+            .dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)? {
             // Unknown retirement retains custody; native events or explicit recovery wake it.
             return Ok(false);
         }
@@ -106,7 +106,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             });
             if retained && active { continue; }
             if (host_resources::RetireCommand::Lane { request: &record.request })
-                .execute(&self.store, self.runtime.as_ref(), &self.host_observations)? {
+                .dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)? {
                 self.incremental.touch(&crate::store::resource_membership::dependency(&record.request.host, &record.request.name));
                 self.incremental.touch("seat-admission");
                 self.signal_changed();

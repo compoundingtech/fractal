@@ -97,7 +97,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return host_resources::RetireCommand::Shell {
                     request, execution: Some(&execution.command.id),
                     notify: &self.notify, events: &self.event_notify,
-                }.execute(&self.store, self.runtime.as_ref(), &self.host_observations);
+                }.dispatch(&self.store, self.runtime.as_ref(), &self.host_observations);
             }
             return Ok(true);
         }
@@ -117,7 +117,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let retired = host_resources::RetireCommand::Shell {
             request, execution: None,
             notify: &self.notify, events: &self.event_notify,
-        }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
+        }.dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)?;
         if retired {
             self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
             self.incremental.touch("seat-admission");
@@ -240,7 +240,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         for (id, generation) in &running {
             host_resources::SignalCommand::Cancel { runtime_id: id, generation }
-                .execute(self.runtime.as_ref(), &self.host_observations)?;
+                .dispatch(self.runtime.as_ref(), &self.host_observations)?;
         }
         let mut pending: BTreeSet<_> = running.iter().map(|(id, _)| id.clone()).collect();
         while !pending.is_empty() {
@@ -443,7 +443,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             resource_lanes::set_request(&mut member, &request)?;
             host_resources::StartCommand::Shell {
                 member: &member, execution: &execution.command.id, owner: &request.owner,
-            }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
+            }.dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)?;
             self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != request.id);
             execution.state = "admitted".into(); execution.reason = "host membership admitted; payload released".into(); execution.blocked_by = None;
         }
@@ -499,7 +499,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     // The exit watch and subsequent sweeps confirm retirement separately.
                     host_resources::SignalCommand::Kill {
                         runtime_id: &execution.command.id, generation: &generation.generation_id,
-                    }.execute(self.runtime.as_ref(), &self.host_observations)?;
+                    }.dispatch(self.runtime.as_ref(), &self.host_observations)?;
                     return Ok(());
                 }
                 self.arm_restart(&format!("shell-cancel:{}", execution.command.id), now_ms().saturating_add(u128::from(remaining)));
@@ -508,7 +508,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if self.store.update_shell_resource(execution)? { self.signal_changed(); }
                     host_resources::SignalCommand::Cancel {
                         runtime_id: &execution.command.id, generation: &generation.generation_id,
-                    }.execute(self.runtime.as_ref(), &self.host_observations)?;
+                    }.dispatch(self.runtime.as_ref(), &self.host_observations)?;
                 }
             }
             return Ok(());

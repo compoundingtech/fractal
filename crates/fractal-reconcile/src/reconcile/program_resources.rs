@@ -104,7 +104,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.store.start_resource_authority(&self.host, &uuid::Uuid::now_v7().to_string())?;
                 host_resources::RecoverCommand {
                     host: &self.host, now_ms: u64::try_from(now_ms()).unwrap_or(u64::MAX),
-                }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
+                }.dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)?;
                 Ok(())
             })().map_err(|error| format!("resource authority recovery failed: {error:#}"))
         });
@@ -146,7 +146,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         // A child cancellation failure must not prevent cleanup of the remaining execution roots.
         let retired = match (host_resources::RetireCommand::Lane { request: &record.request })
-            .execute(&self.store, self.runtime.as_ref(), &self.host_observations) {
+            .dispatch(&self.store, self.runtime.as_ref(), &self.host_observations) {
             Ok(retired) => retired,
             Err(error) => { retirement_errors.push(format!("{error:#}")); false }
         };
@@ -299,7 +299,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     for root in record.roots.iter().filter(|root| root.runtime_id == base || root.runtime_id.starts_with(&prefix)) {
                         host_resources::RetireCommand::Execution {
                             request: &record.request, runtime_id: &root.runtime_id,
-                        }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
+                        }.dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)?;
                         self.resource_changed(&record.request);
                     }
                     engine.resolve_resource(request, failure("cancelled", "Resource execution was cancelled."))?;
@@ -387,7 +387,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             resource_lanes::set_request(&mut member, &record.request)?;
             host_resources::StartCommand::Program {
                 member: &member, step: &request.step, attempt: request.attempt,
-            }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
+            }.dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)?;
             self.resource_changed(&record.request);
             return Ok(true);
         }
@@ -414,7 +414,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if elapsed >= timeout {
                     host_resources::RetireCommand::Execution {
                         request: &record.request, runtime_id: &runtime_id,
-                    }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
+                    }.dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)?;
                     self.resource_changed(&record.request);
                     engine.resolve_resource(request, failure("execution-timeout", "Resource command exceeded its payload budget."))?;
                     return Ok(true);
