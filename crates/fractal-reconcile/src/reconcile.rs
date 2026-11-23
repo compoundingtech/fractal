@@ -1597,7 +1597,6 @@ fn reconcile_decision_admitted(subject: &str) -> bool {
 struct MemberRoster {
     pending_subjects: BTreeSet<String>,
     task_stops: BTreeSet<String>,
-    root_tasks: BTreeMap<String, Vec<RootTask>>,
 }
 
 struct MemberEvaluation {
@@ -3688,7 +3687,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// Resolve lifecycle participation before either full or scoped member planning.
+    /// Resolve lifecycle participation for scoped member planning.
     /// This is read-only apart from transforming this snapshot's retired members
     /// into stops; scoped render validation must not resurrect their ownership.
     fn prepare_member_roster(&self, desired: &mut [DesiredSubject]) -> Result<MemberRoster> {
@@ -3719,7 +3718,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
             .map(|subject| subject.subject.as_str())
             .collect::<BTreeSet<_>>();
-        let mut root_tasks = BTreeMap::<String, Vec<RootTask>>::new();
         let mut task_stops = BTreeSet::new();
         if !stopped_roots.is_empty() {
             for subject in desired.iter() {
@@ -3738,19 +3736,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     continue;
                 }
                 task_stops.insert(subject.subject.clone());
-                if member.host == self.host {
-                    root_tasks
-                        .entry(root.clone())
-                        .or_default()
-                        .push(RootTask {
-                            subject: subject.subject.clone(),
-                            runtime_id: member.runtime_id.clone(),
-                            terminal: member.terminal,
-                        });
-                }
             }
         }
-        Ok(MemberRoster { pending_subjects, task_stops, root_tasks })
+        Ok(MemberRoster { pending_subjects, task_stops })
     }
 
     fn reconcile_pass(&self) -> Result<()> {
