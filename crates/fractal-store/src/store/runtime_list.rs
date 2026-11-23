@@ -13,6 +13,15 @@ impl Store {
         &self.fractal.published_runtimes
     }
 
+    /// Initial owner keys, including owners whose reduction may put them in history.
+    /// Reuse the runtime-only index seek instead of scanning observation history.
+    pub fn runtime_list_subjects(&self, through: u64) -> Result<BTreeSet<String>> {
+        self.readers.get().prepare_cached(RUNTIME_SUBJECTS)?
+            .query_map([through], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .map_err(Into::into)
+    }
+
     /// Runtime rows read all claims on their subject (including unknown and reserved
     /// kinds), their declaration, and the actual state of its owning run/generation.
     /// Use the same bounded commit scan as the other published lists, then seek only
