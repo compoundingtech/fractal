@@ -546,7 +546,34 @@ impl ReplicationHealth {
             Self::NoTargets => "replication worker is live; this fleet has no other current member to exchange with",
             Self::WorkerMissing => "fleet replication is configured but no replication worker heartbeat has reached this daemon; start the replication-worker service",
             Self::WorkerStale => "replication worker heartbeat is stale (over 25 seconds); inspect and restart the replication-worker service",
-            Self::ExchangeStale => "replication worker is live but no successful exchange with a current peer occurred within 60 seconds; inspect fleet routes, including the bootstrap sponsor, and replication-worker logs",
+            Self::ExchangeStale => "replication worker is live but no successful exchange with a current peer occurred within 60 seconds; inspect replication status and replication-worker logs",
+        }
+    }
+
+    /// Summarize existing failure evidence without volatile timings or peer ordering.
+    pub(crate) fn message_with_failures<'a>(
+        self,
+        failures: impl IntoIterator<Item = Option<&'a ReplicationExchangeFailure>>,
+    ) -> String {
+        if self != Self::ExchangeStale {
+            return self.message().into();
+        }
+        let mut counts = BTreeMap::new();
+        let mut peers = 0;
+        for failure in failures {
+            peers += 1;
+            if let Some(failure) = failure {
+                *counts.entry((failure.phase.as_str(), failure.code.as_str())).or_insert(0usize) += 1;
+            }
+        }
+        // The ordered map breaks equal-count ties lexically, independent of peer order.
+        let dominant = counts.iter().max_by_key(|(_, count)| **count);
+        match dominant {
+            Some(((phase, code), count)) => format!(
+                "{}; last failures: {phase} {code} on {count}/{peers} peers",
+                self.message(),
+            ),
+            None => format!("{}; no recorded last failures for current peers", self.message()),
         }
     }
 }
@@ -650,6 +677,35 @@ mod replication_health_tests {
         let health = ReplicationHealth::observe(true, GRACE, Some(Duration::from_secs(10)), 1, Some(Duration::from_secs(30)));
         assert_eq!(health, ReplicationHealth::Healthy);
         assert_eq!(health.status(), "pass");
+    }
+
+    #[test]
+    fn stale_failure_summary_counts_missing_evidence_and_breaks_ties_stably() {
+        let local = ReplicationExchangeFailure::from_error(
+            &anyhow::anyhow!("operation failed"),
+            ReplicationFailurePhase::LocalReceive,
+            Duration::from_secs(120),
+            None,
+        );
+        let transport = ReplicationExchangeFailure::from_error(
+            &anyhow::anyhow!("operation failed"),
+            ReplicationFailurePhase::Dial,
+            Duration::ZERO,
+            None,
+        );
+        let health = ReplicationHealth::ExchangeStale;
+        assert_eq!(
+            health.message_with_failures([Some(&local), Some(&transport), Some(&local), None]),
+            format!("{}; last failures: local-receive replication-operation-failed on 2/4 peers", health.message()),
+        );
+        assert_eq!(
+            health.message_with_failures([Some(&local), Some(&transport)]),
+            health.message_with_failures([Some(&transport), Some(&local)]),
+        );
+        assert_eq!(
+            health.message_with_failures([None]),
+            format!("{}; no recorded last failures for current peers", health.message()),
+        );
     }
 }
 
@@ -764,6 +820,20 @@ pub enum ReplicationFailurePhase {
     Verify,
     LocalReceive,
     FollowUpExport,
+}
+
+impl ReplicationFailurePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dial => "dial",
+            Self::LocalExport => "local-export",
+            Self::RequestHeaders => "request-headers",
+            Self::ResponseBody => "response-body",
+            Self::Verify => "verify",
+            Self::LocalReceive => "local-receive",
+            Self::FollowUpExport => "follow-up-export",
+        }
+    }
 }
 
 /// Last observed HTTP client boundary. Pool acquisition is not exposed by reqwest.

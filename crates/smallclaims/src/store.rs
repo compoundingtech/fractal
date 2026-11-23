@@ -10765,6 +10765,33 @@ impl Store {
             age(last_exchange),
         ))
     }
+
+    /// Fault text uses only the last failure phase/code of current exchange targets.
+    /// Do not compute full replication status here: it also reads inventory and projections.
+    pub fn replication_health_message(&self, health: crate::replication::ReplicationHealth) -> Result<String> {
+        if health != crate::replication::ReplicationHealth::ExchangeStale {
+            return Ok(health.message().into());
+        }
+        let view = self.fleet_view_sealed()?;
+        let first_sync = self.first_sync()?;
+        let bootstrap = first_sync.as_ref().filter(|first| first.state == "syncing")
+            .and_then(|first| first.peer.as_deref())
+            .filter(|peer| view.members.iter().all(|member| member.name != *peer));
+        let progress = self.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+        let targets = view.members.iter()
+            .filter(|member| member.name != self.origin && member.state == "current")
+            .map(|member| member.name.as_str())
+            .chain(bootstrap);
+        let failure = |peer: &str| progress.get(peer)
+            .and_then(|progress| progress.last_failed_exchange.as_ref())
+            .and_then(|exchange| exchange.failure.as_ref());
+        // Legacy config-peer operation has no membership or join receipt.
+        if view.anchor.is_none() && first_sync.is_none() {
+            Ok(health.message_with_failures(progress.keys().map(|peer| failure(peer))))
+        } else {
+            Ok(health.message_with_failures(targets.map(failure)))
+        }
+    }
     /// Invalid claims and fenced writers cannot be treated as ordinary in-flight traffic.
     pub fn replication_admission_healthy(&self) -> Result<bool> {
         Ok(self.readers.get().query_row(
