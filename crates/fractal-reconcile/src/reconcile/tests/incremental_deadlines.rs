@@ -1804,17 +1804,17 @@ fn queue_workspace_start(
 ) -> String {
     let desired = store.desired_subjects_named(&["agent/node.worker".into()])
         .unwrap().remove(0);
-    let mut member = desired.member.as_ref().unwrap().clone();
-    if request.as_ref().is_some_and(|request| request.body["fields"]["fresh_session"] == true) {
-        member.tags.insert(start_jobs::OPERATION_TAG.into(), "fixture-incumbent".into());
-    }
+    let member = desired.member.as_ref().unwrap().clone();
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut launch_member = member.clone();
+    launch_member.tags.insert(start_jobs::OPERATION_TAG.into(), id.clone());
     let prepared = start_jobs::PreparedStart {
         workspace_admission: Some(start_jobs::WorkspaceAdmission::Git {
             owner: workspace.to_path_buf(),
             repository: repository.to_path_buf(),
         }),
         subject: desired.clone(),
-        launch_member: member.clone(),
+        launch_member,
         member,
         reason: "workspace recovery".into(),
         request,
@@ -1833,7 +1833,7 @@ fn queue_workspace_start(
         body.as_object_mut().unwrap().remove("workspace_admission");
     }
     let mut operation = crate::store::RuntimeStartOperation {
-        id: uuid::Uuid::now_v7().to_string(),
+        id,
         subject: desired.subject,
         owner: "previous-daemon".into(),
         body,
@@ -1907,7 +1907,80 @@ fn recovery_retires_queued_starts_with_missing_or_replaced_workspaces() {
 }
 
 #[test]
-fn old_format_queued_start_is_retired_then_restarted_under_a_fresh_lease() {
+fn queued_workspace_starts_admit_legacy_records_and_reuse_modern_leases() {
+    for legacy in [true, false] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let database = root.path().join("claims.db");
+        let id = {
+            let store = Store::open(&database, "node").unwrap();
+            apply_source(&store, &format!(
+                "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
+                repository.to_str().unwrap(),
+            ), "queued-start");
+            queue_workspace_start(&store, &repository, &repository, legacy, None)
+        };
+        let store = Arc::new(Store::open(&database, "node").unwrap());
+        let runtime = Arc::new(FakeRuntime::default());
+        let restarted = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        restarted.reconcile_start_jobs().unwrap();
+        complete_queued_workspace_start(&restarted, &store, &runtime, &id, legacy);
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1,
+            "dispatch and completion must reuse the same deletion lease");
+    }
+}
+
+#[test]
+fn legacy_queued_idle_restart_keeps_its_original_request_and_quiet_boundary() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let database = root.path().join("claims.db");
+    let (id, request, release) = {
+        let store = Store::open(&database, "node").unwrap();
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; restart \"never\" }}",
+            repository.to_str().unwrap(),
+        ), "queued-idle-restart");
+        let request = store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from(crate::restart::WHEN_IDLE)),
+                ("runtime_id".into(), Value::from("node.worker")),
+                ("incarnation_id".into(), Value::from("incumbent")),
+            ]),
+            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let release = store.append_claim(&ClaimInput {
+            subject: request.subject.clone(), kind: "runtime.action.succeeded".into(),
+            actor: request.actor.clone(),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("operation_status".into(), Value::from("quiesced")),
+            ]),
+            evidence: vec![request.id.clone()], expected_subject: None,
+            idempotency_key: Some(crate::restart::release_key(&request)),
+        }).unwrap();
+        let id = queue_workspace_start(&store, &repository, &repository, true, Some(request.clone()));
+        (id, request, release)
+    };
+    let store = Arc::new(Store::open(&database, "node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_start_jobs().unwrap();
+    complete_queued_workspace_start(&restarted, &store, &runtime, &id, true);
+    assert_eq!(crate::restart::latest_request(&store, &request.subject).unwrap().unwrap().id, request.id);
+    assert_eq!(store.operation_claim(&crate::restart::release_key(&request)).unwrap().unwrap().id, release.id);
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+}
+
+#[test]
+fn a_later_stop_prevents_legacy_queued_restart_dispatch() {
     let root = crate::test_support::canonical_tempdir();
     let repository = crate::checkout::test_support::repository(root.path());
     let database = root.path().join("claims.db");
@@ -1916,285 +1989,97 @@ fn old_format_queued_start_is_retired_then_restarted_under_a_fresh_lease() {
         apply_source(&store, &format!(
             "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
             repository.to_str().unwrap(),
-        ), "old-start-recovery");
-        queue_workspace_start(&store, &repository, &repository, true, None);
+        ), "queued-before-stop");
+        let request = store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("runtime_id".into(), Value::from("node.worker")),
+                ("incarnation_id".into(), Value::from("incumbent")),
+            ]),
+            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        queue_workspace_start(&store, &repository, &repository, true, Some(request));
+        store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([("action".into(), Value::from("stop"))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        apply_source(&store, "version 2\nstop \"agent/node.worker\"", "stop-queued-start");
     }
     let store = Arc::new(Store::open(&database, "node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
     let restarted = Reconciler::new(
-        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
     );
     restarted.reconcile_start_jobs().unwrap();
-    assert!(store.runtime_start_for("agent/node.worker").unwrap().is_none());
-    assert!(runtime.started_members.lock().unwrap().is_empty());
-    assert_eq!(crate::checkout::test_support::lease_count(&repository), 0,
-        "old records must not rediscover and trust the current filesystem");
     restarted.reconcile_once().unwrap();
-    assert_eq!(runtime.started_members.lock().unwrap().len(), 1,
-        "old records must not leave an operator-only failed agent");
-    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
-    assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+    assert!(runtime.started_members.lock().unwrap().is_empty());
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
 }
 
 #[test]
-fn old_format_queued_explicit_restart_is_reissued_and_started_with_a_fresh_lease() {
-    assert_old_format_restart_recovery("restart", false, false, false, false);
-}
-
-#[test]
-fn old_format_queued_idle_restart_keeps_its_already_reached_quiet_boundary() {
-    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, false, false, false, false);
-}
-
-#[test]
-fn old_format_queued_restart_does_not_revive_authority_after_a_later_stop() {
-    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true, false, false, false);
-}
-
-#[test]
-fn interrupted_restart_requeue_does_not_transfer_quiescence_after_a_stop() {
-    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true, true, false, false);
-}
-
-#[test]
-fn old_format_fresh_restart_carries_its_acknowledged_handoff_boundary() {
-    assert_old_format_restart_recovery("restart", false, false, true, false);
-}
-
-#[test]
-fn interrupted_fresh_restart_requeue_keeps_the_same_incumbents_handoff() {
-    assert_old_format_restart_recovery("restart", false, true, true, false);
-}
-
-#[test]
-fn interrupted_fresh_restart_requeue_does_not_carry_handoff_to_another_incumbent() {
-    assert_old_format_restart_recovery("restart", false, true, true, true);
-}
-
-fn assert_old_format_restart_recovery(
-    action: &str, later_stop: bool, interrupted: bool, fresh: bool, changed_incumbent: bool,
-) {
-    let _clock = Clock::at(START);
+fn refused_legacy_admission_stays_queued_and_retries_without_losing_its_operation() {
     let root = crate::test_support::canonical_tempdir();
     let repository = crate::checkout::test_support::repository(root.path());
     let database = root.path().join("claims.db");
-    let original;
-    {
+    let id = {
         let store = Store::open(&database, "node").unwrap();
         apply_source(&store, &format!(
-            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; restart \"never\" }}",
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
             repository.to_str().unwrap(),
-        ), "old-explicit-restart-recovery");
-        let desired = store.desired_subjects_named(&["agent/node.worker".into()]).unwrap().remove(0);
-        store.append_claim(&ClaimInput {
-            subject: desired.subject.clone(),
-            kind: "runtime.observed".into(),
-            actor: None,
-            fields: member_fields(desired.member.as_ref().unwrap(),
-                if fresh { "running" } else { "stopped" }, Some("incumbent"), false),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        }).unwrap();
-        if fresh {
-            store.append_claim(&ClaimInput {
-                subject: desired.subject.clone(), kind: "harness.session-file".into(), actor: None,
-                fields: BTreeMap::from([
-                    ("incarnation_id".into(), Value::from("incumbent")),
-                    ("harness".into(), Value::from("omp")),
-                    ("session_id".into(), Value::from("native-A")),
-                ]),
-                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-            }).unwrap();
-            store.append_claim(&ClaimInput {
-                subject: desired.subject.clone(), kind: "runtime.observed".into(), actor: None,
-                fields: member_fields(desired.member.as_ref().unwrap(), "stopped", Some("incumbent"), false),
-                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-            }).unwrap();
-        }
-        original = store.append_claim(&ClaimInput {
-            subject: "agent/node.worker".into(),
-            kind: "runtime.action.requested".into(),
-            actor: Some("person/operator".into()),
-            fields: BTreeMap::from([
-                ("action".into(), Value::from(action)),
-                ("runtime_id".into(), Value::from("node.worker")),
-                ("incarnation_id".into(), Value::from("incumbent")),
-                ("fresh_session".into(), Value::from(fresh)),
-            ]),
-            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
-            expected_subject: None,
-            idempotency_key: None,
-        }).unwrap();
-        if action == crate::restart::WHEN_IDLE {
-            store.append_claim(&ClaimInput {
-                subject: original.subject.clone(),
-                kind: "runtime.action.succeeded".into(),
-                actor: original.actor.clone(),
-                fields: BTreeMap::from([
-                    ("action".into(), Value::from("restart")),
-                    ("operation_status".into(), Value::from("quiesced")),
-                ]),
-                evidence: vec![original.id.clone()],
-                expected_subject: None,
-                idempotency_key: Some(crate::restart::release_key(&original)),
-            }).unwrap();
-        }
-        if fresh {
-            store.append_claim(&ClaimInput {
-                subject: original.subject.clone(),
-                kind: "runtime.reconcile-decision".into(),
-                actor: None,
-                fields: BTreeMap::from([("decision".into(), Value::from("prepare"))]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!("restart-prepare:{}:{}", original.subject, original.id)),
-            }).unwrap();
-            smallclaims::store::set_thread_clock(Some(START + 1));
-            let document = crate::handoff::document_name(&original.subject).unwrap();
-            store.put_document(&document, b"Retained handoff", &None, "retained-restart-handoff").unwrap();
-            assert!(crate::handoff::acknowledged_handoff_since(&store, &original.subject, START).unwrap());
-        }
-        let operation = queue_workspace_start(&store, &repository, &repository, true, Some(original.clone()));
-        if interrupted {
-            store.append_claim(&ClaimInput {
-                subject: original.subject.clone(),
-                kind: original.kind.clone(),
-                actor: original.actor.clone(),
-                fields: serde_json::from_value(original.body["fields"].clone()).unwrap(),
-                evidence: original.body["evidence"].as_array().unwrap().iter()
-                    .map(|value| value.as_str().unwrap().to_owned()).chain([original.id.clone()]).collect(),
-                expected_subject: None,
-                idempotency_key: Some(format!("workspace-admission-restart:{operation}")),
-            }).unwrap();
-        }
-        assert!(store.operation_claim(&format!("agent-restart-attempt:{}", original.id)).unwrap().is_some());
-        if later_stop {
-            store.append_claim(&ClaimInput {
-                subject: original.subject.clone(),
-                kind: "runtime.action.requested".into(),
-                actor: Some("person/operator".into()),
-                fields: BTreeMap::from([("action".into(), Value::from("stop"))]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            }).unwrap();
-            // The stop CLI publishes both the control request and desired stop.
-            apply_source(&store, "version 2\nstop \"agent/node.worker\"", "stop-old-restart-recovery");
-        }
-    }
-    smallclaims::store::set_thread_clock(Some(START + 2));
+        ), "queued-before-refusal");
+        queue_workspace_start(&store, &repository, &repository, true, None)
+    };
+    let hidden = root.path().join("temporarily-unavailable");
+    std::fs::rename(&repository, &hidden).unwrap();
     let store = Arc::new(Store::open(&database, "node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
-    if changed_incumbent {
-        let mut member = store.desired_subjects_named(std::slice::from_ref(&original.subject))
-            .unwrap().remove(0).member.unwrap();
-        member.tags.insert(start_jobs::OPERATION_TAG.into(), "fixture-incumbent".into());
-        runtime.started_members.lock().unwrap().push(member.clone());
-        let observation = running_observation(&member, "replacement");
-        if member.terminal {
-            runtime.ptys.lock().unwrap().push(observation);
-        } else {
-            runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), observation);
-        }
-        assert_eq!(runtime.observe_start(&member).unwrap().unwrap().incarnation_id.as_deref(),
-            Some("replacement"), "recovery must observe the replacement, not an absent incumbent");
-        store.append_claim(&ClaimInput {
-            subject: original.subject.clone(), kind: "runtime.observed".into(), actor: None,
-            fields: member_fields(&member, "running", Some("replacement"), false),
-            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-        }).unwrap();
-        store.append_claim(&ClaimInput {
-            subject: original.subject.clone(), kind: "harness.session-file".into(), actor: None,
-            fields: BTreeMap::from([
-                ("incarnation_id".into(), Value::from("replacement")),
-                ("harness".into(), Value::from("omp")),
-                ("session_id".into(), Value::from("native-B")),
-            ]),
-            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-        }).unwrap();
-    }
     let restarted = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
     );
-    restarted.reconcile_start_jobs().unwrap();
-    assert!(store.runtime_start_for("agent/node.worker").unwrap().is_none());
-    let requeued = crate::restart::latest_request(&store, "agent/node.worker").unwrap().unwrap();
-    if later_stop {
-        if interrupted {
-            assert_ne!(requeued.id, original.id);
-            let retired = store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))
-                .unwrap().unwrap();
-            assert_eq!(retired.body["fields"]["operation_status"], "retired");
-            assert!(store.operation_claim(&crate::restart::release_key(&requeued)).unwrap().is_none(),
-                "a stop after persisted requeue must prevent authority transfer");
-        } else {
-            assert_eq!(requeued.id, original.id, "later stop must suppress authority requeue");
-        }
+    for _ in 0..2 {
+        restarted.reconcile_start_jobs().unwrap();
+        let queued = store.runtime_start_for("agent/node.worker").unwrap().unwrap();
+        assert_eq!(queued.id, id);
+        assert!(!queued.dispatched && !queued.finished && queued.revoked_by.is_none());
         assert!(runtime.started_members.lock().unwrap().is_empty());
-        assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
-        restarted.reconcile_once().unwrap();
-        assert!(runtime.started_members.lock().unwrap().is_empty(),
-            "full reconciliation must not start a requeue superseded by a stop");
-        return;
     }
-    assert_ne!(requeued.id, original.id);
-    assert_eq!(requeued.actor, original.actor);
-    assert_eq!(requeued.body["fields"], original.body["fields"]);
-    assert_eq!(requeued.body["evidence"][0], original.body["evidence"][0]);
-    assert!(store.operation_claim(&format!("agent-restart-attempt:{}", requeued.id)).unwrap().is_none());
-    if changed_incumbent {
-        assert!(store.operation_claim(&format!("restart-prepare:{}:{}:handoff",
-            requeued.subject, requeued.id)).unwrap().is_none(),
-            "a different running incarnation/session must prepare its own handoff");
-        assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
-        restarted.reconcile_once().unwrap();
-        let preparation = store.operation_claim(&format!("restart-prepare:{}:{}",
-            requeued.subject, requeued.id)).unwrap().unwrap();
-        assert_eq!(preparation.body["fields"]["decision"], "prepare");
-        assert_eq!(preparation.accepted_at_unix_ms, START + 2,
-            "the replacement must receive a new handoff request, not reuse the original acknowledgement");
-        assert_eq!(runtime.started_members.lock().unwrap().len(), 1,
-            "the member pass must wait for the replacement's handoff without starting another runtime");
-        return;
-    }
-    if fresh {
-        assert!(store.operation_claim(&format!("restart-prepare:{}:{}:handoff",
-            requeued.subject, requeued.id)).unwrap().is_some());
-    }
-    if action == crate::restart::WHEN_IDLE {
-        let release = store.operation_claim(&crate::restart::release_key(&requeued)).unwrap().unwrap();
-        assert_eq!(release.body["fields"]["operation_status"], "quiesced");
-        assert_eq!(release.body["evidence"][0], requeued.id);
-        assert!(runtime.started_members.lock().unwrap().is_empty(),
-            "the incumbent is absent; recovery must use its retained boundary, not a new report");
-    }
-    assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
-    restarted.reconcile_once().unwrap();
-    let (live, changed) = &*restarted.start_jobs.live;
+    assert_eq!(store.observations_for("agent/node.worker", "runtime.reconcile-decision").unwrap()
+        .iter().filter(|claim| claim.body["fields"]["key"] == format!("start-workspace-wait:{id}")).count(), 1);
+    assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+    std::fs::rename(&hidden, &repository).unwrap();
+    restarted.reconcile_start_jobs().unwrap();
+    complete_queued_workspace_start(&restarted, &store, &runtime, &id, true);
+}
+
+fn complete_queued_workspace_start(
+    reconciler: &Reconciler<FakeRuntime>,
+    store: &Store,
+    runtime: &FakeRuntime,
+    id: &str,
+    legacy: bool,
+) {
+    let (live, changed) = &*reconciler.start_jobs.live;
     let mut live = live.lock().unwrap();
     while !live.is_empty() {
         live = changed.wait(live).unwrap();
     }
     drop(live);
     let operation = store.runtime_start_for("agent/node.worker").unwrap().unwrap();
-    let incarnation = operation.result.as_ref().unwrap()["incarnation"]
-        .as_str().unwrap();
-    let launched = runtime.started_members.lock().unwrap().last().unwrap().clone();
-    let observation = running_observation(&launched, incarnation);
-    if launched.terminal {
-        *runtime.ptys.lock().unwrap() = vec![observation];
-    } else {
-        runtime.execs.lock().unwrap().insert(launched.runtime_id.clone(), observation);
-    }
-    assert!(restarted.apply_start_result(&operation.id, "agent/node.worker").unwrap(),
-        "the completed worker must publish its operation-fenced start result");
-    restarted.reconcile_once().unwrap();
-    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
-    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
-    let completion = store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))
+    assert_eq!(operation.id, id);
+    assert!(operation.dispatched && operation.finished);
+    assert_eq!(operation.body["workspace_admission"].is_null(), legacy,
+        "lazy dispatch must not rewrite the stored operation body");
+    assert!(reconciler.apply_start_result(id, "agent/node.worker").unwrap(),
+        "legacy completion must reacquire admission and publish its fenced result");
+    let receipt = store.latest_observation("agent/node.worker", "runtime.action.succeeded")
         .unwrap().unwrap();
-    assert_eq!(completion.kind, "runtime.action.succeeded");
+    assert_eq!(receipt.body["fields"]["operation"], id);
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
     assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
 }
 

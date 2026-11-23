@@ -5485,21 +5485,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(true);
             }
         }
-        self.prepare_restart(subject, trigger, reason, false, Some(observation))
-    }
-
-    fn handoff_incumbent_matches(
-        &self,
-        subject: &str,
-        incarnation: &str,
-        session: Option<&(String, String)>,
-        incumbent: Option<&RuntimeObservation>,
-    ) -> Result<bool> {
-        let Some(incumbent) = incumbent.filter(|observation| observation.status == "running") else {
-            return Ok(true);
-        };
-        Ok(incumbent.incarnation_id.as_deref() == Some(incarnation)
-            && crate::suspension::bound_session(&self.store, subject, incarnation)?.as_ref() == session)
+        self.prepare_restart(subject, trigger, reason, false)
     }
 
     /// Fresh sessions wait for acknowledgement without a restart-anyway deadline, even
@@ -5511,21 +5497,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         trigger: &str,
         reason: &str,
         require_handoff: bool,
-        incumbent: Option<&RuntimeObservation>,
     ) -> Result<bool> {
         let key = format!("restart-prepare:{subject}:{trigger}");
-        if require_handoff
-            && let Some(boundary) = self.store.operation_claim(&format!("{key}:handoff"))?
-            && let Some(reason) = boundary.body["fields"]["reason"].as_str()
-            && let Ok(proof) = serde_json::from_str::<start_jobs::HandoffBoundary>(reason)
-            && self.handoff_incumbent_matches(
-                subject, &proof.incarnation, proof.native_session.as_ref(), incumbent,
-            )?
-        {
-            return crate::handoff::acknowledged_handoff_since(
-                &self.store, subject, proof.acknowledged_since_unix_ms,
-            );
-        }
         let now = now_ms();
         let Some(prepare) = self.store.operation_claim(&key)? else {
             let deadline = (!require_handoff)
@@ -10191,7 +10164,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 "a fresh session was requested by {}",
                 request.actor.as_deref().unwrap_or("the operator"),
             );
-            if !self.prepare_restart(&subject.subject, &request.id, &reason, true, observation)? {
+            if !self.prepare_restart(&subject.subject, &request.id, &reason, true)? {
                 let deadline = request.accepted_at_unix_ms
                     .saturating_add(crate::restart::ATTENTION_AFTER_MS);
                 if now_ms() < deadline {

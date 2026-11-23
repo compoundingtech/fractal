@@ -2641,78 +2641,73 @@ fn native_scoped_pidless_start_retires_only_after_its_producer_scope_is_empty() 
 #[test]
 fn recovered_queued_workspace_refusals_retire_without_entering_the_backend() {
     for kind in ["agent", "exec"] {
-        for failure in ["missing-identity", "missing-workspace"] {
-            let root = tempfile::tempdir().unwrap();
-            let workspace = root.path().join("workspace");
-            std::fs::create_dir(&workspace).unwrap();
-            let store = Arc::new(Store::open(&root.path().join("claims.db"), "node").unwrap());
-            apply_source(&store, &format!(
-                "version 2\n{kind} \"example/recovery\" {{ workspace {:?}; command \"true\" }}",
-                workspace.display().to_string(),
-            ), "refused-recovery");
-            let desired = store.desired_subjects_named(&[format!("{kind}/example/recovery")])
-                .unwrap().remove(0);
-            let member = desired.member.as_ref().unwrap().clone();
-            let prepared = start_jobs::PreparedStart {
-                workspace_admission: (failure != "missing-identity")
-                    .then_some(start_jobs::WorkspaceAdmission::NonGit),
-                subject: desired.clone(),
-                launch_member: member.clone(),
-                member,
-                reason: "workspace refusal recovery regression".into(),
-                request: None,
-                desired_token: "refused-recovery".into(),
-                selected_token: store.selected_desired_token(&desired.subject).unwrap(),
-                placement_evidence: Vec::new(),
-                start_request: String::new(),
-                start_request_receipt: None,
-                control_request: None,
-                control_request_receipt: None,
-                expected_incarnation: None,
-                resume_operation: None,
-            };
-            let mut operation = crate::store::RuntimeStartOperation {
-                id: uuid::Uuid::now_v7().to_string(),
-                subject: desired.subject.clone(),
-                owner: "previous-owner".into(),
-                body: serde_json::to_value(prepared).unwrap(),
-                revoked_by: None,
-                finished: false,
-                result: None,
-                applied: false,
-                cleanup_verified: false,
-                dispatched: false,
-                receipted: false,
-            };
-            assert_eq!(store.admit_runtime_start(&mut operation, 2).unwrap(),
-                crate::store::RuntimeStartAdmission::Admitted);
-            if failure == "missing-workspace" {
-                std::fs::remove_dir(&workspace).unwrap();
-            }
-            let runtime = Arc::new(FakeRuntime::default());
-            let reconciler = Reconciler::new(
-                store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
-            );
-            reconciler.reconcile_start_jobs().unwrap();
-            assert!(store.runtime_start_for(&desired.subject).unwrap().is_none(),
-                "{kind}: {failure}: refusal must apply the queued cancellation in the same pass");
-            assert!(runtime.starts.lock().unwrap().is_empty());
-            let result: String = store.readers.get().query_row(
-                "SELECT result FROM local_runtime_starts WHERE id=?1",
-                [&operation.id], |row| row.get(0),
-            ).unwrap();
-            let result: Value = serde_json::from_str(&result).unwrap();
-            assert_eq!(result["closure_kind"], "never-dispatched");
-            assert_eq!(result["producer_closed"], true);
-            let (diagnostic_kind, field) = if kind == "agent" {
-                ("harness.diagnostic", "code")
-            } else {
-                ("runtime.reconcile-decision", "decision")
-            };
-            let diagnostic = store.latest_observation(&desired.subject, diagnostic_kind)
-                .unwrap().unwrap();
-            assert_eq!(diagnostic.body["fields"][field], "start-workspace-refused");
-        }
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.db"), "node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\n{kind} \"example/recovery\" {{ workspace {:?}; command \"true\" }}",
+            workspace.display().to_string(),
+        ), "refused-recovery");
+        let desired = store.desired_subjects_named(&[format!("{kind}/example/recovery")])
+            .unwrap().remove(0);
+        let member = desired.member.as_ref().unwrap().clone();
+        let prepared = start_jobs::PreparedStart {
+            workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
+            subject: desired.clone(),
+            launch_member: member.clone(),
+            member,
+            reason: "workspace refusal recovery regression".into(),
+            request: None,
+            desired_token: "refused-recovery".into(),
+            selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+            placement_evidence: Vec::new(),
+            start_request: String::new(),
+            start_request_receipt: None,
+            control_request: None,
+            control_request_receipt: None,
+            expected_incarnation: None,
+            resume_operation: None,
+        };
+        let mut operation = crate::store::RuntimeStartOperation {
+            id: uuid::Uuid::now_v7().to_string(),
+            subject: desired.subject.clone(),
+            owner: "previous-owner".into(),
+            body: serde_json::to_value(prepared).unwrap(),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        assert_eq!(store.admit_runtime_start(&mut operation, 2).unwrap(),
+            crate::store::RuntimeStartAdmission::Admitted);
+        std::fs::remove_dir(&workspace).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none(),
+            "{kind}: missing workspace must apply the queued cancellation in the same pass");
+        assert!(runtime.starts.lock().unwrap().is_empty());
+        let result: String = store.readers.get().query_row(
+            "SELECT result FROM local_runtime_starts WHERE id=?1",
+            [&operation.id], |row| row.get(0),
+        ).unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["closure_kind"], "never-dispatched");
+        assert_eq!(result["producer_closed"], true);
+        let (diagnostic_kind, field) = if kind == "agent" {
+            ("harness.diagnostic", "code")
+        } else {
+            ("runtime.reconcile-decision", "decision")
+        };
+        let diagnostic = store.latest_observation(&desired.subject, diagnostic_kind)
+            .unwrap().unwrap();
+        assert_eq!(diagnostic.body["fields"][field], "start-workspace-refused");
     }
 }
 
