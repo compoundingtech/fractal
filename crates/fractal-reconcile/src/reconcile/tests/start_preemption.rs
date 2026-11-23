@@ -1861,7 +1861,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             let member = desired.member.as_ref().unwrap().clone();
             let mut launch_member = member.clone();
             if missing_cwd {
-                launch_member.workspace = root.path().join("missing-cwd").display().to_string();
+                launch_member.cwd = root.path().join("missing-cwd").display().to_string();
             }
             reconciler.dispatch_start(start_jobs::PreparedStart {
                 workspace_admission: None,
