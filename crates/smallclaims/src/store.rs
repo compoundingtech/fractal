@@ -35,6 +35,12 @@ use crate::sqlite::{
     STATEMENT_CACHE_CAPACITY, WriterConnection,
 };
 
+fn note_full_summary_construction(_store: &Store) {
+    crate::performance::record_request("replication/full-summary", None, std::time::Duration::ZERO);
+    #[cfg(test)]
+    _store.full_summary_constructions.fetch_add(1, Ordering::Relaxed);
+}
+
 mod admitted;
 #[cfg(any(test, feature = "test-support"))]
 mod temporary;
@@ -924,6 +930,9 @@ pub struct Store {
     /// For a shard, the default store whose fleet identity and membership it uses: a shard
     /// holds no fleet claims of its own. See `bind_fleet_authority`.
     fleet_authority: std::sync::OnceLock<Arc<dyn FleetAuthority>>,
+    pub(crate) sync_revisions: std::sync::OnceLock<Arc<crate::sync::revision::StoreRevisions>>,
+    #[cfg(test)]
+    pub(crate) full_summary_constructions: AtomicU64,
     /// For a shard, its authority's fleet generation when its last admission began. Membership
     /// that changes later can decide envelopes the shard held. See `fleet_moved_since_admission`.
     admitted_fleet_generation: AtomicI64,
@@ -1399,6 +1408,9 @@ impl Store {
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
             fleet_authority: std::sync::OnceLock::new(),
+            sync_revisions: Default::default(),
+            #[cfg(test)]
+            full_summary_constructions: AtomicU64::new(0),
             admitted_fleet_generation: AtomicI64::new(i64::MIN),
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
@@ -5403,9 +5415,9 @@ pub fn replication_bucket_start(sequence: u64) -> u64 {
 }
 
 /// Compare a local inventory with a peer's compact inventory. Returns the local envelopes the
-/// peer provably lacks, bounded per exchange, and the local identities of the ranges both
-/// sides hold with different digests, so the peer can compute the reverse difference. Whole
-/// ranges are listed in order while they fit `listing_limit`, from the first differing range.
+/// peer provably lacks, bounded per exchange, and complete local range listings so the peer can
+/// compute the reverse difference. A root probe proves no ranges absent: it receives bounded
+/// listings without payloads. Whole ranges fit `listing_limit`, except the first is always whole.
 pub fn compact_replication_difference(
     inventory: &CompactReplicationInventory,
     buckets: &[ReplicationInventoryBucket],
@@ -5445,6 +5457,10 @@ pub fn compact_replication_difference_turn(
             .push(identity);
     }
     let page_limit = replication_page_limit(remote);
+    // A root probe omits proofs; absent ranges are unknown, not proven empty.
+    let omitted_buckets = remote.buckets.is_empty()
+        && remote.can(crate::replication::ROOT_FIRST)
+        && remote.can(crate::replication::ROOT_SUMMARY);
     let mut missing = Vec::new();
     // Differing ranges with an envelope to send, then those holding only checkpoint identities.
     let (mut live, mut payloadless) = (Vec::new(), Vec::new());
@@ -5453,6 +5469,14 @@ pub fn compact_replication_difference_turn(
         let local = inventory.range(&bucket.writer, bucket.start);
         let room = page_limit.saturating_sub(missing.len());
         let Some(theirs) = remote_buckets.get(&key) else {
+            if omitted_buckets {
+                if local.iter().any(|envelope| inventory.has_payload(envelope)) {
+                    live.push(bucket);
+                } else {
+                    payloadless.push(bucket);
+                }
+                continue;
+            }
             // The peer holds nothing in this range.
             missing.extend(
                 local
@@ -7906,6 +7930,16 @@ impl Store {
         self.replication_summary(fleet_id, true)
     }
 
+    /// A signed peer probe, including signature requests and claim roots, but no bucket list.
+    /// The root-summary marker distinguishes omitted proofs from an empty inventory.
+    pub fn export_replication_root_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        let mut summary = self.replication_summary(fleet_id, false)?;
+        summary.signature_requests = self.replication_signature_requests()?;
+        summary.inventory.capabilities.push(crate::replication::ROOT_SUMMARY.to_owned());
+        crate::performance::record_request("replication/root-summary", None, std::time::Duration::ZERO);
+        Ok(summary)
+    }
+
     /// A local scalar guard reads only `authority_digest`. Keep the full summary's fresh
     /// snapshot, metadata and errors, but avoid cloning/serializing its unused bucket list.
     /// This reduced inventory must not be used to construct a signed peer exchange.
@@ -7920,6 +7954,9 @@ impl Store {
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
         let digests = self.exported_digests(&snapshot)?;
+        if include_buckets {
+            note_full_summary_construction(self);
+        }
         let _timing = time_stage(&self.replication_timers.export);
         // A guard summary stays on this node, so it asks no peer and takes no backfill request.
         let signature_requests = if include_buckets {
@@ -8056,15 +8093,26 @@ impl Store {
         buckets: &[ReplicationInventoryBucket],
         mut archive: Option<&mut crate::wire_archive::ArchiveReaders>,
     ) -> Result<ReplicationExchange> {
+        let _timing = time_stage(&self.replication_timers.export);
+        let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
+        if same
+            && remote.can(crate::replication::ROOT_FIRST)
+            && remote.can(crate::replication::ROOT_SUMMARY)
+            && remote.claim_range_query.is_none()
+        {
+            // Only equality can be answered without proofs. A mismatch must also list
+            // bounded complete ranges so the next request can push the reverse difference.
+            return self.export_replication_root_summary(fleet_id);
+        }
         let digests = {
             let _span = crate::profile::span("replication.digests");
             self.exported_digests(snapshot)?
         };
-        let _timing = time_stage(&self.replication_timers.export);
-        let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
-        if !same && !remote.buckets.is_empty() {
-            // The peer sent range digests, so only differing ranges need identities. Each
-            // answer lists from the next differing range, so every one is listed in turn.
+        note_full_summary_construction(self);
+        if !same && (remote.can(crate::replication::ROOT_FIRST) || !remote.buckets.is_empty()) {
+            // Modern peers always reconcile compactly, even an empty store or a root
+            // probe with deliberately omitted proofs. List bounded live ranges first;
+            // the peer can then push and pull within the same compact round.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
                 compact_replication_difference_turn(
