@@ -187,37 +187,23 @@ async fn a_read_queues_a_close_without_waiting_for_a_held_writer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_queue_keeps_at_most_its_bound_and_drops_the_rest_for_a_later_read() {
+async fn queue_rejects_overflow_and_completion_admits_the_next_page() {
     let store = Arc::new(Store::open_memory("relayed-closes").unwrap());
     let subjects: Vec<String> = (0..QUEUED + BATCH + 10).map(|index| format!("message/held-{index:04}")).collect();
     for (version, subject) in subjects.iter().enumerate() {
         sent(&store, subject, version as u64);
     }
-    let (release, holder) = hold_writer(&store);
-
-    let started = std::time::Instant::now();
-    relayed_closes::queue(&store, subjects.iter().map(|subject| close(subject)).collect()).unwrap();
-    assert!(started.elapsed() < Duration::from_millis(500), "a read waited for the writer: {:?}", started.elapsed());
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // The writer may already hold one batch it took before it reached the held lock.
-    let queued = relayed_closes::queued(&store);
-    assert!(queued <= QUEUED, "the queue grew past its bound: {queued}");
-    assert!(queued >= QUEUED - BATCH, "the queue filled to its bound: {queued}");
-
-    release.send(()).unwrap();
-    holder.join().unwrap();
-    idle(&store).await;
-    let recorded = |store: &Store| {
-        subjects.iter().filter(|subject| relayed_closes::closed(&store.readers.get(), subject).unwrap()).count()
-    };
-    assert_eq!(recorded(&store), QUEUED, "only what the queue kept was recorded");
-
-    // A later read queues the dropped ones again.
-    relayed_closes::queue(&store, subjects.iter().map(|subject| close(subject)).collect()).unwrap();
-    let queued = relayed_closes::queued(&store);
-    assert!(queued <= subjects.len() - QUEUED, "only the dropped ones are queued again: {queued}");
-    idle(&store).await;
-    assert_eq!(recorded(&store), subjects.len());
+    assert!(relayed_closes::queue(&store, subjects.iter().map(|subject| close(subject)).collect()).is_err());
+    assert_eq!(relayed_closes::queued(&store), 0, "overflow admission is atomic");
+    let mut admitted = 0;
+    for page in subjects.chunks(QUEUED) {
+        relayed_closes::queue(&store, page.iter().map(|subject| close(subject)).collect()).unwrap();
+        relayed_closes::wait_idle(&store).await;
+        admitted += page.len();
+        let recorded = subjects.iter().filter(|subject| relayed_closes::closed(&store.readers.get(), subject).unwrap()).count();
+        assert_eq!(recorded, admitted);
+        assert_eq!(relayed_closes::queued(&store), 0);
+    }
 }
 
 /// Wait until the queue is empty and the writer has committed the last batch it took: an empty

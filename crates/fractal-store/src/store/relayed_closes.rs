@@ -12,7 +12,7 @@
 //! revision, an `updated_at`, a message view's status or `message_index`.
 //!
 //! Daemon maintenance discovers closes independently of reads and queues them ([`queue`]).
-//! The queue holds at most [`QUEUED`] closes; a later maintenance sweep retries any dropped close.
+//! The queue holds at most [`QUEUED`] closes; maintenance awaits [`wait_idle`] between pages.
 //! A background writer records at most [`BATCH`] in each transaction, and the selectors fold
 //! them at its commit. Read answers remain in memory and never start or feed this writer.
 //!
@@ -75,13 +75,14 @@ END;
 pub struct Queue {
     pending: parking_lot::Mutex<BTreeMap<String, RelayedClose>>,
     draining: AtomicBool,
+    completed: tokio::sync::Notify,
 }
 
 /// Queue the closes among `closes` that this member would record (of a message it holds open and
 /// has not recorded or closed), and start a background writer when none is draining. A close of
-/// mail not yet here is left for a maintenance sweep after it arrives. This call never waits
-/// for the writer; a close past [`QUEUED`] is dropped for a later sweep to queue again. Without
-/// a runtime to start the writer on, the closes wait for the next maintenance turn that has one.
+/// mail not yet here is rediscovered when its selector arrives. This call never waits
+/// for the writer; admission beyond [`QUEUED`] is an error rather than silently lost work.
+/// Without a runtime, the closes wait for the next maintenance turn that has one.
 pub fn queue(store: &Arc<Store>, closes: Vec<RelayedClose>) -> Result<()> {
     if closes.is_empty() {
         return Ok(());
@@ -107,10 +108,10 @@ pub fn queue(store: &Arc<Store>, closes: Vec<RelayedClose>) -> Result<()> {
     let queue = store.extension::<Queue>();
     {
         let mut pending = queue.pending.lock();
+        let additional = fresh.iter().map(|close| &close.message).collect::<BTreeSet<_>>()
+            .into_iter().filter(|message| !pending.contains_key(*message)).count();
+        anyhow::ensure!(pending.len() + additional <= QUEUED, "relayed close queue capacity exceeded");
         for close in fresh {
-            if pending.len() >= QUEUED && !pending.contains_key(&close.message) {
-                continue;
-            }
             pending.insert(close.message.clone(), close);
         }
     }
@@ -131,6 +132,19 @@ pub fn idle(store: &Store) -> bool {
     pending.is_empty() && !queue.draining.load(Ordering::Acquire)
 }
 
+/// Wait for all admitted closes without a recurring completion timer.
+pub async fn wait_idle(store: &Arc<Store>) {
+    let queue = store.extension::<Queue>();
+    start(store, &queue);
+    loop {
+        let completed = queue.completed.notified();
+        tokio::pin!(completed);
+        completed.as_mut().enable();
+        if idle(store) { return; }
+        completed.await;
+    }
+}
+
 fn start(store: &Arc<Store>, queue: &Queue) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return;
@@ -145,12 +159,13 @@ fn start(store: &Arc<Store>, queue: &Queue) {
         if let Err(error) = workers.spawn_blocking(move || drain(&drained)).await {
             tracing::warn!(%error, "relayed close writer stopped");
             store.extension::<Queue>().draining.store(false, Ordering::Release);
+            store.extension::<Queue>().completed.notify_waiters();
         }
     });
 }
 
-/// Record the queued closes, [`BATCH`] at a time, until the queue is empty. A batch the writer
-/// refuses is dropped; a later maintenance sweep queues its closes again.
+/// Record the queued closes, [`BATCH`] at a time, until the queue is empty.
+/// Writer failures are reported instead of assuming a periodic rediscovery sweep.
 fn drain(store: &Arc<Store>) {
     let queue = store.extension::<Queue>();
     let mut failed = 0;
@@ -166,6 +181,7 @@ fn drain(store: &Arc<Store>) {
             if batch.is_empty() {
                 // Under the lock, so a close queued after this sees no writer and starts one.
                 queue.draining.store(false, Ordering::Release);
+                queue.completed.notify_waiters();
                 drop(pending);
                 if let Some(error) = first_error {
                     tracing::warn!(%error, closes = failed, "could not record relayed closes");
