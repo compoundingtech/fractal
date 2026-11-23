@@ -285,6 +285,8 @@ pub async fn replication_receive(
         finalizer_client_messages_ms = counters.finalizer_time[Finalizer::ClientMessages as usize].as_secs_f64() * 1000.0,
         admit_ms = counters.admit_time.as_secs_f64() * 1000.0,
         project_ms = counters.project_time.as_secs_f64() * 1000.0,
+        gate_wait_ms = counters.gate_wait.as_secs_f64() * 1000.0,
+        discovery_ms = counters.projection_discovery_time.as_secs_f64() * 1000.0,
         receipt_ingest = ?counters.phases[smallclaims::receive_metrics::Stage::ReceiptIngest as usize],
         admission_prelude = ?counters.phases[smallclaims::receive_metrics::Stage::AdmissionPrelude as usize],
         admission = ?counters.phases[smallclaims::receive_metrics::Stage::Admission as usize],

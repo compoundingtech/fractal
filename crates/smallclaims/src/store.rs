@@ -9285,6 +9285,33 @@ impl Store {
         self.project_replication_backlog().map(Some)
     }
 
+    /// Receive-side projection never queues behind another pass. The background
+    /// contention retry drains admitted work even if no further peer page arrives.
+    pub fn try_project_replication_backlog_unless_catching_up(&self) -> Result<Option<bool>> {
+        if self.replication_projection_throttle_remaining().is_some() {
+            self.defer_replication_projection();
+            self.note_projection_contention();
+            return Ok(None);
+        }
+        let gate_wait = std::time::Instant::now();
+        let projecting = self.projection.try_lock();
+        crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
+        let Some(projecting) = projecting else {
+            self.defer_replication_projection();
+            self.note_projection_contention();
+            return Ok(None);
+        };
+        self.project_replication_backlog_owned(
+            projecting,
+            || {},
+            || {},
+            "replication",
+            |line| eprintln!("{line}"),
+            |_| {},
+        )
+        .map(Some)
+    }
+
     /// Time until a catch-up projection may run again, without bypassing its throttle.
     pub fn replication_projection_throttle_remaining(&self) -> Option<std::time::Duration> {
         let since = (now_ms() as u64).saturating_sub(
@@ -9659,15 +9686,27 @@ impl Store {
 
     fn project_replication_backlog_chunks(
         &self,
+        between: impl FnMut(),
+        before_clear: impl FnMut(),
+        phase: &str,
+        log: impl FnMut(&str),
+        progress: impl FnMut(ProjectionProgress),
+    ) -> Result<bool> {
+        let gate_wait = std::time::Instant::now();
+        let projecting = self.projection.lock();
+        crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
+        self.project_replication_backlog_owned(projecting, between, before_clear, phase, log, progress)
+    }
+
+    fn project_replication_backlog_owned(
+        &self,
+        _projecting: ProjectionGuard<'_>,
         mut between: impl FnMut(),
         mut before_clear: impl FnMut(),
         phase: &str,
         mut log: impl FnMut(&str),
         mut progress: impl FnMut(ProjectionProgress),
     ) -> Result<bool> {
-        let gate_wait = std::time::Instant::now();
-        let _projecting = self.projection.lock();
-        crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
         let _timing = time_stage(&self.replication_timers.projection);
         self.defer_replication_projection();
         self.last_replication_projection_unix_ms
@@ -9675,7 +9714,10 @@ impl Store {
         // Finish the backlog observed at entry. New receives can admit more between chunks;
         // their own projection pass will take those up without keeping this one alive forever.
         let target = self.index()?;
-        self.discover_operation_conflicts(target).map_err(|error| {
+        let discovery_started = std::time::Instant::now();
+        let discovery = self.discover_operation_conflicts(target);
+        crate::receive_metrics::projection_discovery_time(discovery_started.elapsed());
+        discovery.map_err(|error| {
             // Discovery lends the same writer before the projection chunk. Preserve its
             // typed contention boundary, health and deferred retry state as for that chunk.
             let error = crate::error::typed(error);
@@ -9997,7 +10039,12 @@ impl Store {
                         continue;
                     }
                     if self.verdicts_due.swap(false, Ordering::AcqRel) {
-                        self.judge_claims_slice(true).map_err(|error| {
+                        let discovery_started = std::time::Instant::now();
+                        let verdicts = self.judge_claims_slice(true);
+                        crate::receive_metrics::projection_discovery_time(
+                            discovery_started.elapsed(),
+                        );
+                        verdicts.map_err(|error| {
                             self.verdicts_due.store(true, Ordering::Release);
                             let error = crate::error::typed(error);
                             if error.is_sqlite_contention() {

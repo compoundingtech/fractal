@@ -150,7 +150,7 @@ async fn replication_receive_logs_one_summary_with_expected_fields_on_success_an
 }
 
 #[tokio::test]
-async fn replication_receive_final_drain_failure_retains_marker_and_retry_commits_rebuild() {
+async fn empty_receive_retains_failed_final_drain_until_explicit_projection_commits_rebuild() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     crate::api::published_lists::tests_shared_client_v0_tests::publish(
@@ -213,6 +213,9 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
         .with_writer(logs.clone()).finish();
     async {
         for retry in [false, true] {
+            if retry {
+                assert!(state.store.project_replication_backlog().unwrap());
+            }
             // Projection failures do not reject already admitted peer data.
             let _ = replication_receive(
                 State(state.clone()), axum::http::HeaderMap::new(), Json(request.clone()),
@@ -245,15 +248,9 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
                 .filter(|line| line.contains("replication receive summary")).collect();
             assert_eq!(summaries.len(), if retry { 2 } else { 1 }, "{captured}");
             let summary = summaries.last().unwrap();
-            if retry {
-                assert!(summary.contains("outcome=ok"), "{summary}");
-                assert!(summary.contains("projection_stage=-"), "{summary}");
-                assert!(summary.contains("projection_chunks=1"), "{summary}");
-            } else {
-                assert!(summary.contains("outcome=internal"), "{summary}");
-                assert!(summary.contains("projection_stage=final-drain"), "{summary}");
-                assert!(summary.contains("projection_chunks=0"), "{summary}");
-            }
+            assert!(summary.contains(if retry { "outcome=ok" } else { "outcome=deferred" }), "{summary}");
+            assert!(summary.contains("projection_stage=-"), "{summary}");
+            assert!(summary.contains("projection_chunks=0"), "{summary}");
         }
     }.with_subscriber(subscriber).await;
 }
@@ -398,4 +395,71 @@ fn duplicate_only_receive_skips_backlog_validation_and_projection() {
     assert_eq!(counters.admit_time, Duration::ZERO, "backlog validation must not run");
     assert_eq!(counters.project_time, Duration::ZERO, "duplicate receipts must stay cheap");
     assert_eq!(counters.envelopes_prepared, 0);
+}
+
+#[tokio::test]
+async fn empty_receive_does_not_wait_for_projection_gate_or_drain_deferred_work() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = Store::open_memory("empty-source").unwrap();
+    let exchange = source.export_replication_summary("018f6f0d-4a5d-7b8c-9d0e-123456789abc").unwrap();
+    let request = ReplicationReceiveRequest {
+        peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
+        round_trip_ms: None, carrier: Default::default(), authenticated_member_key: None,
+    };
+    // Exercise both a healthy empty receive and one with admitted work waiting.
+    for deferred in [false, true] {
+        if deferred {
+            let nonempty = deadline_request(&state.store);
+            let gate = state.store.projection.lock();
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                replication_receive(State(state.clone()), Default::default(), Json(nonempty)),
+            ).await;
+            drop(gate);
+            let response = result.expect("seed receive waited for the projection gate").unwrap().0;
+            assert!(response.receipt.received > 0);
+            assert!(state.store.replication_projection_deferred());
+        }
+        let frontier = state.store.projection_frontier().unwrap();
+        let generation = state.store.projection_contention_generation();
+        let gate = state.store.projection.lock();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            replication_receive(State(state.clone()), Default::default(), Json(request.clone())),
+        ).await;
+        drop(gate);
+        let response = result.expect("empty receive waited for the projection gate").unwrap().0;
+        assert_eq!(response.receipt.received, 0);
+        assert_eq!(state.store.projection_frontier().unwrap(), frontier);
+        assert_eq!(state.store.projection_contention_generation(), generation);
+        assert_eq!(state.store.replication_projection_deferred(), deferred);
+    }
+}
+
+#[tokio::test]
+async fn nonempty_receive_admits_without_waiting_for_projection_gate() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let request = deadline_request(&state.store);
+    let frontier = state.store.projection_frontier().unwrap();
+    let generation = state.store.projection_contention_generation();
+    let gate = state.store.projection.lock();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        replication_receive(State(state.clone()), Default::default(), Json(request)),
+    ).await;
+    drop(gate);
+    let response = result.expect("nonempty receive waited for the projection gate").unwrap().0;
+    assert!(response.receipt.received > 0);
+    assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
+    assert!(state.store.index().unwrap() > frontier);
+    assert_eq!(state.store.projection_frontier().unwrap(), frontier);
+    assert!(state.store.replication_projection_deferred());
+    assert!(state.store.projection_contention_generation() > generation);
+    let visible: i64 = state.store.readers.get().query_row(
+        "SELECT COUNT(*) FROM events WHERE subject='resource/receive-deadline' AND kind='resource.observed'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(visible, 0);
 }
