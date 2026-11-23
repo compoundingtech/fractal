@@ -215,7 +215,6 @@ pub(super) async fn run_message(
                 receipt.idempotency_key,
                 plain_error(&error)));
             }
-            print_message_receipt(&receipt, json_output)?;
             // Acceptance is durable even if the optional status read fails. Never turn a
             // queued send into an error that invites a resend, or change its JSON receipt.
             if !json_output
@@ -233,8 +232,10 @@ pub(super) async fn run_message(
                     _ => phase,
                 };
                 eprintln!("delivery: {state}: {reason}");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
             }
-            Ok(())
+            // Keep the ID last even when callers merge stderr into stdout before tail -1.
+            print_message_receipt(&receipt, json_output)
         }
         MessageCommand::Status(args) => {
             notice_ignored_read_actor(args.ignored_actor.as_deref());

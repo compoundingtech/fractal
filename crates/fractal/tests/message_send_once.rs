@@ -79,6 +79,7 @@ struct Losses {
     delivery_reads_hold: AtomicBool,
     delivery_reads_malformed: AtomicBool,
     release_delivery: Notify,
+    held_delivery_finished: Notify,
 }
 
 /// Forward every request on `front` to the daemon on `back`, and close the connection without a
@@ -104,6 +105,8 @@ async fn lossy_proxy(
                     losses.delivery_reads.fetch_add(1, Ordering::SeqCst);
                     if losses.delivery_reads_hold.load(Ordering::SeqCst) {
                         losses.release_delivery.notified().await;
+                        drop(caller);
+                        losses.held_delivery_finished.notify_one();
                         return;
                     }
                     if losses.delivery_reads_malformed.load(Ordering::SeqCst) {
@@ -171,33 +174,26 @@ async fn read_request(stream: &mut UnixStream) -> Vec<u8> {
 
 /// Run the st CLI against `socket` with none of this process's st environment, so a harness
 /// running the suite lends it no seat identity, projection root or incarnation.
-async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
-    let binary = test_bin!("fractal-fixture").to_path_buf();
-    let socket = socket.to_path_buf();
-    let env = env
-        .iter()
-        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-        .collect::<Vec<_>>();
-    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-    tokio::task::spawn_blocking(move || {
-        let mut command = fractal_daemon::test_support::command(binary);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("ST_") || name.starts_with("ST3_") {
-                command.env_remove(name.as_ref());
-            }
+fn st_command(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> tokio::process::Command {
+    let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
+    command.kill_on_drop(true);
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy();
+        if name.starts_with("ST_") || name.starts_with("ST3_") {
+            command.env_remove(name.as_ref());
         }
-        command
-            .envs(env)
-            .arg("--endpoint")
-            .arg(socket)
-            .args(["--daemon-wait", "0"])
-            .args(args)
-            .output()
-            .unwrap()
-    })
-    .await
-    .unwrap()
+    }
+    command
+        .envs(env.iter().copied())
+        .arg("--endpoint")
+        .arg(socket)
+        .args(["--daemon-wait", "0"])
+        .args(args);
+    command
+}
+
+async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    st_command(socket, env, args).output().await.unwrap()
 }
 
 /// Run the st CLI as [`st`] does, with `input` on its stdin.
@@ -758,9 +754,14 @@ async fn human_send_reports_current_delivery_but_status_failure_keeps_acceptance
         losses.delivery_reads_hold.store(outcome == "timeout", Ordering::SeqCst);
         losses.delivery_reads_malformed.store(outcome == "malformed", Ordering::SeqCst);
         let proxy = lossy_proxy(front.clone(), back, losses.clone()).await;
+        let started = std::time::Instant::now();
         let sent = tokio::time::timeout(
-            std::time::Duration::from_secs(10), st(&front, &[], &SEND[1..]),
+            std::time::Duration::from_secs(5), st(&front, &[], &SEND[1..]),
         ).await.expect("an optional status read must not hold the send open");
+        if outcome == "timeout" {
+            assert!(started.elapsed() < std::time::Duration::from_secs(5),
+                "the optional two-second status read took {:?}", started.elapsed());
+        }
         assert!(sent.status.success(), "{}", stderr(&sent));
         assert_eq!(message_count(&store), 1);
         assert_eq!(losses.delivery_reads.load(Ordering::SeqCst), 1);
@@ -790,9 +791,41 @@ async fn human_send_reports_current_delivery_but_status_failure_keeps_acceptance
         assert_eq!(message_count(&store), 1);
         // The timeout fixture never answers until the command has returned and assertions finish.
         losses.release_delivery.notify_waiters();
+        if outcome == "timeout" {
+            tokio::time::timeout(std::time::Duration::from_secs(1), losses.held_delivery_finished.notified())
+                .await.expect("the held status request must close at test cleanup");
+        }
         proxy.abort();
         server.abort();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_send_keeps_the_id_last_when_stderr_is_merged_into_stdout() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    for retry in [false, true] {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let mut reader = UnixStream::from_std(reader).unwrap();
+        let stderr: std::os::fd::OwnedFd = writer.try_clone().unwrap().into();
+        let stdout: std::os::fd::OwnedFd = writer.into();
+        let mut command = st_command(&socket, &[], &SEND[1..]);
+        command.stdout(std::process::Stdio::from(stdout)).stderr(std::process::Stdio::from(stderr));
+        let mut child = command.spawn().unwrap();
+        drop(command);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await.expect("a send must finish after its bounded status read").unwrap();
+        assert!(status.success());
+        let mut merged = String::new();
+        reader.read_to_string(&mut merged).await.unwrap();
+        let subject = store.messages(None, true).unwrap()[0].subject.clone();
+        assert!(merged.contains("delivery: queued: "), "{merged}");
+        assert_eq!(merged.lines().last(), Some(subject.as_str()), "{merged}");
+        assert_eq!(merged.contains("confirmed on retry"), retry, "{merged}");
+        assert_eq!(message_count(&store), 1);
+    }
+    server.abort();
 }
 
 /// `--body -` reads a reply's text from stdin, as it does a send's, and a body that is empty or
