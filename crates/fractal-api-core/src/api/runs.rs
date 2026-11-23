@@ -346,6 +346,18 @@ pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
     report["mission_reads"] = state.store.mission_read_work();
     report["mail_objectives"] = json!(crate::mail_delivery_objectives::work_counts(&state.store));
     report["file_watch_work"] = crate::incremental::file_watch_work::snapshot();
+    report["agent_roster_work"] = state.store.agent_roster_work();
+    report["agent_roster_presentation_work"] = super::roster_presentation::work(&state.store);
+    report["summary_work"] = state.store.summary_work();
+    let attention = state.store.attention_list_folds();
+    report["attention_work"] = json!({
+        "cards_presented": attention.get("card/present").copied().unwrap_or(0),
+        "cards_enriched": attention.get("card/resource").copied().unwrap_or(0),
+        "subjects_rebuilt": attention.get("source/subject").copied().unwrap_or(0),
+        "groups_rebuilt": attention.get("source/group").copied().unwrap_or(0),
+        "prompt_reads": attention.get("card/prompt").copied().unwrap_or(0),
+        "fleet_agent_inputs": attention.get("fleet/agent").copied().unwrap_or(0),
+    });
     // Lane bursts held and asked now, and those dropped since start because their holder stopped
     // renewing (docs/st3/seat-lanes.md, "Bursts"): a holder that crashes shows here. With them, the
     // room admission keeps from starts for a burst, as it last judged a seat's start.

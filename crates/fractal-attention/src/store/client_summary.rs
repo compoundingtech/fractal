@@ -1,6 +1,8 @@
 //! The part of `store::client_summary` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
+use crate::SummaryListStore;
+use crate::store::summary_list::SummaryMission;
 pub use fractal_seats::store::client_summary::*;
 
 type SummaryRunHeader = (String, String, String, String, String, String);
@@ -14,6 +16,12 @@ pub trait ClientSummaryStore {
             &self,
             at: u128,
         ) -> Result<(Vec<fractal_client::Mission>, Option<u128>)>;
+    fn client_summary_missions_for(
+        &self,
+        at: u128,
+        selected: Option<&[String]>,
+    ) -> Result<(Vec<fractal_client::Mission>, Option<u128>)>;
+    fn client_summary_counts(&self, at: u128, cut: u64, active: impl Fn(&fractal_client::Mission) -> bool) -> Result<usize>;
 }
 
 impl ClientSummaryStore for Store {
@@ -22,9 +30,19 @@ impl ClientSummaryStore for Store {
             &self,
             at: u128,
         ) -> Result<(Vec<fractal_client::Mission>, Option<u128>)> {
+        self.client_summary_missions_for(at, None)
+    }
+
+    fn client_summary_missions_for(
+        &self,
+        at: u128,
+        selected: Option<&[String]>,
+    ) -> Result<(Vec<fractal_client::Mission>, Option<u128>)> {
         let c = self.readers.get();
         // Published definitions with no run always read NotStarted and cannot be active.
-        let candidates: Vec<String> = c.prepare_cached(
+        let candidates: Vec<String> = if let Some(selected) = selected {
+            selected.to_vec()
+        } else { c.prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h90d7e998a875 owner=fractal_attention::store::client_summary TODO=trace-statement-and-value-representation */ "WITH states AS (
                 SELECT mission_id,MAX(status='running') running,MAX(status='standing') standing
                 FROM mission_runs GROUP BY mission_id
@@ -45,24 +63,25 @@ impl ClientSummaryStore for Store {
                         AND CAST(latest.updated_at_unix_ms AS INTEGER)>=?1))
              ORDER BY states.mission_id")?
             .query_map([at.saturating_sub(RECENTLY_ENDED_MS) as i64], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        // A conservative deadline includes all worker leases: a selected person's
-        // effective state can depend on an origin outside the selected preview.
-        let lease: Option<String> = c.query_row(
-            "SELECT CAST(MIN(CAST(lease_expires_at_unix_ms AS INTEGER)) AS TEXT) FROM step_runs WHERE CAST(lease_expires_at_unix_ms AS INTEGER)>CAST(?1 AS INTEGER)",
-            [at.to_string()], |r| r.get(0))?;
-        let mut deadline = lease.map(|s| s.parse::<u128>()).transpose()?;
-        // The tuple comparison cannot seek this expression index in SQLite.
-        // Separate equal-width and longer-width ranges skip historical claims.
-        for sql in [FUTURE_ASK_SAME_WIDTH, FUTURE_ASK_LONGER] {
-            let next: Option<String> = c
-                .query_row(/* sqlite-large-value: allow-for-now lv-h8df79105754b owner=fractal_attention::store::client_summary TODO=trace-statement-and-value-representation */ sql, [at.to_string()], |r| r.get(0))
-                .optional()?;
-            if let Some(next) = next {
-                let next = next.parse::<u128>()?;
-                deadline = Some(deadline.map_or(next, |held| held.min(next)));
+            .collect::<rusqlite::Result<_>>()? };
+        let mut deadline = if selected.is_some() {
+            // Reuse the collection's exact per-mission clock fence for keyed maintenance.
+            self.mission_collection_valid_until(&candidates, at)?
+        } else {
+            // Native reads retain the lean global deadline seeks.
+            let lease: Option<String> = c.query_row(
+                "SELECT CAST(MIN(CAST(lease_expires_at_unix_ms AS INTEGER)) AS TEXT) FROM step_runs WHERE CAST(lease_expires_at_unix_ms AS INTEGER)>CAST(?1 AS INTEGER)",
+                [at.to_string()], |r| r.get(0))?;
+            let mut deadline = lease.map(|s| s.parse::<u128>()).transpose()?;
+            for sql in [FUTURE_ASK_SAME_WIDTH, FUTURE_ASK_LONGER] {
+                let next: Option<String> = c.query_row(sql, [at.to_string()], |r| r.get(0)).optional()?;
+                if let Some(next) = next {
+                    let next = next.parse::<u128>()?;
+                    deadline = Some(deadline.map_or(next, |held| held.min(next)));
+                }
             }
-        }
+            deadline
+        };
         // Declared flags (keep-open steps, system missions) come from each current definition.
         let definitions = self
             .mission_definitions_for_ids(&candidates)?
@@ -121,6 +140,67 @@ impl ClientSummaryStore for Store {
             result.push(serde_json::from_value(json!({"id":mission_subject,"system":crate::mission::is_system(&mission_subject, definition),"kind":"mission","revision":"summary-input","updated_at":crate::client_values::client_timestamp(0),"title":mission,"state":state,"mission_revision":"summary-input","runs":details.iter().map(|r|r["id"].clone()).collect::<Vec<_>>(),"run_details":details}))?);
         }
         Ok((result, deadline))
+    }
+
+    fn client_summary_counts(&self, at: u128, cut: u64, active: impl Fn(&fractal_client::Mission) -> bool) -> Result<usize> {
+        self.with_summary_sources(|sources| {
+            let c = self.readers.get();
+            let after = sources.missions_cut.unwrap_or(0);
+            let mut changed = BTreeSet::new();
+            // Consume changes once by subject, rather than scanning dependencies per mission.
+            let subjects: Vec<(String, String)> = c.prepare_cached(
+                "SELECT subject,kind FROM claims WHERE store_index>?1 AND store_index<=?2
+                 UNION SELECT json_extract(body,'$.fields.origin_step'),kind FROM claims
+                 WHERE store_index>?1 AND store_index<=?2 AND kind LIKE 'work.person-%'
+                   AND json_extract(body,'$.fields.origin_step') IS NOT NULL")?
+                .query_map(params![after, cut], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (subject, kind) in subjects {
+                if matches!(kind.as_str(), "harness.observed" | "harness.diagnostic"
+                    | "harness.activity" | "harness.usage" | "work.progress" | "work.submitted") {
+                    continue;
+                }
+                if let Some(mission) = subject.strip_prefix("mission/") {
+                    changed.insert(mission.to_owned());
+                }
+                let missions: Vec<String> = c.prepare_cached(
+                    "SELECT mission_id FROM mission_runs WHERE id=?2
+                     UNION SELECT r.mission_id FROM run_generations g
+                       JOIN mission_runs r ON r.id=g.run_id WHERE g.id=?3
+                     UNION SELECT r.mission_id FROM step_runs s JOIN mission_runs r ON r.id=s.run_id
+                     WHERE s.subject=?1
+                     UNION SELECT r.mission_id FROM claims a JOIN step_runs s
+                       ON s.subject=json_extract(a.body,'$.fields.origin_step')
+                       JOIN mission_runs r ON r.id=s.run_id
+                     WHERE ?4 AND a.kind='work.person-asked' AND a.actor=?1")?
+                    .query_map(params![&subject, subject.strip_prefix("mission-run/"),
+                        subject.strip_prefix("run-generation/"),
+                        crate::store::published_list::decides_asks(&kind)], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                changed.extend(missions);
+            }
+            if sources.missions_cut.is_none() {
+                changed.extend(c.prepare_cached("SELECT DISTINCT mission_id FROM mission_runs")?
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?);
+            }
+            changed.extend(sources.missions.iter().filter(|(_, m)|
+                m.evaluated_at > at || m.valid_until.is_some_and(|until| at >= until))
+                .map(|(id, _)| id.clone()));
+            for id in changed {
+                let (missions, valid_until) = self.client_summary_missions_for(at, Some(std::slice::from_ref(&id)))?;
+                let is_active = missions.first().is_some_and(&active);
+                if let Some(previous) = sources.missions.insert(id, SummaryMission {
+                    evaluated_at: at, valid_until, active: is_active,
+                }) {
+                    sources.active_missions -= usize::from(previous.active);
+                }
+                sources.active_missions += usize::from(is_active);
+                sources.work.mission_subject_rebuilds += 1;
+            }
+            sources.missions_cut = Some(cut);
+            Ok(sources.active_missions)
+        })
     }
 }
 
