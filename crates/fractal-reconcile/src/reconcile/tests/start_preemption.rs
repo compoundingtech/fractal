@@ -524,6 +524,7 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
     assert_eq!(store.selected_desired_token(subject).unwrap(), token);
     let member = stale.member.as_ref().unwrap().clone();
     let prepared = start_jobs::PreparedStart {
+        workspace_admission: None,
         subject: stale,
         launch_member: member.clone(),
         member,
@@ -1756,6 +1757,7 @@ async fn missing_or_repaired_original_request_prevents_real_native_start() {
             .environment
             .insert(start_jobs::OPERATION_ENV.into(), id.clone());
         let prepared = start_jobs::PreparedStart {
+            workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
             subject: desired.clone(),
             launch_member: member.clone(),
             member,
@@ -1855,11 +1857,16 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
         // Exercise NativeRuntime's producer boundary directly through the durable jobs.
         // The ordinary exec member preparation wraps its command in the Fractal driver;
         // a missing command inside that wrapper is a later readiness failure.
-        let dispatch = |desired: &DesiredSubject| {
+        let dispatch = |desired: &DesiredSubject, missing_cwd: bool| {
             let member = desired.member.as_ref().unwrap().clone();
+            let mut launch_member = member.clone();
+            if missing_cwd {
+                launch_member.cwd = root.path().join("missing-cwd").display().to_string();
+            }
             reconciler.dispatch_start(start_jobs::PreparedStart {
+                workspace_admission: None,
                 subject: desired.clone(),
-                launch_member: member.clone(),
+                launch_member,
                 member,
                 reason: "native producer closure regression".into(),
                 request: None,
@@ -1874,11 +1881,9 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
                 resume_operation: None,
             })
         };
-        let cwd = if failure == "missing-cwd" {
-            root.path().join("missing-cwd")
-        } else {
-            root.path().to_owned()
-        };
+        // Keep the admitted workspace valid; only the backend launch cwd is
+        // missing, so this exercises NativeRuntime's producer-closure boundary.
+        let cwd = root.path().to_owned();
         let program = if failure == "missing-program" {
             format!("missing-native-program-{}", uuid::Uuid::new_v4())
         } else {
@@ -1897,7 +1902,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             .desired_subjects_named(&["exec/example/rejected".into()])
             .unwrap()
             .remove(0);
-        let rejected = dispatch(&desired);
+        let rejected = dispatch(&desired, failure == "missing-cwd");
         assert!(rejected.is_err(), "{failure}: {rejected:?}");
         assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
         let result: String = store
@@ -1942,7 +1947,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             .desired_subjects_named(&["exec/example/rejected".into()])
             .unwrap()
             .remove(0);
-        assert!(dispatch(&desired).unwrap());
+        assert!(dispatch(&desired, false).unwrap());
         assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
         let observation = runtime
             .observe_exec(&desired.member.as_ref().unwrap().runtime_id)
@@ -2015,6 +2020,7 @@ fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
     let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry), &pty));
     let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
     let result = reconciler.dispatch_start(start_jobs::PreparedStart {
+        workspace_admission: None,
         subject: desired.clone(), launch_member: member.clone(), member,
         reason: "foreign PTY prelaunch regression".into(), request: None,
         desired_token: reconciler.launch_token(&desired.subject).unwrap(),
@@ -2339,6 +2345,7 @@ exit 1
             format!("{}:${{PATH}}", self.root.path().join("bin").display()),
         );
         self.reconciler.dispatch_start(start_jobs::PreparedStart {
+            workspace_admission: None,
             subject: self.desired.clone(),
             member,
             launch_member,
@@ -2590,6 +2597,7 @@ fn native_scoped_pidless_start_retires_only_after_its_producer_scope_is_empty() 
         let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
             Arc::new(Notify::new()));
         assert!(reconciler.dispatch_start(start_jobs::PreparedStart {
+            workspace_admission: None,
             subject: desired.clone(), launch_member: member.clone(), member,
             reason: "native pidless scope regression".into(), request: None,
             desired_token: reconciler.launch_token(&desired.subject).unwrap(),
@@ -2631,6 +2639,79 @@ fn native_scoped_pidless_start_retires_only_after_its_producer_scope_is_empty() 
 }
 
 #[test]
+fn recovered_queued_workspace_refusals_retire_without_entering_the_backend() {
+    for kind in ["agent", "exec"] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.db"), "node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\n{kind} \"example/recovery\" {{ workspace {:?}; command \"true\" }}",
+            workspace.display().to_string(),
+        ), "refused-recovery");
+        let desired = store.desired_subjects_named(&[format!("{kind}/example/recovery")])
+            .unwrap().remove(0);
+        let member = desired.member.as_ref().unwrap().clone();
+        let prepared = start_jobs::PreparedStart {
+            workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
+            subject: desired.clone(),
+            launch_member: member.clone(),
+            member,
+            reason: "workspace refusal recovery regression".into(),
+            request: None,
+            desired_token: "refused-recovery".into(),
+            selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+            placement_evidence: Vec::new(),
+            start_request: String::new(),
+            start_request_receipt: None,
+            control_request: None,
+            control_request_receipt: None,
+            expected_incarnation: None,
+            resume_operation: None,
+        };
+        let mut operation = crate::store::RuntimeStartOperation {
+            id: uuid::Uuid::now_v7().to_string(),
+            subject: desired.subject.clone(),
+            owner: "previous-owner".into(),
+            body: serde_json::to_value(prepared).unwrap(),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        assert_eq!(store.admit_runtime_start(&mut operation, 2).unwrap(),
+            crate::store::RuntimeStartAdmission::Admitted);
+        std::fs::remove_dir(&workspace).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none(),
+            "{kind}: missing workspace must apply the queued cancellation in the same pass");
+        assert!(runtime.starts.lock().unwrap().is_empty());
+        let result: String = store.readers.get().query_row(
+            "SELECT result FROM local_runtime_starts WHERE id=?1",
+            [&operation.id], |row| row.get(0),
+        ).unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["closure_kind"], "never-dispatched");
+        assert_eq!(result["producer_closed"], true);
+        let (diagnostic_kind, field) = if kind == "agent" {
+            ("harness.diagnostic", "code")
+        } else {
+            ("runtime.reconcile-decision", "decision")
+        };
+        let diagnostic = store.latest_observation(&desired.subject, diagnostic_kind)
+            .unwrap().unwrap();
+        assert_eq!(diagnostic.body["fields"][field], "start-workspace-refused");
+    }
+}
+
+#[test]
 fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
     for kind in ["before-backend", "native-rejection", "never-dispatched"] {
         for change in [
@@ -2653,6 +2734,7 @@ fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
             let runtime_id = member.runtime_id.clone();
             let id = uuid::Uuid::now_v7().to_string();
             let prepared = start_jobs::PreparedStart {
+                workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
                 subject: desired.clone(),
                 member: member.clone(),
                 launch_member: member,
