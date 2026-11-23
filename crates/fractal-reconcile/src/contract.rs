@@ -46,11 +46,11 @@ fn prepared(store: &Store, desired: &DesiredSubject) -> Result<MemberSpec> {
 /// `None` while one is still measured off the caller.
 struct Measures<'a> {
     environment: &'a EnvironmentMeasure,
-    identity: &'a IdentityMeasure,
+    identity: &'a IdentityMeasure<'a>,
 }
 
 type EnvironmentMeasure = dyn Fn(&BTreeMap<String, String>, &Path) -> Result<Option<BTreeMap<String, String>>>;
-type IdentityMeasure = dyn Fn(&Path, &dyn Fn(&str) -> Result<std::path::PathBuf>, &dyn Fn(&Path) -> Result<()>) -> Result<Option<String>>;
+type IdentityMeasure<'a> = dyn Fn(&Path, &dyn Fn(&str) -> Result<std::path::PathBuf>, &dyn Fn(&Path) -> Result<()>) -> Result<Option<String>> + 'a;
 
 pub(crate) fn capture(store: &Store, desired: &DesiredSubject, member: &MemberSpec, running: bool) -> Result<Contract> {
     let blocking = Measures {
