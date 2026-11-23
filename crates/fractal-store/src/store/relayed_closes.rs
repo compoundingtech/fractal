@@ -40,7 +40,7 @@ pub struct RelayedClose {
 /// The table, before any projection backfill folds it in.
 pub fn create_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h6f8aadc01a2e owner=fractal_store::store::relayed_closes TODO=chunk-or-reference-variable-columns */ "
+        /* sqlite-large-value: allow-for-now lv-h13d721aa10a3 owner=fractal_store::store::relayed_closes TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_relayed_message_closes (
     message TEXT PRIMARY KEY,
     host TEXT NOT NULL,
@@ -103,14 +103,14 @@ pub fn queue(store: &Arc<Store>, closes: Vec<RelayedClose>) -> Result<()> {
         let transaction = connection.transaction()?;
         {
             let mut insert = transaction.prepare_cached(
-                "INSERT OR IGNORE INTO local_relayed_message_closes_pending(message,host,receipt,closed_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h3ec2840a2231 owner=fractal_store::store::relayed_closes TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_relayed_message_closes_pending(message,host,receipt,closed_at_unix_ms)
                  SELECT ?1,?2,?3,?4
                  WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1 AND closed=0)
                    AND NOT EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=?1)
                    AND NOT EXISTS(SELECT 1 FROM local_message_marks WHERE message=?1 AND kind='message.closed')",
             )?;
             for close in closes {
-                insert.execute(params![close.message, close.host, close.receipt, close.closed_at_unix_ms as i64])?;
+                insert.execute(/* sqlite-large-value: allow-for-now lv-h567511a3ece2 owner=fractal_store::store::relayed_closes TODO=trace-statement-and-value-representation */ params![close.message, close.host, close.receipt, close.closed_at_unix_ms as i64])?;
             }
         }
         let pending: usize = transaction.query_row(
@@ -232,7 +232,7 @@ fn drain(store: &Arc<Store>) {
             let transaction = connection.transaction()?;
             record_transaction(&transaction, &batch)?;
             for close in &batch {
-                transaction.execute("DELETE FROM local_relayed_message_closes_pending WHERE message=?1", [&close.message])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-h7aafd4dc03b2 owner=fractal_store::store::relayed_closes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_message_closes_pending WHERE message=?1", [&close.message])?;
             }
             transaction.commit()?;
             Ok(true)

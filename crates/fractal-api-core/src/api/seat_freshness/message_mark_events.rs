@@ -64,8 +64,8 @@ fn page(store: &Store, feed: &FeedState, cursor: Option<&str>, max: usize) -> an
     // must not turn a validated cursor into a silently truncated page.
     let connection = connection.unchecked_transaction()?;
     let newest = message_marks::event_position(&connection)?;
-    let oldest: u64 = connection.prepare_cached("SELECT COALESCE(MIN(id),0) FROM local_message_mark_events")?.query_row([], |row| row.get(0))?;
-    let (scope_oldest, scope_newest): (u64, u64) = connection.prepare_cached("SELECT (SELECT COALESCE(MIN(id),0) FROM local_message_mark_scope_events), (SELECT COALESCE(MAX(id),0) FROM local_message_mark_scope_events)")?.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let oldest: u64 = connection.prepare_cached("SELECT COALESCE(MIN(id),0) FROM local_message_mark_events")?.query_row(/* sqlite-large-value: allow-for-now lv-h834172c1c620 owner=fractal_api_core::api::seat_freshness::message_mark_events TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+    let (scope_oldest, scope_newest): (u64, u64) = connection.prepare_cached("SELECT (SELECT COALESCE(MIN(id),0) FROM local_message_mark_scope_events), (SELECT COALESCE(MAX(id),0) FROM local_message_mark_scope_events)")?.query_row(/* sqlite-large-value: allow-for-now lv-hae39a164406d owner=fractal_api_core::api::seat_freshness::message_mark_events TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?)))?;
     let stream = messages_shard::mailbox_reads::position(store)?;
     let previous = cursor.and_then(|cursor| serde_json::from_str::<Cursor>(cursor).ok());
     let valid = previous.as_ref().is_some_and(|cursor| cursor.epoch == feed.epoch

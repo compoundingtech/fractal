@@ -6,7 +6,7 @@ pub const WORK_TABLE: &str = "local_relayed_close_work";
 pub const READ_TABLE: &str = "local_relayed_close_reads";
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(r#"
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd381702fffe4 owner=fractal_store::store::relayed_close_work TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_relayed_close_work(
  kind TEXT NOT NULL,key TEXT NOT NULL,after_key TEXT NOT NULL DEFAULT '',PRIMARY KEY(kind,key)
 ) WITHOUT ROWID;
@@ -102,14 +102,14 @@ pub fn enqueue_messages(store: &Store, messages: &[String]) -> Result<()> {
     let mut connection = store.connection.write_background();
     let transaction = connection.transaction()?;
     for message in messages {
-        transaction.execute("INSERT OR REPLACE INTO local_relayed_close_work(kind,key) SELECT 'message',?1 WHERE EXISTS(SELECT 1 FROM local_relayed_close_candidates WHERE message=?1)", [message])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h04813fc705c7 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO local_relayed_close_work(kind,key) SELECT 'message',?1 WHERE EXISTS(SELECT 1 FROM local_relayed_close_candidates WHERE message=?1)", [message])?;
     }
     transaction.commit()?;
     Ok(())
 }
 
 pub fn enqueue_host(store: &Store, host: &str) -> Result<()> {
-    store.connection.write_background().execute("INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('host',?1)", [host])?;
+    store.connection.write_background().execute(/* sqlite-large-value: allow-for-now lv-h1bfe02f34e0e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('host',?1)", [host])?;
     Ok(())
 }
 
@@ -117,14 +117,14 @@ pub fn enqueue_host(store: &Store, host: &str) -> Result<()> {
 /// candidates. Do not restart an already-paged compatibility turn.
 pub fn enqueue_legacy_host(store: &Store, host: &str) -> Result<()> {
     store.connection.write_background().execute(
-        "INSERT OR IGNORE INTO local_relayed_close_work(kind,key) SELECT 'legacy_host',?1 WHERE EXISTS(SELECT 1 FROM local_relayed_close_candidates WHERE host=?1)",
+        /* sqlite-large-value: allow-for-now lv-h07dc02309570 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_relayed_close_work(kind,key) SELECT 'legacy_host',?1 WHERE EXISTS(SELECT 1 FROM local_relayed_close_candidates WHERE host=?1)",
         [host],
     )?;
     Ok(())
 }
 
 pub fn enqueue_recipient(store: &Store, recipient: &str) -> Result<()> {
-    store.connection.write_background().execute("INSERT OR REPLACE INTO local_relayed_close_work(kind,key) SELECT 'recipient',?1 WHERE EXISTS(SELECT 1 FROM local_relayed_close_candidates WHERE recipient=?1)", [recipient])?;
+    store.connection.write_background().execute(/* sqlite-large-value: allow-for-now lv-ha848c1f3c46a owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO local_relayed_close_work(kind,key) SELECT 'recipient',?1 WHERE EXISTS(SELECT 1 FROM local_relayed_close_candidates WHERE recipient=?1)", [recipient])?;
     Ok(())
 }
 
@@ -164,29 +164,29 @@ fn discovery_at(connection: &Connection, origin: &str, limit: usize) -> Result<V
             _ => None,
         };
         let message = if let Some(next) = next {
-            connection.execute("UPDATE local_relayed_close_work SET after_key=?3 WHERE kind=?1 AND key=?2", params![kind,key,next])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h6ef96883e201 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_relayed_close_work SET after_key=?3 WHERE kind=?1 AND key=?2", params![kind,key,next])?;
             if kind == "host" {
-                connection.execute("INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('recipient',?1)", [&next])?;
+                connection.execute(/* sqlite-large-value: allow-for-now lv-hda91c3c6a37d owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('recipient',?1)", [&next])?;
                 continue;
             }
             // Consume the recipient or legacy-host leaf immediately within the page budget.
-            connection.execute("DELETE FROM local_relayed_close_work WHERE kind='message' AND key=?1", [&next])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-hbd15d41e6b80 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_work WHERE kind='message' AND key=?1", [&next])?;
             next
         } else {
-            connection.execute("DELETE FROM local_relayed_close_work WHERE kind=?1 AND key=?2", params![kind,key])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h89468d545472 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_work WHERE kind=?1 AND key=?2", params![kind,key])?;
             if kind != "message" { continue; }
             key
         };
         let key = message;
-        connection.execute("DELETE FROM local_relayed_close_candidates WHERE message=?1", [&key])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h31cfb9ea580b owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_candidates WHERE message=?1", [&key])?;
         let candidate: Option<(String,String)> = connection.query_row(
             "SELECT selector.recipient,desired.member FROM local_client_message_selectors_v1 AS selector JOIN desired ON desired.subject=selector.recipient WHERE selector.subject=?1 AND selector.born_index>=0 AND selector.retired_index IS NULL AND selector.closed=0 AND desired.member IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=?1) LIMIT 1", [&key], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
         if let Some((recipient,member)) = candidate {
             if let Ok(member) = serde_json::from_str::<crate::model::MemberSpec>(&member) {
                 if member.host != origin {
-                    connection.execute("INSERT INTO local_relayed_close_candidates(message,recipient,host) VALUES(?1,?2,?3)", params![key,recipient,member.host])?;
+                    connection.execute(/* sqlite-large-value: allow-for-now lv-h313b145b0c4e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_candidates(message,recipient,host) VALUES(?1,?2,?3)", params![key,recipient,member.host])?;
                     connection.execute(
-                        "INSERT INTO local_relayed_close_reads(message,host) VALUES(?1,?2) ON CONFLICT(message) DO UPDATE SET host=excluded.host,next_attempt_ms=0,attempts=0 WHERE ?3!='legacy_host' OR local_relayed_close_reads.host IS NOT excluded.host",
+                        /* sqlite-large-value: allow-for-now lv-h4b61be01a35e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_reads(message,host) VALUES(?1,?2) ON CONFLICT(message) DO UPDATE SET host=excluded.host,next_attempt_ms=0,attempts=0 WHERE ?3!='legacy_host' OR local_relayed_close_reads.host IS NOT excluded.host",
                         params![key,member.host,kind],
                     )?;
                     result.push((key,recipient,member.host));
@@ -194,7 +194,7 @@ fn discovery_at(connection: &Connection, origin: &str, limit: usize) -> Result<V
                 }
             }
         }
-        connection.execute("DELETE FROM local_relayed_close_reads WHERE message=?1", [&key])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h7416c9aa5f89 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_reads WHERE message=?1", [&key])?;
     }
     Ok(result)
 }
@@ -215,7 +215,7 @@ pub fn read_succeeded(store: &Store, messages: &[String]) -> Result<()> {
     let mut connection = store.connection.write_background();
     let transaction = connection.transaction()?;
     for message in messages {
-        transaction.execute("DELETE FROM local_relayed_close_reads WHERE message=?1", [message])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h610eea19054a owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_reads WHERE message=?1", [message])?;
     }
     transaction.commit()?;
     Ok(())
@@ -234,7 +234,7 @@ pub fn read_failed(store: &Store, messages: &[String], now_ms: u64) -> Result<()
             let delay = (1_000u64 << attempts.min(6)).min(60_000);
             let deadline = now_ms.saturating_add(delay).min(i64::MAX as u64) as i64;
             transaction.execute(
-                "UPDATE local_relayed_close_reads SET attempts=?2,next_attempt_ms=?3 WHERE message=?1",
+                /* sqlite-large-value: allow-for-now lv-hb86dd5ae4c6f owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_relayed_close_reads SET attempts=?2,next_attempt_ms=?3 WHERE message=?1",
                 params![message,attempts.saturating_add(1).min(6),deadline],
             )?;
         }
