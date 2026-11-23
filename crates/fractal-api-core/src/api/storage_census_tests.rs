@@ -16,8 +16,8 @@ fn seed(state: &AppState, from: usize, to: usize) {
     }).unwrap().unwrap();
 }
 
-// daemon_cost's whole-process SQLite counters, warm-up, and minimum of three samples. The
-// retained history grows 10x while kind cardinality and the response's row count stay fixed.
+// Measure only the snapshot worker's SQLite work, excluding concurrent tests.
+// Retained history grows 10x while kind cardinality and response row count stay fixed.
 #[tokio::test]
 async fn storage_census_route_has_constant_sqlite_cost_as_retained_history_grows() {
     use smallclaims::sqlite::work;
@@ -25,17 +25,15 @@ async fn storage_census_route_has_constant_sqlite_cost_as_retained_history_grows
     let state = super::tests::state(root.path());
     state.store.storage_census.checkpoint_enabled.set(false).unwrap();
     async fn measured(state: &AppState) -> (work::SqliteWork, Value) {
-        let _ = operations::storage_status(State(state.clone())).await.unwrap();
-        let mut best = None;
-        for _ in 0..3 {
-            let before = work::total();
-            let report = operations::storage_status(State(state.clone())).await.unwrap().0;
-            let cost = work::total() - before;
-            if best.as_ref().is_none_or(|(previous, _): &(work::SqliteWork, Value)| cost.vm_steps < previous.vm_steps) {
-                best = Some((cost, report));
-            }
-        }
-        best.unwrap()
+        let state = state.clone();
+        blocking_store(move || {
+            let _ = operations::storage_status_snapshot(&state)?;
+            let scope = work::SqliteWorkScope::start();
+            let report = operations::storage_status_snapshot(&state)?;
+            let cost = scope.finish();
+            assert!(cost.statements > 0, "census measurement must include its SQLite reads");
+            Ok((cost, report))
+        }).await.unwrap()
     }
     seed(&state, 0, 100);
     let (small, before) = measured(&state).await;
