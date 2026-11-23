@@ -150,7 +150,7 @@ async fn replication_receive_logs_one_summary_with_expected_fields_on_success_an
 }
 
 #[tokio::test]
-async fn empty_receive_retains_failed_final_drain_until_explicit_projection_commits_rebuild() {
+async fn empty_receive_retains_stale_final_drain_until_maintenance_commits_rebuild() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     crate::api::published_lists::tests_shared_client_v0_tests::publish(
@@ -346,7 +346,7 @@ fn receive_deadline_after_receipt_finishes_followups_and_retry_projects_exactly_
     smallclaims::store::set_thread_clock(Some(now));
     let metrics = smallclaims::receive_metrics::RequestMetrics::new("deadline-after-receipt".into());
     let (response, _, _) = replication_receive_phases(
-        &state.store, &request, metrics.clone(), Some(deadline), || {
+        &state.store, &request, metrics.clone(), Some(deadline), std::time::Instant::now(), || {
             // Move the clock only after the atomic receipt has returned its writer.
             smallclaims::store::set_thread_clock(Some(deadline));
         },
@@ -359,7 +359,7 @@ fn receive_deadline_after_receipt_finishes_followups_and_retry_projects_exactly_
         let (retry, _, _) = replication_receive_phases(
             &state.store, &request,
             smallclaims::receive_metrics::RequestMetrics::new("deadline-retry".into()),
-            None, || {},
+            None, std::time::Instant::now(), || {},
         ).unwrap();
         assert_eq!(retry.receipt.received, 0);
         assert!(retry.receipt.duplicate > 0);
@@ -374,19 +374,19 @@ fn receive_deadline_after_receipt_finishes_followups_and_retry_projects_exactly_
 }
 
 #[test]
-fn duplicate_only_receive_skips_backlog_validation_and_projection() {
+fn healthy_duplicate_only_receive_skips_backlog_validation_and_projection() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let request = deadline_request(&state.store);
     let first_metrics = smallclaims::receive_metrics::RequestMetrics::new("duplicate-first".into());
     let (first, _, _) = replication_receive_phases(
-        &state.store, &request, first_metrics.clone(), None, || {},
+        &state.store, &request, first_metrics.clone(), None, std::time::Instant::now(), || {},
     ).unwrap();
     assert!(first.receipt.received > 0);
     assert!(first_metrics.snapshot().envelopes_admitted > 0);
     let metrics = smallclaims::receive_metrics::RequestMetrics::new("duplicate-only".into());
     let (retry, _, _) = replication_receive_phases(
-        &state.store, &request, metrics.clone(), None, || {},
+        &state.store, &request, metrics.clone(), None, std::time::Instant::now(), || {},
     ).unwrap();
     assert_eq!(retry.receipt.received, 0);
     assert_eq!(retry.receipt.signatures, 0);
@@ -398,7 +398,7 @@ fn duplicate_only_receive_skips_backlog_validation_and_projection() {
 }
 
 #[tokio::test]
-async fn empty_receive_does_not_wait_for_projection_gate_or_drain_deferred_work() {
+async fn empty_receive_tries_deferred_projection_without_waiting_for_held_gate() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let source = Store::open_memory("empty-source").unwrap();
@@ -435,6 +435,25 @@ async fn empty_receive_does_not_wait_for_projection_gate_or_drain_deferred_work(
         assert_eq!(state.store.projection_contention_generation(), generation);
         assert_eq!(state.store.replication_projection_deferred(), deferred);
     }
+    // Admission already reserved the maintenance episode. Further quiet traffic
+    // cannot keep increasing its generation or replay its deferred graph.
+    let generation = state.store.projection_contention_generation();
+    for _ in 0..4 {
+        let response = replication_receive(
+            State(state.clone()), Default::default(), Json(request.clone()),
+        ).await.unwrap().0;
+        assert_eq!(response.receipt.received, 0);
+        assert!(state.store.replication_projection_deferred());
+        assert_eq!(state.store.projection_contention_generation(), generation);
+    }
+    state.store.project_replication_backlog().unwrap();
+    assert!(!state.store.replication_projection_deferred());
+    assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
+    let visible: i64 = state.store.readers.get().query_row(
+        "SELECT COUNT(*) FROM events WHERE subject='resource/receive-deadline' AND kind='resource.observed'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(visible, 1);
 }
 
 #[tokio::test]
@@ -465,7 +484,7 @@ async fn nonempty_receive_admits_without_waiting_for_projection_gate() {
 }
 
 #[tokio::test]
-async fn routed_receive_defers_behind_held_gate_and_duplicate_does_not_retry_projection() {
+async fn routed_receive_defers_behind_held_gate_and_duplicate_rearms_projection_retry() {
     use tower::ServiceExt as _;
 
     let root = tempfile::tempdir().unwrap();
@@ -497,7 +516,7 @@ async fn routed_receive_defers_behind_held_gate_and_duplicate_does_not_retry_pro
         assert_eq!(state.store.projection_frontier().unwrap(), frontier);
         let current = state.store.projection_contention_generation();
         if duplicate {
-            assert_eq!(current, generation, "duplicate receive must not enter projection");
+            assert_eq!(current, generation, "duplicate must coalesce into the active episode");
         } else {
             assert!(current > generation, "new admission must arm background retry");
             generation = current;
@@ -507,4 +526,87 @@ async fn routed_receive_defers_behind_held_gate_and_duplicate_does_not_retry_pro
     state.store.project_replication_backlog().unwrap();
     assert!(!state.store.replication_projection_deferred());
     assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn replication_wake_and_peer_failure_coalesce_active_retry_without_waiting_for_gate() {
+    for peer_failure in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let request = deadline_request(&state.store);
+        let frontier = state.store.projection_frontier().unwrap();
+        let gate = state.store.projection.lock();
+        let (receipt, _, _) = replication_receive_phases(
+            &state.store, &request,
+            smallclaims::receive_metrics::RequestMetrics::new("held-gate-seed".into()),
+            None, std::time::Instant::now(), || {},
+        ).unwrap();
+        assert!(receipt.receipt.received > 0);
+        assert!(state.store.replication_projection_deferred());
+        state.store.projection_retry_episode_started();
+        let generation = state.store.projection_contention_generation();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            if peer_failure {
+                replication_peer_failure(State(state.clone()), Json(ReplicationPeerFailureRequest {
+                    peer: request.peer.clone(),
+                    status: "down".into(),
+                    error: "connection closed".into(),
+                    carrier: None,
+                    failure: None,
+                })).await
+            } else {
+                replication_wake(State(state.clone())).await
+            }
+        }).await;
+        // Release even on timeout so a regressed blocking worker can finish.
+        drop(gate);
+        let response = result.expect("replication maintenance waited for the projection gate").unwrap().0;
+        if peer_failure {
+            assert_eq!(response["recorded"], true);
+        } else {
+            assert_eq!(response["projection_attempted"], true);
+            assert_eq!(response["projected"], false);
+        }
+        assert!(state.store.replication_projection_deferred());
+        assert_eq!(state.store.projection_frontier().unwrap(), frontier);
+        assert_eq!(state.store.projection_contention_generation(), generation);
+        state.store.project_replication_backlog().unwrap();
+        assert!(!state.store.replication_projection_deferred());
+        let visible: i64 = state.store.readers.get().query_row(
+            "SELECT COUNT(*) FROM events WHERE subject='resource/receive-deadline' AND kind='resource.observed'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(visible, 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_receive_recovers_deferred_healthy_frontier_after_episode_cooldown() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = Store::open_memory("healthy-source").unwrap();
+    let fleet = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    state.store.bind_fleet(fleet).unwrap();
+    state.store.record_transport_observation("healthy-source", "up", None, None).unwrap();
+    state.store.project_replication_backlog().unwrap();
+    assert!(!state.store.replication_projection_needs_recovery().unwrap());
+    let frontier = state.store.projection_frontier().unwrap();
+    let gate = state.store.projection.lock();
+    assert_eq!(state.store.try_project_replication_backlog_unless_catching_up().unwrap(), None);
+    drop(gate);
+    assert!(state.store.replication_projection_deferred());
+    state.store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
+    tokio::time::advance(Duration::from_secs(120)).await;
+    let exchange = source.export_replication_summary(fleet).unwrap();
+    let request = ReplicationReceiveRequest {
+        peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
+        round_trip_ms: None, carrier: Default::default(), authenticated_member_key: None,
+    };
+    let response = replication_receive(
+        State(state.clone()), Default::default(), Json(request),
+    ).await.unwrap().0;
+    assert_eq!(response.receipt.received, 0);
+    assert!(!state.store.replication_projection_deferred());
+    assert_eq!(state.store.projection_frontier().unwrap(), frontier);
+    assert!(!state.store.replication_projection_needs_recovery().unwrap());
 }

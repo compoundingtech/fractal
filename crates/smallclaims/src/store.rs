@@ -210,6 +210,13 @@ impl ProjectionDiagnosticRate {
 }
 
 #[derive(Default)]
+struct ProjectionRetryEpisode {
+    active: bool,
+    ended: Option<std::time::Instant>,
+    logged_failure: bool,
+}
+
+#[derive(Default)]
 struct ProjectionDiagnosticState {
     slots: Vec<(String, String, ProjectionDiagnosticRate)>,
     overflow: ProjectionDiagnosticRate,
@@ -470,6 +477,26 @@ mod projection_failure_diagnostic_tests {
             assert_eq!(value["suppressed_errors"], suppressed);
             assert_eq!(value["rate_bucket_overflow"], false);
         }
+    }
+
+    #[test]
+    fn projection_retry_episode_logs_one_error_even_after_diagnostic_interval() {
+        let store = Store::open_memory("node", Arc::new(runtime::Plain)).unwrap();
+        let error = FractalError::new("internal", "projection failed")
+            .with_detail("projection_stage", "decode");
+        let mut lines = Vec::new();
+        let now = std::time::Instant::now();
+        store.projection_retry_episode_started();
+        store.log_projection_failure(&error, "replication", 0, 1, &mut |line| lines.push(line.to_owned()));
+        store.projection_diagnostics.lock().unwrap().slots[0].2.last_logged =
+            Some(now - PROJECTION_DIAGNOSTIC_INTERVAL);
+        store.log_projection_failure(&error, "replication", 0, 1, &mut |line| lines.push(line.to_owned()));
+        assert_eq!(lines.len(), 1);
+        store.projection_retry_episode_finished(now);
+        assert!(!store.request_quiet_projection_retry(now + std::time::Duration::from_secs(119)));
+        assert!(store.request_quiet_projection_retry(now + std::time::Duration::from_secs(120)));
+        store.log_projection_failure(&error, "replication", 0, 1, &mut |line| lines.push(line.to_owned()));
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
@@ -924,9 +951,9 @@ pub struct Store {
     replication_projection_state: AtomicU64,
     /// Only limits new error detail lines; it never caches projection results or decisions.
     projection_diagnostics: Mutex<ProjectionDiagnosticState>,
-    /// Advances only for numeric SQLite contention, so the daemon can coalesce a bounded
-    /// retry episode without treating arbitrary deferred work as contention.
+    /// Coalesces deferred request work into bounded daemon retry episodes.
     projection_contention_generation: AtomicU64,
+    projection_retry_episode: Mutex<ProjectionRetryEpisode>,
     /// When this process last attempted projection of replicated claims, in Unix milliseconds.
     pub last_replication_projection_unix_ms: AtomicU64,
     /// For a shard, the default store whose fleet identity and membership it uses: a shard
@@ -1493,6 +1520,7 @@ impl Store {
             replication_projection_state: AtomicU64::new(u64::from(projection_pending)),
             projection_diagnostics: Mutex::new(ProjectionDiagnosticState::default()),
             projection_contention_generation: AtomicU64::new(0),
+            projection_retry_episode: Mutex::default(),
             last_replication_projection_unix_ms: AtomicU64::new(0),
             member_key: std::sync::RwLock::new(None),
             keyring: crate::principal::Keyring::default(),
@@ -9285,8 +9313,27 @@ impl Store {
         self.project_replication_backlog().map(Some)
     }
 
-    /// Receive-side projection never queues behind another pass. The background
-    /// contention retry drains admitted work even if no further peer page arrives.
+    /// Quiet requests may restart maintenance only after the preceding episode's
+    /// longest backoff. Stale graph failures never replay inline on this path.
+    pub fn try_project_replication_backlog_after_quiet_exchange(
+        &self,
+        now: std::time::Instant,
+    ) -> Result<Option<bool>> {
+        if !self.request_quiet_projection_retry(now) {
+            return Ok(None);
+        }
+        if self.replication_projection_needs_recovery()? {
+            return Ok(None);
+        }
+        let result = self.try_project_replication_backlog_unless_catching_up();
+        if matches!(result, Ok(Some(true))) && !self.replication_projection_deferred() {
+            self.projection_retry_episode_finished(now);
+        }
+        result
+    }
+
+    /// Request-side projection never queues behind another pass. Background
+    /// maintenance drains admitted work even if no further peer page arrives.
     pub fn try_project_replication_backlog_unless_catching_up(&self) -> Result<Option<bool>> {
         if self.replication_projection_throttle_remaining().is_some() {
             self.defer_replication_projection();
@@ -9301,7 +9348,8 @@ impl Store {
             self.note_projection_contention();
             return Ok(None);
         };
-        self.project_replication_backlog_owned(
+        let generation = self.projection_contention_generation();
+        let result = self.project_replication_backlog_owned(
             projecting,
             || {},
             || {},
@@ -9309,7 +9357,15 @@ impl Store {
             |line| eprintln!("{line}"),
             |_| {},
         )
-        .map(Some)
+        .map(Some);
+        if !matches!(&result, Ok(Some(true)))
+            && self.projection_contention_generation() == generation
+        {
+            // Both returned errors and unhealthy Ok(false) retain the frontier.
+            // Start one bounded retry episode; never spin in the request.
+            self.note_projection_contention();
+        }
+        result
     }
 
     /// Time until a catch-up projection may run again, without bypassing its throttle.
@@ -9370,7 +9426,40 @@ impl Store {
         self.projection_contention_generation.load(Ordering::Acquire)
     }
 
+    pub fn projection_retry_episode_started(&self) {
+        let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+        if !episode.active {
+            episode.active = true;
+            episode.logged_failure = false;
+        }
+    }
+
+    pub fn projection_retry_episode_finished(&self, now: std::time::Instant) {
+        let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+        if episode.active {
+            episode.active = false;
+            episode.ended = Some(now);
+        }
+    }
+
+    /// Reserve one quiet retry episode; repeated exchanges cannot extend its budget.
+    pub fn request_quiet_projection_retry(&self, now: std::time::Instant) -> bool {
+        self.defer_replication_projection();
+        let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+        if episode.active || episode.ended.is_some_and(|ended|
+            now.saturating_duration_since(ended) < std::time::Duration::from_secs(120))
+        {
+            return false;
+        }
+        episode.active = true;
+        episode.logged_failure = false;
+        drop(episode);
+        self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
     fn note_projection_contention(&self) {
+        self.projection_retry_episode_started();
         self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
         crate::receive_metrics::contended();
     }
@@ -9562,6 +9651,13 @@ impl Store {
             .get("projection_stage")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        // Keep one error detail per maintenance episode, not per quiet exchange.
+        if {
+            let episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+            episode.active && episode.logged_failure
+        } {
+            return;
+        }
         let emission = {
             let mut state = self
                 .projection_diagnostics
@@ -9572,6 +9668,11 @@ impl Store {
         // Release the diagnostic mutex before formatting or invoking the caller's log sink.
         // The caller still holds its existing projection transaction at this boundary.
         if let Some(emission) = emission {
+            let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+            if episode.active {
+                episode.logged_failure = true;
+            }
+            drop(episode);
             log(&projection_failure_log_line(
                 phase,
                 error.code,
