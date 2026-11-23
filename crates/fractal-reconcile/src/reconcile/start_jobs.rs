@@ -2,7 +2,7 @@
 use crate::RuntimeStartsStore;
 use super::*;
 use crate::store::RuntimeStartOperation;
-use super::host_executor::{StartAdmission, StartCommand, StartReceipt};
+use super::host_executor::{StartCommand, StartReceipt};
 use serde::{Deserialize, Serialize};
 use std::sync::Condvar;
 
@@ -296,11 +296,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             operation.body["stale_failed_start"] = Value::from(pending.id.clone());
         }
         let operation = match StartCommand::admit(&self.store, operation, MAX_START_JOBS)? {
-            StartAdmission::Refused => {
+            None => {
                 self.store.finish_invocation_trace(&format!("invocation/{id}"), false);
                 return Ok(false);
             }
-            StartAdmission::Accepted(operation) => operation,
+            Some(operation) => operation,
         };
         if let Some(lease) = activation_lease {
             self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
@@ -365,7 +365,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let command = StartCommand::recovered(operation, self.start_jobs.owner.clone())?;
         let prepared = command.prepared();
         // Recovered queued operations reacquire admission before any launch work.
-        let activation_lease = match self.retain_start_activation_lease(&operation.id, &prepared) {
+        let activation_lease = match self.retain_start_activation_lease(&operation.id, prepared) {
             Ok(lease) => lease,
             Err(error) => {
                 if prepared.workspace_admission.is_none() {
@@ -440,7 +440,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let _lock = lock;
             let _launch_permit = launch_permit;
             let _activation_lease = activation_lease;
-            let outcome = command.execute(&store, runtime.as_ref(), &host_observations, timeouts);
+            let outcome = command.dispatch(&store, runtime.as_ref(), &host_observations, timeouts);
             let persisted = match outcome {
                 Ok(StartReceipt::CaptureRetry) => {
                     capture_retries.lock().unwrap_or_else(PoisonError::into_inner)

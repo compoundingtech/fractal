@@ -2970,12 +2970,10 @@ async fn host_executor_duplicate_command_retains_the_original_durable_receipt() 
     let starts = runtime.inner.starts.lock().unwrap().len();
     let _lock = store.try_runtime_start_lock(subject).unwrap().unwrap();
     let command = host_executor::StartCommand::recovered(&completed, completed.owner.clone()).unwrap();
+    assert!(host_executor::StartCommand::admit(&store, completed, start_jobs::MAX_START_JOBS)
+        .unwrap().is_none());
     assert!(matches!(
-        host_executor::StartCommand::admit(&store, completed, start_jobs::MAX_START_JOBS).unwrap(),
-        host_executor::StartAdmission::Refused,
-    ));
-    assert!(matches!(
-        command.execute(&store, runtime.as_ref(), &reconciler.host_observations, 0).unwrap(),
+        command.dispatch(&store, runtime.as_ref(), &reconciler.host_observations, 0).unwrap(),
         host_executor::StartReceipt::Persisted,
     ));
     assert_eq!(runtime.inner.starts.lock().unwrap().len(), starts);
@@ -3052,10 +3050,8 @@ async fn host_executor_cancel_before_durable_admission_preserves_failed_start_cu
         evidence: vec![restart.id.clone()], expected_subject: None,
         idempotency_key: Some("executor-cancel-before-admission".into()),
     }).unwrap();
-    assert!(matches!(
-        host_executor::StartCommand::admit(&store, replacement, start_jobs::MAX_START_JOBS).unwrap(),
-        host_executor::StartAdmission::Refused,
-    ));
+    assert!(host_executor::StartCommand::admit(&store, replacement, start_jobs::MAX_START_JOBS)
+        .unwrap().is_none());
     let retained = store.runtime_start_for(subject).unwrap().unwrap();
     assert_eq!(retained.id, failed_id);
     assert!(!retained.cleanup_verified);

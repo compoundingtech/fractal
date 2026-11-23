@@ -19,10 +19,6 @@ pub(super) struct StartCommand {
     prepared: PreparedStart,
 }
 
-pub(super) enum StartAdmission {
-    Accepted(RuntimeStartOperation),
-    Refused,
-}
 
 pub(super) enum StartReceipt {
     /// Capture did not enter a backend. The planner owns the next injected-clock deadline.
@@ -37,13 +33,13 @@ impl StartCommand {
         store: &Store,
         mut operation: RuntimeStartOperation,
         limit: usize,
-    ) -> Result<StartAdmission> {
+    ) -> Result<Option<RuntimeStartOperation>> {
         match store.admit_runtime_start(&mut operation, limit)? {
             RuntimeStartAdmission::SeatBusy | RuntimeStartAdmission::Superseded => {
-                Ok(StartAdmission::Refused)
+                Ok(None)
             }
             RuntimeStartAdmission::Admitted | RuntimeStartAdmission::CapacityBusy => {
-                Ok(StartAdmission::Accepted(operation))
+                Ok(Some(operation))
             }
         }
     }
@@ -62,7 +58,7 @@ impl StartCommand {
 
     /// Backend entry is a durable, single-use fence. Replayed commands cannot spawn twice,
     /// and revocation before entry closes the producer without touching a physical runtime.
-    pub(super) fn execute<R: RuntimeControl>(
+    pub(super) fn dispatch<R: RuntimeControl>(
         self,
         store: &Store,
         runtime: &R,
@@ -219,7 +215,7 @@ impl<'a> StopCommand<'a> {
 
     /// Signal-only completion is not retirement proof. Only the native exact-generation
     /// retirement path may produce that proof; the graph retains its existing receipt writer.
-    pub(super) fn execute<R: RuntimeControl>(
+    pub(super) fn dispatch<R: RuntimeControl>(
         self,
         runtime: &R,
         observations: &host_observations::HostObservations,
