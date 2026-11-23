@@ -527,6 +527,10 @@ fn wake_demand_before_idle_stop_cancels_without_touching_runtime() {
 fn idle_resume_completion_requires_incarnation_channel_readiness() {
     let seat = Seat::new_with_owned_publication(false);
     let (suspend, token, member) = seat.finish_suspend();
+    let state = seat.root.path().join("state");
+    let payload = crate::seat_snapshot::directory(&state, &suspend);
+    std::fs::create_dir_all(&payload).unwrap();
+    std::fs::write(payload.join("payload.tar"), b"snapshot").unwrap();
     let request = seat.suspension_claim("runtime.action.requested",
         json!({"action":"resume"}), vec![token, suspend], None);
     seat.suspension_claim("runtime.action.succeeded",
@@ -536,22 +540,64 @@ fn idle_resume_completion_requires_incarnation_channel_readiness() {
     suspension.cause = Some("idle".into());
     let mut observation = seat.runtime.observation.lock().unwrap().clone().unwrap();
     observation.status = "running".into();
-    let reconciler = Reconciler::new(seat.store.clone(), seat.runtime.clone(),
+    let mut reconciler = Reconciler::new(seat.store.clone(), seat.runtime.clone(),
         "amber".into(), Arc::new(Notify::new()));
+    reconciler.driver_state_dir = state.join("drivers");
     let desired = seat.desired();
     reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
     assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_none());
+    assert!(payload.exists(), "verification must retain the snapshot");
     // A ready receipt from another incarnation is not the resumed driver's channel.
     seat.append("harness.diagnostic", json!({
         "driver":"omp", "code":"omp-channel-ready", "incarnation_id":"other", "reason":"confirmed"
     }));
     reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
     assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_none());
+    assert!(payload.exists(), "another incarnation cannot release the snapshot");
     seat.append("harness.diagnostic", json!({
         "driver":"omp", "code":"omp-channel-ready", "incarnation_id":"original-1", "reason":"confirmed"
     }));
     reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
     assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_some());
+    assert!(!payload.exists(), "durably verified resume must release the snapshot");
+}
+
+#[test]
+fn suspended_store_sweep_preserves_manual_and_failed_resume_holds_after_reopen() {
+    let mut seat = Seat::new_with_owned_publication(false);
+    let (suspend, token, _) = seat.finish_suspend();
+    let state = seat.root.path().join("state");
+    let payload = crate::seat_snapshot::directory(&state, &suspend);
+    let orphan = crate::seat_snapshot::directory(&state, "aborted-write");
+    for dir in [&payload, &orphan] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("payload.tmp"), b"interrupted").unwrap();
+    }
+    seat.reopen();
+    crate::seat_snapshot::sweep(&state, &seat.store).unwrap();
+    assert!(payload.exists(), "manual suspension remains referenced");
+    assert!(!orphan.exists());
+    let resume = seat.suspension_claim("runtime.action.requested",
+        json!({"action":"resume"}), vec![token, suspend], None);
+    crate::seat_snapshot::sweep(&state, &seat.store).unwrap();
+    assert!(payload.exists(), "restoration still references the original snapshot");
+    seat.suspension_claim("runtime.action.failed", json!({
+        "action":"resume", "code":"start-failed", "reason":"provider unavailable"
+    }), vec![resume.id.clone()], Some(crate::suspension::resume_failed_key(&resume.id)));
+    seat.reopen();
+    crate::seat_snapshot::sweep(&state, &seat.store).unwrap();
+    assert!(payload.exists(), "a failed resume retains the manual suspension");
+    let source = format!("version 2\nstop {SUBJECT:?}\n");
+    let input = crate::graph::parse_internal_intent(&source, "amber").unwrap();
+    let preview = seat.store.mission(&input, crate::model::IntentInput {
+        kdl:source, source_name:None,
+    }).unwrap();
+    seat.store.apply_as(&input, &preview.subject_tokens, "discard-snapshot",
+        Some("person/operator")).unwrap();
+    seat.reopen();
+    crate::seat_snapshot::sweep(&state, &seat.store).unwrap();
+    crate::seat_snapshot::sweep(&state, &seat.store).unwrap();
+    assert!(!payload.exists(), "an explicitly discarded hold is reclaimable");
 }
 
 #[test]
