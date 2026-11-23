@@ -1,6 +1,7 @@
 use crate::{AttentionListStore, SummaryListStore};
 use crate::AttentionStore;
 use crate::MissionsStore;
+use crate::MissionListStore;
 use crate::MissionsStoreCore;
 use crate::RevisionSeatsStore;
 use super::*;
@@ -358,6 +359,11 @@ pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
         "groups_rebuilt": attention.get("source/group").copied().unwrap_or(0),
         "prompt_reads": attention.get("card/prompt").copied().unwrap_or(0),
         "fleet_agent_inputs": attention.get("fleet/agent").copied().unwrap_or(0),
+    });
+    report["published_list_work"] = json!({
+        "work": { "refolded": state.store.published_work_list().refolded() },
+        "missions": { "refolded": state.store.published_missions_list().refolded() },
+        "runtimes": { "refolded": state.store.published_runtime_list().refolded() },
     });
     // Lane bursts held and asked now, and those dropped since start because their holder stopped
     // renewing (docs/st3/seat-lanes.md, "Bursts"): a holder that crashes shows here. With them, the
