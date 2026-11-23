@@ -44,6 +44,8 @@ pub enum Indicator {
     Cpu { idle_min_minutes: u64, load_max_cores: f64 },
     /// The store's pages in use and their daily growth.
     Database,
+    /// Host-local available filesystem bytes, sampled by the daemon every minute.
+    DiskFree { host: String, path: String, floor_bytes: u64 },
     /// Open projection divergence faults.
     Divergence,
     /// Work that starts and stops in claims, one sample per subject.
@@ -80,6 +82,7 @@ impl Indicator {
             Self::WriterHold => "writer-hold",
             Self::Cpu { .. } => "cpu",
             Self::Database => "database",
+            Self::DiskFree { .. } => "disk-free",
             Self::Divergence => "divergence",
             Self::Interval(_) => "interval",
             Self::Count(_) => "count",
@@ -290,6 +293,7 @@ impl Objective {
                 | Indicator::GithubReadyToMerged(_)
                 | Indicator::Ratio(_)
                 | Indicator::Gauge(_)
+                | Indicator::DiskFree { .. }
                 | Indicator::Native { .. }
         ) && self.name.contains('/')
     }
@@ -459,6 +463,28 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
         }
     };
     Ok(match kind {
+        "disk-free" => {
+            allow(&["host", "path", "floor-bytes"])?;
+            let host = single("host")?;
+            let path = single("path")?;
+            if host.is_empty() || host.contains('/') || !valid_native_name(&host) {
+                return Err(fail("disk-free needs a canonical host name".into()));
+            }
+            if !std::path::Path::new(&path).is_absolute() || path.contains('\0') {
+                return Err(fail("disk-free path must be absolute and contain no NUL".into()));
+            }
+            let floors: Vec<_> = kids.iter().filter(|kid| kid["name"] == "floor-bytes").collect();
+            let [floor] = floors.as_slice() else {
+                return Err(fail("disk-free needs one floor-bytes".into()));
+            };
+            no_children(floor, fail)?;
+            only_properties(floor, &[], fail)?;
+            let floor_bytes = match arguments(floor) {
+                [value] => value.as_u64().filter(|value| *value > 0 && *value <= 9_007_199_254_740_991),
+                _ => None,
+            }.ok_or_else(|| fail("disk-free floor-bytes must be a positive safe integer".into()))?;
+            Indicator::DiskFree { host, path, floor_bytes }
+        }
         "github-merged-count" | "github-ready-to-merged" => {
             allow(&["source", "roster", "timezone", "cut", "measurement", "author-login"])?;
             let source = single("source")?;
@@ -985,13 +1011,24 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
     if let Some(missing) = required.iter().find(|stat| objective.target(stat, false).is_none()) {
         return Err(fail(format!("a `{kind}` indicator needs target `{missing}`")));
     }
-    let numeric = matches!(objective.indicator, Indicator::Ratio(_) | Indicator::Gauge(_));
+    let numeric = matches!(objective.indicator, Indicator::Ratio(_) | Indicator::Gauge(_) | Indicator::DiskFree { .. });
     let native = matches!(objective.indicator, Indicator::Native { .. });
     if native && (objective.budget.is_some() || objective.window.is_some() || !objective.targets.is_empty()) {
         return Err(fail("a native binding inherits targets, window and budget; none may be overridden".into()));
     }
     if numeric && (objective.budget.is_none() || !objective.targets.is_empty() || objective.window.is_some()) {
         return Err(fail("ratio and gauge need `budget` and take no diagnostic `target` or `window`".into()));
+    }
+    if let Indicator::DiskFree { host, .. } = &objective.indicator {
+        if !objective.name.starts_with(&format!("disk/{host}/")) {
+            return Err(fail("disk-free objective name must be disk/HOST/NAME for its authored host".into()));
+        }
+        let budget = objective.budget.as_ref().expect("numeric budget checked above");
+        let supported = [300_000, 1_800_000, 3_600_000, 7_200_000, 21_600_000, 2_592_000_000];
+        if [budget.horizon_ms, budget.fast.long_ms, budget.fast.short_ms, budget.slow.long_ms, budget.slow.short_ms]
+            .iter().any(|width| !supported.contains(width)) {
+            return Err(fail("disk-free budget windows must be native ledger windows: 5m, 30m, 1h, 2h, 6h or 30d".into()));
+        }
     }
     if objective.budget.is_some() && matches!(objective.indicator, Indicator::Interval(_) | Indicator::Count(_)) {
         return Err(fail("interval and count take `window` and targets, not `budget`".into()));

@@ -429,3 +429,41 @@ fn github_author_selector_is_canonical_and_absence_means_all_authors() {
         assert!(one(&GITHUB_MEASURED.replace("measurement \"only\"", &format!("measurement \"only\"\n    author-login \"{invalid}\""))).is_err());
     }
 }
+
+const DISK_FREE: &str = r#"objective "disk/worker/free" {
+  about "Available bytes above the authored admission floor"
+  indicator "disk-free" {
+    host "worker"
+    path "/"
+    floor-bytes 1000000000
+  }
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+}"#;
+
+#[test]
+fn disk_free_reads_authored_host_path_floor_and_budget() {
+    let objective = one(DISK_FREE).unwrap();
+    assert!(objective.declarable());
+    assert_eq!(objective.indicator, Indicator::DiskFree {
+        host: "worker".into(), path: "/".into(), floor_bytes: 1_000_000_000,
+    });
+    assert_eq!(objective.budget.unwrap().allowance, 0.05);
+}
+
+#[test]
+fn disk_free_rejects_ambiguous_or_unusable_policy() {
+    for source in [
+        DISK_FREE.replace("host \"worker\"", "host \"worker\"; host \"other\""),
+        DISK_FREE.replace("path \"/\"", "path \"relative\""),
+        DISK_FREE.replace("floor-bytes 1000000000", "floor-bytes 0"),
+        DISK_FREE.replace("floor-bytes 1000000000", "floor-bytes 1.5"),
+        DISK_FREE.replace("disk/worker/free", "disk/other/free"),
+        DISK_FREE.replace("long=\"1h\"", "long=\"3h\""),
+        DISK_FREE.replace("indicator \"disk-free\"", "indicator \"future-disk-free\""),
+    ] {
+        assert!(one(&source).is_err(), "{source}");
+    }
+}

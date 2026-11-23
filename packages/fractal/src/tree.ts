@@ -86,12 +86,12 @@ const scheduleMismatch: Record<'mission' | 'schedule', string> = {
   schedule: 'A schedule file must declare a mission with a schedule',
 }
 
-/** Fleet declarations use namespaced claim, source-backed or native-binding objectives. */
+/** Fleet declarations use namespaced claim, source-backed, disk or native-binding objectives. */
 const declaredObjective = (id: string) =>
-  `A declared objective is an interval, count, ratio, gauge, GitHub measurement or native binding named NAMESPACE/NAME; objective/${id} is not`
+  `A declared objective is an interval, count, ratio, gauge, disk-free, GitHub measurement or native binding named NAMESPACE/NAME; objective/${id} is not`
 
 const declarable = (kind: unknown): boolean =>
-  kind === 'interval' || kind === 'count' || kind === 'ratio' || kind === 'gauge' ||
+  kind === 'interval' || kind === 'count' || kind === 'ratio' || kind === 'gauge' || kind === 'disk-free' ||
   kind === 'native' || kind === 'github-merged-count' || kind === 'github-ready-to-merged'
 
 const isRef = (value: unknown): value is SubjectRef<SubjectKind> =>

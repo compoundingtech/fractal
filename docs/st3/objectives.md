@@ -679,6 +679,59 @@ minCoverage, minSamples, fast: { burnRate, long, short }, slow: { burnRate, long
 Gauge inputs allow exactly one of `badAbove` and `badBelow`. Targets may be omitted for these
 indicators. The DSL checks these same rules and lowers to the KDL above.
 
+#### Host-local disk capacity
+
+`disk-free` is a daemon-native covered-time gauge, not a Prometheus query or an
+agent's self-report. Author a `disk/HOST/NAME` objective with the exact daemon host,
+an absolute filesystem path and its admission floor in bytes:
+
+```kdl
+objective "disk/worker/free" {
+  about "Filesystem available bytes above the admission floor"
+  indicator "disk-free" {
+    host "worker"
+    path "/"
+    floor-bytes 1000000000
+  }
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+}
+```
+
+Only the named host samples and publishes this row. Replicated declarations on
+other hosts never cause them to sample that path or substitute their own disk.
+Use normal declaration publication/host slicing when authoring host-local trees.
+`Fractal.indicator.diskFree({ host: 'worker', path: '/', floorBytes: 1_000_000_000 })`
+lowers to the same indicator; its objective takes the authored `budget`, no
+diagnostic `targets` or generic `window`, and may declare `onBreach`.
+
+The daemon samples every UTC minute using `statvfs`: `f_bavail * f_frsize`, the
+space available to its user on the containing filesystem. This honors dataset
+quotas/available space on Linux and the explicitly selected APFS volume on macOS;
+it is not total pool free space, purgeable capacity or a sum of mounts. No host,
+path or floor is built into Fractal. Equality with the floor is good.
+
+Samples persist in the existing native gauge ledger. Each reading covers forward
+for at most two minutes; a failed sample immediately ends the prior held value.
+Startup, stopped sampling and stale native evidence stay `no-data`, never green.
+Readers perform no sampling or ledger I/O. The row includes `available_bytes`,
+`floor_bytes`, `host`, measurement time and covered/unknown capacity time. Paths
+are not included in row evidence. Changing the authored host, path or floor
+starts a distinct ledger stream; changing only budget policy reuses measurements.
+
+Capacity time is measured per host, not averaged across hosts. The example allows
+5% bad covered capacity-hours over 30 days and uses the usual 1h+5m and 6h+30m
+paired burns. Authored horizons and burn windows must be existing native ledger
+windows: `5m`, `30m`, `1h`, `2h`, `6h` or `30d`. Coverage is never invented while
+a newly commissioned host accumulates history.
+
+This adds declaration grammar, not a claim kind or corpus version. Upgrade the
+sampling hosts before publishing the new indicator: older readers reject the
+unknown indicator rather than selecting it as an existing native binding.
+
+#### Native ownership bindings
 Fleet ownership of a built-in row is a separate, namespaced declaration, not a redefinition of
 native measurement or an embedded private owner in public defaults:
 
