@@ -22032,7 +22032,7 @@ fn retry_projection_contention(
 // The observer is a no-op in the daemon; owned tests use it to synchronize on actual
 // backoff entry rather than assume a task has polled after a virtual-time advance.
 fn retry_projection_contention_observed(
-    store: std::sync::Weak<Store>,
+    weak_store: std::sync::Weak<Store>,
     notify: Arc<Notify>,
     event_notify: watch::Sender<u64>,
     state_dir: PathBuf,
@@ -22042,12 +22042,16 @@ fn retry_projection_contention_observed(
         let mut schedule = ProjectionContentionRetry::default();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let Some(store) = store.upgrade() else { break };
+            let Some(store) = weak_store.upgrade() else { break };
+            if !store.replication_projection_deferred() {
+                store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
+            }
             let generation = store.projection_contention_generation();
             let attempt = schedule.poll(
                 tokio::time::Instant::now(), generation, store.replication_projection_deferred());
             on_poll(schedule.due.is_some());
             let Some(attempt) = attempt else { continue };
+            store.projection_retry_episode_started();
             // Only this task schedules these attempts. The existing projection mutex also
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
             let result = store.connection.write_workers().spawn_blocking(move || {
@@ -22068,7 +22072,7 @@ fn retry_projection_contention_observed(
                 Ok((Ok(Some(true)), _current, _)) => (true, false, generation, "projected"),
                 Ok((Ok(None), current, _)) => (false, true, current, "catch-up-throttled"),
                 Ok((Ok(Some(false)), current, _)) => {
-                    (false, current != generation, current, "deferred")
+                    (false, true, current, "deferred")
                 }
                 Ok((Err(error), current, _)) => {
                     let busy = error
@@ -22076,7 +22080,9 @@ fn retry_projection_contention_observed(
                         .is_some_and(|error| error.is_sqlite_contention());
                     (
                         false,
-                        busy,
+                        // Other projection failures can be transient too. Retain the
+                        // same three-attempt budget rather than abandoning the frontier.
+                        true,
                         current,
                         if busy {
                             "sqlite-contention"
@@ -22088,6 +22094,11 @@ fn retry_projection_contention_observed(
                 Err(_) => (false, false, generation, "worker-failed"),
             };
             schedule.finish(tokio::time::Instant::now(), generation, retry);
+            if schedule.due.is_none()
+                && let Some(store) = weak_store.upgrade()
+            {
+                store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
+            }
             stderr_message("fractal", format_args!("projection contention retry {}", json!({
                 "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
                 "projection_deferred_after_attempt": still_deferred,
