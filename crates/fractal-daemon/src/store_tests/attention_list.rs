@@ -758,6 +758,8 @@ store
     ))
     .unwrap();
 let opened = now_ms();
+// The writer stamps observed_since_ms from the observation time on a new transition;
+// a caller-supplied observed_since_ms is not authoritative.
 let asked = store
     .append_claim(&input(
         seat,
@@ -765,7 +767,7 @@ let asked = store
         Some(seat),
         json!({"state":"working", "driver":"claude", "incarnation_id":"one",
             "blocked_on":"human", "ask":"permission", "reason":"Bash",
-            "ownership_sequence":1, "transition_sequence":3, "observed_since_ms":opened}),
+            "ownership_sequence":1, "transition_sequence":3, "observed_at_ms":opened}),
     ))
     .unwrap();
 let prompted = refresh_and_check(&store);
