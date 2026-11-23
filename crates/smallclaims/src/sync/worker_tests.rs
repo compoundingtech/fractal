@@ -763,11 +763,11 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         let requests = requests.lock().unwrap();
         assert_eq!(
             requests.len(), 2,
-            "one scalar probe and one compact push/pull, never a full-inventory round or retry"
+            "one complete-summary negotiation and one compact push/pull, never a full-inventory round or retry"
         );
         assert_eq!(
-            requests[0], (true, 0, 0),
-            "the first request stays scalar even with checkpoint divergence"
+            requests[0], (false, 0, 0),
+            "an unknown peer receives complete bucket proofs even with checkpoint divergence"
         );
         let (bare, listed, pushed) = requests[1];
         assert!(!bare && listed > 0 && listed <= 512, "bounded complete range listings: {requests:?}");
@@ -812,6 +812,10 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         .await
         .unwrap(),
         "tombstone-only divergence must let the worker rest"
+    );
+    assert_eq!(
+        requests.lock().unwrap()[2], (true, 0, 0),
+        "the negotiated peer receives a scalar summary on the next round",
     );
     note(&left, "published-after-quiet-comparison");
     assert!(
@@ -1293,13 +1297,15 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         url: format!("http://{address}"),
     };
     let http = replication_http_client();
+    // Negotiated protocol state belongs to the worker session, not the HTTP client.
+    let fleet_context = FleetContext::legacy(BTreeSet::from(["target".into()]));
     let pushed = exchange(
         &http,
         &Local(source.clone()),
         "source",
         &peer,
         &auth,
-        &FleetContext::legacy(BTreeSet::from(["target".into()])),
+        &fleet_context,
     )
     .await
     .unwrap();
@@ -1328,7 +1334,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         "source",
         &peer,
         &auth,
-        &FleetContext::legacy(BTreeSet::from(["target".into()])),
+        &fleet_context,
     )
     .await
     .unwrap();
@@ -1358,7 +1364,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         "source",
         &peer,
         &auth,
-        &FleetContext::legacy(BTreeSet::from(["target".into()])),
+        &fleet_context,
     )
     .await
     .unwrap();
@@ -1387,7 +1393,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
     legacy_query.inventory.capabilities.clear();
     let (legacy_answer, _, _) = post_signed(
         &http, &Local(source.clone()), &peer, "source", &auth,
-        &FleetContext::legacy(BTreeSet::from(["target".into()])), &legacy_query, false,
+        &fleet_context, &legacy_query, false,
     ).await.unwrap();
     assert!(!legacy_answer.inventory.can(crate::replication::ROOT_SUMMARY));
     assert!(!legacy_answer.inventory.buckets.is_empty());
