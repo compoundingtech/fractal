@@ -114,5 +114,60 @@ export const lane = (
     ),
   ).pipe(Effect.withSpan('Fractal.resources.lane'))
 
-/** Host-native resource capabilities; Effect owns scope and control flow. */
-export const resources = { lane }
+export const ScratchHandle = Schema.Struct({
+  id: Schema.String,
+  host: Schema.String,
+  owner: Schema.String,
+  ownerGeneration: Schema.String,
+  path: Schema.String,
+  generation: Schema.String,
+  authorityEpoch: Schema.String,
+})
+export type ScratchHandle = typeof ScratchHandle.Type
+
+export interface ScratchOptions {
+  readonly host: string
+  /** Dedicated host-local directory, never a workspace or shared temporary root. */
+  readonly root: string
+}
+
+export const ScratchInventoryRow = Schema.Struct({
+  handle: ScratchHandle,
+  state: Schema.String,
+  ownerObservation: Schema.Literals(['live', 'terminal', 'unknown']),
+  consumerObservation: Schema.Literals(['live', 'terminal', 'unknown']),
+  uninspectable: Schema.optionalKey(Schema.Number),
+})
+export type ScratchInventoryRow = typeof ScratchInventoryRow.Type
+
+/**
+ * Acquire mission-owned scratch. Native finalization releases every persisted acquisition intent,
+ * even when the worker exits before receiving its handle. JS scopes do not own this lifetime.
+ */
+export const scratch = (
+  name: string,
+  options: ScratchOptions,
+): Effect.Effect<ScratchHandle, ResourceError, Program> =>
+  Effect.flatMap(Effect.serviceOption(ResourceCommandScope), (scope) =>
+    keyed(Option.match(scope, {
+      onNone: () => `resource.scratch/${name}`,
+      onSome: (activity) => `${activity}/resource.scratch/${name}`,
+    }), (key, program) => invoke(program, {
+      key,
+      operation: 'resource.scratch.acquire',
+      payload: options,
+    }, ScratchHandle)),
+  ).pipe(Effect.withSpan('Fractal.resources.scratch'))
+
+/** Bounded, read-only inventory. Terminal or unknown owners never authorize reclamation. */
+export const scratchInventory = (
+  options: { readonly host: string; readonly after?: string; readonly limit?: number },
+): Effect.Effect<readonly ScratchInventoryRow[], ResourceError, Program> =>
+  keyed('resource.scratch.inventory', (key, program) => invoke(program, {
+    key,
+    operation: 'resource.scratch.inventory',
+    payload: options,
+  }, Schema.Array(ScratchInventoryRow)))
+
+/** Host-native resource capabilities. Lanes are scoped; scratch belongs to the mission. */
+export const resources = { lane, scratch, scratchInventory }
