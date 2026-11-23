@@ -52,23 +52,14 @@ async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()
     ).unwrap();
     store.apply_internal(&intent, "fixture-recipients").unwrap();
     let server_socket = socket.clone();
+    let (ready, started) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
-            .await
-            .unwrap();
+        fractal_daemon::api::serve_unix_with_ready(
+            &server_socket, fractal_daemon::api::router(state), move || { let _ = ready.send(()); },
+        ).await.unwrap();
     });
-    wait_for(&socket).await;
+    started.await.unwrap();
     (socket, store, server)
-}
-
-async fn wait_for(socket: &Path) {
-    for _ in 0..200 {
-        if socket.exists() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    panic!("{} did not start", socket.display());
 }
 
 /// Answers the proxy loses while the daemon still applies the request, as under load.
@@ -82,6 +73,9 @@ struct Losses {
     page_reads_after_a_send: AtomicBool,
     blob_uploads: AtomicUsize,
     recipient_route_missing: AtomicBool,
+    /// Fail the optional post-send status read without changing durable send acceptance.
+    delivery_reads_fail: AtomicBool,
+    delivery_reads: AtomicUsize,
 }
 
 /// Forward every request on `front` to the daemon on `back`, and close the connection without a
@@ -102,6 +96,9 @@ async fn lossy_proxy(
                 let line = String::from_utf8_lossy(&request[..request.len().min(64)]).to_string();
                 if line.starts_with("POST /v1/client/blobs ") {
                     losses.blob_uploads.fetch_add(1, Ordering::SeqCst);
+                }
+                if line.starts_with("GET /v1/messages/delivery/") {
+                    losses.delivery_reads.fetch_add(1, Ordering::SeqCst);
                 }
                 if line.starts_with("GET /v1/messages/recipient?")
                     && losses.recipient_route_missing.load(Ordering::SeqCst)
@@ -126,6 +123,8 @@ async fn lossy_proxy(
                     lose
                 } else if line.starts_with("GET /v1/messages/page") {
                     losses.page_reads.load(Ordering::SeqCst)
+                } else if line.starts_with("GET /v1/messages/delivery/") {
+                    losses.delivery_reads_fail.load(Ordering::SeqCst)
                 } else {
                     false
                 };
@@ -282,9 +281,10 @@ async fn running_the_same_send_twice_sends_one_message() {
     let human = st(&socket, &[], &SEND[1..]).await;
     assert!(human.status.success(), "{}", stderr(&human));
     assert_eq!(
-        String::from_utf8_lossy(&human.stdout).trim(),
+        String::from_utf8_lossy(&human.stdout).lines().next().unwrap(),
         first["subject"].as_str().unwrap()
     );
+    assert!(String::from_utf8_lossy(&human.stdout).contains("\nqueued: "), "{}", String::from_utf8_lossy(&human.stdout));
     assert!(
         stderr(&human).contains("confirmed on retry"),
         "{}",
@@ -464,10 +464,11 @@ async fn a_lost_send_answer_confirms_success_on_retry() {
     let sent = st(&front, &[], &SEND[1..]).await;
     assert!(sent.status.success(), "{}", stderr(&sent));
     assert_eq!(message_count(&store), 1);
-    let subject = std::str::from_utf8(&sent.stdout).unwrap();
-    assert!(subject.trim().starts_with("message/"), "{subject}");
+    let output = std::str::from_utf8(&sent.stdout).unwrap();
+    let subject = output.lines().next().unwrap();
+    assert!(subject.starts_with("message/"), "{output}");
     let confirmation = stderr(&sent);
-    assert!(confirmation.contains(subject.trim()), "{confirmation}");
+    assert!(confirmation.contains(subject), "{confirmation}");
     assert!(confirmation.contains("confirmed on retry"), "{confirmation}");
     assert!(!confirmation.contains("nothing new was sent"), "{confirmation}");
     assert!(!confirmation.contains("already sent"), "{confirmation}");
@@ -718,12 +719,61 @@ async fn a_landed_send_succeeds_when_the_projection_cannot_be_refreshed() {
         stderr(&sent)
     );
     let subject = store.messages(None, true).unwrap()[0].subject.clone();
-    assert_eq!(String::from_utf8_lossy(&sent.stdout).trim(), subject);
+    assert_eq!(String::from_utf8_lossy(&sent.stdout).lines().next().unwrap(), subject);
     let warning = stderr(&sent);
     assert!(warning.contains(&subject), "{warning}");
     assert!(warning.contains("st3-message:v1:"), "{warning}");
     proxy.abort();
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_send_reports_current_delivery_but_status_failure_keeps_acceptance_successful() {
+    for outcome in ["queued", "stopped", "status-error"] {
+        let root = tempfile::tempdir().unwrap();
+        let (back, store, server) = daemon(root.path()).await;
+        if outcome == "stopped" {
+            store.append_claim(&fractal_daemon::model::ClaimInput {
+                subject: WORKER.into(), kind: "runtime.observed".into(), actor: Some(WORKER.into()),
+                fields: serde_json::from_value(serde_json::json!({
+                    "status":"stopped", "runtime_id":WORKER, "incarnation_id":"fixture",
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let front = root.path().join("front.sock");
+        let losses = Arc::new(Losses::default());
+        losses.delivery_reads_fail.store(outcome == "status-error", Ordering::SeqCst);
+        let proxy = lossy_proxy(front.clone(), back, losses.clone()).await;
+        let sent = st(&front, &[], &SEND[1..]).await;
+        assert!(sent.status.success(), "{}", stderr(&sent));
+        assert_eq!(message_count(&store), 1);
+        assert_eq!(losses.delivery_reads.load(Ordering::SeqCst), 1);
+        let subject = store.messages(None, true).unwrap()[0].subject.clone();
+        let output = String::from_utf8(sent.stdout).unwrap();
+        let lines = output.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], subject);
+        if outcome == "status-error" {
+            assert_eq!(lines, [subject.as_str()]);
+        } else {
+            assert_eq!(lines.len(), 2, "{output}");
+            assert!(lines[1].starts_with("queued: "), "{output}");
+            if outcome == "stopped" {
+                assert!(lines[1].contains("recipient stopped"), "{output}");
+            } else {
+                assert!(lines[1].contains("waiting for delivery"), "{output}");
+            }
+        }
+        // JSON keeps the existing receipt and does not perform an optional delivery read.
+        let json = value(&st(&front, &[], SEND).await);
+        assert_eq!(json["subject"], subject);
+        assert_eq!(json["already_sent"], true);
+        assert!(json.get("delivery").is_none());
+        assert_eq!(losses.delivery_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(message_count(&store), 1);
+        proxy.abort();
+        server.abort();
+    }
 }
 
 /// `--body -` reads a reply's text from stdin, as it does a send's, and a body that is empty or

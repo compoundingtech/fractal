@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Human conversations send output shows the existing delivery status after durable acceptance, including stopped-recipient and host delivery diagnostics when available.",
+  "replay": {"status": "none", "detail": "No replay change."},
+  "schema": {"status": "none", "detail": "No SQLite tables, indexes, store versions or claim fields change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Human send output keeps the message ID first, then prints the existing status endpoint's phase and reason. Sent or staged mail is labelled queued. One optional status read has a two-second deadline; failure or timeout leaves the ID-only success output. The durable-send exit status remains successful. JSON receipts and client-v0 are unchanged, and JSON mode performs no extra status read."},
+  "downtime": {"status": "none", "detail": "Normal deployment; no state migration."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "An older CLI prints the message ID without the added delivery line; messages and receipts remain unchanged."}
+}

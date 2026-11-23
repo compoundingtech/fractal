@@ -215,7 +215,26 @@ pub(super) async fn run_message(
                 receipt.idempotency_key,
                 plain_error(&error)));
             }
-            print_message_receipt(&receipt, json_output)
+            print_message_receipt(&receipt, json_output)?;
+            // Acceptance is durable even if the optional status read fails. Never turn a
+            // queued send into an error that invites a resend, or change its JSON receipt.
+            if !json_output
+                && let Ok(Ok(value)) = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    message_delivery(client, &receipt.message.subject),
+                ).await
+                && let (Some(phase), Some(reason)) = (
+                    value.pointer("/delivery/phase").and_then(Value::as_str),
+                    value.pointer("/delivery/reason").and_then(Value::as_str),
+                )
+            {
+                let state = match phase {
+                    "sent" | "staged" => "queued",
+                    _ => phase,
+                };
+                println!("{state}: {reason}");
+            }
+            Ok(())
         }
         MessageCommand::Status(args) => {
             notice_ignored_read_actor(args.ignored_actor.as_deref());
