@@ -1,4 +1,5 @@
 use super::*;
+use super::replication::replication_revision;
 use smallclaims::claim::ReplicaEnvelopeId;
 use smallclaims::replication::ReplicationInventory;
 use smallclaims::sync::Backend as _;
@@ -121,7 +122,7 @@ fn guard_marker_is_ignored_by_old_bodies_and_absent_from_ordinary_requests() {
 }
 
 #[tokio::test]
-async fn guard_summary_uses_unchanged_default_backend_and_old_local_handler() {
+async fn older_worker_flags_remain_compatible_with_old_local_handlers() {
     if crate::test_support::supervise_test() {
         return;
     }
@@ -133,14 +134,15 @@ async fn guard_summary_uses_unchanged_default_backend_and_old_local_handler() {
         smallclaims::store::Store::open_memory("legacy", Arc::new(smallclaims::store::runtime::Plain)).unwrap()
     ));
     let normal = local.export(FLEET, &Default::default(), true, &[]).await.unwrap();
-    let guard = local.guard_summary(FLEET).await.unwrap();
-    assert_eq!(serde_json::to_vec(&guard).unwrap(), serde_json::to_vec(&normal).unwrap());
+    let snapshot = local.wait_revision(smallclaims::sync::revision::RevisionRequest {
+        kind: smallclaims::sync::revision::RevisionKind::Authority, after: None,
+    }).await.unwrap();
+    assert_eq!(snapshot.authority_root.as_deref(), Some(normal.exchange.authority_digest.as_str()));
     let expected = ReplicationExportResponse {
         exchange: graph.export_replication_summary(FLEET).unwrap(),
         store_index: graph.index().unwrap(),
     };
     let expected_bytes = serde_json::to_vec(&expected).unwrap();
-    let expected_digest = expected.exchange.authority_digest.clone();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let handler_calls = calls.clone();
     let answer = serde_json::to_value(expected).unwrap();
@@ -163,13 +165,12 @@ async fn guard_summary_uses_unchanged_default_backend_and_old_local_handler() {
         serve_unix_with_ready(&server_socket, old_app, || { let _ = ready.send(()); }).await.unwrap();
     });
     tokio::time::timeout(Duration::from_secs(5), bound).await.unwrap().unwrap();
-    let main = crate::peer::MainBackend::new(socket);
-    let received = main.guard_summary(FLEET).await.unwrap();
+    let client = crate::client::Client::unix(socket);
+    let received: ReplicationExportResponse = client.post(
+        "/v1/internal/replication/export", &request(true, true),
+    ).await.unwrap();
     assert_eq!(serde_json::to_vec(&received).unwrap(), expected_bytes);
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(main.authority_digest(FLEET).await.unwrap(), expected_digest);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2,
-        "the additive mode consumes an old response in one request, without retry");
     server.abort();
     let _ = server.await;
 }
@@ -289,97 +290,72 @@ async fn reduced_mode_preserves_reached_store_errors_and_guard_accounting() {
 }
 
 #[tokio::test]
-async fn main_backend_scalar_uses_only_new_local_mode_and_reads_a_later_change() {
+async fn main_backend_subscribes_to_revisions_without_guard_or_membership_requests() {
+    use smallclaims::sync::revision::{RevisionKind, RevisionRequest};
     if crate::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
     state.store.bind_fleet(FLEET).unwrap();
-    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let calls = observed.clone();
     let handler_state = state.clone();
+    let (entered, mut calls) = tokio::sync::mpsc::unbounded_channel();
     let app = Router::new().route(
-        "/v1/internal/replication/export",
-        axum::routing::post(move |Json(input): Json<ReplicationExportRequest>| {
+        "/v1/internal/replication/revision",
+        axum::routing::post(move |Json(input): Json<RevisionRequest>| {
             let state = handler_state.clone();
-            let calls = calls.clone();
+            let entered = entered.clone();
             async move {
-                let flags = (
-                    input.summary_only,
-                    input.authority_guard,
-                    input.authority_digest_only,
-                );
-                let result = replication_export(State(state), Json(input))
-                    .await
-                    .unwrap()
-                    .0;
-                calls
-                    .lock()
-                    .unwrap()
-                    .push((flags, result.exchange.inventory.buckets.len()));
+                entered.send(()).unwrap();
+                let result = replication_revision(State(state), Json(input)).await.unwrap().0;
                 Json(json!({"api_version":"st3.v1","value":result}))
             }
         }),
     );
-    let socket = root.path().join("new.sock");
+    let socket = root.path().join("revision.sock");
     let server_socket = socket.clone();
     let (ready, bound) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         serve_unix_with_ready(&server_socket, app, || {
             let _ = ready.send(());
-        })
-        .await
-        .unwrap();
+        }).await.unwrap();
     });
-    tokio::time::timeout(Duration::from_secs(5), bound)
-        .await
-        .unwrap()
-        .unwrap();
+    bound.await.unwrap();
     let main = crate::peer::MainBackend::new(socket);
-    let ordinary = main
-        .export(FLEET, &Default::default(), true, &[])
-        .await
-        .unwrap();
-    let old_guard = main.guard_summary(FLEET).await.unwrap();
-    assert_eq!(
-        serde_json::to_value(&ordinary).unwrap(),
-        serde_json::to_value(&old_guard).unwrap()
-    );
-    let before = main.authority_digest(FLEET).await.unwrap();
-    assert_eq!(before, ordinary.exchange.authority_digest);
+    let before = main.wait_revision(RevisionRequest {
+        kind: RevisionKind::Authority, after: None,
+    }).await.unwrap();
+    calls.recv().await.unwrap();
+    assert!(before.authority_root.is_some());
+    let waiting_main = main.clone();
+    let cursor = before.clone();
+    let waiting = tokio::spawn(async move {
+        waiting_main.wait_revision(RevisionRequest {
+            kind: RevisionKind::Authority, after: Some(cursor),
+        }).await.unwrap()
+    });
+    calls.recv().await.unwrap();
+    for _ in 0..100 {
+        state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h8f252aa568a5 owner=fractal_api_core::api::replication_guard_tests TODO=bound-or-reference-values-and-reclamation */
+            "INSERT INTO meta(key,value) VALUES('revision_test_progress','1')
+             ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", [],
+        ).unwrap();
+    }
+    assert!(!waiting.is_finished(), "local metadata must not complete the authority wait");
     state.store.connection.write().execute(
         /* sqlite-large-value: allow-for-now lv-hdfb4ddb189b8 owner=fractal_api_core::api::replication_guard_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,payload,relay,receipt_state,received_at_unix_ms)
          VALUES('fixture',1,?1,'0',X'','fixture','pending','0')", ["b".repeat(64)],
     ).unwrap();
-    let after = main.authority_digest(FLEET).await.unwrap();
-    assert_ne!(
-        after, before,
-        "a previous guard result is not reused after a write"
-    );
-    assert_eq!(
-        after,
-        state
-            .store
-            .export_replication_summary(FLEET)
-            .unwrap()
-            .authority_digest
-    );
-    assert_eq!(
-        observed
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|call| call.0)
-            .collect::<Vec<_>>(),
-        vec![
-            (true, false, false),
-            (true, true, false),
-            (true, true, true),
-            (true, true, true)
-        ]
-    );
-    assert_eq!(observed.lock().unwrap()[3].1, 0);
+    let after = waiting.await.unwrap();
+    assert_eq!(after.epoch, before.epoch);
+    assert!(after.generation > before.generation);
+    assert_ne!(after.authority_root, before.authority_root);
+    assert_eq!(after.authority_root.unwrap(),
+        state.store.export_replication_summary(FLEET).unwrap().authority_digest);
+    assert_eq!(count("replication/authority-wait"), 2);
+    assert_eq!(count("replication/membership-wait"), 0);
+    assert_eq!(count(GUARD), 0);
     server.abort();
     let _ = server.await;
 }

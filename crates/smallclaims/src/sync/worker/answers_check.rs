@@ -362,6 +362,13 @@ mod tests {
     struct Answering(Local<Store>, Option<Arc<crate::answers::AnswersCache>>);
 
     impl Backend for Answering {
+        async fn wait_revision(
+            &self,
+            request: crate::sync::revision::RevisionRequest,
+        ) -> Result<crate::sync::revision::StoreRevision> {
+            self.0.wait_revision(request).await
+        }
+
         async fn export(
             &self,
             fleet_id: &str,
