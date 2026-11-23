@@ -1365,6 +1365,11 @@ objective "example/read" {
   indicator "native" { objective "person-read"; }
   on-breach "fault" owner="agent/node.ops" condition="read-burn"
 }
+objective "example/admission" {
+  about "Admission owner"
+  indicator "native" { objective "build/admission"; }
+  on-breach "fault" owner="agent/node.ops" condition="admission-burn"
+}
 "#);
     with_owner(&store, "node");
     let mail = json!({
@@ -1384,17 +1389,31 @@ objective "example/read" {
         "target": "5% bad events", "current": "paired burn", "window": "30d",
         "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
     });
-    let mut sibling = mail.clone();
-    sibling["id"] = json!("agents");
-    let all = rows(&store, *NOW, &[mail.clone(), read, sibling]).unwrap();
+    store.start_resource_authority("node", "ancestor-binding-test").unwrap();
+    let request: crate::store::resource_membership::LaneRequest = serde_json::from_value(json!({
+        "id": "ancestor-binding-waiter", "name": "build", "host": "node", "maxMembers": 1,
+        "capacity": {"cores": 1, "memory": 100}, "coverage": "logical",
+        "admissionTimeoutMs": null, "class": "check",
+        "owner": {"run": "mission-run/ancestor-binding", "step": "compile", "attempt": 1, "invocation": null}
+    })).unwrap();
+    let fit = crate::store::resource_membership::Fit {
+        room: Some(fractal_runtime::Capacity { cores: 4, memory: 1000 }),
+        held_bytes: 1000,
+        ..Default::default()
+    };
+    store.request_resource_membership(&request, fit, *NOW - 2 * 60 * MINUTE - 1).unwrap();
+    let native = crate::admission_objectives::rows(&store, *NOW).unwrap();
+    let sibling = native.iter().find(|row| row["id"] == "build/admission/node/check").unwrap();
+    assert_eq!(sibling["status"], "exhausted");
+    let all = rows(&store, *NOW, &[mail.clone(), read, sibling.clone()]).unwrap();
     check(&store, &all).unwrap();
     assert_eq!(fault_status(&store, "example/read"), "pending");
-    assert_eq!(fault_status(&store, "example/agents"), "pending");
+    assert_eq!(fault_status(&store, "example/admission/node/check"), "pending");
     let mut recovered = mail;
     recovered["status"] = json!("met");
     recovered["remaining_percent"] = json!(100.0);
     check_native_and_report(&store, *NOW, "agents/mail-delivery", &[recovered]).unwrap();
     assert_eq!(fault_status(&store, "example/agents/mail-delivery/node"), "resolved");
     assert_eq!(fault_status(&store, "example/read"), "pending", "mail cannot close another producer's episode");
-    assert_eq!(fault_status(&store, "example/agents"), "pending", "mail cannot retire an ancestor binding's sibling row");
+    assert_eq!(fault_status(&store, "example/admission/node/check"), "pending", "mail cannot close a store-backed sibling producer's episode");
 }
