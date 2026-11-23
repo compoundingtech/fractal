@@ -8399,7 +8399,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 host_executor::StopAction::Terminate {
                     retirement_proof: retirement_operation.is_some(),
                 },
-            ).execute(self.runtime.as_ref(), &self.host_observations);
+            ).dispatch(self.runtime.as_ref(), &self.host_observations);
             let receipt = match stopped {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -8528,7 +8528,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         host_executor::StopCommand::new(
             &deadline_record, runtime_id, terminal, Some(incarnation),
             host_executor::StopAction::Kill,
-        ).execute(self.runtime.as_ref(), &self.host_observations)?;
+        ).dispatch(self.runtime.as_ref(), &self.host_observations)?;
         self.store.append_claim(&ClaimInput {
             subject: subject.into(),
             kind: "runtime.action.succeeded".into(),
@@ -21493,7 +21493,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             &request, &runtime_id, false, incarnation,
             if hard { host_executor::StopAction::Kill }
             else { host_executor::StopAction::Terminate { retirement_proof: false } },
-        ).execute(self.runtime.as_ref(), &self.host_observations)?;
+        ).dispatch(self.runtime.as_ref(), &self.host_observations)?;
         self.store.append_claim(&ClaimInput {
             subject: subject.into(),
             kind: "runtime.action.succeeded".into(),
