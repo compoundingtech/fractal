@@ -8136,6 +8136,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Five seconds finds gaps between short readers without polling on every write.
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store), Duration::from_secs(5));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
+    let _shard_contention_retry = retry_projection_contention_for_store(
+        Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone(), true, |_| {},
+    );
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone(), config.store.valid_record_delete_after_ms()?)));
@@ -22035,13 +22038,31 @@ fn retry_projection_contention_observed(
     notify: Arc<Notify>,
     event_notify: watch::Sender<u64>,
     state_dir: PathBuf,
+    on_poll: impl FnMut(bool) + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    retry_projection_contention_for_store(weak_store, notify, event_notify, state_dir, false, on_poll)
+}
+
+fn retry_projection_contention_for_store(
+    weak_store: std::sync::Weak<Store>,
+    notify: Arc<Notify>,
+    event_notify: watch::Sender<u64>,
+    state_dir: PathBuf,
+    messages_shard: bool,
     mut on_poll: impl FnMut(bool) + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("replication.retry_projection", async move {
         let mut schedule = ProjectionContentionRetry::default();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let Some(store) = weak_store.upgrade() else { break };
+            let Some(graph) = weak_store.upgrade() else { break };
+            let shard = if messages_shard {
+                let Some(shard) = fractal_store::store::messages_shard::shard(&graph) else { break };
+                Some(shard)
+            } else {
+                None
+            };
+            let store = shard.as_deref().unwrap_or(&graph.graph);
             if !store.replication_projection_deferred() {
                 store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
             }
@@ -22055,6 +22076,7 @@ fn retry_projection_contention_observed(
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
             let result = store.connection.write_workers().spawn_blocking(move || {
                 fractal_daemon::task_cpu::profiled_blocking("replication.retry_projection", || {
+                let store = shard.as_deref().unwrap_or(&graph.graph);
                 let result = store.project_replication_backlog_unless_catching_up();
                 (result, store.projection_contention_generation(), store.replication_projection_deferred())
                 })
@@ -22096,10 +22118,13 @@ fn retry_projection_contention_observed(
             if schedule.due.is_none()
                 && let Some(store) = weak_store.upgrade()
             {
+                let shard = messages_shard.then(|| fractal_store::store::messages_shard::shard(&store)).flatten();
+                let store = shard.as_deref().unwrap_or(&store.graph);
                 store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
             }
             stderr_message("fractal", format_args!("projection contention retry {}", json!({
                 "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
+                "shard": if messages_shard { "messages" } else { "graph" },
                 "projection_deferred_after_attempt": still_deferred,
                 "stop_reason": if schedule.due.is_some() { None } else if recovered {
                     Some("recovered")
