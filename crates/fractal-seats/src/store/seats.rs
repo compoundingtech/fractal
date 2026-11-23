@@ -1025,10 +1025,9 @@ impl SeatsStore for Store {
             entry.idle_residency == idle_residency
                 && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         };
-        // Local agent timeline and main-loop usage rows change cards without advancing the
-        // graph index. The frontier ignores heartbeats and response/subagent spend.
-        // Read it inside the caller's SQLite snapshot, never from a future atomic generation
-        // that could race this cut.
+        // Every local append changes the snapshot token, including usage repeats clearing a
+        // pending slot. A bounded append-interval delta filters heartbeats and response spend,
+        // reusing all card rows when none of their inputs changed. Read inside this snapshot.
         let local = crate::performance::task("roster/frontier-read", || {
             roster_local_frontier(&self.readers.get(), index)
         })?;
@@ -1107,10 +1106,7 @@ impl SeatsStore for Store {
                 if previous.local != local {
                     let connection = self.readers.get();
                     let mut statement = connection.prepare_cached(
-                        "SELECT DISTINCT subject FROM local_observations WHERE id>?1 AND id<=?2
-                         AND after_store_index<=?3 AND subject LIKE 'agent/%'
-                         AND (kind='harness.timeline' OR (kind='harness.usage'
-                           AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')))",
+                        /* sqlite-large-value: allow-for-now lv-h49951ea678c3 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS,
                     )?;
                     changed.extend(statement.query_map(params![previous.local, local, index],
                         |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<BTreeSet<_>>>()?);
@@ -1309,12 +1305,31 @@ impl SeatsStore for Store {
             roster_local_frontier(&self.readers.get(), index)
         })?;
         let selected = BTreeSet::from([agent.to_owned()]);
-        Ok(self.fractal.exact_agent_resources_cache.lock()
-            .expect("exact agent resources cache poisoned").iter().rev()
-            .find(|entry| exact_agent_entry(entry, agent)
-                && entry.index == index && entry.local == local && entry.history == history)
-            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, Some(&selected)))
-            .map(|entry| Arc::clone(&entry.items)))
+        let candidate = {
+            let cache = self.fractal.exact_agent_resources_cache.lock()
+                .expect("exact agent resources cache poisoned");
+            cache.iter().rev()
+                .find(|entry| exact_agent_entry(entry, agent)
+                    && entry.index == index && entry.local <= local && entry.history == history)
+                .filter(|entry| agent_resources_entry_hits(entry, now, index, entry.local, history, Some(&selected)))
+                .map(|entry| (entry.local, Arc::clone(&entry.items), entry.published_at_unix_ms))
+        };
+        let Some((before, items, published_at)) = candidate else { return Ok(None); };
+        if before == local {
+            return Ok(Some(items));
+        }
+        if !roster_local_unchanged(&self.readers.get(), before, local, index)? {
+            return Ok(None);
+        }
+        // Match the checked entry after releasing the lock for reader acquisition and SQL.
+        let mut cache = self.fractal.exact_agent_resources_cache.lock()
+            .expect("exact agent resources cache poisoned");
+        if let Some(entry) = cache.iter_mut().find(|entry|
+            entry.index == index && entry.history == history && entry.local == before
+                && entry.published_at_unix_ms == published_at && Arc::ptr_eq(&entry.items, &items)) {
+            entry.local = local;
+        }
+        Ok(Some(items))
     }
 
     fn agent_page_refs_cached_at(
