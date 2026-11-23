@@ -5516,15 +5516,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         let key = format!("restart-prepare:{subject}:{trigger}");
         if require_handoff
             && let Some(boundary) = self.store.operation_claim(&format!("{key}:handoff"))?
-            && let Some(incarnation) = boundary.body["fields"]["incarnation_id"].as_str()
-            && let Some(session) = boundary.body["fields"].get("native_session")
-                .and_then(|value| serde_json::from_value::<Option<(String, String)>>(value.clone()).ok())
-            && self.handoff_incumbent_matches(subject, incarnation, session.as_ref(), incumbent)?
+            && let Some(reason) = boundary.body["fields"]["reason"].as_str()
+            && let Ok(proof) = serde_json::from_str::<start_jobs::HandoffBoundary>(reason)
+            && self.handoff_incumbent_matches(
+                subject, &proof.incarnation, proof.native_session.as_ref(), incumbent,
+            )?
         {
-            let since = boundary.body["fields"]["acknowledged_since_unix_ms"]
-                .as_str().context("transferred handoff boundary has no acknowledgement time")?
-                .parse::<u128>().context("invalid transferred handoff acknowledgement time")?;
-            return crate::handoff::acknowledged_handoff_since(&self.store, subject, since);
+            return crate::handoff::acknowledged_handoff_since(
+                &self.store, subject, proof.acknowledged_since_unix_ms,
+            );
         }
         let now = now_ms();
         let Some(prepare) = self.store.operation_claim(&key)? else {

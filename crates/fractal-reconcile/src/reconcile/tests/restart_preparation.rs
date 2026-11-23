@@ -239,9 +239,11 @@ agent "example/worker" { workspace "/tmp"; harness "omp" {}; restart "never"; }
             "incarnation_id": incarnation, "harness": "omp", "session_id": session,
         }), vec![], "current-session");
         claim(&store, "runtime.reconcile-decision", json!({
-            "acknowledged_since_unix_ms": origin.to_string(),
-            "incarnation_id": "incumbent",
-            "native_session": ["omp", "native-A"],
+            "reason": serde_json::to_string(&start_jobs::HandoffBoundary {
+                acknowledged_since_unix_ms: origin,
+                incarnation: "incumbent".into(),
+                native_session: Some(("omp".into(), "native-A".into())),
+            }).unwrap(),
         }), vec![], &format!("restart-prepare:{AGENT}:reissued:handoff"));
         smallclaims::store::set_thread_clock(Some(origin + 1));
         store.put_document(

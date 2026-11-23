@@ -61,6 +61,15 @@ pub enum WorkspaceAdmission {
     Git { owner: PathBuf, repository: PathBuf },
 }
 
+// Private restart-upgrade proof, encoded in the decision's existing string reason.
+// Keep the registered claim schema unchanged.
+#[derive(Serialize, Deserialize)]
+pub(super) struct HandoffBoundary {
+    pub acknowledged_since_unix_ms: u128,
+    pub incarnation: String,
+    pub native_session: Option<(String, String)>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PreparedStart {
     pub subject: DesiredSubject,
@@ -790,10 +799,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     fields: BTreeMap::from([
                         ("key".into(), Value::from("restart-prepare")),
                         ("decision".into(), Value::from("ready")),
-                        ("acknowledged_since_unix_ms".into(),
-                            Value::from(prepare.accepted_at_unix_ms.to_string())),
-                        ("incarnation_id".into(), Value::from(incarnation)),
-                        ("native_session".into(), serde_json::to_value(&session)?),
+                        ("reason".into(), Value::from(serde_json::to_string(&HandoffBoundary {
+                            acknowledged_since_unix_ms: prepare.accepted_at_unix_ms,
+                            incarnation: incarnation.to_owned(),
+                            native_session: session,
+                        })?)),
                     ]),
                     evidence: vec![requeued.id.clone(), prepare.id, request.id.clone()],
                     expected_subject: Some(head),

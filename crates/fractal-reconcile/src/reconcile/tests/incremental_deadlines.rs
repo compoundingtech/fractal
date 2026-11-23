@@ -2079,6 +2079,8 @@ fn assert_old_format_restart_recovery(
                 expected_subject: None,
                 idempotency_key: None,
             }).unwrap();
+            // The stop CLI publishes both the control request and desired stop.
+            apply_source(&store, "version 2\nstop \"agent/node.worker\"", "stop-old-restart-recovery");
         }
     }
     smallclaims::store::set_thread_clock(Some(START + 2));
@@ -2090,7 +2092,11 @@ fn assert_old_format_restart_recovery(
         member.tags.insert(start_jobs::OPERATION_TAG.into(), "fixture-incumbent".into());
         runtime.started_members.lock().unwrap().push(member.clone());
         let observation = running_observation(&member, "replacement");
-        runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), observation);
+        if member.terminal {
+            runtime.ptys.lock().unwrap().push(observation);
+        } else {
+            runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), observation);
+        }
         assert_eq!(runtime.observe_start(&member).unwrap().unwrap().incarnation_id.as_deref(),
             Some("replacement"), "recovery must observe the replacement, not an absent incumbent");
         store.append_claim(&ClaimInput {
@@ -2164,6 +2170,25 @@ fn assert_old_format_restart_recovery(
             "the incumbent is absent; recovery must use its retained boundary, not a new report");
     }
     assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
+    restarted.reconcile_once().unwrap();
+    let (live, changed) = &*restarted.start_jobs.live;
+    let mut live = live.lock().unwrap();
+    while !live.is_empty() {
+        live = changed.wait(live).unwrap();
+    }
+    drop(live);
+    let operation = store.runtime_start_for("agent/node.worker").unwrap().unwrap();
+    let incarnation = operation.result.as_ref().unwrap()["incarnation"]
+        .as_str().unwrap();
+    let launched = runtime.started_members.lock().unwrap().last().unwrap().clone();
+    let observation = running_observation(&launched, incarnation);
+    if launched.terminal {
+        *runtime.ptys.lock().unwrap() = vec![observation];
+    } else {
+        runtime.execs.lock().unwrap().insert(launched.runtime_id.clone(), observation);
+    }
+    assert!(restarted.apply_start_result(&operation.id, "agent/node.worker").unwrap(),
+        "the completed worker must publish its operation-fenced start result");
     restarted.reconcile_once().unwrap();
     assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
     assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
