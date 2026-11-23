@@ -409,3 +409,36 @@ async fn a_provider_task_that_has_returned_is_settled_and_one_that_has_not_is_no
     assert!(!provider_task_settled(&running).await);
     running.abort();
 }
+
+#[tokio::test(start_paused = true)]
+async fn shard_projection_retry_recovers_without_another_receive() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = Arc::new(Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap());
+    graph.bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
+    let shard = fractal_store::store::messages_shard::open(&graph, dir.path()).unwrap();
+    let gate = shard.projection.lock();
+    assert_eq!(shard.try_project_replication_backlog_unless_catching_up().unwrap(), None);
+    assert!(shard.replication_projection_deferred());
+    let (events, mut changed) = watch::channel(0u64);
+    let (polls, mut polled) = watch::channel(false);
+    let worker = retry_projection_contention_for_store(
+        Arc::downgrade(&graph), Arc::new(Notify::new()), events, dir.path().to_owned(), true,
+        move |backoff| { polls.send_replace(backoff); },
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    loop {
+        let backoff = *polled.borrow_and_update();
+        if backoff { break; }
+        polled.changed().await.unwrap();
+    }
+    drop(gate);
+    // A graph projection owner cannot prevent the shard's independent retry.
+    let graph_gate = graph.projection.lock();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    changed.changed().await.unwrap();
+    assert!(!shard.replication_projection_deferred());
+    assert_eq!(shard.projection_frontier().unwrap(), shard.index().unwrap());
+    drop(graph_gate);
+    worker.abort();
+}
