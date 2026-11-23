@@ -51,8 +51,8 @@ pub struct MeasurementSnapshot {
 pub struct MeasurementView<'a> {
     pub id: &'a str,
     pub required: &'a [FactFamily],
-    /// Deadline ratios must retain open PRs as well as completed merges.
-    pub include_unmerged: bool,
+    /// Deadline ratios also acquire horizon-relevant creation/ready candidates.
+    pub deadline_ms: Option<u64>,
 }
 
 struct SnapshotBuilder {
@@ -63,9 +63,12 @@ struct SnapshotBuilder {
     repositories: Vec<String>,
     repository: usize,
     after: Option<(u64, String)>,
-    include_unmerged: bool,
-    merge_scan_complete: bool,
+    deadline_ms: Option<u64>,
+    phase: SnapshotPhase,
 }
+
+#[derive(Clone, Copy)]
+enum SnapshotPhase { Merges, Creations, Readies }
 
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h6b101dd45bbc owner=fractal_reconcile::reconcile::github_capture TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS capture_v1_meta(id INTEGER PRIMARY KEY CHECK(id=1),cursor INTEGER NOT NULL);
@@ -80,6 +83,7 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS capture_v1_merge_window ON capture_v1_entities(source,family,repository_id,occurred_ms,entity_id);
         CREATE INDEX IF NOT EXISTS capture_v1_lifecycle ON capture_v1_entities(source,family,repository_id,pr_id,transition_kind,occurred_ms,entity_id);
         CREATE INDEX IF NOT EXISTS capture_v1_plugin_pulls ON capture_v1_entities(source,family,repository_id,json_extract(record,'$.image.state'),json_extract(record,'$.image.number') DESC);
+        CREATE INDEX IF NOT EXISTS capture_v1_pull_created ON capture_v1_entities(source,repository_id,json_extract(record,'$.image.created_at_ms'),entity_id) WHERE family='pull_request';
         CREATE TABLE IF NOT EXISTS capture_v1_coverage(source TEXT NOT NULL,repository_id TEXT NOT NULL,family TEXT NOT NULL,sequence INTEGER NOT NULL,record TEXT NOT NULL,PRIMARY KEY(source,repository_id,family));
         CREATE TABLE IF NOT EXISTS capture_v1_checkpoints(source TEXT NOT NULL,repository_id TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(source,repository_id));
         CREATE TABLE IF NOT EXISTS capture_v1_receipts(source TEXT NOT NULL,repository_id TEXT NOT NULL,pr_id TEXT NOT NULL,updated_ms INTEGER NOT NULL,pass_ms INTEGER NOT NULL,PRIMARY KEY(source,repository_id,pr_id));")?;
@@ -368,7 +372,7 @@ pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, ro
     let Some(head) = head else { return Ok(None) };
     // Independent view definitions (civil timezone and Now/watermark cut) must not consume
     // each other's differently bounded reads. The caller supplies that stable view identity.
-    let cache_key = (state_dir.to_path_buf(), source.clone(), serde_json::to_string(&roster)?, format!("{}:{:?}:{}", view.id, view.required, view.include_unmerged));
+    let cache_key = (state_dir.to_path_buf(), source.clone(), serde_json::to_string(&roster)?, format!("{}:{:?}:{:?}", view.id, view.required, view.deadline_ms));
     let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(snapshot) = snapshots.complete.get(&cache_key) {
         if snapshot.projection.revision == head && snapshot.start_ms == start_ms && snapshot.end_ms == end_ms {
@@ -391,7 +395,7 @@ pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, ro
         reader.execute_batch(/* sqlite-large-value: allow-for-now lv-h5234cc786356 owner=fractal_reconcile::reconcile::github_capture TODO=trace-statement-and-value-representation */ "BEGIN DEFERRED")?;
         ensure!(current_head(&reader, &source)?.1.as_deref() == Some(projection.revision.as_str()), "capture head changed while pinning snapshot");
         let mut builder = SnapshotBuilder::new(projection);
-        builder.include_unmerged = view.include_unmerged;
+        builder.deadline_ms = view.deadline_ms;
         builder.reader = Some(reader);
         builder.start_ms = start_ms;
         builder.end_ms = end_ms;
@@ -411,21 +415,20 @@ pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, ro
 impl SnapshotBuilder {
     fn new(projection: Projection) -> Self {
         let repositories = projection.roster.members.iter().map(|member| member.repository_id.clone()).collect::<BTreeSet<_>>().into_iter().collect();
-        Self { projection, repositories, repository: 0, after: None, reader: None, start_ms: 0, end_ms: 0, include_unmerged: false, merge_scan_complete: false }
+        Self { projection, repositories, repository: 0, after: None, reader: None, start_ms: 0, end_ms: 0, deadline_ms: None, phase: SnapshotPhase::Merges }
     }
 
     /// Repository probes and merge enrichment both consume the shared per-call budget.
     /// The tuple cursor preserves equal-timestamp merges without OFFSET scans.
     fn advance(&mut self, connection: &Connection, source: &str, start_ms: u64, end_ms: u64) -> Result<bool> {
-        if self.include_unmerged && self.merge_scan_complete { return self.advance_pull_requests(connection, source, end_ms); }
-        let exclusive_end = end_ms.saturating_add(u64::from(self.include_unmerged));
+        if !matches!(self.phase, SnapshotPhase::Merges) { return self.advance_deadline_candidates(connection, source, end_ms); }
         let mut budget = SNAPSHOT_PAGE;
         while self.repository < self.repositories.len() && budget > 0 {
             let repository = &self.repositories[self.repository];
             let (after_ms, after_id) = self.after.as_ref().map_or((start_ms, ""), |(ms, id)| (*ms, id.as_str()));
             let rows = {
                 let mut statement = connection.prepare_cached("SELECT occurred_ms,entity_id,record FROM capture_v1_entities WHERE source=?1 AND family='merge' AND repository_id=?2 AND (occurred_ms,entity_id)>(?3,?4) AND occurred_ms<?5 ORDER BY occurred_ms,entity_id LIMIT ?6")?;
-                let rows = statement.query_map(params![source,repository,after_ms,after_id,exclusive_end,budget],
+                let rows = statement.query_map(params![source,repository,after_ms,after_id,end_ms,budget],
                     |row| Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
@@ -438,22 +441,19 @@ impl SnapshotBuilder {
             budget -= rows.len();
             for (occurred, id, record) in rows {
                 if let FactImage::Merge(merge) = serde_json::from_str(&record)? {
-                    if !self.include_unmerged {
-                        let pr: Option<String> = connection.query_row("SELECT record FROM capture_v1_entities WHERE source=?1 AND family='pull_request' AND repository_id=?2 AND entity_id=?3", params![source,repository,merge.pull_request_id], |row| row.get(0)).optional()?;
-                        let mut ready_at = ReadyCycle::Unknown;
-                        if let Some(record) = pr && let FactImage::PullRequest(pr) = serde_json::from_str(&record)? {
-                            ready_at = ready_cycle(connection, source, &pr, merge.merged_at_ms)?;
-                            self.projection.pull_requests.push(pr);
-                        }
-                        self.projection.ready_cycles.insert((merge.repository_id.clone(),merge.pull_request_id.clone()),ready_at);
+                    let pr: Option<String> = connection.query_row("SELECT record FROM capture_v1_entities WHERE source=?1 AND family='pull_request' AND repository_id=?2 AND entity_id=?3", params![source,repository,merge.pull_request_id], |row| row.get(0)).optional()?;
+                    if let Some(record) = pr && let FactImage::PullRequest(pr) = serde_json::from_str(&record)? {
+                        Self::enrich_pull_request(&mut self.projection, connection, source, pr, merge.merged_at_ms)?;
+                    } else {
+                        self.projection.ready_cycles.insert((merge.repository_id.clone(), merge.pull_request_id.clone()), ReadyCycle::Unknown);
                     }
                     self.projection.merges.push(merge);
                 }
                 self.after = Some((occurred, id));
             }
         }
-        if self.include_unmerged && self.repository == self.repositories.len() {
-            self.merge_scan_complete = true;
+        if self.deadline_ms.is_some() && self.repository == self.repositories.len() {
+            self.phase = SnapshotPhase::Creations;
             self.repository = 0;
             self.after = None;
             return Ok(false);
@@ -461,16 +461,23 @@ impl SnapshotBuilder {
         Ok(self.repository == self.repositories.len())
     }
 
-    /// Scan the source/repository primary-key range in bounded pages. Open PR deadlines
-    /// cannot be discovered by a merge-time index. No OFFSET or per-PR history scan.
-    fn advance_pull_requests(&mut self, connection: &Connection, source: &str, end_ms: u64) -> Result<bool> {
+    /// Candidate timestamps are bounded by horizon + deadline. Recent merges are
+    /// already enriched; creation and lifecycle indexes find old PRs newly ready.
+    fn advance_deadline_candidates(&mut self, connection: &Connection, source: &str, end_ms: u64) -> Result<bool> {
+        let start_ms = self.start_ms.saturating_sub(self.deadline_ms.expect("deadline candidate phase"));
         let mut budget = SNAPSHOT_PAGE;
         while self.repository < self.repositories.len() && budget > 0 {
             let repository = &self.repositories[self.repository];
-            let after = self.after.as_ref().map_or("", |(_, id)| id.as_str());
+            let (after_ms, after_id) = self.after.as_ref().map_or((start_ms, ""), |(at, id)| (*at, id.as_str()));
             let rows = {
-                let mut statement = connection.prepare_cached("SELECT entity_id,record FROM capture_v1_entities WHERE source=?1 AND family='pull_request' AND repository_id=?2 AND entity_id>?3 ORDER BY entity_id LIMIT ?4")?;
-                statement.query_map(params![source, repository, after, budget], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                let sql = match self.phase {
+                    SnapshotPhase::Creations => "SELECT json_extract(record,'$.image.created_at_ms'),entity_id,record FROM capture_v1_entities WHERE source=?1 AND family='pull_request' AND repository_id=?2 AND json_extract(record,'$.image.created_at_ms')>=?3 AND (json_extract(record,'$.image.created_at_ms'),entity_id)>(?3,?4) AND json_extract(record,'$.image.created_at_ms')<?5 ORDER BY json_extract(record,'$.image.created_at_ms'),entity_id LIMIT ?6",
+                    SnapshotPhase::Readies => "SELECT occurred_ms,entity_id,record FROM capture_v1_entities WHERE source=?1 AND family='lifecycle' AND repository_id=?2 AND (occurred_ms,entity_id)>(?3,?4) AND occurred_ms<?5 ORDER BY occurred_ms,entity_id LIMIT ?6",
+                    SnapshotPhase::Merges => unreachable!(),
+                };
+                let mut statement = connection.prepare_cached(sql)?;
+                statement.query_map(params![source, repository, after_ms, after_id, end_ms, budget],
+                    |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
                     .collect::<rusqlite::Result<Vec<_>>>()?
             };
             if rows.is_empty() {
@@ -480,18 +487,40 @@ impl SnapshotBuilder {
                 continue;
             }
             budget -= rows.len();
-            for (id, record) in rows {
-                if let FactImage::PullRequest(pr) = serde_json::from_str(&record)? && pr.created_at_ms < end_ms
-                    && pr.merged_at_ms.or(pr.closed_at_ms).is_none_or(|at| at >= self.start_ms) {
-                    let at = pr.merged_at_ms.or(pr.closed_at_ms).unwrap_or(end_ms).min(end_ms);
-                    let cycle = ready_cycle(connection, source, &pr, at)?;
-                    self.projection.ready_cycles.insert((repository.clone(), pr.id.clone()), cycle);
-                    self.projection.pull_requests.push(pr);
+            for (occurred, id, record) in rows {
+                let pr = match serde_json::from_str(&record)? {
+                    FactImage::PullRequest(pr) => Some(pr),
+                    FactImage::Lifecycle(event) if event.kind == LifecycleKind::Ready => {
+                        let record: Option<String> = connection.query_row("SELECT record FROM capture_v1_entities WHERE source=?1 AND family='pull_request' AND repository_id=?2 AND entity_id=?3",
+                            params![source, event.repository_id, event.pull_request_id], |row| row.get(0)).optional()?;
+                        if let Some(record) = record && let FactImage::PullRequest(pr) = serde_json::from_str(&record)? { Some(pr) }
+                        else { self.projection.lifecycle.push(event); None }
+                    }
+                    _ => None,
+                };
+                if let Some(pr) = pr && pr.created_at_ms < end_ms {
+                    let at = pr.merged_at_ms.or(pr.closed_at_ms).filter(|at| *at < end_ms).unwrap_or(end_ms.saturating_sub(1));
+                    Self::enrich_pull_request(&mut self.projection, connection, source, pr, at)?;
                 }
-                self.after = Some((0, id));
+                self.after = Some((occurred, id));
             }
         }
+        if self.repository == self.repositories.len() && matches!(self.phase, SnapshotPhase::Creations) {
+            self.phase = SnapshotPhase::Readies;
+            self.repository = 0;
+            self.after = None;
+            return Ok(false);
+        }
         Ok(self.repository == self.repositories.len())
+    }
+
+    fn enrich_pull_request(projection: &mut Projection, connection: &Connection, source: &str, pr: PullRequestFact, at: u64) -> Result<()> {
+        let key = (pr.repository_id.clone(), pr.id.clone());
+        if projection.ready_cycles.contains_key(&key) { return Ok(()); }
+        let cycle = ready_cycle(connection, source, &pr, at)?;
+        projection.ready_cycles.insert(key, cycle);
+        projection.pull_requests.push(pr);
+        Ok(())
     }
 }
 

@@ -212,10 +212,13 @@ Login matching is ASCII case-insensitive. Missing PR/author evidence and conflic
 images remain unknown; known nonmatching authors are excluded. Coverage is still required
 for every effective roster member before an empty selected cohort can be a real zero.
 
-These are declaration grammar extensions only: no claim fields, registry digest, SQLite
-tables/indexes, storage version or convergence corpus change, and no new `include_str!`
-lane inputs. Existing generic declaration bodies retain the authored policy and replay it.
-The indexed ready-state proof is an in-memory projection value, not a serialized fact.
+The declaration extensions add no claim fields, registry digest, storage version,
+convergence corpus or new `include_str!` lane inputs. Generic declaration bodies retain
+the authored policy and replay it. The indexed ready-state proof is an in-memory value,
+not a serialized fact. The local GitHub plugin adds a derived creation-time index
+(see [schema](schema.md#local-github-deadline-candidates)); existing merge/lifecycle
+indexes and the new index bound candidate reads to horizon plus deadline, not all PR
+history. Each continuation reads at most 128 indexed candidates or repository probes.
 N-1 readers without these extensions reject `author-login`, merged-count `window`, or
 targeted latency with `budget` as unsupported and show no-data; they never silently
 evaluate another cohort, the old one-hour rate, or a measured-only success verdict.
@@ -316,6 +319,9 @@ PRs. A later merge does not move that bad event to its completion time. Pending
 and proven draft cycles do not vote. Closing an unmerged cycle before its deadline
 cancels it; a close after the deadline cannot erase its bad event. Source coverage,
 author evidence and final-ready proof are required, never inferred from silence.
+Only PR evidence that can settle within effective roster membership and the authored
+author cohort can make the budget unknown. Every settlement window is half-open
+`[cut - window, cut)`: a merge or deadline exactly at the cut belongs to the next cut.
 Each eligible horizon/burn window needs the authored minimum settled samples.
 Both windows must reach a paired burn threshold; a short-only spike never fires.
 The row exposes `latency_percentiles_ms.p95` for completed merges as a diagnostic;

@@ -126,14 +126,31 @@ pub fn latency_budget(projection: &Projection, cut_ms: u64, within_ms: u64, wind
     let mut unknown = Vec::new();
     let history_start = cut_ms.saturating_sub(windows.iter().copied().max().unwrap_or(0));
     for (key, merge) in &index.merges {
-        if merge.merged_at_ms >= history_start && merge.merged_at_ms <= cut_ms
+        if merge.merged_at_ms >= history_start && merge.merged_at_ms < cut_ms
             && projection.roster.contains(&merge.repository_id, merge.merged_at_ms) && !index.prs.contains_key(key) {
             unknown.push(format!("{}/{}: missing pull request", key.0, key.1));
+        }
+    }
+    for event in &projection.lifecycle {
+        if event.kind == LifecycleKind::Ready
+            && let Some(deadline) = event.occurred_at_ms.checked_add(within_ms)
+            && deadline >= history_start && deadline < cut_ms
+            && projection.roster.contains(&event.repository_id, deadline)
+            && !index.prs.contains_key(&(event.repository_id.as_str(), event.pull_request_id.as_str())) {
+            unknown.push(format!("{}/{}: missing pull request for ready cycle", event.repository_id, event.pull_request_id));
         }
     }
     for (key, pr) in &index.prs {
         if pr.created_at_ms >= cut_ms { continue; }
         if pr.merged_at_ms.or(pr.closed_at_ms).is_some_and(|at| at < history_start) { continue; }
+        // Unknown evidence can affect this budget only if the PR could settle in
+        // an effective membership interval. Retired/unrelated repositories do not vote.
+        if !projection.roster.members.iter().any(|member| {
+            member.repository_id == pr.repository_id
+                && history_start.max(pr.created_at_ms).max(member.effective_from_ms)
+                    < cut_ms.min(member.effective_until_ms.unwrap_or(cut_ms))
+                        .min(pr.merged_at_ms.or(pr.closed_at_ms).map_or(cut_ms, |at| at.saturating_add(1)))
+        }) { continue; }
         if !author_logins.is_empty() {
             match &pr.author_login {
                 Some(author) if !author_logins.iter().any(|login| login.eq_ignore_ascii_case(author)) => continue,
@@ -145,12 +162,12 @@ pub fn latency_budget(projection: &Projection, cut_ms: u64, within_ms: u64, wind
             unknown.push(format!("{}/{}: conflicting canonical images", key.0, key.1));
             continue;
         }
-        let merged = pr.merged_at_ms.filter(|at| *at <= cut_ms);
+        let merged = pr.merged_at_ms.filter(|at| *at < cut_ms);
         if merged.is_some() && index.merges.get(key).map(|merge| merge.merged_at_ms) != merged {
             unknown.push(format!("{}/{}: merge image disagrees with pull request", key.0, key.1));
             continue;
         }
-        let at = merged.or(pr.closed_at_ms).unwrap_or(cut_ms).min(cut_ms);
+        let at = merged.or(pr.closed_at_ms.filter(|at| *at < cut_ms)).unwrap_or(cut_ms.saturating_sub(1));
         let ready = match index.ready_state(key, pr, at) {
             ReadyCycle::Ready(ready) => ready,
             ReadyCycle::Draft if merged.is_none() => continue,
@@ -162,8 +179,8 @@ pub fn latency_budget(projection: &Projection, cut_ms: u64, within_ms: u64, wind
         };
         let settled = match merged {
             Some(merged) => (merged.min(deadline), merged > deadline),
-            None if pr.closed_at_ms.is_some_and(|closed| closed < deadline && closed <= cut_ms) => continue,
-            None if deadline <= cut_ms => (deadline, true),
+            None if pr.closed_at_ms.is_some_and(|closed| closed < deadline && closed < cut_ms) => continue,
+            None if deadline < cut_ms => (deadline, true),
             None => continue,
         };
         if projection.roster.contains(&pr.repository_id, settled.0) { events.push(settled); }
@@ -177,7 +194,7 @@ pub fn latency_budget(projection: &Projection, cut_ms: u64, within_ms: u64, wind
         let mut total = 0;
         let mut bad = 0;
         for &(at, failed) in &events {
-            if at >= start && at <= cut_ms { total += 1; bad += u64::from(failed); }
+            if at >= start && at < cut_ms { total += 1; bad += u64::from(failed); }
         }
         DeadlineWindow { window_ms, total, bad, complete }
     }).collect();

@@ -25,10 +25,12 @@ pub(super) fn row(store: &Store, state_dir: &Path, objective: &Objective, declar
         let cut = if config.as_of_watermark { Cut::Watermark } else { Cut::Now };
         let end = if config.as_of_watermark { now.min(frontier) } else { now };
         let rolling_ms = objective.budget.map_or_else(|| objective.window.map_or(3_600_000, |window| window.ms), |policy| policy.horizon_ms);
-        let start = measurement::history_start(end, &config.timezone)?.min(end.saturating_sub(rolling_ms));
+        let start = if objective.budget.is_some() { end.saturating_sub(rolling_ms) }
+            else { measurement::history_start(end, &config.timezone)?.min(end.saturating_sub(rolling_ms)) };
+        let deadline_ms = objective.budget.and_then(|_| objective.target("p95", false).and_then(|target| target.within_ms()));
         let view_id = format!("{}:{}:{rolling_ms}", config.timezone, config.as_of_watermark);
         let snapshot = crate::reconcile::github_capture::measurement_snapshot(store, state_dir, &config.source, &config.roster, start..end,
-            crate::reconcile::github_capture::MeasurementView { id: &view_id, required, include_unmerged: objective.budget.is_some() })?
+            crate::reconcile::github_capture::MeasurementView { id: &view_id, required, deadline_ms })?
             .ok_or_else(|| anyhow::anyhow!("source or roster projection is unavailable or completing a bounded snapshot page"))?;
         let projection = &snapshot.projection;
         if config.as_of_watermark && projection.frontier_ms < snapshot.end_ms {

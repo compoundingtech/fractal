@@ -279,9 +279,13 @@ fn latency_deadline_censors_open_and_late_merges_once_without_moving_the_event()
     open.merged_at_ms = None;
     open.closed_at_ms = None;
     let measured = latency_budget(&p, now, deadline, &[30 * 86_400_000, 300_000], &[]);
-    assert_eq!((measured.windows[0].total, measured.windows[0].bad), (3, 2));
-    assert_eq!((measured.windows[1].total, measured.windows[1].bad), (3, 2));
+    assert_eq!((measured.windows[0].total, measured.windows[0].bad), (2, 1));
+    assert_eq!((measured.windows[1].total, measured.windows[1].bad), (2, 1));
     assert!(measured.windows.iter().all(|window| window.complete));
+    p.frontier_ms = now + 1;
+    for coverage in &mut p.coverage { coverage.through_ms = now + 1; }
+    let after_cut = latency_budget(&p, now + 1, deadline, &[30 * 86_400_000, 300_000], &[]);
+    assert_eq!((after_cut.windows[0].total, after_cut.windows[0].bad), (3, 2));
     let later = now + 400_000;
     p.frontier_ms = later;
     for coverage in &mut p.coverage { coverage.through_ms = later; }
@@ -327,6 +331,56 @@ fn latency_orphan_merge_cannot_disappear_from_a_known_cohort() {
     merge(&mut p, "orphan", now - 10_000, now, Some("example-bot"));
     p.pull_requests.pop();
     let measured = latency_budget(&p, now, 172_800_000, &[30 * 86_400_000], &["example-bot".into()]);
+    assert!(measured.windows[0].complete, "the orphan merge at the exclusive cut is not yet in the window");
+    p.frontier_ms = now + 1;
+    for coverage in &mut p.coverage { coverage.through_ms = now + 1; }
+    let measured = latency_budget(&p, now + 1, 172_800_000, &[30 * 86_400_000], &["example-bot".into()]);
     assert!(!measured.windows[0].complete);
     assert!(measured.unknown.iter().any(|reason| reason.contains("missing pull request")));
+}
+
+#[test]
+fn latency_membership_and_cohort_exclude_irrelevant_unknown_pr_evidence() {
+    let now = at("2026-11-17T12:00:00Z");
+    let mut p = projection(now);
+    merge(&mut p, "known", now - 10_000, now - 1, Some("example-bot"));
+    let mut irrelevant = p.pull_requests[0].clone();
+    irrelevant.created_as_draft = None;
+    irrelevant.merged_at_ms = None;
+    irrelevant.closed_at_ms = None;
+    irrelevant.state = PullRequestState::Open;
+    irrelevant.author_login = None;
+    irrelevant.repository_id = "outside-roster".into();
+    irrelevant.id = "outside-roster-pr".into();
+    p.pull_requests.push(irrelevant.clone());
+    p.roster.members.push(RosterMember { repository_id: "retired".into(), effective_from_ms: 0, effective_until_ms: Some(now - 20_000) });
+    irrelevant.repository_id = "retired".into();
+    irrelevant.id = "after-retirement".into();
+    p.pull_requests.push(irrelevant.clone());
+    p.roster.members.push(RosterMember { repository_id: "future".into(), effective_from_ms: now + 1_000, effective_until_ms: None });
+    irrelevant.repository_id = "future".into();
+    irrelevant.id = "before-membership".into();
+    p.pull_requests.push(irrelevant.clone());
+    irrelevant.repository_id = "R1".into();
+    irrelevant.id = "outside-cohort".into();
+    irrelevant.author_login = Some("another-author".into());
+    p.pull_requests.push(irrelevant);
+    // The retired membership is outside this window; none of its evidence is required.
+    let authors = ["example-bot".into()];
+    let measured = latency_budget(&p, now, 172_800_000, &[10_000], &authors);
+    assert!(measured.windows[0].complete, "{:?}", measured.unknown);
+    assert_eq!((measured.windows[0].total, measured.windows[0].bad), (1, 0));
+    p.pull_requests.last_mut().unwrap().author_login = Some("example-bot".into());
+    assert!(!latency_budget(&p, now, 172_800_000, &[10_000], &authors).windows[0].complete);
+}
+
+#[test]
+fn latency_settlement_window_includes_start_and_excludes_cut() {
+    let now = at("2026-11-17T12:00:00Z");
+    let mut p = projection(now);
+    merge(&mut p, "start", now - 20_000, now - 10_000, None);
+    merge(&mut p, "cut", now - 20_000, now, None);
+    let measured = latency_budget(&p, now, 172_800_000, &[10_000], &[]);
+    assert_eq!((measured.windows[0].total, measured.windows[0].bad), (1, 0));
+    assert_eq!(measured.merged_latency_ms, [10_000]);
 }

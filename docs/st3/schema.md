@@ -692,3 +692,23 @@ A store with no completed selector cut records resumable initialization metadata
 One worker-owned guard saves and disables SQLite automatic WAL checkpoints for the entire initial online backfill, including the foreground writes interleaved between background loans. The daemon WAL recycler owns checkpoint scheduling. Completing the cut, returning an error or unwinding drops the guard and restores the incoming policy; an explicitly disabled policy remains disabled. Explicit benchmark rebuilds additionally perform a passive checkpoint outside their chunk transactions. Checkpoint cost must be reported separately from commit-inclusive chunk duration.
 
 Each transaction records backfill progress in `meta` under `client_message_selectors_v1_backfill` as `{"cut": INITIAL_INDEX, "phase": "clear" | "headers" | "pending", "after": LAST_SUBJECT}`; `client_message_selectors_v1_fold` separately records any unfinished subject fold. A restart resumes both instead of rescanning completed work. A populated store opened with pending rows queued reconciles them without discarding its headers or resetting its epoch. The final transaction writes the completed cut `client_message_selectors_v1_cut` and deletes the backfill marker together. Until then, negotiated v2 pages return retryable HTTP 503 `message-selectors-not-ready`, while legacy unindexed readers remain available. Ordinary maintenance after initialization keeps serving the previous published frontier. Earlier local message body-version tables and their triggers are dropped when the store opens. No claim is rewritten.
+
+## Local GitHub deadline candidates
+
+The rebuildable GitHub plugin projection adds `capture_v1_pull_created` on
+`capture_v1_entities(source, repository_id, json_extract(record,'$.image.created_at_ms'), entity_id)`
+where `family='pull_request'`. Plugin initialization installs this derived index
+idempotently; existing row contents, authoritative facts, registry digest, convergence
+corpus, storage version and checkpoint rules are unchanged. Older binaries ignore
+the extra index and read the same rows.
+
+Deadline snapshots keyset-page recent merges, then creations and lifecycle events in
+`[cut - horizon - deadline, cut)`. Existing merge/lifecycle time indexes and the
+creation index avoid visiting historical PR keys outside that range. Old PRs that
+became ready within the range are found through lifecycle events. Each continuation
+reads at most 128 candidates/repository probes, deduplicating PR enrichment across
+phases. Missing PR evidence remains unknown, not a healthy empty cohort.
+
+First opening an existing populated plugin builds the index once; its duration has
+not been measured. No authoritative replay or coordinated schema cutover is required.
+
