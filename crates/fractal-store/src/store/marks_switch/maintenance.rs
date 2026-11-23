@@ -88,11 +88,12 @@ impl Maintenance {
             let mut switch_changes = 0;
             for (key, value) in [("marks_switched", marks), ("staged_switched", staged)] {
                 switch_changes += tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-hc3b220f3d207 owner=fractal_store::store::marks_switch::maintenance TODO=bound-or-reference-values-and-reclamation */
                     "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value",
                     params![key, if value { "1" } else { "0" }],
                 )?;
             }
-            tx.execute("DELETE FROM local_marks_switch_dirty_v1", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hb3a50419b705 owner=fractal_store::store::marks_switch::maintenance TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_marks_switch_dirty_v1", [])?;
             Ok((generation, next, updates, switch_changes))
         }).map_err(anyhow::Error::msg)??;
         let (generation, next, updates, switch_changes) = result;
@@ -123,8 +124,8 @@ fn requirements(connection: &Connection, origin: &str, peers: &BTreeSet<String>)
     let fenced = membership.legacy_removed_names().collect::<BTreeSet<_>>();
     for (table, column) in WRITER_TABLES {
         let mut previous = String::new();
-        let mut query = connection.prepare_cached(&writer_seek(table, column))?;
-        while let Some(writer) = query.query_row([&previous], |row| row.get::<_, String>(0)).optional()? {
+        let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hefba4fc2e7d3 owner=fractal_store::store::marks_switch::maintenance TODO=trace-statement-and-value-representation */ &writer_seek(table, column))?;
+        while let Some(writer) = query.query_row(/* sqlite-large-value: allow-for-now lv-h61161908d975 owner=fractal_store::store::marks_switch::maintenance TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0)).optional()? {
             if writer != origin && !result.contains_key(&writer) && !fenced.contains(&writer)
                 && !(membership.anchor().is_some() && membership.is_keyed_writer(&writer)) {
                 result.insert(writer.clone(), Requirement::Legacy);
@@ -137,7 +138,7 @@ fn requirements(connection: &Connection, origin: &str, peers: &BTreeSet<String>)
 }
 
 fn install(connection: &Connection) -> Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS local_marks_switch_dirty_v1(member TEXT PRIMARY KEY) WITHOUT ROWID;")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1360d68afada owner=fractal_store::store::marks_switch::maintenance TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_marks_switch_dirty_v1(member TEXT PRIMARY KEY) WITHOUT ROWID;")?;
     // Writer membership changes only on the first/last row for that writer, not on every batch.
     // Indexed existence probes avoid enumerating unrelated history on ordinary appends.
     // Explicit outer conflict policies override trigger OR IGNORE. Avoid conflicts altogether,
@@ -148,11 +149,13 @@ fn install(connection: &Connection) -> Result<()> {
                 format!("(SELECT count(*) FROM (SELECT 1 FROM {table} WHERE {column}={row}.{column} LIMIT 2))=1")
             } else { format!("NOT EXISTS(SELECT 1 FROM {table} WHERE {column}={row}.{column})") };
             connection.execute_batch(&format!(
+                /* sqlite-large-value: allow-for-now lv-h4e8eef905563 owner=fractal_store::store::marks_switch::maintenance TODO=bound-or-reference-values-and-reclamation */
                 "CREATE TRIGGER IF NOT EXISTS marks_switch_{table}_{event}_v1 AFTER {event} ON {table}
                  WHEN {condition} BEGIN INSERT INTO local_marks_switch_dirty_v1
                  SELECT '' WHERE NOT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member=''); END;"))?;
         }
         connection.execute_batch(&format!(
+            /* sqlite-large-value: allow-for-now lv-h2821e23aaf55 owner=fractal_store::store::marks_switch::maintenance TODO=bound-or-reference-values-and-reclamation */
             "CREATE TRIGGER IF NOT EXISTS marks_switch_{table}_writer_v1 AFTER UPDATE OF {column} ON {table}
              WHEN OLD.{column}<>NEW.{column} BEGIN INSERT INTO local_marks_switch_dirty_v1
              SELECT '' WHERE NOT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member=''); END;"))?;
@@ -160,11 +163,11 @@ fn install(connection: &Connection) -> Result<()> {
     for (event, rows) in [("INSERT", &["NEW"][..]), ("DELETE", &["OLD"][..]), ("UPDATE", &["OLD", "NEW"][..])] {
         let mut body = String::new();
         for row in rows {
-            body.push_str(&format!("INSERT INTO local_marks_switch_dirty_v1 SELECT {row}.origin
+            body.push_str(&format!(/* sqlite-large-value: allow-for-now lv-hc8938fdd7da4 owner=fractal_store::store::marks_switch::maintenance TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_marks_switch_dirty_v1 SELECT {row}.origin
                 WHERE {row}.kind='daemon.started' AND {row}.subject='daemon/'||{row}.origin
                   AND NOT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member={row}.origin);"));
         }
-        connection.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS marks_switch_claims_{event}_v1 AFTER {event} ON claims BEGIN {body} END;"))?;
+        connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h4e048b51e619 owner=fractal_store::store::marks_switch::maintenance TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS marks_switch_claims_{event}_v1 AFTER {event} ON claims BEGIN {body} END;"))?;
         // Canonical rank and incarnation sequence can change without appending a claim.
         for (table, selector) in [("batches", "claims.batch_id={row}.id"),
             ("replica_records", "claims.id={row}.claim_id"),
@@ -173,12 +176,12 @@ fn install(connection: &Connection) -> Result<()> {
             if table == "batches" && event == "INSERT" { continue; }
             let mut body = String::new();
             for row in rows {
-                body.push_str(&format!("INSERT INTO local_marks_switch_dirty_v1 SELECT DISTINCT claims.origin FROM claims
+                body.push_str(&format!(/* sqlite-large-value: allow-for-now lv-h745bf007acb3 owner=fractal_store::store::marks_switch::maintenance TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_marks_switch_dirty_v1 SELECT DISTINCT claims.origin FROM claims
                     WHERE {} AND claims.kind='daemon.started' AND claims.subject='daemon/'||claims.origin
                       AND NOT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member=claims.origin);",
                     selector.replace("{row}", row)));
             }
-            connection.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS marks_switch_{table}_capability_{event}_v1 AFTER {event} ON {table} BEGIN {body} END;"))?;
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h01fae2826b5b owner=fractal_store::store::marks_switch::maintenance TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS marks_switch_{table}_capability_{event}_v1 AFTER {event} ON {table} BEGIN {body} END;"))?;
         }
     }
     Ok(())
