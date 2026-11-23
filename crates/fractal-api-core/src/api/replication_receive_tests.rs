@@ -680,3 +680,76 @@ fn quiet_receive_during_recovery_preserves_completion_but_new_admission_survives
         }
     }
 }
+
+#[tokio::test]
+async fn shard_receive_and_wake_do_not_wait_for_projection_and_preserve_admitted_order() {
+    let root = tempfile::tempdir().unwrap();
+    let source_root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    state.store.bind_fleet(fleet).unwrap();
+    let target = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let source_graph = Arc::new(Store::open(&source_root.path().join("graph.db"), "shard-source").unwrap());
+    source_graph.bind_fleet(fleet).unwrap();
+    let source = crate::store::messages_shard::open(&source_graph, source_root.path()).unwrap();
+    for subject in ["message/0123456789abcdef", "message/0123456789abcdee"] {
+        source.append_claim(&smallclaims::ClaimInput {
+            subject: subject.into(),
+            kind: "message.sent".into(),
+            actor: Some("agent/birch".into()),
+            fields: serde_json::from_value(json!({
+                "from": "agent/birch", "to": "agent/cedar", "content": "hello", "status": "sent",
+            })).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    let exchange = source.export_replication_exchange(fleet, &target.replication_inventory().unwrap()).unwrap();
+    let request = ReplicationReceiveRequest {
+        peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
+        round_trip_ms: None, carrier: Default::default(), authenticated_member_key: None,
+    };
+    // The shard is a smallclaims store, not the graph's published-list wrapper.
+    let projection_frontier = || target.readers.get().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap();
+    let frontier = projection_frontier();
+    let gate = target.projection.lock();
+    let shard_path = || AxumPath(crate::store::messages_shard::SHARD_ID.to_owned());
+    // The gate is acquired before polling the handler and released only after its
+    // response: completion itself is the signal, with no clock-based scheduling.
+    let response = shard_replication_receive(
+        State(state.clone()), shard_path(), Default::default(), Json(request.clone()),
+    ).await.unwrap().0;
+    assert!(response.receipt.received > 0);
+    assert!(response.changed);
+    assert_eq!(response.store_index, target.index().unwrap());
+    assert!(target.index().unwrap() > frontier);
+    assert_eq!(projection_frontier(), frontier);
+    assert!(target.replication_projection_deferred());
+    let generation = target.projection_contention_generation();
+    assert!(generation > 0);
+    let first = target.claims_for("message/0123456789abcdef", Some("message.sent")).unwrap();
+    let second = target.claims_for("message/0123456789abcdee", Some("message.sent")).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert!(first[0].store_index < second[0].store_index);
+    assert!(state.event_notify.borrow().gt(&0));
+    let duplicate = shard_replication_receive(
+        State(state.clone()), shard_path(), Default::default(), Json(request),
+    ).await.unwrap().0;
+    assert_eq!(duplicate.receipt.received, 0);
+    assert_eq!(target.projection_contention_generation(), generation);
+    let wake = shard_replication_wake(State(state.clone()), shard_path()).await.unwrap().0;
+    assert_eq!(wake["changed"], false, "{wake}");
+    assert_eq!(projection_frontier(), frontier);
+    assert_eq!(target.projection_contention_generation(), generation);
+    drop(gate);
+    assert!(target.project_replication_backlog().unwrap());
+    assert!(!target.replication_projection_deferred());
+    assert_eq!(projection_frontier(), target.index().unwrap());
+    assert_eq!(target.claims_for("message/0123456789abcdef", None).unwrap().len(), 1);
+    assert_eq!(target.claims_for("message/0123456789abcdee", None).unwrap().len(), 1);
+}

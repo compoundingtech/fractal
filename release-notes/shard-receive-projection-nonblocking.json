@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep shard replication receives from waiting behind projection",
+  "replay": { "status": "none", "detail": "Durable envelope receipt, ordered admission and exactly-once projection frontier advancement are unchanged." },
+  "schema": { "status": "none", "detail": "No schema, index, store-version or claim-field changes." },
+  "rules": { "status": "changed", "detail": "Shard receive and wake use the graph receive's non-blocking projection gate and quiet retry coalescing. The messages shard gets its own existing bounded maintenance schedule so deferred projection can recover without another exchange. Fleet authority and fencing checks are unchanged." },
+  "compatibility": { "status": "none", "detail": "Replication request and response fields are unchanged. Admitted stream items still wake readers before projection catches up." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback preserves admitted history and projection watermarks." }
+}

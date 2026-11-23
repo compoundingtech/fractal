@@ -236,6 +236,7 @@ impl FractalRuntime {
         message_marks::create_triggers(connection)?;
         relayed_closes::create_triggers(connection)?;
         stream_mirror::create_triggers(connection)?;
+        relayed_close_work::create_schema(connection)?;
         mail_delivery_source::install(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;

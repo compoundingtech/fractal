@@ -360,6 +360,7 @@ pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
         "prompt_reads": attention.get("card/prompt").copied().unwrap_or(0),
         "fleet_agent_inputs": attention.get("fleet/agent").copied().unwrap_or(0),
     });
+    report["relayed_close_work"] = super::relayed_close_maintenance::work_counts(&state.store);
     report["reconcile_inputs"] = state.store.reconcile_input_work();
     report["fault_families"] = state.store.fault_family_work();
     report["published_list_work"] = json!({
