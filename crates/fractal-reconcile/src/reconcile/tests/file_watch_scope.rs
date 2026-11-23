@@ -56,6 +56,7 @@ fn launch_input_change_evaluates_only_its_declaration() {
     use super::{FakeRuntime, parse_intent};
     use super::super::Reconciler;
     use crate::store::Store;
+    use crate::SeatsStoreCore as _;
     use std::sync::Arc;
 
     let store = Arc::new(Store::open_memory("node").unwrap());
