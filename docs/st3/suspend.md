@@ -150,6 +150,15 @@ native session. A different session (`native-session-mismatch`), no session with
 (`native-session-unbound`), or an exit before binding fails the resume. After a failed resume the
 seat stays suspended on the same snapshot, with the code and reason.
 
+Host-local suspension archives are released only after the operation-bound resume
+completion receipt is durable. Failed verification retains the snapshot. Before
+reconciliation starts after a daemon restart, an idempotent sweep removes hashed
+snapshot entries not referenced by any current suspension, including discarded
+holds and interrupted captures. Manual holds, in-flight suspends and moves, and
+failed resumes remain protected. The sweep fences claim writers while checking
+references and deleting entries; it does not remove authoritative native sessions
+or workspace files. Failed archive writes remove their `payload.tmp` staging file.
+
 ### Explicit pi-family transcript paths
 
 OMP's session manager reports the actual `sessionFile` along with the native ID on

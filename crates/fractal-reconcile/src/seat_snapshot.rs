@@ -158,6 +158,59 @@ pub fn directory(state: &Path, operation: &str) -> PathBuf {
         .join("suspended")
         .join(hex::encode(Sha256::digest(operation.as_bytes())))
 }
+
+/// Reclaim unreferenced host-local snapshots before reconciliation starts writing them.
+/// The writer transaction fences new suspension references through the physical deletion.
+/// Failed resumes project back to suspended, and manual holds use the same protection.
+pub fn sweep(state: &Path, store: &Store) -> Result<()> {
+    let root = state.join("suspended");
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(!fs::symlink_metadata(&root)?.file_type().is_symlink(),
+        "suspended store must not be a symlink");
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let subjects = transaction.prepare("SELECT subject FROM desired WHERE kind='agent'")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut live = std::collections::BTreeSet::new();
+    for subject in subjects {
+        // No writes have occurred in this transaction. The normal reader sees the
+        // same committed state and also protects an incumbent manual publication.
+        // Startup invokes this outside any pinned reader snapshot.
+        if let Some(hold) = crate::suspension::current(store, &subject)?
+            .filter(Suspension::holds_seat)
+        {
+            live.insert(directory(state, hold.suspend_operation_id.as_deref()
+                .unwrap_or(&hold.operation_id)));
+        }
+    }
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.len() != 64 || !name.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            continue;
+        }
+        if entry.file_type()?.is_dir() && !live.contains(&entry.path()) {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Call only after the operation-bound native-session verification receipt commits.
+pub fn remove(state: &Path, operation: &str) -> Result<()> {
+    match fs::remove_dir_all(directory(state, operation)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
 pub fn sessions(drivers: &Path, subject: &str, harness: &str) -> PathBuf {
     drivers
         .join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24])
