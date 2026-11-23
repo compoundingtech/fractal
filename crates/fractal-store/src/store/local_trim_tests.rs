@@ -592,7 +592,7 @@ fn a_local_cut_preserves_publications_however_many_chunks_it_deletes() {
     // A capped day stops at TrimDeferred, and the next day's run reaches the final mark.
     store.trim_locally_at_most(15);
     for (day, outcome) in [(0, "deferred"), (1, "trimmed")] {
-        let context = context(scratch.path(), day);
+        let context = cap_context(scratch.path(), day);
         let before = answers(&store, context.now_unix_ms);
         let deleted = all.difference(&observer_ids(&store)).count();
         let generation = store.fractal.presented_agents.generation();
@@ -1253,6 +1253,14 @@ fn cut_states(store: &Store) -> Vec<String> {
         .unwrap()
 }
 
+/// Daily-cap tests run at the end of the UTC day, when the whole paced budget is available.
+fn cap_context(scratch: &Path, days_later: u128) -> CheckpointContext {
+    use smallclaims::store::checkpoint::DAY_MS;
+    let mut context = context(scratch, days_later);
+    context.now_unix_ms = (context.now_unix_ms / DAY_MS + 1) * DAY_MS - 1;
+    context
+}
+
 /// A cut that drops more than the day's claims stops at the cap, stays `trimming`, and goes on
 /// the next day where it stopped; only what it deleted is retired, and the readers answer the
 /// same each day.
@@ -1266,7 +1274,7 @@ fn a_capped_local_cut_stops_at_the_day_s_claims_and_goes_on_the_next_day() {
     }
     let all = observer_ids(&store);
     // Each day's clock, and what the readers answer at it from the whole log.
-    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    let contexts: Vec<_> = (0..3).map(|day| cap_context(scratch.path(), day)).collect();
     let before: Vec<_> = contexts.iter().map(|context| answers(&store, context.now_unix_ms)).collect();
     for (day, deleted) in [(0_u128, 10), (1, 20), (2, 29)] {
         let context = &contexts[day as usize];
@@ -1298,13 +1306,13 @@ fn the_next_day_s_cut_follows_the_leftover_of_a_capped_one() {
         apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
     }
     let all_first = observer_ids(&store);
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 0))), ["deferred"]);
     // Observations of another observer after the first cut was recorded: the next cut's.
     for n in 16..24 {
         apply(&store, &Write::Observer { observer: 1, status: (n % 3) as u8, cursor: None }, n);
     }
     let all: BTreeSet<_> = all_first.union(&observer_ids(&store)).cloned().collect();
-    let next_day = context(scratch.path(), 1);
+    let next_day = cap_context(scratch.path(), 1);
     let before = answers(&store, next_day.now_unix_ms);
     // The leftover's five go first; then the new cut takes the five the day has left.
     assert_eq!(kinds(&step(&store, &next_day)), ["trimmed", "deferred"]);
@@ -1313,7 +1321,7 @@ fn the_next_day_s_cut_follows_the_leftover_of_a_capped_one() {
     assert_eq!(answers(&store, next_day.now_unix_ms), before);
     let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
     assert!(retired_exactly(&store, &gone));
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 2))).first(), Some(&"trimmed"));
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 2))).first(), Some(&"trimmed"));
     assert!(cut_states(&store).iter().all(|state| state == "trimmed"), "{:?}", cut_states(&store));
     assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
     let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
@@ -1345,17 +1353,17 @@ fn a_restart_during_a_capped_cut_goes_on_where_it_stopped() {
             apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
         }
         let all = observer_ids(&store);
-        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+        assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 0))), ["deferred"]);
         all
     };
     let store = open(false);
     assert_eq!(cut_states(&store), ["trimming"]);
     assert_eq!(claims_of(&store, "observer.observed"), 15);
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 0))), ["deferred"]);
     assert_eq!(claims_of(&store, "observer.observed"), 15, "the same day deletes no more");
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 1))), ["deferred"]);
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 1))), ["deferred"]);
     assert_eq!(claims_of(&store, "observer.observed"), 5);
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 2))).first(), Some(&"trimmed"));
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 2))).first(), Some(&"trimmed"));
     let left = observer_ids(&store);
     assert_eq!(left.len(), 1, "the newest stays");
     assert!(retired_exactly(&store, &all.difference(&left).cloned().collect()));
@@ -1420,7 +1428,7 @@ fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
     for n in 0..27 {
         apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
     }
-    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    let contexts: Vec<_> = (0..3).map(|day| cap_context(scratch.path(), day)).collect();
     for (day, context) in contexts.iter().enumerate() {
         defer_a_resource_delete(&store, day as u8);
         let deferred = |store: &Store| -> i64 {
