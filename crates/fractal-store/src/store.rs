@@ -5729,6 +5729,17 @@ impl Store {
         self.status_for_claim_kind_view(kind, at_index, include_history, claims, true)
     }
 
+    /// Runtime owner keys at a snapshot, including owners later filtered into history.
+    pub fn runtime_list_subjects(&self, store_index: u64) -> Result<BTreeSet<String>> {
+        let connection = self.readers.get();
+        // One seek per runtime instead of every runtime observation.
+        connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h11ef4fb3e9cb owner=fractal_store::store TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
+            .query_map([store_index], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(Into::into)
+    }
+
     fn status_for_claim_kind_view(
         &self, kind: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction, generic: bool,
     ) -> Result<StatusResponse> {
@@ -5739,11 +5750,7 @@ impl Store {
             connection.prepare_cached("SELECT subject FROM arrangements ORDER BY subject")?
                 .query_map([], |row| row.get::<_,String>(0))?.collect::<Result<BTreeSet<_>,_>>()?
         } else if kind == "runtime.observed" {
-            // One seek per runtime instead of every runtime observation.
-            connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h11ef4fb3e9cb owner=fractal_store::store TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
-                .query_map([store_index], |row| row.get::<_, String>(0))?
-                .collect::<Result<BTreeSet<_>, _>>()?
+            self.runtime_list_subjects(store_index)?
         } else {
             connection
                 .prepare(

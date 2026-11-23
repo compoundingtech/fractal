@@ -543,8 +543,10 @@ duplicate, malformed, orphaned or changed exceptions and altered column catalogs
 The guard compares exact template bytes and comment-free dynamic argument tokens;
 it does not infer receiver types or evaluate Rust/SQL.
 
-Explicit inline `#[cfg(test)]` items are excluded. Arbitrary cfg expressions are
-not evaluated; separate test-only source files and diagnostic strings may be
+Explicit inline `#[cfg(test)]` items and struct fields are excluded. A field's
+comma or enclosing brace ends its exclusion; it must not hide later production
+schema initialization. Arbitrary cfg expressions are not evaluated; separate
+test-only source files and diagnostic strings may be
 conservatively included. This makes the manifest a candidate source inventory,
 not a count of production writers. The column parser handles literal CREATE
 TABLE/INDEX lists and ALTER TABLE ADD COLUMN declarations, not an evaluated SQL grammar: generated table/column names,
