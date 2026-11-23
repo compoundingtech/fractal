@@ -85,6 +85,17 @@ impl OperationsFixtureStore for Store {
             }
         }
         drop((insert_run, insert_generation, insert_step, insert_claim));
+        // Admission stores canonical positions; these raw fixture inserts bypass it.
+        // Rank the entire batch before filtering so existing siblings keep their offsets.
+        // Otherwise each canonical sort counts all earlier siblings as legacy history.
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hc076c0cd70cb owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claim_positions(claim_id, position)
+             SELECT id, position FROM (
+                 SELECT id, ROW_NUMBER() OVER (ORDER BY store_index) - 1 AS position
+                 FROM claims WHERE batch_id=?1
+             ) WHERE id GLOB 'fixture-*'",
+            [batch],
+        ).unwrap();
         transaction.commit().unwrap();
     }
 }
