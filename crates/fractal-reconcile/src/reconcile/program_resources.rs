@@ -120,7 +120,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         ) else { return Ok(false); };
         if host != self.host { return Ok(false); }
         if self.store.runtime_cleanup_settled(runtime_id, incarnation)? {
-            return Ok(self.store.runtime_history_retired(subject)?);
+            return self.store.runtime_history_retired(subject);
         }
         let settled = if terminal {
             self.runtime.stop_with_retirement_proof(runtime_id, true, incarnation)?

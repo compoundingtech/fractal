@@ -1,6 +1,8 @@
 //! Mission-native scratch finalization, independent of JavaScript scope teardown.
 use super::*;
 use crate::store::scratch_resources::{OwnerObservation, ScratchRequest};
+#[cfg(target_os = "linux")]
+use serde_json::json;
 
 fn lifecycle_with_owner_tree(outcome: &str, deadline: bool, pending: bool) {
     let root = tempfile::tempdir().unwrap();
