@@ -81,6 +81,17 @@ impl OperationsFixtureStore for Store {
                     params![format!("fixture-{kind}-{i}"),batch,subject,kind,json!({"fields":{"status":status,"phase":phase,"reason":reason}}).to_string(),at]).unwrap();
             }
         }
+        // Normal admission records each claim's immutable batch position. Bulk loading
+        // must preserve that invariant too: without these rows canonical reads fall back
+        // to counting preceding siblings for every claim in this 250,000-row batch.
+        // Compute positions once over the whole batch, retaining its admitted originals.
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h9a3848c4be8f owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claim_positions(claim_id,position)
+             SELECT id,ROW_NUMBER() OVER (ORDER BY store_index)-1 FROM claims
+             WHERE batch_id=?1
+             ON CONFLICT(claim_id) DO NOTHING",
+            [&batch],
+        ).unwrap();
         transaction.commit().unwrap();
     }
 }
