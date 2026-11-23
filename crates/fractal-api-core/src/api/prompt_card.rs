@@ -14,9 +14,6 @@ use notify::Watcher as _;
 /// The most of a call's input a card carries, as JSON text.
 const INPUT_BYTES: usize = 4 * 1024;
 
-/// The longest a prompt card shows the calls it read from a transcript here without reading it
-/// again, though no change to it was seen: a change whose event was lost shows within this.
-const CALLS_HERE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How far back st looks for a call without a result: the conversation's newest entries, a page
 /// as a client or a peer reads it. A harness waits on the calls it made last, so an older one
@@ -209,6 +206,8 @@ impl RemoteConversation {
             if latest.as_ref() != Some(&read) {
                 *latest = Some(read);
                 drop(latest);
+                shared.remote_dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(self.key());
                 shared.changed();
             }
         };
@@ -321,10 +320,8 @@ pub(crate) fn source_pending_calls(
 /// unwatch, so an event around it can be lost. A transcript it cannot watch is not followed:
 /// its card says so and offers no answer.
 ///
-/// A transcript here is read again only after a change to it, a lost event, a change to what is
-/// watched, a refresh in which no card read it, or a minute since its last read (in case an event
-/// was lost unreported); until then each refresh takes the calls it read last, so a fold does not
-/// reread every card's conversation.
+/// A transcript here is read again only after a change to it, a lost event, or a refresh in
+/// which no card retained it. Unchanged conversations have no time-based invalidation.
 ///
 /// A conversation another member keeps is followed through the client-read relay by a task of
 /// its own: it reads the conversation, waits on its changes from where it was before that read,
@@ -342,11 +339,10 @@ pub struct PromptWatch {
     /// read as, and those the refresh in progress read.
     remote: std::collections::HashMap<RemoteKey, RemoteFollower>,
     remote_read: HashSet<RemoteKey>,
-    /// The calls without a result each followed transcript held when it was last read, and when.
-    /// An entry stands only while no change to its transcript has been seen since that read, and
-    /// for at most `calls_max_age`.
-    calls: std::collections::HashMap<PathBuf, (std::time::Instant, Vec<Value>)>,
-    calls_max_age: std::time::Duration,
+    /// The calls without a result last read from each unchanged transcript.
+    calls: std::collections::HashMap<PathBuf, Vec<Value>>,
+    seats: std::collections::HashMap<String, ConversationKey>,
+    seats_read: HashSet<String>,
     /// How many times the watcher was made again after a delivery failure.
     rebuilds: usize,
 }
@@ -363,6 +359,8 @@ struct Delivery {
     changed: AtomicBool,
     /// The watcher reported an error or lost events: no subscription is trusted until made again.
     broken: AtomicBool,
+    remote_dirty: Mutex<HashSet<RemoteKey>>,
+    retry_all: AtomicBool,
 }
 
 /// The calls a follower read last from a conversation another member keeps, or why it could not.
@@ -370,6 +368,12 @@ type RemoteRead = Result<Vec<Value>, String>;
 
 /// A followed conversation another member keeps: its host, session and the person read as.
 type RemoteKey = (String, String, String);
+
+#[derive(Clone)]
+enum ConversationKey {
+    Transcript(PathBuf),
+    Remote(RemoteKey),
+}
 
 /// A task following a conversation another member keeps, and the calls it read last or why it
 /// could not.
@@ -448,6 +452,8 @@ impl PromptWatch {
                 directories: Mutex::default(),
                 changed: AtomicBool::new(false),
                 broken: AtomicBool::new(false),
+                remote_dirty: Mutex::default(),
+                retry_all: AtomicBool::new(false),
             }),
             watcher: None,
             followed: HashSet::new(),
@@ -455,7 +461,8 @@ impl PromptWatch {
             remote: std::collections::HashMap::new(),
             remote_read: HashSet::new(),
             calls: std::collections::HashMap::new(),
-            calls_max_age: CALLS_HERE_MAX_AGE,
+            seats: std::collections::HashMap::new(),
+            seats_read: HashSet::new(),
             rebuilds: 0,
         };
         // A watcher that cannot be made now is made again when a card first follows a seat.
@@ -478,16 +485,60 @@ impl PromptWatch {
         self.shared.changed.swap(false, Ordering::AcqRel)
     }
 
+    /// Changed prompt owners. `None` means the watcher lost events and every owner must
+    /// be re-presented. Taking this does not consume transcript dirtiness before its read.
+    pub fn take_changed_seats(&self) -> Option<BTreeSet<String>> {
+        if self.seats.is_empty() || self.shared.broken.load(Ordering::Acquire)
+            || self.shared.retry_all.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let dirty = self.shared.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remote = self.shared.remote_dirty.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(self.seats.iter().filter(|(_, key)| match key {
+            ConversationKey::Transcript(path) => change_files(path).iter().any(|file| dirty.contains(file)),
+            ConversationKey::Remote(key) => remote.contains(key),
+        }).map(|(seat, _)| seat.clone()).collect())
+    }
+
+    /// Keep an unchanged active prompt's existing follows through this presentation pass.
+    pub fn retain_seat(&mut self, seat: &str) {
+        self.seats_read.insert(seat.to_owned());
+        match self.seats.get(seat) {
+            Some(ConversationKey::Transcript(path)) => { self.read.insert(path.clone()); }
+            Some(ConversationKey::Remote(key)) => { self.remote_read.insert(key.clone()); }
+            None => {}
+        }
+    }
+
+    /// Drop the old source before resolving a changed prompt, even if resolution fails.
+    pub fn forget_seat(&mut self, seat: &str) {
+        self.seats.remove(seat);
+    }
+
+    /// Associate a conversation with its prompt owner before reading/following it.
+    pub fn follow_seat_conversation(&mut self, seat: &str, conversation: Follow<'_>)
+        -> Result<Option<Vec<Value>>, String>
+    {
+        let key = match &conversation {
+            Follow::Transcript(source) => ConversationKey::Transcript(source.transcript.clone()),
+            Follow::Remote(remote) => ConversationKey::Remote(remote.key()),
+        };
+        self.seats.insert(seat.to_owned(), key);
+        self.seats_read.insert(seat.to_owned());
+        self.follow_conversation(conversation)
+    }
+
     /// Ask again at the next refresh: the refresh that read the change failed.
     pub(crate) fn keep_changed(&self) {
+        self.shared.retry_all.store(true, Ordering::Release);
         self.shared.changed.store(true, Ordering::Release);
     }
 
     /// What is watched changed: read again soon, since an event around the change may be lost.
     fn watched_changed(&mut self) {
-        self.calls.clear();
-        self.keep_changed();
-        self.shared.wake.notify_one();
+        // Adding a directory does not invalidate other transcripts already followed.
+        self.shared.changed();
     }
 
     /// A refresh is about to present the prompts. After a delivery failure nothing followed is
@@ -495,6 +546,7 @@ impl PromptWatch {
     pub fn begin(&mut self) {
         self.read.clear();
         self.remote_read.clear();
+        self.seats_read.clear();
         if self.shared.broken.swap(false, Ordering::AcqRel) {
             self.watcher = None;
             self.followed.clear();
@@ -519,10 +571,8 @@ impl PromptWatch {
         }
     }
 
-    /// The calls without a result in a followed transcript here. A change seen since the last
-    /// read, a watcher that lost events, or a read older than `calls_max_age` has it read again; a
-    /// change during the read leaves it to be read again at the next refresh, which that change
-    /// wakes.
+    /// Cached pending calls remain valid until a source event or watcher loss. A change
+    /// during the read remains dirty and wakes another pass.
     fn calls_here(&mut self, source: &crate::external_sessions::ExternalSession) -> Result<Vec<Value>, String> {
         let mut changed = false;
         let mut dirty = self.shared.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -532,16 +582,14 @@ impl PromptWatch {
         drop(dirty);
         if !changed
             && !self.shared.broken.load(Ordering::Acquire)
-            && let Some((read_at, calls)) = self.calls.get(&source.transcript)
-            && read_at.elapsed() < self.calls_max_age
+            && let Some(calls) = self.calls.get(&source.transcript)
         {
             return Ok(calls.clone());
         }
-        let read_at = std::time::Instant::now();
         match tail(source) {
             Ok(items) => {
                 let calls = pending_calls(&items);
-                self.calls.insert(source.transcript.clone(), (read_at, calls.clone()));
+                self.calls.insert(source.transcript.clone(), calls.clone());
                 Ok(calls)
             }
             Err(error) => {
@@ -565,6 +613,10 @@ impl PromptWatch {
                 vacant.insert(RemoteFollower { task, latest })
             }
         };
+        // Consume before taking latest: a concurrent publish either appears in that read
+        // or leaves its key dirty for the next pass.
+        self.shared.remote_dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
         let latest = follower.latest.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         self.remote_read.insert(key);
         latest.unwrap_or_else(|| Err(format!("st is still reading this seat's conversation on {}", remote.host)))
@@ -602,6 +654,7 @@ impl PromptWatch {
 
     /// The refresh presented the prompts: stop following what no card read.
     pub fn finish(&mut self) {
+        self.seats.retain(|seat, _| self.seats_read.contains(seat));
         self.remote.retain(|key, follower| {
             let read = self.remote_read.contains(key);
             if !read {
@@ -609,6 +662,8 @@ impl PromptWatch {
             }
             read
         });
+        self.shared.remote_dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key| self.remote.contains_key(key));
         let gone = self.followed.difference(&self.read).cloned().collect::<Vec<_>>();
         for transcript in gone {
             self.followed.remove(&transcript);
@@ -1055,8 +1110,6 @@ pub(crate) mod tests {
         codex_lines(&elm.transcript, &[("call-e", false)]);
         let wake = Arc::new(tokio::sync::Notify::new());
         let mut watch = PromptWatch::new(Arc::clone(&wake));
-        // Only changes reread here, however slowly the test runs.
-        watch.calls_max_age = Duration::from_secs(3600);
         let start = reads();
         assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [["call-a"], ["call-e"]]);
         assert_eq!(reads() - start, 2);
@@ -1085,24 +1138,60 @@ pub(crate) mod tests {
         assert_eq!(reads() - start, 6);
     }
 
-    /// An event can be lost without the watcher saying so. A card whose transcript changed no
-    /// file it saw still reads it again once its last read is older than the most a card shows
-    /// a read, so a new prompt is never hidden for longer than that.
-    #[tokio::test]
-    async fn a_transcript_here_is_read_again_after_its_read_grows_old_without_an_event() {
+    #[test]
+    fn changed_conversations_route_only_to_their_prompt_owners() {
+        let mut watch = PromptWatch::new(Arc::new(tokio::sync::Notify::new()));
+        let oak = PathBuf::from("/prompt-fixture/oak.jsonl");
+        let elm = PathBuf::from("/prompt-fixture/elm.jsonl");
+        for (seat, path) in [("agent/oak", &oak), ("agent/elm", &elm)] {
+            watch.seats.insert(seat.into(), ConversationKey::Transcript(path.clone()));
+            watch.followed.insert(path.clone());
+            watch.shared.files.lock().unwrap().extend(change_files(path));
+            watch.calls.insert(path.clone(), Vec::new());
+        }
+        let remote = ("host/remote".into(), "session".into(), "person/test".into());
+        watch.seats.insert("agent/remote".into(), ConversationKey::Remote(remote.clone()));
+        watch.shared.deliver(Ok(notify::Event::new(
+            notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(change_files(&oak)[1].clone())));
+        assert!(watch.take_changed());
+        assert_eq!(watch.take_changed_seats(), Some(BTreeSet::from(["agent/oak".into()])));
+        assert_eq!(watch.take_changed_seats(), Some(BTreeSet::from(["agent/oak".into()])),
+            "routing preserves dirtiness until the selected source read");
+        watch.shared.dirty.lock().unwrap().clear();
+        watch.shared.remote_dirty.lock().unwrap().insert(remote);
+        assert_eq!(watch.take_changed_seats(), Some(BTreeSet::from(["agent/remote".into()])));
+        watch.shared.remote_dirty.lock().unwrap().clear();
+        watch.begin();
+        watch.retain_seat("agent/oak");
+        watch.finish();
+        assert!(watch.followed.contains(&oak));
+        assert!(watch.calls.contains_key(&oak));
+        assert!(!watch.followed.contains(&elm));
+        assert!(!watch.calls.contains_key(&elm));
+        assert_eq!(watch.seats.len(), 1);
+        watch.keep_changed();
+        assert_eq!(watch.take_changed_seats(), None, "failed refresh retries active prompts");
+        watch.shared.deliver(Err(notify::Error::generic("lost events")));
+        assert_eq!(watch.take_changed_seats(), None, "watch loss invalidates every owner");
+    }
+
+    /// Cached calls have no age expiry. Only actual source events make another read necessary.
+    #[test]
+    fn unchanged_transcript_calls_have_no_time_based_invalidation() {
         let root = tempfile::tempdir().unwrap();
         let oak = transcript_here(root.path(), "oak");
         codex_lines(&oak.transcript, &[("call-a", false)]);
         let mut watch = PromptWatch::new(Arc::new(tokio::sync::Notify::new()));
-        watch.calls_max_age = Duration::from_secs(3600);
         let start = reads();
-        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
-        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
-        assert_eq!(reads() - start, 1, "a fresh read was read again");
-        // No file event: the read is past its age, so the next refresh reads again.
-        watch.calls_max_age = Duration::ZERO;
-        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
-        assert_eq!(reads() - start, 2, "an old read was served without reading again");
+        // Exercise the source cache directly, without installing an OS watch.
+        assert_eq!(watch.calls_here(&oak).unwrap()[0]["call_id"], "call-a");
+        codex_lines(&oak.transcript, &[("call-a", true), ("call-b", false)]);
+        assert_eq!(watch.calls_here(&oak).unwrap()[0]["call_id"], "call-a");
+        assert_eq!(reads() - start, 1);
+        watch.shared.dirty.lock().unwrap().insert(oak.transcript.clone());
+        assert_eq!(watch.calls_here(&oak).unwrap()[0]["call_id"], "call-b");
+        assert_eq!(reads() - start, 2);
     }
 
     /// A transcript st cannot follow is not read as if it could: its card says why.
