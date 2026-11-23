@@ -8184,12 +8184,11 @@ impl Store {
             && (root_probe
                 || !remote.buckets.is_empty()
                 || (remote.can(crate::replication::ROOT_FIRST)
-                    && remote.envelopes.is_empty()
-                    && remote.digest == replication_inventory_digest(&[])))
+                    && remote.can(crate::replication::RANGE_PROOFS)))
         {
             // Capability support alone does not turn a complete identity inventory into
-            // range proofs. Only a marked root probe omits proofs; an empty modern
-            // range answer proves the empty set, and nonempty ranges carry buckets.
+            // range proofs. A root probe omits proofs; a marked range answer has a
+            // complete bucket list, including when that list proves the empty set.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
                 compact_replication_difference_turn(
@@ -8228,7 +8227,11 @@ impl Store {
                 // peer then adopts nothing).
                 checkpoint: None,
                     claim_range_query: None,
-                    capabilities: crate::replication::replication_capabilities(),
+                    capabilities: {
+                        let mut capabilities = crate::replication::replication_capabilities();
+                        capabilities.push(crate::replication::RANGE_PROOFS.to_owned());
+                        capabilities
+                    },
                 },
                 envelopes,
                 signature_requests: Vec::new(),

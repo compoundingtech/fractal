@@ -229,6 +229,7 @@ fn an_empty_modern_peer_never_requests_a_full_identity_inventory() {
     let response = empty.export_replication_exchange(FLEET, &probe.inventory).unwrap();
     assert!(response.inventory.buckets.is_empty());
     assert!(!response.inventory.can(ROOT_SUMMARY), "empty proofs are complete, not omitted");
+    assert!(response.inventory.can(crate::replication::RANGE_PROOFS));
     let push = store.export_replication_exchange(FLEET, &response.inventory).unwrap();
     assert!(!push.envelopes.is_empty());
     assert!(!push.inventory.buckets.is_empty());
@@ -278,5 +279,20 @@ fn root_first_capability_preserves_complete_identity_request_semantics() {
     assert_eq!(answer.envelopes[0].sequence, known.envelopes.last().unwrap().sequence + 1);
     assert_eq!(answer.inventory.envelopes.len(), known.envelopes.len() + 1);
     assert!(answer.inventory.buckets.is_empty(), "the answer remains a complete inventory");
+    assert_eq!(answers(), before + 1);
+}
+
+#[test]
+fn an_empty_complete_inventory_is_not_an_empty_range_answer() {
+    let store = source();
+    let empty = Store::open_memory("birch", Arc::new(Plain)).unwrap();
+    empty.bind_fleet(FLEET).unwrap();
+    let request = empty.replication_inventory().unwrap();
+    assert!(request.can(ROOT_FIRST));
+    assert!(!request.can(crate::replication::RANGE_PROOFS));
+    let before = answers();
+    let answer = store.export_replication_exchange(FLEET, &request).unwrap();
+    assert_eq!(answer.inventory.envelopes, store.replication_inventory().unwrap().envelopes);
+    assert!(answer.inventory.buckets.is_empty());
     assert_eq!(answers(), before + 1);
 }

@@ -47,6 +47,9 @@ pub const ROOT_FIRST: &str = "root-first-v1";
 /// An additive inventory marker: this message intentionally omits bucket proofs.
 /// Only a peer advertising [`ROOT_FIRST`] may answer it with another root summary.
 pub const ROOT_SUMMARY: &str = "root-summary-v1";
+/// An additive inventory marker: the bucket list is complete, even when empty.
+/// Unlike [`ROOT_FIRST`], this describes this message, not the peer's capabilities.
+pub const RANGE_PROOFS: &str = "range-proofs-v1";
 
 /// What this build lists in its inventories' `capabilities`.
 pub fn replication_capabilities() -> Vec<String> {
