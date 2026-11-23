@@ -1443,6 +1443,11 @@ mod root_first_compatibility {
             let target = Arc::new(plain_memory("target").unwrap());
             source.bind_fleet(fleet_id).unwrap();
             target.bind_fleet(fleet_id).unwrap();
+            // Local::receive publishes this node's transport observation on first
+            // success. Seed both observations before synchronizing the fixture,
+            // so measured equal rounds do not create fresh local envelopes.
+            source.record_transport_observation("target", "up", None, None).unwrap();
+            target.record_transport_observation("source", "up", None, None).unwrap();
             source.append_claim(&ClaimInput {
                 subject: "note/shared".into(),
                 kind: "example.note".into(),
@@ -1456,6 +1461,10 @@ mod root_first_compatibility {
                 fleet_id, &ReplicationInventory::default(),
             ).unwrap();
             admit_fixture_exchange(&target, "source", fleet_id, &initial);
+            let reverse = target.export_replication_exchange(
+                fleet_id, &ReplicationInventory::default(),
+            ).unwrap();
+            admit_fixture_exchange(&source, "target", fleet_id, &reverse);
             assert_eq!(
                 source.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
                 target.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
@@ -1483,6 +1492,11 @@ mod root_first_compatibility {
                             serde_json::from_slice(&body).unwrap();
                         let advertisement = advertised.lock().unwrap().clone();
                         observations.lock().unwrap().requests.push(query.inventory.clone());
+                        assert_eq!(
+                            query.inventory.digest,
+                            remote.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
+                            "every measured request starts with equal stores",
+                        );
                         // A legacy reader needs complete range proofs. It cannot answer a
                         // bucketless scalar probe and refuses before admitting any envelopes.
                         let refused = !advertisement.root_first
@@ -1540,6 +1554,9 @@ mod root_first_compatibility {
 
         async fn equal_round(&self, http: &reqwest::Client, root_only: bool) {
             let before = self.observed.lock().unwrap().requests.len();
+            // Compare the request with the summary that existed when the request
+            // was sent, not with state potentially changed by receiving its answer.
+            let expected = self.source.export_replication_summary(self.auth.fleet_id()).unwrap();
             let result = exchange(
                 http, &Local(self.source.clone()), "source", &self.peer, &self.auth, &self.fleet,
             ).await;
@@ -1547,6 +1564,11 @@ mod root_first_compatibility {
                 self.observed.lock().unwrap().exchange_failures += 1;
             }
             assert!(!result.expect("an equal round must succeed without a compatibility retry"));
+            assert_eq!(
+                self.source.export_replication_root_summary(self.auth.fleet_id()).unwrap().inventory.digest,
+                expected.inventory.digest,
+                "an equal round must not create new local metadata envelopes",
+            );
             let observed = self.observed.lock().unwrap();
             assert_eq!(observed.requests.len(), before + 1, "one HTTP exchange per equal round");
             let request = &observed.requests[before];
@@ -1558,7 +1580,7 @@ mod root_first_compatibility {
                 assert!(!request.buckets.is_empty(), "the shared nonempty store needs bucket proofs");
                 assert_eq!(
                     request.buckets,
-                    self.source.export_replication_summary(self.auth.fleet_id()).unwrap().inventory.buckets,
+                    expected.inventory.buckets,
                     "unknown and legacy peers receive every bucket in the complete summary",
                 );
             }
