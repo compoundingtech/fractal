@@ -2732,7 +2732,7 @@ mission "cancel-driver" state="ready" {
         };
         let gate = GateSpec::Field {
             name: "exited".into(), path: "exit_code".into(),
-            subject: "exec/node/probe".into(), operator: "is".into(), value: json!(0),
+            subject: "exec/node/probe".into(), operator: "is".into(), value: serde_json::json!(0),
         };
         let ((outcome, due), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| reconciler.evaluate_gate(&stage, &gate))
