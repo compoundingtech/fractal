@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Native GitHub objectives support authored rolling throughput windows and a final-ready merge-latency budget. A 24h window with a five-per-hour minimum requires 120 merges. Targeted p95 latency counts open and late-merged PRs bad at their deadline and exposes completed-merge p95 diagnostics.",
+  "summary": "Native GitHub objectives support authored rolling throughput windows and a final-ready merge-latency budget. A 24h window with a five-per-hour minimum requires 120 merges. Targeted p95 latency counts open and late-merged PRs bad at their deadline and exposes completed-merge p95 diagnostics. Candidate history must cover the horizon plus deadline lookback; missing lookback remains no-data even when every visible merge was timely.",
   "replay": { "status": "none", "detail": "Measurements read corrected committed GitHub projections. No authoritative history rewrite or replay is required." },
   "schema": { "status": "changed", "detail": "The local GitHub plugin adds an idempotently installed derived PR creation-time index for horizon-bounded deadline candidates. No claim fields, registry digest, convergence corpus, row layout or storage version changes. Indexed ready proofs gain an in-memory draft/unknown distinction." },
   "rules": { "status": "none", "detail": "No checkpoint rule changes." },

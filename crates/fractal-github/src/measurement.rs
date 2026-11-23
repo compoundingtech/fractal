@@ -125,6 +125,18 @@ pub fn latency_budget(projection: &Projection, cut_ms: u64, within_ms: u64, wind
     let mut events = Vec::new();
     let mut unknown = Vec::new();
     let history_start = cut_ms.saturating_sub(windows.iter().copied().max().unwrap_or(0));
+    // Excluding old PRs is valid only with complete creation/ready evidence in
+    // the deadline lookback: a hidden ready there can settle inside this horizon.
+    let candidate_start = history_start.saturating_sub(within_ms);
+    for member in &projection.roster.members {
+        let until = cut_ms.min(member.effective_until_ms.unwrap_or(cut_ms));
+        if history_start.max(member.effective_from_ms) >= until { continue; }
+        for family in [FactFamily::PullRequest, FactFamily::Lifecycle] {
+            if !index.covered(&member.repository_id, family, candidate_start, until) {
+                unknown.push(format!("{}: missing {family:?} deadline lookback coverage [{candidate_start},{until})", member.repository_id));
+            }
+        }
+    }
     for (key, merge) in &index.merges {
         if merge.merged_at_ms >= history_start && merge.merged_at_ms < cut_ms
             && projection.roster.contains(&merge.repository_id, merge.merged_at_ms) && !index.prs.contains_key(key) {

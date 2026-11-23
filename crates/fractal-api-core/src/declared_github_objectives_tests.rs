@@ -178,6 +178,26 @@ fn latency_ratio_keeps_authored_id_diagnostic_p95_and_inclusive_allowance() {
 }
 
 #[test]
+fn latency_row_requires_deadline_lookback_coverage_before_reporting_met() {
+    let now = 1_800_000_000_000;
+    let objective = latency_objective();
+    let mut projection = projection(now);
+    latency_sample(&mut projection, 0, now - 100_000, false);
+    let lookback = now - 30 * 86_400_000 - 172_800_000;
+    assert_eq!(latency_row(&objective, "revision", &projection, now, now)["status"], "met");
+    for family in [FactFamily::Lifecycle, FactFamily::PullRequest] {
+        projection.coverage.iter_mut().find(|coverage| coverage.family == family).unwrap().history_from_ms = lookback + 1;
+        let row = latency_row(&objective, "revision", &projection, now, now);
+        assert_eq!(row["status"], "no-data", "{family:?}");
+        assert_eq!(row["verdict"], "unknown");
+        assert!(row["remaining_percent"].is_null());
+        assert_eq!(row["latency_percentiles_ms"]["p95"], 1_000);
+        projection.coverage.iter_mut().find(|coverage| coverage.family == family).unwrap().history_from_ms = lookback;
+        assert_eq!(latency_row(&objective, "revision", &projection, now, now)["status"], "met");
+    }
+}
+
+#[test]
 fn latency_burns_require_both_windows_not_a_short_only_spike() {
     let now = 1_800_000_000_000;
     let objective = latency_objective();

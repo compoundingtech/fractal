@@ -375,6 +375,48 @@ fn latency_membership_and_cohort_exclude_irrelevant_unknown_pr_evidence() {
 }
 
 #[test]
+fn latency_missing_deadline_lookback_cannot_turn_excluded_overdue_prs_into_success() {
+    let now = at("2026-11-17T12:00:00Z");
+    let within = 48 * 3_600_000;
+    let horizon = 30 * 86_400_000;
+    let start = now - horizon;
+    let candidate_start = start - within;
+    let authors = ["example-bot".into()];
+    for family in [FactFamily::Lifecycle, FactFamily::PullRequest] {
+        let mut p = projection(now);
+        // A ready cycle before membership still votes when its deadline is inside.
+        p.roster.members[0].effective_from_ms = start;
+        merge(&mut p, "timely", now - 2_000, now - 1_000, Some("example-bot"));
+        let mut overdue = p.pull_requests[0].clone();
+        overdue.id = "excluded-overdue".into();
+        overdue.state = PullRequestState::Open;
+        overdue.merged_at_ms = None;
+        overdue.closed_at_ms = None;
+        if family == FactFamily::Lifecycle {
+            overdue.created_at_ms = candidate_start - 1_000;
+            overdue.created_as_draft = Some(true);
+            event(&mut p, "excluded-overdue", LifecycleKind::Ready, candidate_start + 1_000);
+        } else {
+            overdue.created_at_ms = candidate_start + 1_000;
+        }
+        p.pull_requests.push(overdue);
+        let full = latency_budget(&p, now, within, &[horizon, 3_600_000], &authors);
+        assert!(full.windows.iter().all(|window| window.complete), "{:?}", full.unknown);
+        assert_eq!((full.windows[0].total, full.windows[0].bad), (2, 1));
+
+        // Bounded snapshots cannot include the old PR when the creation/ready
+        // that would discover it falls in unobserved lookback evidence.
+        p.pull_requests.truncate(1);
+        p.lifecycle.clear();
+        p.coverage.iter_mut().find(|coverage| coverage.family == family).unwrap().history_from_ms = candidate_start + 2_000;
+        let missing = latency_budget(&p, now, within, &[horizon, 3_600_000], &authors);
+        assert!(missing.windows.iter().all(|window| !window.complete), "{family:?}");
+        assert_eq!((missing.windows[0].total, missing.windows[0].bad), (1, 0));
+        assert!(missing.unknown.iter().any(|reason| reason.contains("deadline lookback coverage")), "{:?}", missing.unknown);
+    }
+}
+
+#[test]
 fn latency_settlement_window_includes_start_and_excludes_cut() {
     let now = at("2026-11-17T12:00:00Z");
     let mut p = projection(now);

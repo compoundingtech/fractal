@@ -327,6 +327,17 @@ Both windows must reach a paired burn threshold; a short-only spike never fires.
 The row exposes `latency_percentiles_ms.p95` for completed merges as a diagnostic;
 the success verdict is the censored event ratio, not the percentile of survivors.
 
+Excluding old PR candidates requires complete authoritative pull-request and lifecycle
+coverage over `[horizon start - deadline, cut)`, clipped only at a membership's end.
+This proof is required for members active in the settlement horizon, including fact
+history before their membership begins: an earlier ready may have its deadline inside
+membership. A 30-day horizon with a 48-hour deadline therefore needs 32 days of candidate
+evidence. Missing lookback coverage makes the row `no-data` and the budget unknown,
+even if all visible merges were timely; a missing old cycle cannot become a healthy
+empty cohort. Memberships that ended before the settlement horizon do not require
+this extra history. Merge evidence still needs only the settlement window.
+
+
 `measurement "only"` requires no targets and forbids `on-breach`; it never implies a target
 or green verdict. The native SLO row exposes `verdict: "measured-only"` while retaining
 `status: "no-data"` for existing verdict consumers. Missing coverage, members, PR images
