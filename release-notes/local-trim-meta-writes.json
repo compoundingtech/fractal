@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reduce local trim metadata write amplification",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No schema, index or store version changes."},
+  "rules": {"status": "none", "detail": "Retention, chunk budgets and daily deletion limits are unchanged."},
+  "compatibility": {"status": "none", "detail": "Trim cursor and daily counter retain their existing keys and values. Missing keys are still inserted; existing keys are updated in place only when their values change."},
+  "downtime": {"status": "none", "detail": "No migration or downtime required."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Cursor progress and the daily counter still commit atomically with each deletion chunk. Recording and trimming recovery states are unchanged."}
+}

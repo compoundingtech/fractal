@@ -99,3 +99,106 @@ fn a_member_finishes_a_committed_trim_and_keeps_an_uncommitted_one() {
     assert!(checkpoint::claim_tombstoned(&store.readers.get(), "candidate").unwrap());
     assert_eq!(seals(&store), 0);
 }
+
+#[test]
+fn trim_metadata_updates_in_place_and_skips_unchanged_daily_counts() {
+    // Missing keys cover resuming a checkpoint recorded by an older build.
+    for initialized in [false, true] {
+        let store = local_store();
+        let checkpoint = "checkpoint/metadata";
+        store.set_checkpoint_state(checkpoint, 1, "trimming").unwrap();
+        let claim = store
+            .append_claim(&ClaimInput {
+                subject: "note/metadata".into(),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        let tombstone = deletable_claim(claim.id.clone(), claim.operation_id, claim.subject, claim.kind);
+        let day = store.trim_day.load(Ordering::Relaxed);
+        let walk_key = local_walk_key(checkpoint);
+        let initial_count = if initialized { 7 } else { 0 };
+        let original_walk_rowid = {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            for id in ["absent-a", "absent-b"] {
+                let mut absent = tombstone.clone();
+                absent.id = id.into();
+                record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &[absent]).unwrap();
+            }
+            record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &[tombstone]).unwrap();
+            if initialized {
+                tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-hcccb27bfbc0f owner=smallclaims::store::checkpoint_trim::local_trim_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                    params![LOCAL_TRIM_DAY, format!("{day} {initial_count}")],
+                )
+                .unwrap();
+                tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-ha6f9f42881ce owner=smallclaims::store::checkpoint_trim::local_trim_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'0 0')",
+                    [&walk_key],
+                )
+                .unwrap();
+            }
+            let rowid: Option<i64> = tx
+                .query_row("SELECT rowid FROM meta WHERE key=?1", [&walk_key], |row| row.get(0))
+                .optional()
+                .unwrap();
+            tx.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h52f9c9da8bbe owner=smallclaims::store::checkpoint_trim::local_trim_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE trim_meta_writes(key TEXT, operation TEXT);
+                 CREATE TEMP TRIGGER trim_meta_insert AFTER INSERT ON main.meta
+                 BEGIN INSERT INTO trim_meta_writes VALUES(NEW.key,'insert'); END;
+                 CREATE TEMP TRIGGER trim_meta_update AFTER UPDATE ON main.meta
+                 BEGIN INSERT INTO trim_meta_writes VALUES(NEW.key,'update'); END;",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            rowid
+        };
+        store.set_trim_chunk_envelopes(1);
+        store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
+        let mut actions = Vec::new();
+        assert!(store.finish_trim_paced(checkpoint, &mut actions, |_| {}).is_err());
+        assert_eq!(state(&store, checkpoint), "trimming");
+        assert_eq!(deleted_on(&store.readers.get(), day).unwrap(), initial_count);
+        let saved = store.local_walk(checkpoint).unwrap();
+        assert_eq!(saved.claim, 1);
+        if let Some(rowid) = original_walk_rowid {
+            let current: i64 = store
+                .readers
+                .get()
+                .query_row("SELECT rowid FROM meta WHERE key=?1", [&walk_key], |row| row.get(0))
+                .unwrap();
+            assert_eq!(current, rowid, "updating the walk must not replace its row");
+        }
+        store.set_trim_fault(None);
+        store.finish_trim_paced(checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(state(&store, checkpoint), "trimmed");
+        assert_eq!(deleted_on(&store.readers.get(), day).unwrap(), initial_count + 1);
+        let reader = store.connection.write();
+        let writes = |key: &str, operation: &str| -> i64 {
+            reader
+                .query_row(
+                    "SELECT COUNT(*) FROM trim_meta_writes WHERE key=?1 AND operation=?2",
+                    params![key, operation],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(writes(LOCAL_TRIM_DAY, "insert"), i64::from(!initialized));
+        // Two cursor-only chunks do not update the daily count; the real delete does once.
+        assert_eq!(writes(LOCAL_TRIM_DAY, "update"), 1);
+        assert_eq!(writes(&walk_key, "insert"), i64::from(!initialized));
+        assert_eq!(writes(&walk_key, "update"), if initialized { 3 } else { 2 });
+        assert!(checkpoint::claim_tombstoned(&reader, &claim.id).unwrap());
+        assert_eq!(
+            reader
+                .query_row("SELECT COUNT(*) FROM claims WHERE id=?1", [&claim.id], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
