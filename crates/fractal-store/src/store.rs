@@ -26160,32 +26160,6 @@ impl RelayedFreshness {
     }
 }
 
-#[cfg(test)]
-mod relayed_freshness_change_tests {
-    use super::RelayedFreshness;
-
-    #[test]
-    fn wakes_only_for_changed_evidence() {
-        let freshness = RelayedFreshness::default();
-        let mut changes = freshness.subscribe();
-        let record = |incarnation: &str, at| {
-            freshness.record([("agent/example".into(), incarnation.into(), at)]);
-        };
-        record("one", 100);
-        assert!(changes.has_changed().unwrap());
-        changes.borrow_and_update();
-        record("one", 100);
-        record("one", 99);
-        assert!(!changes.has_changed().unwrap());
-        record("one", 101);
-        assert!(changes.has_changed().unwrap());
-        changes.borrow_and_update();
-        record("two", 50);
-        assert!(changes.has_changed().unwrap());
-        assert_eq!(freshness.heard_at("agent/example", "one"), None);
-        assert_eq!(freshness.heard_at("agent/example", "two"), Some(50));
-    }
-}
 
 /// How often an unchanged harness report still replicates while some member cannot ask the
 /// seat's host how recently it heard the seat. Within an older member's 661-second down rule.
@@ -26215,4 +26189,30 @@ fn stopped_after(connection: &Connection, subject: &str, decision_index: u64, at
                AND store_index>?2 AND store_index<=?3 AND json_extract(body, '$.kind')='stop')",
         )?
         .query_row(/* sqlite-large-value: allow-for-now lv-h0e4abbec7bce owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, decision_index, at_index], |row| row.get(0))?)
+}
+#[cfg(test)]
+mod relayed_freshness_change_tests {
+    use super::RelayedFreshness;
+
+    #[test]
+    fn wakes_only_for_changed_evidence() {
+        let freshness = RelayedFreshness::default();
+        let mut changes = freshness.subscribe();
+        let record = |incarnation: &str, at| {
+            freshness.record([("agent/example".into(), incarnation.into(), at)]);
+        };
+        record("one", 100);
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        record("one", 100);
+        record("one", 99);
+        assert!(!changes.has_changed().unwrap());
+        record("one", 101);
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        record("two", 50);
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(freshness.heard_at("agent/example", "one"), None);
+        assert_eq!(freshness.heard_at("agent/example", "two"), Some(50));
+    }
 }

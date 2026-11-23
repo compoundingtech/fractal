@@ -106,10 +106,10 @@ impl Store {
                         None, i64::MAX as u128, Some(&BTreeSet::from([subject.clone()])),
                     )?);
                 }
-                if let Some((body, at)) = custom {
-                    if !fractal_schema::notice::is_reserved_subject(&subject) {
-                        rows.push(custom::attention_item(&serde_json::from_str(&body)?, at.parse().unwrap_or(0))?);
-                    }
+                if let Some((body, at)) = custom
+                    && !fractal_schema::notice::is_reserved_subject(&subject)
+                {
+                    rows.push(custom::attention_item(&serde_json::from_str(&body)?, at.parse().unwrap_or(0))?);
                 }
                 self.current_attention(rows, i64::MAX as u128)
             });
