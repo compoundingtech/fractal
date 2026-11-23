@@ -11,16 +11,16 @@
 //! column and the open messages a reminder winner is picked from, and nothing else: never a
 //! revision, an `updated_at`, a message view's status or `message_index`.
 //!
-//! Daemon maintenance discovers closes independently of reads and queues them ([`queue`]).
-//! The queue holds at most [`QUEUED`] closes; a later maintenance sweep retries any dropped close.
-//! A background writer records at most [`BATCH`] in each transaction, and the selectors fold
-//! them at its commit. Read answers remain in memory and never start or feed this writer.
+//! Daemon maintenance durably admits closes independently of reads ([`queue`]).
+//! At most [`QUEUED`] admitted closes await finalization; maintenance awaits [`wait_idle`]
+//! between pages. Finalization records at most [`BATCH`] per transaction and acknowledges
+//! pending evidence in that same commit. Failed work survives restart and is retried only
+//! by an explicit maintenance/recovery call, never a recurring local-error timer.
 //!
 //! A build without this table never reads it. Its rows and trigger stay inert there, and headers
 //! already folded closed stay closed until their next fold, which fails safe.
 
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The most closes waiting for the writer.
 pub const QUEUED: usize = 256;
@@ -40,13 +40,19 @@ pub struct RelayedClose {
 /// The table, before any projection backfill folds it in.
 pub fn create_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h6f8aadc01a2e owner=fractal_store::store::relayed_closes TODO=chunk-or-reference-variable-columns */ "
+        /* sqlite-large-value: allow-for-now lv-h13d721aa10a3 owner=fractal_store::store::relayed_closes TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_relayed_message_closes (
     message TEXT PRIMARY KEY,
     host TEXT NOT NULL,
     receipt TEXT NOT NULL,
     closed_at_unix_ms INTEGER NOT NULL,
     recorded_at_unix_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_relayed_message_closes_pending (
+    message TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    receipt TEXT NOT NULL,
+    closed_at_unix_ms INTEGER NOT NULL
 ) WITHOUT ROWID;
 ",
     )?;
@@ -70,113 +76,178 @@ END;
     Ok(())
 }
 
-/// The closes waiting for the writer, by message, and whether a writer is draining them.
+/// In-process writer lifecycle only. Pending terminal evidence lives in SQLite.
 #[derive(Default)]
 pub struct Queue {
-    pending: parking_lot::Mutex<BTreeMap<String, RelayedClose>>,
-    draining: AtomicBool,
+    state: parking_lot::Mutex<WriterState>,
+    completed: tokio::sync::Notify,
 }
 
-/// Queue the closes among `closes` that this member would record (of a message it holds open and
-/// has not recorded or closed), and start a background writer when none is draining. A close of
-/// mail not yet here is left for a maintenance sweep after it arrives. This call never waits
-/// for the writer; a close past [`QUEUED`] is dropped for a later sweep to queue again. Without
-/// a runtime to start the writer on, the closes wait for the next maintenance turn that has one.
+#[derive(Default)]
+struct WriterState {
+    draining: bool,
+    error: Option<String>,
+}
+
+/// Durably admit closes of mail held open here. Successful admission survives restart even
+/// if subsequent selector finalization fails. Capacity admission is atomic, including duplicates.
+/// This takes the SQLite writer; callers on a runtime should use their blocking write worker.
 pub fn queue(store: &Arc<Store>, closes: Vec<RelayedClose>) -> Result<()> {
     if closes.is_empty() {
         return Ok(());
     }
-    let fresh = {
-        let connection = store.readers.get();
-        let mut known = connection.prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=?1)
-                 OR NOT EXISTS(SELECT 1 FROM message_index WHERE subject=?1 AND closed=0)
-                 OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=?1 AND kind='message.closed')",
-        )?;
-        let mut fresh = Vec::new();
-        for close in closes {
-            if !known.query_row(/* sqlite-large-value: allow-for-now lv-h86484c8b1d96 owner=fractal_store::store::relayed_closes TODO=trace-statement-and-value-representation */ [&close.message], |row| row.get::<_, bool>(0))? {
-                fresh.push(close);
-            }
-        }
-        fresh
-    };
-    if fresh.is_empty() {
-        return Ok(());
-    }
     let queue = store.extension::<Queue>();
+    let state = queue.state.lock();
     {
-        let mut pending = queue.pending.lock();
-        for close in fresh {
-            if pending.len() >= QUEUED && !pending.contains_key(&close.message) {
-                continue;
+        let mut connection = store.connection.write_background();
+        let transaction = connection.transaction()?;
+        {
+            let mut insert = transaction.prepare_cached(
+                /* sqlite-large-value: allow-for-now lv-h3ec2840a2231 owner=fractal_store::store::relayed_closes TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_relayed_message_closes_pending(message,host,receipt,closed_at_unix_ms)
+                 SELECT ?1,?2,?3,?4
+                 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1 AND closed=0)
+                   AND NOT EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=?1)
+                   AND NOT EXISTS(SELECT 1 FROM local_message_marks WHERE message=?1 AND kind='message.closed')",
+            )?;
+            for close in closes {
+                insert.execute(/* sqlite-large-value: allow-for-now lv-h567511a3ece2 owner=fractal_store::store::relayed_closes TODO=trace-statement-and-value-representation */ params![close.message, close.host, close.receipt, close.closed_at_unix_ms as i64])?;
             }
-            pending.insert(close.message.clone(), close);
         }
+        let pending: usize = transaction.query_row(
+            "SELECT count(*) FROM local_relayed_message_closes_pending", [], |row| row.get(0),
+        )?;
+        anyhow::ensure!(pending <= QUEUED, "relayed close queue capacity exceeded");
+        transaction.commit()?;
     }
-    start(store, &queue);
+    // A local failure is latched until explicit recovery through wait_idle. Admission of a
+    // different close is not evidence that the failing finalization path has recovered.
+    let failed = state.error.is_some();
+    drop(state);
+    if !failed {
+        start(store, &queue);
+    }
     Ok(())
 }
 
-/// How many closes wait for the writer.
-#[cfg(any(test, feature = "test-support"))]
-pub fn queued(store: &Store) -> usize {
-    store.extension::<Queue>().pending.lock().len()
+fn pending_count(store: &Store) -> Result<usize> {
+    Ok(store.readers.get().query_row(
+        "SELECT count(*) FROM local_relayed_message_closes_pending", [], |row| row.get(0),
+    )?)
 }
 
-/// Whether no close waits and no writer is recording a batch it took.
+/// How many durably admitted closes still await acknowledgment, including failed batches.
+#[cfg(any(test, feature = "test-support"))]
+pub fn queued(store: &Store) -> usize {
+    pending_count(store).expect("read pending relayed closes")
+}
+
+/// True only when no pending evidence, writer, or unreported local failure remains.
 pub fn idle(store: &Store) -> bool {
     let queue = store.extension::<Queue>();
-    let pending = queue.pending.lock();
-    pending.is_empty() && !queue.draining.load(Ordering::Acquire)
+    let state = queue.state.lock();
+    !state.draining && state.error.is_none() && pending_count(store).is_ok_and(|count| count == 0)
+}
+
+/// Finish admitted evidence, or surface the local writer failure with evidence still pending.
+/// Each invocation is an explicit recovery attempt, including after reopening a store. A failed
+/// attempt stops: cancellation/shutdown never waits on an automatic retry of a persistent defect.
+pub async fn wait_idle(store: &Arc<Store>) -> Result<()> {
+    let queue = store.extension::<Queue>();
+    {
+        let mut state = queue.state.lock();
+        if !state.draining {
+            state.error = None;
+        }
+    }
+    start(store, &queue);
+    loop {
+        let completed = queue.completed.notified();
+        tokio::pin!(completed);
+        completed.as_mut().enable();
+        {
+            let state = queue.state.lock();
+            if let Some(error) = &state.error {
+                anyhow::bail!("relayed close finalization failed; admitted evidence remains pending: {error}");
+            }
+            if !state.draining {
+                anyhow::ensure!(pending_count(store)? == 0, "relayed close finalization stopped with pending evidence");
+                return Ok(());
+            }
+        }
+        completed.await;
+    }
 }
 
 fn start(store: &Arc<Store>, queue: &Queue) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return;
     };
-    if queue.draining.swap(true, Ordering::AcqRel) {
+    let mut state = queue.state.lock();
+    if state.draining || state.error.is_some() {
         return;
     }
+    state.draining = true;
     let store = store.clone();
     runtime.spawn(async move {
         let workers = store.connection.write_workers();
         let drained = store.clone();
         if let Err(error) = workers.spawn_blocking(move || drain(&drained)).await {
-            tracing::warn!(%error, "relayed close writer stopped");
-            store.extension::<Queue>().draining.store(false, Ordering::Release);
+            let queue = store.extension::<Queue>();
+            let mut state = queue.state.lock();
+            state.error = Some(format!("{error:#}"));
+            state.draining = false;
+            queue.completed.notify_waiters();
+            tracing::warn!(%error, "relayed close writer stopped with pending evidence");
         }
     });
 }
 
-/// Record the queued closes, [`BATCH`] at a time, until the queue is empty. A batch the writer
-/// refuses is dropped; a later maintenance sweep queues its closes again.
+/// Read and acknowledge only bounded pages. A failed transaction leaves the entire page intact.
 fn drain(store: &Arc<Store>) {
     let queue = store.extension::<Queue>();
-    let mut failed = 0;
-    let mut first_error = None;
     loop {
-        let batch = {
-            let mut pending = queue.pending.lock();
-            let mut batch = Vec::with_capacity(BATCH.min(pending.len()));
-            while batch.len() < BATCH {
-                let Some((_, close)) = pending.pop_first() else { break };
-                batch.push(close);
-            }
+        let result = (|| -> Result<bool> {
+            // Serialize the empty/stop boundary with admission so no close loses its writer.
+            let mut state = queue.state.lock();
+            let batch = {
+                let connection = store.readers.get();
+                let mut statement = connection.prepare_cached(
+                    "SELECT message,host,receipt,closed_at_unix_ms FROM local_relayed_message_closes_pending ORDER BY message LIMIT ?1",
+                )?;
+                let rows = statement.query_map([BATCH as i64], |row| Ok(RelayedClose {
+                    message: row.get(0)?,
+                    host: row.get(1)?,
+                    receipt: row.get(2)?,
+                    closed_at_unix_ms: row.get::<_, i64>(3)? as u64,
+                }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
             if batch.is_empty() {
-                // Under the lock, so a close queued after this sees no writer and starts one.
-                queue.draining.store(false, Ordering::Release);
-                drop(pending);
-                if let Some(error) = first_error {
-                    tracing::warn!(%error, closes = failed, "could not record relayed closes");
-                }
+                state.draining = false;
+                queue.completed.notify_waiters();
+                return Ok(false);
+            }
+            drop(state);
+            let mut connection = store.connection.write_background();
+            let transaction = connection.transaction()?;
+            record_transaction(&transaction, &batch)?;
+            for close in &batch {
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-h7aafd4dc03b2 owner=fractal_store::store::relayed_closes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_message_closes_pending WHERE message=?1", [&close.message])?;
+            }
+            transaction.commit()?;
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                let mut state = queue.state.lock();
+                state.error = Some(format!("{error:#}"));
+                state.draining = false;
+                queue.completed.notify_waiters();
+                tracing::warn!(%error, "could not finalize relayed closes; evidence remains pending");
                 return;
             }
-            batch
-        };
-        if let Err(error) = record(store, &batch) {
-            failed += batch.len();
-            first_error.get_or_insert_with(|| format!("{error:#}"));
         }
     }
 }
@@ -186,6 +257,12 @@ fn drain(store: &Arc<Store>) {
 pub fn record(store: &Store, closes: &[RelayedClose]) -> Result<usize> {
     let mut connection = store.connection.write_background();
     let transaction = connection.transaction()?;
+    let recorded = record_transaction(&transaction, closes)?;
+    transaction.commit()?;
+    Ok(recorded)
+}
+
+fn record_transaction(transaction: &Transaction<'_>, closes: &[RelayedClose]) -> Result<usize> {
     let mut recorded = 0;
     {
         let mut insert = transaction.prepare_cached(
@@ -205,9 +282,8 @@ pub fn record(store: &Store, closes: &[RelayedClose]) -> Result<usize> {
         }
     }
     if recorded > 0 {
-        super::client_messages::finalize_commit(&transaction)?;
+        super::client_messages::finalize_commit(transaction)?;
     }
-    transaction.commit()?;
     Ok(recorded)
 }
 

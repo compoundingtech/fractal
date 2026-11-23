@@ -137,6 +137,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_message_marks",
         "local_message_staged",
         "local_message_mark_events",
+        "local_message_mark_scope_events",
         // Member-local messages a graph write queued for the messages shard.
         "local_message_outbox",
         // The messages shard's items and lifecycle, mirrored for the graph's mail indexes.
@@ -144,6 +145,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_stream_lifecycle",
         // A seat's host's closes as it relayed them: never replicated, outside every digest.
         "local_relayed_message_closes",
+        "local_relayed_message_closes_pending",
+        "local_relayed_close_work",
+        "local_relayed_close_candidates",
+        "local_relayed_close_bootstrap",
+        "local_relayed_close_reads",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",
