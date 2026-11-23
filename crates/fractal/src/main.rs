@@ -22623,18 +22623,33 @@ async fn import_retired_identities(store: Arc<Store>) {
     }
 }
 
-/// Decide, at startup and every minute after, whether this member records its seats' lifecycle
-/// as local marks: once every other member, and every configured peer, reads marks and asks hosts
-/// for them (store/marks_switch.rs). A member that joins without that turns it off again within a
-/// minute.
-async fn refresh_marks_switch(store: Arc<Store>, peers: Vec<String>) {
-    loop {
-        let (worker, peers_now) = (store.clone(), peers.clone());
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || worker.refresh_marks_switch(&peers_now))).await;
-        if !matches!(result, Ok(Ok(_))) {
-            stderr_message("fractal", format_args!("message marks switch check failed: {result:?}"));
+/// Converge initially, then only when a member capability, fleet membership or writer roster
+/// changes. Configured peers are fixed for this daemon invocation, as are its sync workers.
+async fn refresh_marks_switch(store: Arc<Store>, mut peers: Vec<String>) {
+    let worker = store.clone();
+    let started = tokio::task::spawn_blocking(move || worker.marks_switch_maintenance()).await
+        .map_err(anyhow::Error::from).and_then(|result| result);
+    let mut maintenance = match started {
+        Ok(maintenance) => maintenance,
+        Err(error) => {
+            stderr_message("fractal", format_args!("message marks switch subscription failed: {error:?}"));
+            return;
         }
-        tokio::time::sleep(Duration::from_secs(60)).await;
+    };
+    loop {
+        let worker = store.clone();
+        let (next, result) = tokio::task::spawn_blocking(move || {
+            let result = fractal_daemon::task_cpu::blocking("maintenance.marks_switch",
+                || maintenance.refresh(&worker, &peers));
+            (maintenance, (peers, result))
+        }).await.expect("marks switch maintenance task panicked");
+        maintenance = next;
+        let (next_peers, result) = result;
+        peers = next_peers;
+        if let Err(error) = result {
+            stderr_message("fractal", format_args!("message marks switch check failed: {error:?}"));
+        }
+        if !maintenance.changed().await { return; }
     }
 }
 
