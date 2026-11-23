@@ -266,9 +266,19 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
     rows_selected(store, now, native_rows, None)
 }
 
-/// Evaluate and report only declarations bound to this producer's native source.
-/// Other producers retain ownership of their own rows and breach lifecycles.
+/// Evaluate and report declarations bound to this producer's native source.
+/// Ancestor selectors require full evaluation; otherwise other producers retain ownership.
 pub(crate) fn check_native_and_report(store: &Store, now: u64, source: &str, native_rows: &[Value]) -> anyhow::Result<()> {
+    // An ancestor selector also judges other producers' children. It needs the full
+    // population, otherwise this producer could retire a sibling's open episode.
+    if store.declared_objectives()?.iter().any(|declaration|
+        declaration.objective.as_ref().is_ok_and(|objective|
+            matches!(&objective.indicator, Indicator::Native { objective: selector }
+                if selector != source && native_owns(selector, source)))) {
+        let rows = crate::api::slo_rows(store, native_rows.to_vec())?;
+        check(store, &rows)?;
+        return Ok(());
+    }
     let rows = rows_selected(store, now, native_rows, Some(source))?;
     check_selected(store, &rows, Some(source))?;
     Ok(())

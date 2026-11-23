@@ -1351,3 +1351,50 @@ objective "example/read" {
     assert_eq!(fault_status(&store, "example/mail/node"), "resolved");
     assert_eq!(fault_status(&store, "example/read"), "pending", "mail cannot close another producer's episode");
 }
+
+#[test]
+fn native_producer_reports_ancestor_binding_without_ending_sibling_episode() {
+    let store = store_with(r#"version 2
+objective "example/agents" {
+  about "Agents owner"
+  indicator "native" { objective "agents"; }
+  on-breach "fault" owner="agent/node.ops" condition="agents-burn"
+}
+objective "example/read" {
+  about "Read owner"
+  indicator "native" { objective "person-read"; }
+  on-breach "fault" owner="agent/node.ops" condition="read-burn"
+}
+"#);
+    with_owner(&store, "node");
+    let mail = json!({
+        "id": "agents/mail-delivery/node", "kind": "objective", "about": "Mail",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    // The store has no captured mail evidence, so its full-evaluation rows cannot
+    // contradict the producer evidence supplied below.
+    assert!(crate::mail_delivery_objectives::rows(&store, *NOW).unwrap().iter()
+        .all(|row| row["status"] == "no-data"));
+    check_native_and_report(&store, *NOW, "agents/mail-delivery", std::slice::from_ref(&mail)).unwrap();
+    assert_eq!(fault_status(&store, "example/agents/mail-delivery/node"), "pending");
+
+    let read = json!({
+        "id": "person-read", "kind": "objective", "about": "Reads",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    let mut sibling = mail.clone();
+    sibling["id"] = json!("agents");
+    let all = rows(&store, *NOW, &[mail.clone(), read, sibling]).unwrap();
+    check(&store, &all).unwrap();
+    assert_eq!(fault_status(&store, "example/read"), "pending");
+    assert_eq!(fault_status(&store, "example/agents"), "pending");
+    let mut recovered = mail;
+    recovered["status"] = json!("met");
+    recovered["remaining_percent"] = json!(100.0);
+    check_native_and_report(&store, *NOW, "agents/mail-delivery", &[recovered]).unwrap();
+    assert_eq!(fault_status(&store, "example/agents/mail-delivery/node"), "resolved");
+    assert_eq!(fault_status(&store, "example/read"), "pending", "mail cannot close another producer's episode");
+    assert_eq!(fault_status(&store, "example/agents"), "pending", "mail cannot retire an ancestor binding's sibling row");
+}
