@@ -1243,17 +1243,17 @@ fn open_pull_request(
 }
 
 /// A pull request is settling while a check has not finished, while a check its base requires
-/// has failed, or while it waits in the merge queue. A rerun of a failed check changes nothing the
-/// REST reads see, so only reading again finds it running and then passing.
+/// has failed or been cancelled, or while it waits in the merge queue. A rerun changes nothing
+/// the REST reads see, so only reading again finds it running and then passing.
 fn settling(facts: &serde_json::Map<String, Value>) -> bool {
     matches!(
         facts.get("checks_state").and_then(Value::as_str),
         Some("pending" | "expected")
-    ) || facts
+    ) || matches!(facts
         .get("required_checks")
         .and_then(|checks| checks.get("state"))
-        .and_then(Value::as_str)
-        == Some("fail")
+        .and_then(Value::as_str),
+        Some("fail" | "cancelled"))
         || facts
             .get("merge_queue")
             .is_some_and(|entry| !entry.is_null())
@@ -4824,6 +4824,18 @@ mod tests {
         let failed = required_checks(&[run("build", "FAILURE"), run("optional", "CANCELLED")], None);
         assert_eq!(failed["state"], "fail");
         assert_eq!(failed["failed"], json!(["build"]));
+    }
+
+    #[test]
+    fn cancelled_required_checks_stay_on_the_active_refresh_cadence() {
+        for state in ["fail", "cancelled"] {
+            let facts = json!({"checks_state":"failure",
+                "required_checks":{"state":state}, "merge_queue":null});
+            assert!(settling(facts.as_object().unwrap()));
+        }
+        let passed = json!({"checks_state":"success",
+            "required_checks":{"state":"pass"}, "merge_queue":null});
+        assert!(!settling(passed.as_object().unwrap()));
     }
 
     #[tokio::test]

@@ -887,7 +887,8 @@ mod tests {
         let first = record(&store, &facts);
         assert_eq!(first.len(), 1);
         facts["pull_requests"][0]["required_checks"]["execution"]["workflows"] =
-            json!([[15368,77,20,20,1]]);
+            json!([[15368,77,20,10,1]]);
+        facts["pull_requests"][0]["required_checks"]["execution"]["ready_since"] = json!(123);
         assert!(record(&store, &facts).is_empty());
         let completed = facts.clone();
         facts["pull_requests"][0]["required_checks"]["state"] = json!("pending");
@@ -904,8 +905,20 @@ mod tests {
         failed["pull_requests"][0]["required_checks"]["state"] = json!("fail");
         failed["pull_requests"][0]["required_checks"]["failed"] = json!(["build"]);
         failed["pull_requests"][0]["checks"][0]["conclusion"] = json!("failure");
+        failed["pull_requests"][0]["required_checks"]["execution"]["workflows"][0][4] = json!(2);
         assert_eq!(record(&reopened, &failed).len(), 1);
         assert_eq!(reopened.messages(Some(agent), false).unwrap().len(), 2);
+        drop(reopened);
+        let restarted = Store::open(&database, "watch-test").unwrap();
+        assert!(record(&restarted, &failed).is_empty());
+        let mut recovery = failed;
+        recovery["pull_requests"][0]["required_checks"]["state"] = json!("pass");
+        recovery["pull_requests"][0]["required_checks"]["failed"] = json!([]);
+        recovery["pull_requests"][0]["checks"][0]["conclusion"] = json!("success");
+        recovery["pull_requests"][0]["required_checks"]["execution"]["workflows"][0][4] = json!(3);
+        assert_eq!(record(&restarted, &recovery).len(), 1);
+        assert!(record(&restarted, &recovery).is_empty());
+        assert_eq!(restarted.messages(Some(agent), false).unwrap().len(), 3);
     }
 
     #[tokio::test]

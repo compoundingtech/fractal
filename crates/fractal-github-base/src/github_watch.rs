@@ -272,23 +272,26 @@ pub enum WatchEvent {
 }
 
 impl WatchEvent {
-    /// Checks are identified by head and conclusions, not observer or workflow execution IDs.
-    /// The resulting message subject is also the durable delivery deduplication key.
+    /// Checks are identified by head, conclusions and counted workflow run/attempt identities,
+    /// never by observer IDs or incidental suite/readiness metadata.
     fn key(&self, observation: &str, facts: &Value) -> Value {
         match self {
             Self::Comment(entry) => {
                 let (kind, id) = crate::resource::recent_comment_key(entry);
                 json!(format!("{kind}:{id}"))
             }
-            Self::Checks(_) => check_state(facts),
+            Self::Checks(_) => check_state(facts, true),
             Self::PullRequestChanged(_) => json!(format!("pull-request:{observation}")),
             Self::Ended { .. } => json!("ended"),
         }
     }
 }
 
-/// A stable projection of the counted conclusions using existing observation facts only.
-fn check_state(facts: &Value) -> Value {
+/// A stable projection using existing facts. Counted workflow tuples are
+/// (app, workflow, suite, run, attempt, event): only run and attempt identify a rerun.
+/// External checks have no workflow identity; an identical recurring conclusion at the same
+/// head remains deduplicated because the existing facts cannot distinguish its executions.
+fn check_state(facts: &Value, include_runs: bool) -> Value {
     let checks = &facts["required_checks"];
     let counted = checks["checks"].as_array();
     let conclusions = facts["checks"]
@@ -298,8 +301,14 @@ fn check_state(facts: &Value) -> Value {
         .filter(|check| counted.is_some_and(|names| names.contains(&check["name"])))
         .map(|check| (check["name"].as_str(), check["conclusion"].as_str()))
         .collect::<std::collections::BTreeSet<_>>();
+    let runs = include_runs.then(|| checks.pointer("/execution/workflows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|execution| Some((execution.get(3)?.as_u64()?, execution.get(4)?.as_u64()?)))
+        .collect::<std::collections::BTreeSet<_>>());
     json!(["checks", facts["head_sha"], checks["state"], checks["checks"],
-        checks["failed"], conclusions])
+        checks["failed"], conclusions, runs])
 }
 
 /// The events one observation of a watched item holds, oldest first: the comments and reviews
@@ -410,7 +419,8 @@ pub fn watch_events(
         }
     }
     if state(facts).is_some_and(|state| matches!(state.as_str(), "pass" | "fail" | "cancelled"))
-        && check_state(prior) != check_state(facts)
+        && check_state(prior, prior.pointer("/required_checks/execution").is_some())
+            != check_state(facts, prior.pointer("/required_checks/execution").is_some())
     {
         events.push(WatchEvent::Checks(
             facts.get("required_checks").cloned().unwrap_or(Value::Null),
@@ -1467,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_conclusions_ignore_new_executions_and_deduplicate_across_observations() {
+    fn workflow_attempts_distinguish_reruns_but_ignore_incidental_metadata() {
         let facts = |execution: u64, state: &str| {
             json!({"state":"open", "head_sha":"same",
             "draft":false, "required_checks":{"state":state, "source":"rules", "checks":["build"],
@@ -1495,16 +1505,20 @@ mod tests {
         assert!(watch_events(&watch(), Some(&previous), &json!({}), &pending).is_empty());
         let completed = facts(20, "pass");
         let events = watch_events(&watch(), Some(&previous), &json!({}), &completed);
-        assert!(events.is_empty());
+        assert_eq!(events, [WatchEvent::Checks(completed["required_checks"].clone())]);
         let thread = ThreadRef::parse("acme/garden#12").unwrap();
         let subject = thread.watch("agent/example/planner");
         let make_wake = |facts: &Value, observation: &str| {
             wake(&subject, &watch(), &thread, facts,
                 &WatchEvent::Checks(facts["required_checks"].clone()), observation, None).unwrap()
         };
-        // A restart reconstructs the same key from persisted facts, regardless of observation ID.
-        assert_eq!(make_wake(&previous, "before-restart").subject,
-            make_wake(&completed, "after-restart").subject);
+        assert_ne!(make_wake(&previous, "one").subject, make_wake(&completed, "two").subject);
+        let mut metadata = completed.clone();
+        metadata["required_checks"]["execution"]["ready_since"] = json!(123);
+        metadata["required_checks"]["execution"]["workflows"][0][2] = json!(999);
+        assert!(watch_events(&watch(), Some(&completed), &json!({}), &metadata).is_empty());
+        assert_eq!(make_wake(&completed, "before-restart").subject,
+            make_wake(&metadata, "after-restart").subject);
         let mut changed = completed.clone();
         changed["checks"] = json!([{"name":"build", "conclusion":"success"}]);
         let mut failed = changed.clone();
@@ -1524,6 +1538,31 @@ mod tests {
             watch_events(&watch(), Some(&pending), &json!({}), &completed).len(),
             1
         );
+    }
+
+    #[test]
+    fn external_checks_without_run_identity_deduplicate_recurring_identical_results() {
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let subject = thread.watch("agent/example/planner");
+        let passed = json!({"head_sha":"same", "state":"open",
+            "required_checks":{"state":"pass", "checks":["external"], "failed":[]},
+            "checks":[{"name":"external", "conclusion":"success"}]});
+        let mut failed = passed.clone();
+        failed["required_checks"]["state"] = json!("fail");
+        failed["required_checks"]["failed"] = json!(["external"]);
+        failed["checks"][0]["conclusion"] = json!("failure");
+        let make_wake = |facts: &Value, observation: &str| {
+            wake(&subject, &watch(), &thread, facts,
+                &WatchEvent::Checks(facts["required_checks"].clone()), observation, None).unwrap()
+        };
+        let first = make_wake(&passed, "first");
+        let failure = make_wake(&failed, "second");
+        let recovery = make_wake(&passed, "third");
+        assert_ne!(first.subject, failure.subject);
+        // Known limitation: without workflow identity the persisted subject guard suppresses
+        // this recurrence, because no existing per-check fact identifies a new external run.
+        assert_eq!(first.subject, recovery.subject);
+        assert_eq!(watch_events(&watch(), Some(&failed), &json!({}), &passed).len(), 1);
     }
 
     #[test]
