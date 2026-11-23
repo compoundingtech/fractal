@@ -601,6 +601,22 @@ fn suspended_store_sweep_preserves_manual_and_failed_resume_holds_after_reopen()
 }
 
 #[test]
+fn suspended_store_sweep_keeps_pending_manual_publication_incumbent() {
+    let mut seat = Seat::new();
+    let (operation, _, _) = seat.finish_suspend();
+    let state = seat.root.path().join("state");
+    let payload = crate::seat_snapshot::directory(&state, &operation);
+    std::fs::create_dir_all(&payload).unwrap();
+    std::fs::write(payload.join("payload.tar"), b"manual snapshot").unwrap();
+    seat.publish_mode(2, "second", None, false, true);
+    seat.reopen();
+    assert!(crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap().holds_seat());
+    crate::seat_snapshot::sweep(&state, &seat.store).unwrap();
+    crate::seat_snapshot::sweep(&state, &seat.store).unwrap();
+    assert!(payload.exists(), "pending manual launch must retain the incumbent snapshot");
+}
+
+#[test]
 fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
     let mut seat = Seat::new_with_owned_publication(false);
     seat.busy(false);

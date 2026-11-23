@@ -178,7 +178,10 @@ pub fn sweep(state: &Path, store: &Store) -> Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut live = std::collections::BTreeSet::new();
     for subject in subjects {
-        if let Some(hold) = crate::suspension::current_at_tx(&transaction, &subject, None)?
+        // No writes have occurred in this transaction. The normal reader sees the
+        // same committed state and also protects an incumbent manual publication.
+        // Startup invokes this outside any pinned reader snapshot.
+        if let Some(hold) = crate::suspension::current(store, &subject)?
             .filter(Suspension::holds_seat)
         {
             live.insert(directory(state, hold.suspend_operation_id.as_deref()
