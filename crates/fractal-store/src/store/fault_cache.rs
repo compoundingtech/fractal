@@ -393,8 +393,8 @@ mod family_tests {
         fault(&store, "daemon/second", "faulted", 2_000);
         assert_eq!(read(&store, 200_000).len(), 2);
         let before = store.fault_family_work();
-        append(&store, "custom/fault-tests/unrelated", "custom.recorded",
-            serde_json::json!({"value": 1}), 3_000);
+        append(&store, "resource/unrelated", "resource.observed",
+            serde_json::json!({}), 3_000);
         assert_eq!(read(&store, 2_000_000).len(), 2);
         assert_eq!(store.fault_family_work(), before,
             "an unrelated commit and elapsed former rebuild interval do no source work");
