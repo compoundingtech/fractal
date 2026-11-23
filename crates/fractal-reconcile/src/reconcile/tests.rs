@@ -1,6 +1,7 @@
     #![cfg_attr(not(test), allow(unused, dead_code))]
     mod agent_review_loop_branches;
     mod restart_preparation;
+    mod scratch_resources;
     #[cfg(test)]
     mod file_watch_scope;
 
