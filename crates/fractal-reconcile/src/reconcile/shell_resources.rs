@@ -2,6 +2,7 @@
 use super::*;
 use crate::store::resource_membership::{Admission, Grant};
 use crate::store::shell_resources::{Execution, PayloadResult, PARENT_ENV};
+use super::host_executor::resource_commands as host_resources;
 
 impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn reconcile_shell_resources(&self) -> Result<()> {
@@ -93,9 +94,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(member) = member else { return Ok(true); };
         if execution.command.parent.is_some() {
             if member.roots.iter().any(|root| root.runtime_id == execution.command.id) {
-                let notify = self.notify.clone(); let event_notify = self.event_notify.clone();
-                return self.runtime.retire_shell_resource_lane(self.store.clone(), request, Some(&execution.command.id),
-                    Arc::new(move || signal_changed(&notify, &event_notify)));
+                return host_resources::RetireCommand::Shell {
+                    request, execution: Some(&execution.command.id),
+                    notify: &self.notify, events: &self.event_notify,
+                }.execute(&self.store, self.runtime.as_ref(), &self.host_observations);
             }
             return Ok(true);
         }
@@ -112,9 +114,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(false);
         }
-        let notify = self.notify.clone(); let event_notify = self.event_notify.clone();
-        let retired = self.runtime.retire_shell_resource_lane(self.store.clone(), request, None,
-            Arc::new(move || signal_changed(&notify, &event_notify)))?;
+        let retired = host_resources::RetireCommand::Shell {
+            request, execution: None,
+            notify: &self.notify, events: &self.event_notify,
+        }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
         if retired {
             self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
             self.incremental.touch("seat-admission");
@@ -235,7 +238,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         // One startup grace for the whole recovered set, not one timeout per root.
         // Native exit notifications wake this wait; no polling or sleep races publication.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        for (id, generation) in &running { self.runtime.cancel_resource_exec(id, generation)?; }
+        for (id, generation) in &running {
+            host_resources::SignalCommand::Cancel { runtime_id: id, generation }
+                .execute(self.runtime.as_ref(), &self.host_observations)?;
+        }
         let mut pending: BTreeSet<_> = running.iter().map(|(id, _)| id.clone()).collect();
         while !pending.is_empty() {
             match receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
@@ -435,11 +441,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 driver: None, terminal_size: None, capacity: None, declared_priority: None, declared_lane: None, declared_budgets: None,
             };
             resource_lanes::set_request(&mut member, &request)?;
-            self.runtime.start_resource_guarded(&self.store, &member, None, &|| {
-                anyhow::ensure!(!self.store.shell_resource(&execution.command.id)?.cancel, "shell request cancelled before payload release");
-                self.store.shell_resource_owner_live(&request.owner)?;
-                Ok(())
-            })?;
+            host_resources::StartCommand::Shell {
+                member: &member, execution: &execution.command.id, owner: &request.owner,
+            }.execute(&self.store, self.runtime.as_ref(), &self.host_observations)?;
             self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != request.id);
             execution.state = "admitted".into(); execution.reason = "host membership admitted; payload released".into(); execution.blocked_by = None;
         }
@@ -493,14 +497,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if self.store.update_shell_resource(execution)? { self.signal_changed(); }
                     // Signal only: a stuck task must not block the writer/reconcile loop.
                     // The exit watch and subsequent sweeps confirm retirement separately.
-                    self.runtime.kill_resource_exec(&execution.command.id, &generation.generation_id)?;
+                    host_resources::SignalCommand::Kill {
+                        runtime_id: &execution.command.id, generation: &generation.generation_id,
+                    }.execute(self.runtime.as_ref(), &self.host_observations)?;
                     return Ok(());
                 }
                 self.arm_restart(&format!("shell-cancel:{}", execution.command.id), now_ms().saturating_add(u128::from(remaining)));
                 if execution.cancellation_started_at == Some(elapsed) {
                     // Commit the deadline before signalling so recovery cannot restart grace.
                     if self.store.update_shell_resource(execution)? { self.signal_changed(); }
-                    self.runtime.cancel_resource_exec(&execution.command.id, &generation.generation_id)?;
+                    host_resources::SignalCommand::Cancel {
+                        runtime_id: &execution.command.id, generation: &generation.generation_id,
+                    }.execute(self.runtime.as_ref(), &self.host_observations)?;
                 }
             }
             return Ok(());
