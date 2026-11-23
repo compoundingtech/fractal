@@ -291,7 +291,7 @@ fn final_ready_proof_uses_last_draft_and_corrected_lifecycle() -> Result<()> {
     let mut snapshot = builder();
     assert!(snapshot.advance(&db, "source", 0, 600)?);
     let identity = ("repo".to_owned(), "pr".to_owned());
-    assert_eq!(snapshot.projection.ready_cycles.get(&identity), Some(&Some(300)));
+    assert_eq!(snapshot.projection.ready_cycles.get(&identity), Some(&ReadyCycle::Ready(300)));
     let old = ObservedFact {
         version: VERSION, source: definition().source, observed_at_ms: 600, supersedes: None,
         fact: FactImage::Lifecycle(LifecycleFact { id: "ready-two".into(), repository_id: "repo".into(), pull_request_id: "pr".into(), kind: LifecycleKind::Ready, occurred_at_ms: 300 }),
@@ -303,7 +303,7 @@ fn final_ready_proof_uses_last_draft_and_corrected_lifecycle() -> Result<()> {
     apply_fact(&db, "source", 2, "retracted-ready", &retracted, &retracted.digest()?)?;
     let mut snapshot = builder();
     assert!(snapshot.advance(&db, "source", 0, 600)?);
-    assert_eq!(snapshot.projection.ready_cycles.get(&identity), Some(&None));
+    assert_eq!(snapshot.projection.ready_cycles.get(&identity), Some(&ReadyCycle::Draft));
     Ok(())
 }
 
@@ -343,4 +343,87 @@ fn indicator_horizons_ignore_unrequired_families_and_do_not_pin_to_retired_membe
     assert_eq!(measurement_horizon(without_lifecycle, &roster, &ready), Some(1_000));
     // A retired member's newer upstream scan cannot move the horizon past its membership.
     assert_eq!(measurement_horizon(&[record("retired", FactFamily::Merge, 2_000)], &roster, &merged), Some(100));
+}
+
+#[test]
+fn deadline_snapshots_page_open_prs_and_preserve_ready_and_draft_proofs() -> Result<()> {
+    let db = database()?;
+    for number in 0..(SNAPSHOT_PAGE as u64 + 3) {
+        let pr = ObservedFact {
+            version: VERSION, source: definition().source, observed_at_ms: 600, supersedes: None,
+            fact: FactImage::PullRequest(PullRequestFact {
+                id: format!("pr-{number:04}"), repository_id: "repo".into(), number, author_login: Some("example-bot".into()),
+                state: PullRequestState::Open, is_draft: number == 0, created_as_draft: Some(number == 0),
+                created_at_ms: 10, closed_at_ms: None, merged_at_ms: None,
+            }),
+        };
+        apply_fact(&db, "source", 1, "pr", &pr, &pr.digest()?)?;
+    }
+    let orphan = merge("orphan", 100, None);
+    apply_fact(&db, "source", 1, "orphan", &orphan, &orphan.digest()?)?;
+    let mut merges_only = builder();
+    assert!(merges_only.advance(&db, "source", 0, 600)?);
+    assert!(merges_only.projection.pull_requests.is_empty());
+    let mut snapshot = builder();
+    snapshot.deadline_ms = Some(100);
+    assert!(!snapshot.advance(&db, "source", 0, 600)?);
+    assert!(snapshot.projection.pull_requests.is_empty());
+    assert_eq!(snapshot.projection.merges.len(), 1);
+    assert!(!snapshot.advance(&db, "source", 0, 600)?);
+    assert_eq!(snapshot.projection.pull_requests.len(), SNAPSHOT_PAGE);
+    assert!(!snapshot.advance(&db, "source", 0, 600)?);
+    assert!(snapshot.advance(&db, "source", 0, 600)?);
+    assert_eq!(snapshot.projection.pull_requests.len(), SNAPSHOT_PAGE + 3);
+    assert_eq!(snapshot.projection.ready_cycles.get(&("repo".into(), "pr-0000".into())), Some(&ReadyCycle::Draft));
+    assert_eq!(snapshot.projection.ready_cycles.get(&("repo".into(), "pr-0001".into())), Some(&ReadyCycle::Ready(10)));
+    Ok(())
+}
+
+#[test]
+fn deadline_candidate_queries_ignore_historical_pr_volume_and_find_old_prs_newly_ready() -> Result<()> {
+    let mut db = database()?;
+    smallclaims::sqlite::observe(&mut db);
+    let insert_pr = |id: String, created_at_ms: u64, merged_at_ms: Option<u64>| -> Result<()> {
+        let created_as_draft = id == "newly-ready";
+        let pr = ObservedFact {
+            version: VERSION, source: definition().source, observed_at_ms: 600_000, supersedes: None,
+            fact: FactImage::PullRequest(PullRequestFact {
+                id, repository_id: "repo".into(), number: 1, author_login: Some("example-bot".into()),
+                state: if merged_at_ms.is_some() { PullRequestState::Merged } else { PullRequestState::Open },
+                is_draft: false, created_as_draft: Some(created_as_draft), created_at_ms,
+                closed_at_ms: merged_at_ms, merged_at_ms,
+            }),
+        };
+        apply_fact(&db, "source", 1, "pr", &pr, &pr.digest()?)
+    };
+    for number in 0..10_000 { insert_pr(format!("old-{number:05}"), 10, None)?; }
+    insert_pr("recent".into(), 510_000, None)?;
+    insert_pr("newly-ready".into(), 10, None)?;
+    insert_pr("merged".into(), 10, Some(560_000))?;
+    let merged = merge("merged", 560_000, None);
+    apply_fact(&db, "source", 1, "merged", &merged, &merged.digest()?)?;
+    let ready = ObservedFact {
+        version: VERSION, source: definition().source, observed_at_ms: 600_000, supersedes: None,
+        fact: FactImage::Lifecycle(LifecycleFact {
+            id: "recent-ready".into(), repository_id: "repo".into(), pull_request_id: "newly-ready".into(),
+            kind: LifecycleKind::Ready, occurred_at_ms: 550_000,
+        }),
+    };
+    apply_fact(&db, "source", 1, "ready", &ready, &ready.digest()?)?;
+    let mut snapshot = builder();
+    snapshot.start_ms = 500_000;
+    snapshot.deadline_ms = Some(10_000);
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    let mut calls = 0;
+    loop {
+        calls += 1;
+        if snapshot.advance(&db, "source", 500_000, 600_000)? { break; }
+        assert!(calls < 5, "historical PR keys must not consume continuation pages");
+    }
+    let cost = scope.finish();
+    assert_eq!(snapshot.projection.pull_requests.len(), 3);
+    assert_eq!(snapshot.projection.ready_cycles.get(&("repo".into(), "newly-ready".into())), Some(&ReadyCycle::Ready(550_000)));
+    assert!(cost.statements < 32, "{} statements", cost.statements);
+    assert!(cost.vm_steps < 10_000, "horizon queries must seek indexes, not scan 10,000 old PRs: {} VM steps", cost.vm_steps);
+    Ok(())
 }

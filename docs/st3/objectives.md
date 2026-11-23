@@ -207,24 +207,29 @@ The DSL emits repeated `author-login "example-bot"` indicator children, lowercas
 logins, sorts them and removes duplicates. An authored list must be nonempty; omitting it
 retains the intentional all-author default. The selector is part of the objective declaration
 and its revision, not consumer-side policy, repository membership or source acquisition.
-It applies identically to rolling-hour counts, civil-day bars and final-ready samples.
+It applies identically to authored rolling counts, civil-day bars and final-ready samples.
 Login matching is ASCII case-insensitive. Missing PR/author evidence and conflicting canonical
 images remain unknown; known nonmatching authors are excluded. Coverage is still required
 for every effective roster member before an empty selected cohort can be a real zero.
 
-This is a declaration grammar extension only: no claim fields, registry digest, SQLite
-tables/indexes or storage version change, and no new `include_str!` lane inputs. Existing
-generic declaration bodies retain the selector and replay from their authored declarations;
-GitHub facts/projection schemas are unchanged. N-1 readers that lack `author-login` reject
-the declaration as unsupported and show no-data, never silently count all authors. Publish
-selected declarations only to upgraded evaluators; the release adds no observer or activation.
+The declaration extensions add no claim fields, registry digest, storage version,
+convergence corpus or new `include_str!` lane inputs. Generic declaration bodies retain
+the authored policy and replay it. The indexed ready-state proof is an in-memory value,
+not a serialized fact. The local GitHub plugin adds a derived creation-time index
+(see [schema](schema.md#local-github-deadline-candidates)); existing merge/lifecycle
+indexes and the new index bound candidate reads to horizon plus deadline, not all PR
+history. Each continuation reads at most 128 indexed candidates or repository probes.
+N-1 readers without these extensions reject `author-login`, merged-count `window`, or
+targeted latency with `budget` as unsupported and show no-data; they never silently
+evaluate another cohort, the old one-hour rate, or a measured-only success verdict.
+Publish the new forms only to upgraded evaluators. No observer or policy is activated.
 
 Merged-count requires `PullRequest` and `Merge` coverage; ready-to-merged additionally
 requires `Lifecycle` coverage. The finite evidence horizon is the latest authoritative
 required-family coverage endpoint intersecting effective roster membership. Retired
 members contribute only up to their authored membership end and never pin that horizon.
 `cut: 'watermark'` evaluates at this horizon (bounded by Now), not an invented claim of
-complete coverage. Each rolling-hour or civil-day window independently requires every
+complete coverage. Each rolling or civil-day window independently requires every
 member effective in that window to have all required-family coverage for its membership
 intersection. Missing coverage makes that aggregate window unknown, while fully covered
 historical civil-day bars remain available. A missing lifecycle family cannot erase
@@ -252,10 +257,11 @@ Root acquisition and membership declarations use `Fractal.githubSource` and
 Private policy belongs in its owning declaration source, not the built-in daemon objectives.
 It supplies source identity, effective-dated versioned roster and timezone before
 declaring source-backed objectives, and selects an admitted authority before enabling
-acquisition. A throughput policy of at least twenty
-merges per rolling hour is `target "per-hour" min=20`; true ready-to-merged remains
-`measurement "only"` without targets. Neither repository discovery nor another workflow's
-roster establishes that policy or its historical effective dates.
+acquisition. A throughput policy of at least five merges/hour over a trailing day is
+`window "24h"` with `target "per-hour" min=5`: at least 120 merges in that rolling
+24-hour window. The window is elapsed time, not a civil day; timezone only changes
+the diagnostic bars. Neither repository discovery nor another workflow's roster
+establishes that policy or its historical effective dates.
 
 ```kdl
 objective "delivery/ready-to-merged" {
@@ -270,13 +276,67 @@ objective "delivery/ready-to-merged" {
 }
 ```
 
-Merged count is distinct repository/PR identities across **all authors**, in exactly
-`[cut - 1 hour, cut)`, under the versioned roster's effective membership at each merge.
+Merged count is distinct repository/PR identities across all authors unless `author-login`
+selects a cohort, under the versioned roster's effective membership at each merge.
 `measurement "targeted"` requires one policy-authored `target "per-hour" min=NUMBER`.
-Ready-to-merged is measured-only: the sample begins at the final proven draft-to-ready
-transition before merge, or at creation only with explicit created-ready proof. Complete
-lifecycle coverage must extend back to creation. A draft transition resets the cycle;
-queue entry, head push and the first-ever ready event are not proxies.
+The optional objective `window` accepts up to `30d`; omitting it preserves exactly
+`[cut - 1 hour, cut)`. The target always bounds the average hourly rate, not the raw
+window total. Any coverage gap anywhere in the authored window keeps the verdict
+unknown, even when the observed merge count already exceeds the minimum.
+
+Ready-to-merged begins at the final proven draft-to-ready transition before merge,
+or at creation only with explicit created-ready proof. Complete lifecycle coverage
+must extend back to creation. A draft transition resets the cycle; queue entry,
+head push and the first-ever ready event are not proxies.
+
+Targeted ready-to-merged accepts `target "p95" within="48h"` with an explicit
+`budget allowance=0.05`: at least 95% of settled final-ready cycles must merge
+within the inclusive deadline. Use the normal authored 30-day budget and paired
+burns as below. The served row ID is exactly the authored objective name, including
+any `/p95` segment; no extra suffix is appended.
+
+```kdl
+objective "delivery/merge-latency/p95" {
+  about "At least 95% merged within 48 hours of final ready"
+  indicator "github-ready-to-merged" {
+    source "github-source/test"
+    roster "github-scope/test"
+    timezone "UTC"
+    cut "now"
+    measurement "targeted"
+    author-login "example-bot"
+  }
+  target "p95" within="48h"
+  budget allowance=0.05 horizon="30d" min-coverage=1 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+}
+```
+
+Cycles settle once, at a timely merge or as bad at the deadline, including still-open
+PRs. A later merge does not move that bad event to its completion time. Pending
+and proven draft cycles do not vote. Closing an unmerged cycle before its deadline
+cancels it; a close after the deadline cannot erase its bad event. Source coverage,
+author evidence and final-ready proof are required, never inferred from silence.
+Only PR evidence that can settle within effective roster membership and the authored
+author cohort can make the budget unknown. Every settlement window is half-open
+`[cut - window, cut)`: a merge or deadline exactly at the cut belongs to the next cut.
+Each eligible horizon/burn window needs the authored minimum settled samples.
+Both windows must reach a paired burn threshold; a short-only spike never fires.
+The row exposes `latency_percentiles_ms.p95` for completed merges as a diagnostic;
+the success verdict is the censored event ratio, not the percentile of survivors.
+
+Excluding old PR candidates requires complete authoritative pull-request and lifecycle
+coverage over `[horizon start - deadline, cut)`, clipped only at a membership's end.
+This proof is required for members active in the settlement horizon, including fact
+history before their membership begins: an earlier ready may have its deadline inside
+membership. A 30-day horizon with a 48-hour deadline therefore needs 32 days of candidate
+evidence. Missing lookback coverage makes the row `no-data` and the budget unknown,
+even if all visible merges were timely; a missing old cycle cannot become a healthy
+empty cohort. Memberships that ended before the settlement horizon do not require
+this extra history. Merge evidence still needs only the settlement window.
+
 
 `measurement "only"` requires no targets and forbids `on-breach`; it never implies a target
 or green verdict. The native SLO row exposes `verdict: "measured-only"` while retaining
@@ -286,15 +346,19 @@ Corrections and retractions replace previous projection images and therefore rev
 counts and cycles.
 
 In TypeScript, either omit `targets` or provide `targets: []` for both measured-only
-GitHub indicators. Targeted merged-count still requires its explicit per-hour minimum.
+GitHub indicators. Targeted merged-count requires its explicit per-hour minimum;
+targeted ready-to-merged requires the p95 deadline and 5% budget.
 
 The native SLO measurement evidence contains fourteen civil-day bars, including partial today,
 with timezone, measured bounds and full calendar end bounds. Day lengths honor DST. It also
 carries source identity/generation, projection and roster revisions, the coverage frontier and
 source lag. `cut "now"` preserves the current cut and marks lagging acquisition unknown while
 retaining observed partial samples. `cut "watermark"` explicitly measures as of the trustworthy
-source frontier; it does not disguise that older cut as now. These indicators own their rolling
-hour/calendar windows and take no generic `window`.
+source frontier; it does not disguise that older cut as now. Merged-count retains its
+diagnostic `rolling_hour` and adds `rolling_window` evidence when a different span is
+authored. Targeted latency instead exposes its horizon and four burn-window counts.
+Latency uses its budget horizon and refuses `window`; counts and measured-only
+latency take no `budget`.
 
 Source-backed rows are composed before native owner bindings are evaluated. A binding
 may reference an existing GitHub measurement row and inherits its evidence and status

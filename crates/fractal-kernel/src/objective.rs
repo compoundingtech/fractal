@@ -924,11 +924,15 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
     }
     let kind = objective.indicator.kind();
     if let Indicator::GithubMergedCount(config) | Indicator::GithubReadyToMerged(config) = &objective.indicator {
-        if objective.window.is_some() {
-            return Err(fail("GitHub indicators own their rolling hour and calendar windows".into()));
+        if objective.window.is_some_and(|window| window.ms > 30 * 86_400_000 || window.min_samples != 1) {
+            return Err(fail("GitHub rolling windows must be at most 30d and take no min-samples".into()));
         }
-        if objective.budget.is_some() {
-            return Err(fail("GitHub indicators own their measurement policy and take no `budget`".into()));
+        let latency = matches!(objective.indicator, Indicator::GithubReadyToMerged(_));
+        if latency && objective.window.is_some() {
+            return Err(fail("GitHub latency uses its budget horizon, not `window`".into()));
+        }
+        if objective.budget.is_some() && (!latency || config.measured_only) {
+            return Err(fail("only targeted GitHub latency takes a `budget`".into()));
         }
         if config.measured_only {
             if !objective.targets.is_empty() || objective.on_breach.is_some() {
@@ -936,8 +940,12 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
             }
             return Ok(());
         }
-        if matches!(objective.indicator, Indicator::GithubReadyToMerged(_)) {
-            return Err(fail("ready-to-merged is measured-only until latency policy is approved".into()));
+        if latency {
+            if objective.targets.len() != 1 || !objective.targets.iter().all(|target| target.stat == "p95" && matches!(target.bound, Bound::Within(ms) if ms > 0))
+                || objective.budget.is_none_or(|policy| (policy.allowance - 0.05).abs() > f64::EPSILON) {
+                return Err(fail("targeted GitHub latency needs one p95 within target and a budget with allowance=0.05".into()));
+            }
+            return Ok(());
         }
         if objective.targets.len() != 1 || !objective.targets.iter().all(|target| {
             target.stat == "per-hour" && matches!(target.bound, Bound::Min(value) if value.is_finite() && value > 0.0)
