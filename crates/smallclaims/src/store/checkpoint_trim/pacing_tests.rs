@@ -445,7 +445,11 @@ fn paced_cut_fixture(
     grouped: bool,
 ) -> (Store, Vec<ClaimRecord>, Option<EnvelopeTombstone>) {
     let store = Store::open(path, "alder", Arc::new(Plain)).unwrap();
+    // Complete startup migration before recording tombstones: before authority is enabled,
+    // legacy triggers retire every recorded tombstone, including claims still held.
+    store.import_retired_identities_paced(|_| {}).unwrap();
     store.trim_locally(true).unwrap();
+    assert!(super::super::retired::authoritative(&store.readers.get()).unwrap());
     store.trim_locally_at_most(daily);
     let mut claims: Vec<ClaimRecord> = Vec::new();
     {
