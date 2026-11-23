@@ -472,9 +472,12 @@ normal-work outcome.
 Dedicated scratch may be consumed **only by the owning run's execution tree**. Release
 requires positive terminal evidence for that tree, including native cgroup/scope retirement;
 payload exit alone is not enough. Existing native retirement operations close owned
-membership scopes and confirm exact-generation work-scope receipts for other owned runtimes
-before creating the scratch release proof. Processes outside this owner
-tree are out of contract; scratch is not a shared workspace or cross-run exchange.
+membership scopes and confirm exact-generation work-scope receipts for **every historical
+incarnation** of other owned runtimes before creating the scratch release proof. Restarting
+a runtime preserves its predecessor receipts until the owning subject is removed. A stopped
+or exited observation is not a retirement receipt; an unavailable or discarded historical
+receipt retains custody as unknown, even when the newest incarnation has retired. Processes
+outside this owner tree are out of contract; scratch is not a shared workspace or cross-run exchange.
 
 As defense in depth, Linux performs one sequential host check before removal: inspect the
 current `/proc` cwd and open-fd links of same-UID processes, matching the held allocation's

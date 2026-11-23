@@ -108,8 +108,8 @@ fn command_environment(
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
-    /// Reuse exact-generation native work-scope receipts, never payload-exit
-    /// observations, as the owning runtime's terminal-tree evidence.
+    /// Every incarnation in the owning runtime's history needs its own native
+    /// retirement receipt; the latest payload exit cannot retire predecessors.
     pub(super) fn scratch_runtime_tree_retired(&self, subject: &str) -> Result<bool> {
         let Some(actual) = self.store.latest_actual_value(subject)? else { return Ok(false); };
         let (Some(runtime_id), Some(incarnation), Some(terminal), Some(host)) = (
@@ -119,7 +119,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             actual_field(&actual, "host").and_then(Value::as_str),
         ) else { return Ok(false); };
         if host != self.host { return Ok(false); }
-        if self.store.runtime_cleanup_settled(runtime_id, incarnation)? { return Ok(true); }
+        if self.store.runtime_cleanup_settled(runtime_id, incarnation)? {
+            return Ok(self.store.runtime_history_retired(subject)?);
+        }
         let settled = if terminal {
             self.runtime.stop_with_retirement_proof(runtime_id, true, incarnation)?
         } else {
@@ -127,7 +129,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.runtime.leftovers_settled(runtime_id, incarnation)?
         };
         if settled { self.store.settle_runtime_cleanup(subject, runtime_id, incarnation)?; }
-        Ok(settled)
+        Ok(settled && self.store.runtime_history_retired(subject)?)
     }
 
     /// Native mission-final work, after authored finalizers and execution quiescence.
