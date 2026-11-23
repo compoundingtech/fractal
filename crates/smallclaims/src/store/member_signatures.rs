@@ -31,7 +31,7 @@ pub fn work_counts() -> serde_json::Value {
     })
 }
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h88bdbfc1cdaf owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2079ddca5029 owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS claim_member_signatures (
     id INTEGER PRIMARY KEY,
     claim_id TEXT NOT NULL,
@@ -138,7 +138,7 @@ impl Store {
         self.connection.batched({
             let origin = self.origin.clone();
             move |tx| -> Result<()> {
-                tx.execute("INSERT INTO claim_signature_frontiers(origin,through) VALUES(?1,1)
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hde426671a84f owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_signature_frontiers(origin,through) VALUES(?1,1)
                     ON CONFLICT(origin) DO UPDATE SET through=through+1", [origin])?;
                 Ok(())
             }
@@ -193,7 +193,7 @@ impl Store {
             // A claim can arrive after a promotion page, or wait behind that page.
             // Check absence in this same transaction: retention never discards an
             // authenticatable signature merely because its ready page ran later.
-            tx.execute("DELETE FROM claim_member_signature_pending WHERE (claim_id,member_key) IN
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h7885c75a64e0 owner=smallclaims::store::member_signatures TODO=prepare-body-and-predecessor-values */ "DELETE FROM claim_member_signature_pending WHERE (claim_id,member_key) IN
                 (SELECT claim_id,member_key FROM claim_member_signature_pending
                  WHERE received_at_unix_ms < ?1 ORDER BY received_at_unix_ms LIMIT ?2)
                 AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=claim_member_signature_pending.claim_id)",
@@ -425,7 +425,7 @@ impl Store {
                 PROMOTE_CANDIDATES.fetch_add(page.len() as u64, Ordering::Relaxed);
                 let mut settled = 0;
                 for (signature, received) in &page {
-                    tx.execute("DELETE FROM claim_signature_ready WHERE claim_id=?1 AND member_key=?2",
+                    tx.execute(/* sqlite-large-value: allow-for-now lv-h138e91033c5a owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_ready WHERE claim_id=?1 AND member_key=?2",
                         params![signature.claim_id, signature.member_key])?;
                     let decided = match claim_writer_tx(tx, &signature.claim_id)? {
                         // The claim has arrived, and with it its writer's admission if there is
