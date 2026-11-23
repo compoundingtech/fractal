@@ -7914,6 +7914,26 @@ impl Store {
             .query_row(/* sqlite-large-value: allow-for-now lv-hf5a6039f365d owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, kind], |row| row.get(0))?)
     }
 
+    /// Inspect only an already-warm actual value; never fill the cache or fold history.
+    /// A single seek checks the newest claim of any kind. Ignored newer claims conservatively
+    /// make this unavailable too, rather than walking kinds or accepting stale evidence.
+    pub fn inspect_cached_actual<T>(
+        &self,
+        subject: &str,
+        inspect: impl FnOnce(&Value) -> T,
+    ) -> Result<Option<T>> {
+        let newest: Option<u64> = self.readers.get().query_row(
+            "SELECT store_index FROM claims INDEXED BY claims_subject_index
+             WHERE subject=?1 ORDER BY store_index DESC LIMIT 1",
+            [subject], |row| row.get(0),
+        ).optional()?;
+        let cache = self.fractal.actual_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(cache.get(subject)
+            .filter(|(index, _)| Some(*index) == newest)
+            .and_then(|(_, value)| value.as_ref())
+            .map(inspect))
+    }
+
     pub fn latest_actual_value(&self, subject: &str) -> Result<Option<Value>> {
         // Harness reports are deliberately excluded from ACTUAL_STATE_CLAIM. Their
         // timestamps must not dirty a reader of the actual-state projection either.
