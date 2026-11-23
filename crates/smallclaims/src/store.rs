@@ -2784,6 +2784,8 @@ impl Store {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         let signed = self.sign_own_envelopes_tx(&transaction, None)?;
+        transaction.execute("INSERT INTO claim_signature_frontiers(origin,through) VALUES(?1,1)
+            ON CONFLICT(origin) DO UPDATE SET through=through+1", [&self.origin])?;
         transaction.commit()?;
         Ok(signed)
     }
@@ -2798,6 +2800,7 @@ impl Store {
             .member_key
             .write()
             .unwrap_or_else(PoisonError::into_inner) = key;
+        self.wake_claim_signatures()?;
         Ok(())
     }
 
