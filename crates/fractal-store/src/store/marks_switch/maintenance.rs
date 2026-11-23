@@ -140,6 +140,8 @@ fn install(connection: &Connection) -> Result<()> {
     connection.execute_batch("CREATE TABLE IF NOT EXISTS local_marks_switch_dirty_v1(member TEXT PRIMARY KEY) WITHOUT ROWID;")?;
     // Writer membership changes only on the first/last row for that writer, not on every batch.
     // Indexed existence probes avoid enumerating unrelated history on ordinary appends.
+    // Explicit outer conflict policies override trigger OR IGNORE. Avoid conflicts altogether,
+    // as the other durable source ledgers do, including when several triggers name one key.
     for (table, column) in WRITER_TABLES {
         for (event, row) in [("INSERT", "NEW"), ("DELETE", "OLD")] {
             let condition = if event == "INSERT" {
@@ -147,17 +149,20 @@ fn install(connection: &Connection) -> Result<()> {
             } else { format!("NOT EXISTS(SELECT 1 FROM {table} WHERE {column}={row}.{column})") };
             connection.execute_batch(&format!(
                 "CREATE TRIGGER IF NOT EXISTS marks_switch_{table}_{event}_v1 AFTER {event} ON {table}
-                 WHEN {condition} BEGIN INSERT OR IGNORE INTO local_marks_switch_dirty_v1 VALUES(''); END;"))?;
+                 WHEN {condition} BEGIN INSERT INTO local_marks_switch_dirty_v1
+                 SELECT '' WHERE NOT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member=''); END;"))?;
         }
         connection.execute_batch(&format!(
             "CREATE TRIGGER IF NOT EXISTS marks_switch_{table}_writer_v1 AFTER UPDATE OF {column} ON {table}
-             WHEN OLD.{column}<>NEW.{column} BEGIN INSERT OR IGNORE INTO local_marks_switch_dirty_v1 VALUES(''); END;"))?;
+             WHEN OLD.{column}<>NEW.{column} BEGIN INSERT INTO local_marks_switch_dirty_v1
+             SELECT '' WHERE NOT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member=''); END;"))?;
     }
     for (event, rows) in [("INSERT", &["NEW"][..]), ("DELETE", &["OLD"][..]), ("UPDATE", &["OLD", "NEW"][..])] {
         let mut body = String::new();
         for row in rows {
-            body.push_str(&format!("INSERT OR IGNORE INTO local_marks_switch_dirty_v1 SELECT {row}.origin
-                WHERE {row}.kind='daemon.started' AND {row}.subject='daemon/'||{row}.origin;"));
+            body.push_str(&format!("INSERT INTO local_marks_switch_dirty_v1 SELECT {row}.origin
+                WHERE {row}.kind='daemon.started' AND {row}.subject='daemon/'||{row}.origin
+                  AND NOT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member={row}.origin);"));
         }
         connection.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS marks_switch_claims_{event}_v1 AFTER {event} ON claims BEGIN {body} END;"))?;
         // Canonical rank and incarnation sequence can change without appending a claim.
@@ -168,8 +173,9 @@ fn install(connection: &Connection) -> Result<()> {
             if table == "batches" && event == "INSERT" { continue; }
             let mut body = String::new();
             for row in rows {
-                body.push_str(&format!("INSERT OR IGNORE INTO local_marks_switch_dirty_v1 SELECT claims.origin FROM claims
-                    WHERE {} AND claims.kind='daemon.started' AND claims.subject='daemon/'||claims.origin;",
+                body.push_str(&format!("INSERT INTO local_marks_switch_dirty_v1 SELECT DISTINCT claims.origin FROM claims
+                    WHERE {} AND claims.kind='daemon.started' AND claims.subject='daemon/'||claims.origin
+                      AND NOT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member=claims.origin);",
                     selector.replace("{row}", row)));
             }
             connection.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS marks_switch_{table}_capability_{event}_v1 AFTER {event} ON {table} BEGIN {body} END;"))?;
@@ -181,7 +187,13 @@ fn install(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::directive_notes::tests_shared_delivery::{claim, sync};
+    use crate::store::directive_notes::tests_shared_delivery::{claim, sync as exchange};
+
+    fn sync(from: &Store, to: &Store) {
+        let admitted = exchange(from, to);
+        assert_eq!((admitted.invalid, admitted.unknown, admitted.held), (0, 0, 0),
+            "source-trigger conflicts must never turn capability records into rejected replication");
+    }
 
     fn started(store: &Store, marks: bool, staged: bool) {
         claim(store, &format!("daemon/{}", store.origin), "daemon.started", None,
