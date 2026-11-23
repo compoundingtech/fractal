@@ -3,14 +3,20 @@ use super::*;
 
 pub const OPERATION: &str = "model-return-v1";
 
+const ATTEMPT_COUNT_SQL: &str = "SELECT json_extract(body,'$.fields.model_return_attempt')
+     FROM claims INDEXED BY claims_subject_kind_accepted_index
+     WHERE subject=?1 AND kind='runtime.action.requested'
+       AND json_extract(body,'$.fields.incarnation_id')=?2
+       AND json_extract(body,'$.fields.operation')='model-return-v1'
+     ORDER BY json_extract(body,'$.fields.model_return_attempt') DESC LIMIT 1";
+
 fn attempt_count(connection: &Connection, agent: &str, incarnation: &str) -> Result<u64> {
-    Ok(connection.query_row(
-        "SELECT json_extract(body,'$.fields.model_return_attempt')
-         FROM claims INDEXED BY claims_model_return_attempt_index
-         WHERE subject=?1 AND json_extract(body,'$.fields.incarnation_id')=?2
-           AND kind='runtime.action.requested' AND json_extract(body,'$.fields.operation')='model-return-v1'
-         ORDER BY json_extract(body,'$.fields.model_return_attempt') DESC LIMIT 1",
-        params![agent, incarnation], |row| row.get(0)).optional()?.unwrap_or(0))
+    Ok(connection
+        .query_row(/* sqlite-large-value: allow-for-now lv-h5cdf69b363df owner=fractal_store::store::model_return TODO=trace-statement-and-value-representation */ ATTEMPT_COUNT_SQL, params![agent, incarnation], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .unwrap_or(0))
 }
 
 /// Match the supported restart selector under the admission writer's snapshot.
@@ -99,6 +105,41 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_return_attempts_seek_existing_subject_kind_index_without_schema_backfill() {
+        let store = fixture();
+        let connection = store.readers.get();
+        let query = format!("EXPLAIN QUERY PLAN {ATTEMPT_COUNT_SQL}");
+        let plans = connection
+            .prepare(&query)
+            .unwrap()
+            .query_map(params!["agent/node.first", "one"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        eprintln!("model-return attempt query plan: {plans:?}");
+        assert!(
+            plans.iter().any(|plan| plan
+                .contains("SEARCH claims USING INDEX claims_subject_kind_accepted_index")
+                && plan.contains("subject=?")
+                && plan.contains("kind=?")),
+            "{plans:?}"
+        );
+        assert!(
+            plans.iter().all(|plan| !plan.contains("SCAN ")),
+            "{plans:?}"
+        );
+        let index_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='claims_model_return_attempt_index')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(
+            !index_exists,
+            "opening a store must not backfill a model-return index"
+        );
+    }
     fn fixture() -> Store { initialize(Store::open_memory("node").unwrap()) }
     fn initialize(store: Store) -> Store {
         let source = "version 2\nagent \"first\" { workspace \"/tmp\"; harness \"omp\" {} }\nagent \"second\" { workspace \"/tmp\"; harness \"omp\" {} }\n";
