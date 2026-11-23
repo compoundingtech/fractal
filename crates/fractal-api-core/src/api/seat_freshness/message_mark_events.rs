@@ -227,12 +227,14 @@ mod tests {
     fn unrelated_commits_do_not_wake_and_scope_keys_stay_precise() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("scope.sqlite3"), "owner").unwrap();
+        // Schema changes invalidate all dependencies; create the fixture before observing DML.
+        store.connection.write().execute_batch("CREATE TABLE unrelated(value TEXT)").unwrap();
         let feed = Feed::default();
         let feed = feed.get(&store);
         let initial = page(&store, feed, None, 10).unwrap();
         let mut changed = feed.changed.subscribe();
         changed.borrow_and_update();
-        store.connection.write().execute_batch("CREATE TABLE unrelated(value TEXT); INSERT INTO unrelated VALUES('quiet')").unwrap();
+        store.connection.write().execute("INSERT INTO unrelated VALUES('quiet')", []).unwrap();
         assert!(!changed.has_changed().unwrap());
         store.connection.write().execute("INSERT INTO local_message_mark_scope_events(consumer) VALUES('agent/changed')", []).unwrap();
         assert!(changed.has_changed().unwrap());
