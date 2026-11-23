@@ -348,6 +348,7 @@ mod message_sent_tests;
 #[cfg(test)]
 mod message_outbox_tests;
 pub mod relayed_closes;
+pub mod relayed_close_work;
 #[cfg(test)]
 mod relayed_closes_tests;
 pub mod stream_mirror;
