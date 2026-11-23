@@ -117,12 +117,15 @@ pub struct FractalRuntime {
     pub published_work: published_list::PublishedList<work_list::WorkRows>,
     /// Current runtime resources, built only by the background collection refresher.
     pub published_runtimes: published_list::PublishedList<runtime_list::RuntimeRows>,
-    #[cfg(any(test, feature = "test-support"))]
     pub agent_resources_builds: std::sync::atomic::AtomicUsize,
-    #[cfg(any(test, feature = "test-support"))]
     pub agent_resources_refolded_cards: std::sync::atomic::AtomicUsize,
-    #[cfg(any(test, feature = "test-support"))]
     pub agent_resources_largest_fold: std::sync::atomic::AtomicUsize,
+    /// Agent cards whose presentation, fault evidence and references were enriched.
+    pub agent_roster_presentations: std::sync::atomic::AtomicUsize,
+    pub agent_roster_fault_enrichments: std::sync::atomic::AtomicUsize,
+    pub agent_roster_ref_enrichments: std::sync::atomic::AtomicUsize,
+    /// Completed presented-roster publications observed without creating roster demand.
+    pub agents_publication_changes: tokio::sync::watch::Sender<u64>,
     /// Direct current-work reads, which an enabled work list never makes.
     #[cfg(any(test, feature = "test-support"))]
     pub direct_work_reads: std::sync::atomic::AtomicUsize,
