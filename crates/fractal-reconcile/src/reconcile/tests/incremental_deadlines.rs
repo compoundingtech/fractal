@@ -1928,6 +1928,20 @@ fn old_format_queued_start_is_retired_then_restarted_under_a_fresh_lease() {
 
 #[test]
 fn old_format_queued_explicit_restart_is_reissued_and_started_with_a_fresh_lease() {
+    assert_old_format_restart_recovery("restart", false);
+}
+
+#[test]
+fn old_format_queued_idle_restart_keeps_its_already_reached_quiet_boundary() {
+    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, false);
+}
+
+#[test]
+fn old_format_queued_restart_does_not_revive_authority_after_a_later_stop() {
+    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true);
+}
+
+fn assert_old_format_restart_recovery(action: &str, later_stop: bool) {
     let root = crate::test_support::canonical_tempdir();
     let repository = crate::checkout::test_support::repository(root.path());
     let database = root.path().join("claims.db");
@@ -1935,7 +1949,7 @@ fn old_format_queued_explicit_restart_is_reissued_and_started_with_a_fresh_lease
     {
         let store = Store::open(&database, "node").unwrap();
         apply_source(&store, &format!(
-            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; restart \"never\" }}",
             repository.to_str().unwrap(),
         ), "old-explicit-restart-recovery");
         original = store.append_claim(&ClaimInput {
@@ -1943,15 +1957,40 @@ fn old_format_queued_explicit_restart_is_reissued_and_started_with_a_fresh_lease
             kind: "runtime.action.requested".into(),
             actor: Some("person/operator".into()),
             fields: BTreeMap::from([
-                ("action".into(), Value::from("restart")),
+                ("action".into(), Value::from(action)),
                 ("runtime_id".into(), Value::from("node.worker")),
             ]),
             evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
             expected_subject: None,
             idempotency_key: None,
         }).unwrap();
+        if action == crate::restart::WHEN_IDLE {
+            store.append_claim(&ClaimInput {
+                subject: original.subject.clone(),
+                kind: "runtime.action.succeeded".into(),
+                actor: original.actor.clone(),
+                fields: BTreeMap::from([
+                    ("action".into(), Value::from("restart")),
+                    ("operation_status".into(), Value::from("quiesced")),
+                ]),
+                evidence: vec![original.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(crate::restart::release_key(&original)),
+            }).unwrap();
+        }
         queue_workspace_start(&store, &repository, &repository, true, Some(original.clone()));
         assert!(store.operation_claim(&format!("agent-restart-attempt:{}", original.id)).unwrap().is_some());
+        if later_stop {
+            store.append_claim(&ClaimInput {
+                subject: original.subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: Some("person/operator".into()),
+                fields: BTreeMap::from([("action".into(), Value::from("stop"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
     }
     let store = Arc::new(Store::open(&database, "node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
@@ -1961,11 +2000,24 @@ fn old_format_queued_explicit_restart_is_reissued_and_started_with_a_fresh_lease
     restarted.reconcile_start_jobs().unwrap();
     assert!(store.runtime_start_for("agent/node.worker").unwrap().is_none());
     let requeued = crate::restart::latest_request(&store, "agent/node.worker").unwrap().unwrap();
+    if later_stop {
+        assert_eq!(requeued.id, original.id, "later stop must suppress authority requeue");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
+        return;
+    }
     assert_ne!(requeued.id, original.id);
     assert_eq!(requeued.actor, original.actor);
     assert_eq!(requeued.body["fields"], original.body["fields"]);
     assert_eq!(requeued.body["evidence"][0], original.body["evidence"][0]);
     assert!(store.operation_claim(&format!("agent-restart-attempt:{}", requeued.id)).unwrap().is_none());
+    if action == crate::restart::WHEN_IDLE {
+        let release = store.operation_claim(&crate::restart::release_key(&requeued)).unwrap().unwrap();
+        assert_eq!(release.body["fields"]["operation_status"], "quiesced");
+        assert_eq!(release.body["evidence"][0], requeued.id);
+        assert!(runtime.started_members.lock().unwrap().is_empty(),
+            "the incumbent is absent; recovery must use its retained boundary, not a new report");
+    }
     assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
     restarted.reconcile_once().unwrap();
     assert_eq!(runtime.started_members.lock().unwrap().len(), 1);

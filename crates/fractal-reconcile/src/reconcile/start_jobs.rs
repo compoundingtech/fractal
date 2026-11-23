@@ -707,6 +707,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(key),
             })?
         };
+        // The incumbent may already be gone. Transfer its durable quiet-boundary
+        // proof before retiring the old request, including after an interrupted requeue.
+        if request.body["fields"]["action"] == crate::restart::WHEN_IDLE
+            && let Some(release) = self.store.operation_claim(&crate::restart::release_key(request))?
+        {
+            self.store.append_claim(&ClaimInput {
+                subject: operation.subject.clone(),
+                kind: release.kind,
+                actor: release.actor,
+                fields: serde_json::from_value(release.body["fields"].clone())?,
+                evidence: vec![requeued.id.clone(), release.id, request.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(crate::restart::release_key(&requeued)),
+            })?;
+        }
         self.retire_restart_request(&operation.subject, request,
             &format!("queued restart reissued as {} with fresh workspace admission", requeued.id))?;
         Ok(())
