@@ -875,6 +875,7 @@ impl Store {
         })
     }
 
+
     /// Only positive producer rejection may erase a preparation intent. Absence of a record
     /// or a timeout cannot stand in for this evidence.
     pub fn reject_resource_preparation(&self, grant: &Grant, runtime_id: &str, _proof: &fractal_runtime::StartRejected) -> Result<()> {
