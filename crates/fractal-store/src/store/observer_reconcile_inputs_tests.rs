@@ -31,6 +31,15 @@ fn desired_inputs_rebuild_only_changed_keys_and_track_raw_removals() {
     assert!(inputs.changed_subjects.is_empty());
     assert_eq!(store.reconcile_input_work(), initial, "no-change loans do no input work");
     assert_eq!(inputs.desired.as_ptr(), first, "unchanged roster is retained in place");
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h97cc452a3510 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET body=body WHERE subject='resource/first'", []).unwrap();
+    inputs.refresh(&store).unwrap();
+    assert_eq!(store.reconcile_input_work(), initial, "same-value writes rebuild zero inputs");
+    {
+        let writer = store.connection.write();
+        writer.execute_batch(/* sqlite-large-value: allow-for-now lv-hb4664af9faaf owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "BEGIN; UPDATE desired SET body='{\"rollback\":true}' WHERE subject='resource/first'; ROLLBACK").unwrap();
+    }
+    inputs.refresh(&store).unwrap();
+    assert_eq!(store.reconcile_input_work(), initial, "rolled-back writes rebuild zero inputs");
     {
         let mut writer = store.connection.write();
         let transaction = writer.transaction().unwrap();

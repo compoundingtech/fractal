@@ -16,9 +16,28 @@ struct State {
     initialized: bool,
     invalid: bool,
     coverage_failed: bool,
-    rows: BTreeMap<i64, String>,
+    rows: BTreeMap<i64, (String, [u8; 32])>,
     pending: BTreeSet<i64>,
     changed: BTreeMap<String, u64>,
+}
+
+// Retain only a signature of selected inputs, not a second copy of declaration bodies.
+// Final-state equality suppresses same-value writes and transaction rollbacks.
+fn row_identity(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<(String, [u8; 32])> {
+    let mut digest = Sha256::new();
+    for column in start..start + 7 {
+        match row.get_ref(column)? {
+            rusqlite::types::ValueRef::Null => digest.update([0]),
+            rusqlite::types::ValueRef::Text(bytes) => {
+                digest.update([1]);
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            }
+            _ => return Err(rusqlite::Error::InvalidColumnType(
+                column, row.as_ref().column_name(column)?.into(), row.get_ref(column)?.data_type())),
+        }
+    }
+    Ok((row.get(start)?, digest.finalize().into()))
 }
 
 /// A pass-owned roster, updated in place; unchanged declarations are neither read nor cloned.
@@ -230,8 +249,9 @@ impl WriterObserver for Observer {
         let mut state = self.inputs.0.lock().unwrap_or_else(PoisonError::into_inner);
         let result = (|| -> Result<()> {
             if !state.initialized || state.invalid {
-                let mut statement = connection.prepare_cached("SELECT rowid, subject FROM desired")?;
-                state.rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                let mut statement = connection.prepare_cached(
+                    "SELECT rowid, subject, kind, body, member, owner_run, owner_generation, owner_step FROM desired")?;
+                state.rows = statement.query_map([], |row| Ok((row.get(0)?, row_identity(row, 1)?)))?
                     .collect::<rusqlite::Result<_>>()?;
                 state.generation = state.generation.saturating_add(1);
                 state.full = state.generation;
@@ -243,17 +263,22 @@ impl WriterObserver for Observer {
             }
             let pending = std::mem::take(&mut state.pending);
             if pending.is_empty() { return Ok(()); }
-            state.generation = state.generation.saturating_add(1);
-            let generation = state.generation;
-            let mut statement = connection.prepare_cached("SELECT subject FROM desired WHERE rowid=?1")?;
+            let mut changed = BTreeSet::new();
+            let mut statement = connection.prepare_cached(
+                "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step FROM desired WHERE rowid=?1")?;
             for rowid in pending {
-                if let Some(previous) = state.rows.remove(&rowid) {
-                    state.changed.insert(previous, generation);
+                let previous = state.rows.remove(&rowid);
+                let current = statement.query_row(/* sqlite-large-value: allow-for-now lv-hd10d6847d3fd owner=fractal_store::store::observer_reconcile_inputs TODO=trace-statement-and-value-representation */ [rowid], |row| row_identity(row, 0)).optional()?;
+                if previous != current {
+                    changed.extend(previous.map(|row| row.0));
+                    changed.extend(current.as_ref().map(|row| row.0.clone()));
                 }
-                if let Some(subject) = statement.query_row(/* sqlite-large-value: allow-for-now lv-h16532348b1c9 owner=fractal_store::store::observer_reconcile_inputs TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, String>(0)).optional()? {
-                    state.changed.insert(subject.clone(), generation);
-                    state.rows.insert(rowid, subject);
-                }
+                if let Some(current) = current { state.rows.insert(rowid, current); }
+            }
+            if !changed.is_empty() {
+                state.generation = state.generation.saturating_add(1);
+                let generation = state.generation;
+                for subject in changed { state.changed.insert(subject, generation); }
             }
             Ok(())
         })();

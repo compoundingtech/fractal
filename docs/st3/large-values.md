@@ -110,7 +110,7 @@ limit changes. Trace the dynamic templates to those representations before
 replacing their variable-sized values or index keys.
 
 The `fractal_store::store::observer_reconcile_inputs` maintainer owns
-`lv-h16532348b1c9`, an integer-rowid probe returning one existing desired subject.
+`lv-hd10d6847d3fd`, an integer-rowid probe reading one existing desired input row.
 Its execution sink remains conservatively inventoried despite the fixed query:
 trace the bound integer and returned subject to the existing subject-key
 representation rather than treating a single row as a byte-size proof.
