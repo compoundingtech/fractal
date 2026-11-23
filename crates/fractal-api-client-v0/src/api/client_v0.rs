@@ -14335,6 +14335,11 @@ mission "differential" state="ready" {
             }
             // Sample a real query, then inject its duration through the existing recorder:
             // testing the report must not depend on slow hardware or a large background log.
+            // Fixture queries can exhaust the meter's bounded label table and fold a
+            // new label into "(other)". Isolate report sampling from setup, then make
+            // a real request so the request report remains covered after the reset.
+            crate::performance::reset_for_test();
+            let _ = read("/v1/mission-overview?mission=mission%2Fexample%2Ffleet".into()).await;
             let index = state.store.index().unwrap();
             let _ = state
                 .store
