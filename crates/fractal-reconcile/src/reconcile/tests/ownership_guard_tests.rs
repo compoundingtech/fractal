@@ -258,8 +258,19 @@ fn evaluated_member_results_survive_a_clean_wake_and_remain_fenced() {
         for failed in [true, false] {
             if failed {
                 fs::remove_dir_all(&workspace).unwrap();
+                // A deleted running workspace is now a non-failing warning. Reject its
+                // diagnostic write instead, so this still tests an actual evaluated fault
+                // after the incumbent queued its wake, not the preparation warning itself.
+                store.connection.lock().unwrap().execute_batch(
+                    /* sqlite-large-value: allow-for-now lv-h3e6054d4d1ce owner=fractal_reconcile::reconcile::tests::ownership_guard_tests TODO=prepare-body-and-predecessor-values */ "CREATE TEMP TRIGGER fail_preparation_diagnostic BEFORE INSERT ON claims
+                     WHEN NEW.kind='harness.diagnostic'
+                       AND json_extract(NEW.body, '$.fields.code')='render-blocked'
+                     BEGIN SELECT RAISE(ABORT, 'injected preparation diagnostic persistence failure'); END;",
+                ).unwrap();
             } else {
                 fs::create_dir(&workspace).unwrap();
+                store.connection.lock().unwrap()
+                    .execute_batch(/* sqlite-large-value: allow-for-now lv-h2810f1f171e8 owner=fractal_reconcile::reconcile::tests::ownership_guard_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_preparation_diagnostic").unwrap();
             }
             reconciler.incremental.observe(&store).unwrap();
             reconciler.incremental.touch_subject(&declaration.subject);
@@ -285,7 +296,7 @@ fn evaluated_member_results_survive_a_clean_wake_and_remain_fenced() {
                 assert!(
                     fault
                         .as_deref()
-                        .is_some_and(|reason| reason.contains("workspace")),
+                        .is_some_and(|reason| reason.contains("diagnostic persistence failure")),
                     "evaluated member fault must survive a clean wake"
                 );
             } else {

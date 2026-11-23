@@ -4367,6 +4367,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             let queued_before = work_message_agents.len();
+            let preparation_blocked = member_errors.contains_key(&subject.subject);
             let cpu_started = crate::incremental::thread_cpu();
             let mark = self.evaluation_mark();
             let ((result, due), reads) = smallclaims::touched::record(|| {
@@ -4635,6 +4636,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         restart,
                                     ));
                                 }
+                                // Preparation did not prevent observing or waking this incumbent.
+                                // Keep it visible without turning a healthy live seat into a fault.
+                                self.record_preparation_diagnostic(
+                                    &subject.subject,
+                                    blocked.take().as_ref(),
+                                )?;
                             }
                             Some(observation)
                                 if matches!(observation.status.as_str(), "exited" | "vanished") =>
@@ -4806,8 +4813,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     None => wakes.remove(&subject.subject),
                 };
             }
-            // A failed member is evaluated again on the next pass, as before.
-            if result.is_ok() {
+            // Failed or preparation-blocked members are evaluated again on the next pass.
+            if result.is_ok() && !preparation_blocked {
                 self.incremental.evaluated(&item, reads, due);
             }
             // A running agent's member pass also includes deferred work delivery, so its result
@@ -4984,6 +4991,43 @@ impl<R: RuntimeControl> Reconciler<R> {
             anyhow::ensure!(raised.is_empty(), "reconcile faults: {}", raised.join("; "));
         }
         Ok(())
+    }
+
+    /// Like render warnings, preparation blockers are diagnostics, not live-seat failures.
+    fn record_preparation_diagnostic(
+        &self,
+        subject: &str,
+        blocked: Option<&anyhow::Error>,
+    ) -> Result<()> {
+        let previous = self
+            .store
+            .observations_for(subject, "harness.diagnostic")?
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body["fields"]["code"] == "render-blocked");
+        let (status, reason) = if let Some(error) = blocked {
+            ("warning", format!("{error:#}"))
+        } else {
+            let pending = previous
+                .as_ref()
+                .is_some_and(|claim| claim.body["fields"]["status"] == "warning");
+            if !pending {
+                return Ok(());
+            }
+            ("resolved", "workspace preparation is no longer blocked".into())
+        };
+        self.record_once_with_previous(
+            subject,
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("code".into(), Value::String("render-blocked".into())),
+                ("severity".into(), Value::String("warning".into())),
+                ("status".into(), Value::String(status.into())),
+                ("reason".into(), Value::String(reason)),
+            ]),
+            Vec::new(),
+            previous.as_ref(),
+        )
     }
 
     /// A member declaration this build cannot read has no member, so the member loop would
