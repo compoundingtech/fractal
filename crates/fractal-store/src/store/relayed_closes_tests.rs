@@ -150,13 +150,14 @@ fn admit(store: &Arc<Store>, closes: Vec<RelayedClose>) {
 
 fn fail_finalization(store: &Store) {
     store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h4ab0ae4d51d7 owner=fractal_store::store::relayed_closes_tests TODO=bound-or-reference-values-and-reclamation */
         "CREATE TRIGGER reject_relayed_close BEFORE INSERT ON local_relayed_message_closes
          BEGIN SELECT RAISE(ABORT, 'forced close writer failure'); END;",
     ).unwrap();
 }
 
 fn recover_finalization(store: &Store) {
-    store.connection.write().execute_batch("DROP TRIGGER reject_relayed_close;").unwrap();
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h41634bdd2967 owner=fractal_store::store::relayed_closes_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_relayed_close;").unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
