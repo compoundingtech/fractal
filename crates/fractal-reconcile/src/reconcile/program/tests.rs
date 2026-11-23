@@ -907,7 +907,7 @@ fn native_await_pr_resolves_observed_merge_and_journals_the_caller_key() {
     let request = engine.requests(&run.subject).pop().unwrap();
     let (pending, reads) = smallclaims::touched::record(|| await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head"));
     assert!(!pending.unwrap());
-    assert!(reads.contains("resource/github/acme/garden/pull-request/12"));
+    assert!(reads.contains("actual:resource/github/acme/garden/pull-request/12"));
     assert_eq!(engine.store.program_pr_watches().unwrap().len(), 1);
     observe_program_pr(&engine, json!([{
         "number":12,"state":"closed","head_sha":"head","head":"head","merged":true,"merge_commit_sha":"merge",
@@ -940,7 +940,7 @@ fn native_await_pr_returns_typed_unknown_repository_and_pull_request_errors() {
         let request = engine.requests(&run.subject).pop().unwrap();
         let (pending, reads) = smallclaims::touched::record(|| await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head"));
         assert!(!pending.unwrap(), "pre-registration failures and incremental absence cannot settle a new wait");
-        assert!(reads.contains("resource/github/acme/garden"));
+        assert!(reads.contains("actual:resource/github/acme/garden"));
         assert!(reads.contains("observer/github/acme/garden"));
         let registrations = engine.store.program_pr_watches().unwrap();
         let token = registrations[0]["registration"].as_str().unwrap();

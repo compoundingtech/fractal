@@ -847,7 +847,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h25bdee44f9bb owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h9dec72335295 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -888,10 +888,6 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
--- Bridge requests carry the durable admitted count; roster reads seek one current-incarnation row.
-CREATE INDEX IF NOT EXISTS claims_model_return_attempt_index
-ON claims(subject, json_extract(body,'$.fields.incarnation_id'), json_extract(body,'$.fields.model_return_attempt') DESC)
-WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.operation')='model-return-v1';
 CREATE INDEX IF NOT EXISTS claims_idle_action_index
 ON claims(subject, store_index)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle';
@@ -1512,12 +1508,6 @@ WHERE kind='harness.timeline'
 CREATE INDEX IF NOT EXISTS local_observations_roster_frontier_index
 ON local_observations(id, after_store_index)
 WHERE kind='harness.timeline' AND subject LIKE 'agent/%';
--- Held main-loop usage can refresh model-drift evidence without publishing a new claim.
--- Keep its frontier separate from timeline rows so both seeks remain partial-index bounded.
-CREATE INDEX IF NOT EXISTS local_observations_roster_model_frontier_index
-ON local_observations(id, after_store_index)
-WHERE kind='harness.usage' AND subject LIKE 'agent/%'
-  AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative');
 -- Retry receipts survive local observation trimming. Device event IDs are unique
 -- across payload kinds; the device queue expires after seven days.
 CREATE TABLE IF NOT EXISTS client_diagnostic_receipts (
@@ -3002,6 +2992,24 @@ impl Store {
         Self::finish_open(graph, fractal)
     }
 
+    /// Open an offline backup source without migrations, projection repair, or writer workers.
+    pub fn open_backup_read_only(database: &Path) -> Result<Self> {
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_backup_read_only(database, fractal.clone())?;
+        anyhow::ensure!(!graph.origin.is_empty(), "read-only backup requires a persisted local writer identity");
+        let store = Self::from_open_graph(graph, fractal, None);
+        let shard_path = backup_shards::database_path(
+            store.path.parent().context("backup database has no parent directory")?,
+        )?;
+        if shard_path.try_exists()? {
+            let shard = GraphStore::open_backup_read_only(
+                &shard_path, Arc::new(messages_shard::MessagesRuntime::default()),
+            ).with_context(|| format!("open read-only messages shard {}", shard_path.display()))?;
+            store.extension::<messages_shard::Slot>().set(Arc::new(shard))?;
+        }
+        Ok(store)
+    }
+
     /// Open only through the directory descriptor retained by explicit-store admission.
     pub fn open_admitted(
         admitted: Arc<smallclaims::store::AdmittedStore>,
@@ -3030,7 +3038,15 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        Ok(Self::from_open_graph(graph, fractal, resource_backfill))
+    }
+
+    fn from_open_graph(
+        graph: GraphStore,
+        fractal: Arc<FractalRuntime>,
+        resource_backfill: Option<resource_references::BackfillWorker>,
+    ) -> Self {
+        Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             storage_census: Default::default(),
             shell_environments: Default::default(),
@@ -3039,7 +3055,7 @@ impl Store {
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
-            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() }
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -7381,7 +7397,7 @@ impl Store {
     }
 
     pub fn selected_desired_kind(&self, subject: &str) -> Result<Option<String>> {
-        smallclaims::touched::note_read(|| subject.to_owned());
+        smallclaims::touched::note_read(|| format!("desired:{subject}"));
         let connection = self.readers.get();
         current_desired_row(&connection, subject).map(|row| row.map(|row| row.kind))
     }
@@ -7883,7 +7899,10 @@ impl Store {
     }
 
     pub fn latest_actual_value(&self, subject: &str) -> Result<Option<Value>> {
-        smallclaims::touched::note_read(|| subject.to_owned());
+        // Harness reports are deliberately excluded from ACTUAL_STATE_CLAIM. Their
+        // timestamps must not dirty a reader of the actual-state projection either.
+        smallclaims::touched::note_read(|| format!("actual:{subject}"));
+        smallclaims::touched::note_read(|| "kind:record.repaired".to_owned());
         if subject.starts_with("resource/slo-breach/") {
             return slo_breaches::fact(&self.readers.get(), subject);
         }
@@ -9355,6 +9374,12 @@ fn enforce_mission_run_capacity_excluding(
 }
 
 pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
+    // Naming and repair can change a negative lookup or move an alias to a different
+    // identity. Ordinary declarations remain keyed to the resolved physical subject.
+    for kind in ["agent.renamed", "mission.renamed", "record.repaired"] {
+        smallclaims::touched::note_read(|| format!("kind:{kind}"));
+    }
+    smallclaims::touched::note_read(|| format!("desired:{subject}"));
     let row = connection
         .prepare_cached(
             "SELECT d.kind, d.revision, d.claim_id, d.body, d.member, d.owner_run, d.owner_generation,
@@ -9362,12 +9387,15 @@ pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Opt
                     AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
                          OR EXISTS(SELECT 1 FROM meta WHERE key IN ('operation-conflict-naming-name:' || ?1, 'operation-conflict-naming-name:' || requested.identity)))),h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
-                     AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
+                     AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END,
+                 requested.identity
              FROM (SELECT COALESCE((SELECT identity FROM identity_names WHERE name=?1),?1) AS identity) requested
              LEFT JOIN identity_heads h ON h.identity=requested.identity
              LEFT JOIN desired d ON d.subject=requested.identity",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h6ba84b692e14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h4b8f61721a65 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| {
+            let identity: String = row.get(8)?;
+            smallclaims::touched::note_read(|| format!("desired:{identity}"));
             let desired = if row.get_ref(0)?.data_type() == rusqlite::types::Type::Null {
                 None
             } else { Some(DesiredRow {
@@ -24082,6 +24110,21 @@ pub enum MissionRunEnrichment {
     Evaluation,
 }
 
+/// Current step projection for one generation, without definition or history enrichment.
+pub fn mission_generation_steps_tx(
+    connection: &Connection,
+    generation: &str,
+) -> rusqlite::Result<Vec<StepRunView>> {
+    let mut statement = connection.prepare(
+        "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
+                lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
+         FROM step_runs WHERE generation_id=?1 ORDER BY created_at_unix_ms, step_path",
+    )?;
+    statement
+        .query_map([generation_id_from_subject(generation)], step_run_from_row)?
+        .collect()
+}
+
 pub fn mission_run_view_and_definition_tx(
     connection: &Connection,
     run_id: &str,
@@ -24090,17 +24133,7 @@ pub fn mission_run_view_and_definition_tx(
     let presentation = matches!(enrichment, MissionRunEnrichment::Presentation | MissionRunEnrichment::Created);
     let history = if enrichment == MissionRunEnrichment::Created { WakeHistory::NewStep } else { WakeHistory::Read };
     let mut view = mission_run_header_tx(connection, run_id)?;
-    let mut statement = connection.prepare(
-        "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
-                lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
-         FROM step_runs WHERE generation_id=?1 ORDER BY created_at_unix_ms, step_path",
-    )?;
-    view.steps = statement
-        .query_map(
-            [generation_id_from_subject(&view.generation)],
-            step_run_from_row,
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+    view.steps = mission_generation_steps_tx(connection, &view.generation)?;
     let mission = if presentation || view.steps.is_empty() {
         None
     } else {

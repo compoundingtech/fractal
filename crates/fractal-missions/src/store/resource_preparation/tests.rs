@@ -215,7 +215,17 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
     let current_store = store.clone();
     store.connection.send(WriterJob::Batched {
         run: Box::new(move |tx| {
-            inside.store(counter.load(Ordering::SeqCst) == 1, Ordering::SeqCst);
+            // The earlier queued job's write is visible on this transaction and no
+            // commit has been published: both jobs share one uncommitted precommit batch.
+            let shared = tx
+                .query_row(
+                    "SELECT value FROM meta WHERE key='invented-same-batch'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .is_ok()
+                && counter.load(Ordering::SeqCst) == 0;
+            inside.store(shared, Ordering::SeqCst);
             selected.store(
                 fence.current(&current_store, tx, &prepared),
                 Ordering::SeqCst,
@@ -228,18 +238,23 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
         enqueued: std::time::Instant::now(),
         done: answer,
     });
-    // Returning the loan publishes one hint; neither queued job has committed yet.
+    // Returning the loan is a no-op: neither queued job commits until the batch finishes.
     drop(writer);
     for result in done {
         result.recv().unwrap().unwrap();
     }
     assert!(
         before_commit.load(Ordering::SeqCst),
-        "the two prequeued jobs must share the native batch for this discriminator"
+        "the two prequeued jobs share one uncommitted precommit batch: the earlier job's write is visible and unpublished"
     );
     assert!(
         !accepted.load(Ordering::SeqCst),
-        "the native counter must reject before commit publication"
+        "the native counter must reject the earlier job's uncommitted write"
+    );
+    assert_eq!(
+        commits.load(Ordering::SeqCst),
+        1,
+        "the shared batch publishes one commit after both jobs finish"
     );
 }
 

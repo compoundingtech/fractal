@@ -996,6 +996,17 @@ impl Store {
         self.connection.observe_commits(callback)
     }
 
+    /// Observe committed mutations of declared main-database tables. Native coverage loss
+    /// and DDL invalidate all dependencies; no-op and rolled-back loans do not evaluate the
+    /// callback. Lifetime and registration ordering match [`Self::observe_commits`].
+    pub fn observe_tables(
+        &self,
+        tables: &'static [&'static str],
+        callback: impl Fn(&Connection) + Send + Sync + 'static,
+    ) -> CommitObserver {
+        self.connection.observe_tables(tables, callback)
+    }
+
     /// Explicitly attach one bounded transaction-owned source adapter. This covers queued
     /// batches and managed lent-writer transactions before commit; it neither installs views
     /// nor certifies source coverage. See WriterConnection::install_transaction_finalizer.
@@ -1022,6 +1033,57 @@ impl Store {
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
         Self::open_with(path, origin.into(), runtime, None, true, |_| {},
             #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    /// Open a cleanly stopped, checkpointed current-schema store without changing any source files.
+    pub fn open_backup_read_only(path: &Path, runtime: Arc<dyn Runtime>) -> Result<Self> {
+        let connection = crate::sqlite::open_immutable_read_connection(path)?;
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        anyhow::ensure!(
+            (CURRENT_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+            "read-only backup requires schema version {CURRENT_SCHEMA_VERSION} through {MAX_SUPPORTED_SCHEMA_VERSION}; source has schema version {version}; migrate with a compatible daemon before exporting"
+        );
+        let path = crate::sqlite::opened_database_path(&connection, path)?;
+        let origin = connection.query_row(
+            "SELECT value FROM meta WHERE key IN ('local_node_writer','backup_restore_writer')
+             ORDER BY CASE key WHEN 'local_node_writer' THEN 0 ELSE 1 END LIMIT 1",
+            [], |row| row.get::<_, String>(0),
+        ).optional()?.unwrap_or_default();
+        let identities: u64 = connection.query_row(
+            "SELECT COUNT(DISTINCT value) FROM meta WHERE key IN ('local_node_writer','backup_restore_writer')",
+            [], |row| row.get(0),
+        )?;
+        anyhow::ensure!(identities <= 1, "read-only backup refuses ambiguous persisted writer identity");
+        let index = current_index(&connection)?;
+        let seeded_batch_rowid = connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key='seeded_batch_rowid'",
+            [], |row| row.get(0),
+        ).optional()?.unwrap_or(0);
+        let readers = ReadPool::new_immutable(&path)?;
+        let committed_index = Arc::new(AtomicU64::new(index));
+        let writer = WriterConnection::read_only(committed_index.clone());
+        Self::from_open_parts(
+            writer, readers, origin, path, false, runtime, committed_index,
+            seeded_batch_rowid, false,
+        )
+    }
+
+    /// Check actual envelope coverage, including batches older than the persisted sealing cursor.
+    /// Call inside the export's pinned snapshot; this never repairs or seals history.
+    pub fn check_backup_sealed(&self) -> Result<()> {
+        let missing: bool = self.readers.get().query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM batches b
+               WHERE NOT EXISTS(SELECT 1 FROM replica_envelopes e WHERE e.batch_id=b.id)
+                 AND NOT EXISTS(SELECT 1 FROM released_envelopes e WHERE e.batch_id=b.id)
+             )",
+            [], |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            !missing,
+            "read-only backup refuses unsealed history; let the daemon finish sealing before exporting"
+        );
+        Ok(())
     }
 
     /// Open only through an admitted, locked directory, without recreating it.
@@ -1364,6 +1426,24 @@ impl Store {
         if auto_schedule {
             Self::install_deferred_drain(&connection, runtime.clone());
         }
+        Self::from_open_parts(
+            connection, readers, origin, path, shared_memory, runtime,
+            committed_index, seeded_batch_rowid, projection_pending,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_open_parts(
+        connection: WriterConnection,
+        readers: ReadPool,
+        origin: String,
+        path: PathBuf,
+        shared_memory: bool,
+        runtime: Arc<dyn Runtime>,
+        committed_index: Arc<AtomicU64>,
+        seeded_batch_rowid: i64,
+        projection_pending: bool,
+    ) -> Result<Self> {
         Ok(Self {
             connection,
             admitted: None,
@@ -6660,7 +6740,7 @@ impl Store {
     /// even below another store's snapshot.
     /// The latest claim of a subject, or of one kind of it, in canonical order.
     pub fn latest_claim(&self, subject: &str, kind: Option<&str>) -> Result<Option<ClaimRecord>> {
-        crate::touched::note_read(|| subject.to_owned());
+        crate::touched::note_claim_read(subject, kind);
         let connection = self.readers.get();
         // With a kind, walk the accepted-time index newest first and sort only claims accepted in
         // the same millisecond, as `newest_claims_of_kind_query` does. Sorting every claim of the
@@ -6694,7 +6774,7 @@ impl Store {
         newest_first: bool,
         mut visit: impl FnMut(&ClaimRecord) -> bool,
     ) -> Result<()> {
-        crate::touched::note_read(|| subject.to_owned());
+        crate::touched::note_claim_read(subject, Some(kind));
         let caller = std::panic::Location::caller();
         crate::profile::tagged(
             || format!("claims_in_order {kind} at {}:{}", caller.file(), caller.line()),
@@ -6768,7 +6848,7 @@ impl Store {
         end: u128,
         mut visit: impl FnMut(&ClaimRecord) -> bool,
     ) -> Result<()> {
-        crate::touched::note_read(|| subject.to_owned());
+        crate::touched::note_claim_read(subject, Some(kind));
         let connection = self.readers.get();
         let end = end.to_string();
         // SQLite cannot seek a row-value inequality whose first element is an indexed
@@ -7233,7 +7313,7 @@ impl Store {
     }
 
     fn claims_for_untagged(&self, subject: &str, kind: Option<&str>) -> Result<Vec<ClaimRecord>> {
-        crate::touched::note_read(|| subject.to_owned());
+        crate::touched::note_claim_read(subject, kind);
         let connection = self.readers.get();
         // One statement with `(?2 IS NULL OR kind=?2)` hides the kind from the planner, which then
         // reads every claim of the subject to test it. A busy agent holds thousands of observations,

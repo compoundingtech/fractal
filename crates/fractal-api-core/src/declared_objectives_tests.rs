@@ -1310,3 +1310,110 @@ objective "delivery/selected" {
     let Indicator::GithubMergedCount(config) = selected.objective.unwrap().indicator else { panic!() };
     assert_eq!(config.author_logins, ["example-bot"]);
 }
+
+#[test]
+fn native_producer_reports_only_its_bound_declarations_and_episodes() {
+    let store = store_with(r#"version 2
+objective "example/mail" {
+  about "Mail owner"
+  indicator "native" { objective "agents/mail-delivery"; }
+  on-breach "fault" owner="agent/node.ops" condition="mail-burn"
+}
+objective "example/read" {
+  about "Read owner"
+  indicator "native" { objective "person-read"; }
+  on-breach "fault" owner="agent/node.ops" condition="read-burn"
+}
+"#);
+    with_owner(&store, "node");
+    let mail = json!({
+        "id": "agents/mail-delivery/node", "kind": "objective", "about": "Mail",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    check_native_and_report(&store, *NOW, "agents/mail-delivery", std::slice::from_ref(&mail)).unwrap();
+    let evaluations = store.fractal.extensions.get::<Evaluations>();
+    assert_eq!(evaluations.0.lock().unwrap().len(), 1, "mail must not initialize unrelated evaluations");
+    assert_eq!(fault_status(&store, "example/mail/node"), "pending");
+
+    let read = json!({
+        "id": "person-read", "kind": "objective", "about": "Reads",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    let all = rows(&store, *NOW, &[mail.clone(), read]).unwrap();
+    check(&store, &all).unwrap();
+    assert_eq!(fault_status(&store, "example/read"), "pending");
+    let mut recovered = mail;
+    recovered["status"] = json!("met");
+    recovered["remaining_percent"] = json!(100.0);
+    check_native_and_report(&store, *NOW, "agents/mail-delivery", &[recovered]).unwrap();
+    assert_eq!(fault_status(&store, "example/mail/node"), "resolved");
+    assert_eq!(fault_status(&store, "example/read"), "pending", "mail cannot close another producer's episode");
+}
+
+#[test]
+fn native_producer_reports_ancestor_binding_without_ending_sibling_episode() {
+    let store = store_with(r#"version 2
+objective "example/agents" {
+  about "Agents owner"
+  indicator "native" { objective "agents"; }
+  on-breach "fault" owner="agent/node.ops" condition="agents-burn"
+}
+objective "example/read" {
+  about "Read owner"
+  indicator "native" { objective "person-read"; }
+  on-breach "fault" owner="agent/node.ops" condition="read-burn"
+}
+objective "example/admission" {
+  about "Admission owner"
+  indicator "native" { objective "build/admission"; }
+  on-breach "fault" owner="agent/node.ops" condition="admission-burn"
+}
+"#);
+    with_owner(&store, "node");
+    let mail = json!({
+        "id": "agents/mail-delivery/node", "kind": "objective", "about": "Mail",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    // The store has no captured mail evidence, so its full-evaluation rows cannot
+    // contradict the producer evidence supplied below.
+    assert!(crate::mail_delivery_objectives::rows(&store, *NOW).unwrap().iter()
+        .all(|row| row["status"] == "no-data"));
+    check_native_and_report(&store, *NOW, "agents/mail-delivery", std::slice::from_ref(&mail)).unwrap();
+    assert_eq!(fault_status(&store, "example/agents/mail-delivery/node"), "pending");
+
+    let read = json!({
+        "id": "person-read", "kind": "objective", "about": "Reads",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    store.start_resource_authority("node", "ancestor-binding-test").unwrap();
+    let request: crate::store::resource_membership::LaneRequest = serde_json::from_value(json!({
+        "id": "ancestor-binding-waiter", "name": "build", "host": "node", "maxMembers": 1,
+        "capacity": {"cores": 1, "memory": 100}, "coverage": "logical",
+        "admissionTimeoutMs": null, "class": "check",
+        "owner": {"run": "mission-run/ancestor-binding", "step": "compile", "attempt": 1, "invocation": null}
+    })).unwrap();
+    let fit = crate::store::resource_membership::Fit {
+        room: Some(fractal_runtime::Capacity { cores: 4, memory: 1000 }),
+        held_bytes: 1000,
+        ..Default::default()
+    };
+    store.request_resource_membership(&request, fit, *NOW - 2 * 60 * MINUTE - 1).unwrap();
+    let native = crate::admission_objectives::rows(&store, *NOW).unwrap();
+    let sibling = native.iter().find(|row| row["id"] == "build/admission/node/check").unwrap();
+    assert_eq!(sibling["status"], "exhausted");
+    let all = rows(&store, *NOW, &[mail.clone(), read, sibling.clone()]).unwrap();
+    check(&store, &all).unwrap();
+    assert_eq!(fault_status(&store, "example/read"), "pending");
+    assert_eq!(fault_status(&store, "example/admission/node/check"), "pending");
+    let mut recovered = mail;
+    recovered["status"] = json!("met");
+    recovered["remaining_percent"] = json!(100.0);
+    check_native_and_report(&store, *NOW, "agents/mail-delivery", &[recovered]).unwrap();
+    assert_eq!(fault_status(&store, "example/agents/mail-delivery/node"), "resolved");
+    assert_eq!(fault_status(&store, "example/read"), "pending", "mail cannot close another producer's episode");
+    assert_eq!(fault_status(&store, "example/admission/node/check"), "pending", "mail cannot close a store-backed sibling producer's episode");
+}

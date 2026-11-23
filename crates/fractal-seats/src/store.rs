@@ -200,26 +200,43 @@ const RETIRED_OWNED_INTAKE_SUBJECTS: &str = "SELECT desired.subject
        )
      ORDER BY desired.subject";
 
-/// The local rows a roster card can read: agent timeline entries date activity and managed
-/// sessions, and held main-loop usage supplies the live model and its observation timestamp.
-/// A same-model usage refresh can stay local while changing model-drift freshness. Heartbeats
-/// and response spend do not change these folded inputs. Each indexed seek returns the newest
-/// relevant row at or before the cut; ids and graph cuts need not rise together after repair.
-const ROSTER_LOCAL_FRONTIER: &str = "SELECT MAX(
- COALESCE((SELECT id FROM local_observations
-  WHERE kind='harness.timeline' AND subject LIKE 'agent/%' AND after_store_index<=?1
-  ORDER BY id DESC LIMIT 1), 0),
- COALESCE((SELECT id FROM local_observations
-  WHERE kind='harness.usage' AND subject LIKE 'agent/%'
-    AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')
-    AND after_store_index<=?1
-  ORDER BY id DESC LIMIT 1), 0))";
+/// Every appended observation advances this snapshot token, including a usage repeat that
+/// clears a pending slot. MAX(id) uses the existing INTEGER PRIMARY KEY endpoint, not a
+/// filtered backwards walk. The delta query below decides which cards actually need refolding.
+const ROSTER_LOCAL_FRONTIER: &str =
+    "SELECT COALESCE(MAX(id), 0) FROM local_observations WHERE ?1>=0";
 
-/// One frontier read, inside the caller's SQLite snapshot when it holds one: the reader pool
-/// lends pinned reads the same connection. The partial frontier index keeps an old cut from
-/// walking newer heartbeat rows.
+/// Read inside the caller's SQLite snapshot. The graph cut remains a delta predicate, not a
+/// frontier predicate: even an observation beyond that cut conservatively changes the token.
 pub fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64> {
     Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h6ec3fa9174f4 owner=fractal_seats::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [index], |row| row.get::<_, u64>(0))?)
+}
+
+/// Seek only observations appended since the cached token. Reading the append interval, rather
+/// than current pending slots, retains clear/replace/repeat transitions after a slot disappears.
+/// Heartbeats and response/subagent spend change the token but refold no cards.
+const ROSTER_LOCAL_CHANGED_SUBJECTS: &str =
+    "SELECT subject FROM local_observations NOT INDEXED
+     WHERE id>?1 AND id<=?2 AND after_store_index<=?3 AND subject LIKE 'agent/%'
+       AND (kind='harness.timeline' OR (kind='harness.usage'
+         AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')))";
+
+/// Read-only pins may reuse rows across an irrelevant append interval. Bound the work under
+/// the pin; larger intervals use the normal incremental builder instead.
+fn roster_local_unchanged(
+    connection: &Connection,
+    before: u64,
+    after: u64,
+    index: u64,
+) -> Result<bool> {
+    if before == after {
+        return Ok(true);
+    }
+    if before > after || after - before > 256 {
+        return Ok(false);
+    }
+    Ok(!connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbf7fc60867bd owner=fractal_seats::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS)?
+        .exists(params![before, after, index])?)
 }
 
 /// The subjects whose claims an agent card reads: its agent, the runs, generations and steps that
@@ -445,7 +462,7 @@ impl SeatsStoreCore for Store {
 
     fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>> {
         for subject in subjects {
-            smallclaims::touched::note_read(|| subject.clone());
+            smallclaims::touched::note_read(|| format!("desired:{subject}"));
         }
         if subjects.is_empty() {
             return Ok(Vec::new());

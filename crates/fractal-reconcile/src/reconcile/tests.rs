@@ -3951,6 +3951,64 @@ version 2
         assert_eq!(ready.attempt, before.attempt, "the step is not reset");
     }
 
+    #[test]
+    fn mission_read_reconstruction_is_scoped_to_the_changed_run() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, r#"
+version 2
+resource "elsewhere" { kind "custom.st3.document-source" }
+mission "counted" state="ready" {
+  goal "Wait for an explicitly named seat."
+  concurrent-runs
+  step "work" { assigned-to "agent/absent" }
+}
+"#, "counted-mission");
+        let create = |key: &str| store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "counted".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let first = create("first-counted-run");
+        let second = create("second-counted-run");
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).skipping_unneeded(true);
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        // Drain preceding self-writes before attributing an individual commit.
+        for _ in 0..MISSION_READS_CONTINUATIONS {
+            if !reconciler.evaluate_changed_mission_runs().unwrap().1 { break; }
+        }
+        assert!(!reconciler.evaluate_changed_mission_runs().unwrap().1);
+        let count = || store.mission_read_work()["reconstructions"].as_u64().unwrap();
+        let before = count();
+        observe_state(&store, "resource/elsewhere", "resumed", "unrelated-counted-change");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+        assert_eq!(count() - before, 0, "unrelated commits reconstruct no missions");
+
+        // This is the same seat the runs read for eligibility and actual state, but
+        // neither query consumes harness reports. Re-stamping it changes no input.
+        store.append_claim(&ClaimInput {
+            subject: "agent/absent".into(), kind: "harness.observed".into(),
+            actor: Some("agent/absent".into()),
+            fields: BTreeMap::from([("state".into(), Value::String("working".into()))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some("heartbeat-counted".into()),
+        }).unwrap();
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+        assert_eq!(count() - before, 0, "unconsumed heartbeat inputs reconstruct no missions");
+
+        store.set_mission_run_state(&first.id, "running", "normal", None).unwrap();
+        let before = count();
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap().0, 1);
+        assert_eq!(count() - before, 1, "one changed run has one full reconstruction");
+        assert_eq!(store.mission_run(&second.id).unwrap().unwrap().steps[0].status, "blocked");
+    }
+
     #[tokio::test]
     async fn the_post_commit_feed_wakes_the_runs_a_change_touched() {
         // On disk, so this test's reads wait for the follower's writes rather than fail.
@@ -8123,6 +8181,39 @@ agent "import/omp/fixture" {{
             .expect("a target mutation must still wake reconciliation");
     }
 
+    #[tokio::test]
+    async fn cached_file_observation_retains_scoped_mission_dependency() {
+        use futures_util::FutureExt as _;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate.txt");
+        std::fs::write(&path, "ready").unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let reconciler = Reconciler::new(
+            store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert!(reconciler.file_observations.lock().unwrap().contains_key(&subject));
+        let ((), reads) = smallclaims::touched::record(|| {
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert!(reconciler.subject_value(&subject).unwrap().is_some());
+        });
+        assert!(reads.contains(&subject), "cached observations still read the external input");
+        assert!(reads.contains(&format!("actual:{subject}")));
+        reconciler.incremental.evaluated("mission-run/file-reader", reads, None);
+        reconciler.incremental.evaluated(
+            "mission-run/unrelated", BTreeSet::from(["file/unrelated".into()]), None,
+        );
+        let global = Notify::new();
+        reconciler.file_changes.invalidate(&reconciler.incremental, &subject, false, &global);
+        assert!(global.notified().now_or_never().is_none());
+        assert!(reconciler.file_changes.notify.notified().now_or_never().is_some());
+        assert_eq!(
+            *reconciler.file_changes.runs.lock().unwrap(),
+            BTreeSet::from(["mission-run/file-reader".into()]),
+        );
+    }
+
     #[test]
     fn managed_launch_inputs_remain_watched_when_profile_or_wrapper_is_missing() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -8989,15 +9080,38 @@ mission "task" state="ready" {{
             runtime.clone(),
             "node".into(),
             Arc::new(Notify::new()),
-        );
-        for _ in 0..3 {
+        ).skipping_unneeded(true);
+        let interleave = |pass| {
+            reconciler.record_once(
+                "agent/node.seat",
+                "harness.diagnostic",
+                BTreeMap::from([
+                    ("code".into(), Value::String("provider-fixture".into())),
+                    ("severity".into(), Value::String("warning".into())),
+                    ("reason".into(), Value::String(format!("provider diagnostic {pass}"))),
+                ]),
+            ).unwrap();
+        };
+        for pass in 0..3 {
+            interleave(pass);
             reconciler.reconcile_once().unwrap();
         }
-        let reason = store
-            .member_reconcile_fault("agent/node.seat", None)
+        assert!(store.member_reconcile_fault("agent/node.seat", None).unwrap().is_none());
+        let diagnostic = store
+            .observations_for("agent/node.seat", "harness.diagnostic")
             .unwrap()
-            .expect("the render failure is recorded on the seat");
-        assert!(reason.contains("tracked file"), "{reason}");
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body["fields"]["code"] == "render-blocked")
+            .expect("the render failure is visible as a diagnostic");
+        assert_eq!(diagnostic.body["fields"]["status"], "warning");
+        assert_eq!(diagnostic.body["fields"]["severity"], "warning");
+        assert_eq!(store.claims_for("agent/node.seat", Some("harness.diagnostic"))
+            .unwrap().iter().filter(|claim| claim.body["fields"]["code"] == "render-blocked").count(),
+            1, "interleaved diagnostics must not duplicate a steady blocker");
+        assert!(diagnostic.body["fields"]["reason"].as_str().unwrap().contains("tracked file"));
+        assert!(reconciler.incremental.needs("member:agent/node.seat", now_ms()),
+            "a preparation-blocked member must not be marked clean");
         assert!(
             !store
                 .work_wake_messages_for_reconcile("agent/node.seat")
@@ -9017,16 +9131,13 @@ mission "task" state="ready" {{
                     .to_owned()
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            decisions,
-            ["member-fault"],
-            "one fault, never a false recovery"
-        );
+        assert!(decisions.is_empty(), "a live seat has neither a member fault nor a false recovery");
 
         // The seat exits. Its render still fails, so it is observed but not started again.
         runtime.ptys.lock().unwrap()[0].status = "exited".into();
         reconciler.reconcile_once().unwrap();
         assert!(runtime.starts.lock().unwrap().is_empty());
+        assert!(store.member_reconcile_fault("agent/node.seat", None).unwrap().is_some());
         assert_eq!(
             store
                 .latest_actual_value("agent/node.seat")
@@ -9034,6 +9145,101 @@ mission "task" state="ready" {{
                 .and_then(|actual| actual_field(&actual, "status").cloned()),
             Some(Value::String("exited".into()))
         );
+        // Unblocking preparation changes only the filesystem, not the desired declaration.
+        // The failed evaluation must remain selected for the very next incremental pass.
+        assert!(crate::test_support::git()
+            .args(["rm", "--cached", ".claude/settings.local.json"])
+            .current_dir(workspace.path())
+            .status().unwrap().success());
+        runtime.ptys.lock().unwrap()[0].status = "running".into();
+        reconciler.reconcile_once().unwrap();
+        assert!(store.member_reconcile_fault("agent/node.seat", None).unwrap().is_none());
+        let resolved = store.observations_for("agent/node.seat", "harness.diagnostic")
+            .unwrap().into_iter().rev()
+            .find(|claim| claim.body["fields"]["code"] == "render-blocked").unwrap();
+        assert_eq!(resolved.body["fields"]["status"], "resolved");
+        assert_eq!(fs::read_to_string(workspace.path().join(".claude/settings.local.json")).unwrap(), "changed");
+        assert!(runtime.starts.lock().unwrap().is_empty());
+        for pass in 3..6 {
+            interleave(pass);
+            reconciler.reconcile_once().unwrap();
+        }
+        let diagnostics = store.claims_for("agent/node.seat", Some("harness.diagnostic"))
+            .unwrap().into_iter()
+            .filter(|claim| claim.body["fields"]["code"] == "render-blocked")
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 2, "one blocker and one resolution, regardless of other codes");
+        assert_eq!(diagnostics.iter().filter(|claim| claim.body["fields"]["status"] == "warning").count(), 1);
+        assert_eq!(diagnostics.iter().filter(|claim| claim.body["fields"]["status"] == "resolved").count(), 1);
+        assert!(diagnostics.iter().all(|claim| claim.body["fields"]["severity"] == "warning"));
+    }
+
+    #[test]
+    fn a_retained_render_lease_timeout_only_faults_an_absent_seat() {
+        for running in [true, false] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let workspace = tempfile::tempdir().unwrap();
+            apply_source(&store, &format!(r#"version 2
+agent "seat" {{ workspace {:?}; command "true" }}
+mission "task" state="ready" {{
+  goal "Give the seat work."
+  step "work" {{ assigned-to "agent/node.seat"; goal "Do the work." }}
+}}
+"#, workspace.path().display().to_string()), "lease-timeout");
+            let run_scratch = tempfile::tempdir().unwrap();
+            store.create_mission_run(&MissionRunRequest {
+                mission: "task".into(),
+                revision: None,
+                workspace: run_scratch.path().to_string_lossy().into_owned(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "lease-timeout-run".into(),
+            }).unwrap();
+            let member = store.desired_subjects().unwrap().into_iter()
+                .find(|subject| subject.subject == "agent/node.seat")
+                .and_then(|subject| subject.member).unwrap();
+            let runtime = Arc::new(FakeRuntime::default());
+            if running {
+                runtime.ptys.lock().unwrap().push(running_observation(&member, "one"));
+                mark_harness_ready(&store, "agent/node.seat", &member, "pi", "one");
+            }
+            let reconciler = Reconciler::new(
+                store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+            ).skipping_unneeded(true);
+            // Seed the existing retained-render-failure lane with the real admission error.
+            // No process or wall-clock timeout is needed to test how members consume it.
+            let timeout = fractal_runtime::store_worktree_lease::LeaseAdmissionTimeout {
+                owner: workspace.path().to_path_buf(),
+                timeout: Duration::from_secs(5),
+            }.to_string();
+            reconciler.render_failures.lock().unwrap()
+                .insert("agent/node.seat".into(), timeout.clone());
+            reconciler.incremental.take_full_pass("member", now_ms());
+            reconciler.incremental.evaluated("render", BTreeSet::new(), None);
+            reconciler.incremental.evaluated(
+                "member:agent/node.seat", BTreeSet::new(), Some(u128::MAX),
+            );
+            reconciler.reconcile_once().unwrap();
+            assert!(runtime.starts.lock().unwrap().is_empty());
+            assert!(runtime.stops.lock().unwrap().is_empty());
+            let fault = store.member_reconcile_fault("agent/node.seat", None).unwrap();
+            if running {
+                assert!(fault.is_none(), "a live seat must not inherit its render timeout");
+                assert!(!store.work_wake_messages_for_reconcile("agent/node.seat")
+                    .unwrap().is_empty(), "the incumbent still receives its ready work");
+                let diagnostic = store.observations_for("agent/node.seat", "harness.diagnostic")
+                    .unwrap().into_iter().rev()
+                    .find(|claim| claim.body["fields"]["code"] == "render-blocked").unwrap();
+                assert_eq!(diagnostic.subject, "agent/node.seat");
+                assert_eq!(diagnostic.body["fields"]["status"], "warning");
+                assert_eq!(diagnostic.body["fields"]["reason"], timeout);
+            } else {
+                assert_eq!(fault.as_deref(), Some(timeout.as_str()));
+                assert!(store.work_wake_messages_for_reconcile("agent/node.seat")
+                    .unwrap().is_empty());
+            }
+        }
     }
 
     /// Declaring a member that would render different bytes to a file another member already
