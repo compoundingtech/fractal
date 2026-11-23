@@ -162,8 +162,20 @@ fn compact_range_pages_carry_the_same_writer_signatures_as_full_inventory_pages(
     peer.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
     peer.validate_replication_backlog().unwrap();
     peer.project_replication_backlog().unwrap();
+    // Force the cursor beyond the new signature, independent of random claim hashes.
+    // Promotion must wrap and settle the waiting signature in the same call.
+    peer.connection
+        .write()
+        .execute(
+            "INSERT INTO meta(key,value) VALUES('claim_member_signature_pending_cursor',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [format!("{}\n{}", "f".repeat(64), key.public())],
+        )
+        .unwrap();
+    assert_eq!(peer.promote_claim_member_signatures().unwrap(), 1);
     while peer.promote_claim_member_signatures().unwrap() > 0 {}
     assert_eq!(signed(&peer), signed(&source));
+    assert_eq!(waiting(&peer), 0);
 }
 
 /// A signature that verifies for `writer` and `sequence` over `claim`, by a fresh key.
