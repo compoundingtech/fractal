@@ -672,12 +672,12 @@ objective "delivery/ready-to-merged" {
         name: 'delivery/merged', about: 'Merge count',
         indicator: Fractal.indicator.githubMergedCount({ ...native, measurement }),
         targets: measurement === 'targeted' ? [{ stat: 'per-hour', min: 7 }] : [], budget,
-      })).toThrow('GitHub measurements do not take claim budgets')
+      })).toThrow('only targeted GitHub latency takes a budget')
     }
     expect(() => render({
       name: 'delivery/ready', about: 'Final-ready latency',
       indicator: Fractal.indicator.githubReadyToMerged(native), targets: [], budget,
-    })).toThrow('GitHub measurements do not take claim budgets')
+    })).toThrow('only targeted GitHub latency takes a budget')
   })
 
   it('rejects a hidden default target, a latency target and an implicit cut', () => {
@@ -692,6 +692,32 @@ objective "delivery/ready-to-merged" {
       ...base,
       indicator: { ...Fractal.indicator.githubMergedCount(native), cut: undefined },
     } as unknown as ObjectiveInput)).toThrow('cut must be')
+  })
+
+  it('authors rolling-day throughput with a native cohort and targeted final-ready latency', () => {
+    const throughput = render({
+      name: 'delivery/merged', about: 'Selected rolling throughput',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted', authorLogins: ['example-bot'] }),
+      window: { span: '24h' }, targets: [{ stat: 'per-hour', min: 5 }],
+    })
+    expect(throughput).toContain('window "24h"')
+    expect(throughput).toContain('author-login "example-bot"')
+    const input = {
+      name: 'delivery/merge-latency/p95', about: 'Final-ready merge latency',
+      indicator: Fractal.indicator.githubReadyToMerged({ ...native, measurement: 'targeted' }),
+      targets: [{ stat: 'p95', within: '48h' }],
+      budget: {
+        allowance: 0.05, horizon: '30d', minCoverage: 1, minSamples: 1,
+        fast: { burnRate: 14.4, long: '1h', short: '5m' },
+        slow: { burnRate: 6, long: '6h', short: '30m' },
+      },
+    } as const
+    const text = render(input)
+    expect(text).toContain('objective "delivery/merge-latency/p95"')
+    expect(text).toContain('target "p95" within="48h"')
+    expect(text).toContain('budget allowance=0.05 horizon="30d"')
+    expect(() => render({ ...input, budget: { ...input.budget, allowance: 0.1 } })).toThrow('allowance=0.05')
+    expect(() => render({ ...input, window: { span: '1h' } })).toThrow('not window')
   })
 })
 

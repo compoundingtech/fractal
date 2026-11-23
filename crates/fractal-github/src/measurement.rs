@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Days, LocalResult, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
-use fractal_schema::github_capture::{FactFamily, LifecycleFact, LifecycleKind, MergeFact, Projection, PullRequestFact, Source};
+use fractal_schema::github_capture::{FactFamily, LifecycleFact, LifecycleKind, MergeFact, Projection, PullRequestFact, ReadyCycle, Source};
 use serde::Serialize;
 
 
@@ -37,12 +37,14 @@ pub struct Measurement {
     pub cut: &'static str,
     pub timezone: String,
     pub rolling_hour: Window,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rolling_window: Option<Window>,
     pub days: Vec<Window>,
 }
 
-/// Fourteen civil days, including today, and exactly [cut-1h, cut). Named IANA zones
-/// use their real offsets at each boundary, not a fixed 24-hour subtraction.
-pub fn measure(projection: &Projection, now_ms: u64, cut: Cut, timezone: &str, latency: bool, author_logins: &[String]) -> anyhow::Result<Measurement> {
+/// Fourteen civil days, including today, the diagnostic hour and the authored rolling window.
+/// Named IANA zones use their real offsets at each boundary.
+pub fn measure(projection: &Projection, now_ms: u64, cut: Cut, timezone: &str, latency: bool, rolling_ms: u64, author_logins: &[String]) -> anyhow::Result<Measurement> {
     let timezone: Tz = timezone.parse()?;
     let cut_ms = match cut { Cut::Now => now_ms, Cut::Watermark => now_ms.min(projection.frontier_ms) };
     let instant = timestamp(cut_ms)?;
@@ -64,6 +66,7 @@ pub fn measure(projection: &Projection, now_ms: u64, cut: Cut, timezone: &str, l
         source_lag_ms: now_ms.saturating_sub(projection.frontier_ms), cut_ms,
         cut: match cut { Cut::Now => "now", Cut::Watermark => "watermark" },
         timezone: timezone.to_string(), rolling_hour: index.window(cut_ms.saturating_sub(3_600_000), cut_ms, false, latency), days,
+        rolling_window: (rolling_ms != 3_600_000).then(|| index.window(cut_ms.saturating_sub(rolling_ms), cut_ms, false, latency)),
     })
 }
 
@@ -99,13 +102,95 @@ fn midnight(zone: Tz, date: NaiveDate) -> anyhow::Result<u64> {
     Ok(u64::try_from(time.timestamp_millis())?)
 }
 
+#[derive(Debug, Serialize)]
+pub struct DeadlineWindow {
+    pub window_ms: u64,
+    pub total: u64,
+    pub bad: u64,
+    pub complete: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatencyBudget {
+    pub windows: Vec<DeadlineWindow>,
+    pub merged_latency_ms: Vec<u64>,
+    pub unknown: Vec<String>,
+}
+
+/// Each final-ready cycle settles once: at a timely merge, or at its deadline.
+/// Late completion never moves a bad event out of a burn window. A close before
+/// the deadline cancels an unmerged cycle; drafts and still-pending cycles do not vote.
+pub fn latency_budget(projection: &Projection, cut_ms: u64, within_ms: u64, windows: &[u64], author_logins: &[String]) -> LatencyBudget {
+    let index = Index::new(projection, author_logins);
+    let mut events = Vec::new();
+    let mut unknown = Vec::new();
+    let history_start = cut_ms.saturating_sub(windows.iter().copied().max().unwrap_or(0));
+    for (key, merge) in &index.merges {
+        if merge.merged_at_ms >= history_start && merge.merged_at_ms <= cut_ms
+            && projection.roster.contains(&merge.repository_id, merge.merged_at_ms) && !index.prs.contains_key(key) {
+            unknown.push(format!("{}/{}: missing pull request", key.0, key.1));
+        }
+    }
+    for (key, pr) in &index.prs {
+        if pr.created_at_ms >= cut_ms { continue; }
+        if pr.merged_at_ms.or(pr.closed_at_ms).is_some_and(|at| at < history_start) { continue; }
+        if !author_logins.is_empty() {
+            match &pr.author_login {
+                Some(author) if !author_logins.iter().any(|login| login.eq_ignore_ascii_case(author)) => continue,
+                None => { unknown.push(format!("{}/{}: missing author login for selector", key.0, key.1)); continue; }
+                _ => {}
+            }
+        }
+        if index.conflicts.contains(key) {
+            unknown.push(format!("{}/{}: conflicting canonical images", key.0, key.1));
+            continue;
+        }
+        let merged = pr.merged_at_ms.filter(|at| *at <= cut_ms);
+        if merged.is_some() && index.merges.get(key).map(|merge| merge.merged_at_ms) != merged {
+            unknown.push(format!("{}/{}: merge image disagrees with pull request", key.0, key.1));
+            continue;
+        }
+        let at = merged.or(pr.closed_at_ms).unwrap_or(cut_ms).min(cut_ms);
+        let ready = match index.ready_state(key, pr, at) {
+            ReadyCycle::Ready(ready) => ready,
+            ReadyCycle::Draft if merged.is_none() => continue,
+            ReadyCycle::Draft | ReadyCycle::Unknown => { unknown.push(format!("{}/{}: final ready cycle unproven", key.0, key.1)); continue; }
+        };
+        let Some(deadline) = ready.checked_add(within_ms) else {
+            unknown.push(format!("{}/{}: deadline overflow", key.0, key.1));
+            continue;
+        };
+        let settled = match merged {
+            Some(merged) => (merged.min(deadline), merged > deadline),
+            None if pr.closed_at_ms.is_some_and(|closed| closed < deadline && closed <= cut_ms) => continue,
+            None if deadline <= cut_ms => (deadline, true),
+            None => continue,
+        };
+        if projection.roster.contains(&pr.repository_id, settled.0) { events.push(settled); }
+    }
+    let mut merged_latency_ms = Vec::new();
+    let windows = windows.iter().enumerate().map(|(position, &window_ms)| {
+        let start = cut_ms.saturating_sub(window_ms);
+        let diagnostic = index.window(start, cut_ms, false, true);
+        let complete = diagnostic.complete && unknown.is_empty();
+        if position == 0 { merged_latency_ms = diagnostic.ready_to_merged_ms; }
+        let mut total = 0;
+        let mut bad = 0;
+        for &(at, failed) in &events {
+            if at >= start && at <= cut_ms { total += 1; bad += u64::from(failed); }
+        }
+        DeadlineWindow { window_ms, total, bad, complete }
+    }).collect();
+    LatencyBudget { windows, merged_latency_ms, unknown }
+}
+
 struct Index<'a> {
     projection: &'a Projection,
     author_logins: &'a [String],
     prs: BTreeMap<(&'a str, &'a str), &'a PullRequestFact>,
     events: BTreeMap<(&'a str, &'a str), Vec<&'a LifecycleFact>>,
     merges: BTreeMap<(&'a str, &'a str), &'a MergeFact>,
-    ready_cycles: BTreeMap<(&'a str, &'a str), Option<u64>>,
+    ready_cycles: BTreeMap<(&'a str, &'a str), ReadyCycle>,
     conflicts: BTreeSet<(&'a str, &'a str)>,
 }
 
@@ -210,26 +295,36 @@ impl<'a> Index<'a> {
         result
     }
 
-    fn last_ready(&self, key: &(&str, &str), pr: &PullRequestFact, merged: u64) -> Option<u64> {
-        if pr.created_at_ms > merged || !self.covered(&pr.repository_id, FactFamily::Lifecycle, pr.created_at_ms, merged) { return None; }
-        if let Some(ready) = self.ready_cycles.get(key) {
-            return ready.filter(|ready| pr.created_at_ms <= *ready && *ready <= merged);
+    fn last_ready(&self, key: &(&str, &str), pr: &PullRequestFact, at: u64) -> Option<u64> {
+        match self.ready_state(key, pr, at) { ReadyCycle::Ready(ready) => Some(ready), _ => None }
+    }
+
+    fn ready_state(&self, key: &(&str, &str), pr: &PullRequestFact, at: u64) -> ReadyCycle {
+        if pr.created_at_ms > at || !self.covered(&pr.repository_id, FactFamily::Lifecycle, pr.created_at_ms, at) { return ReadyCycle::Unknown; }
+        if let Some(state) = self.ready_cycles.get(key) {
+            return match *state {
+                ReadyCycle::Ready(ready) if ready < pr.created_at_ms || ready > at => ReadyCycle::Unknown,
+                state => state,
+            };
         }
-        let mut ready = match pr.created_as_draft { Some(false) => Some(pr.created_at_ms), _ => None };
+        let mut state = match pr.created_as_draft {
+            Some(false) => ReadyCycle::Ready(pr.created_at_ms),
+            Some(true) => ReadyCycle::Draft,
+            None => ReadyCycle::Unknown,
+        };
         let mut previous: Option<(u64, LifecycleKind)> = None;
         if let Some(events) = self.events.get(key) {
             for event in events {
-                if event.occurred_at_ms < pr.created_at_ms || event.occurred_at_ms > merged { continue; }
-                // Opposing transitions at the same instant have no provable ordering.
-                if previous.is_some_and(|(at, kind)| at == event.occurred_at_ms && kind != event.kind) { return None; }
+                if event.occurred_at_ms < pr.created_at_ms || event.occurred_at_ms > at { continue; }
+                if previous.is_some_and(|(time, kind)| time == event.occurred_at_ms && kind != event.kind) { return ReadyCycle::Unknown; }
                 match event.kind {
-                    LifecycleKind::Ready => { if ready.is_none() { ready = Some(event.occurred_at_ms); } }
-                    LifecycleKind::Draft => ready = None,
+                    LifecycleKind::Ready => { if !matches!(state, ReadyCycle::Ready(_)) { state = ReadyCycle::Ready(event.occurred_at_ms); } }
+                    LifecycleKind::Draft => state = ReadyCycle::Draft,
                 }
                 previous = Some((event.occurred_at_ms, event.kind));
             }
         }
-        ready
+        state
     }
 }
 

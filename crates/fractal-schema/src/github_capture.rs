@@ -33,10 +33,18 @@ pub struct Projection {
     pub pull_requests: Vec<PullRequestFact>,
     pub lifecycle: Vec<LifecycleFact>,
     pub merges: Vec<MergeFact>,
-    /// Indexed final-ready proof by (repository, PR). Present None is unproven;
-    /// absent keys require the complete lifecycle vector, never truncated events.
-    pub ready_cycles: std::collections::BTreeMap<(String, String), Option<u64>>,
+    /// Indexed final-ready state by (repository, PR), at the snapshot cut or merge.
+    /// Absent keys require the complete lifecycle vector, never truncated events.
+    pub ready_cycles: std::collections::BTreeMap<(String, String), ReadyCycle>,
     pub coverage: Vec<Coverage>,
+}
+
+/// In-memory proof, not a claim or persisted wire field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadyCycle {
+    Ready(u64),
+    Draft,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

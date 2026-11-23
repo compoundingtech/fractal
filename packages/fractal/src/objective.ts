@@ -170,7 +170,7 @@ export const indicator = {
   count: (input: Count): IndicatorOf<'count'> => freeze({ kind: 'count', ...input }),
   githubMergedCount: (input: GithubMeasurement): IndicatorOf<'github-merged-count'> =>
     freeze({ kind: 'github-merged-count', ...input }),
-  githubReadyToMerged: (input: Omit<GithubMeasurement, 'measurement'> & { readonly measurement: 'only' }): IndicatorOf<'github-ready-to-merged'> =>
+  githubReadyToMerged: (input: GithubMeasurement): IndicatorOf<'github-ready-to-merged'> =>
     freeze({ kind: 'github-ready-to-merged', ...input }),
   ratio: (input: Ratio): IndicatorOf<'ratio'> => freeze({ kind: 'ratio', ...input }),
   gauge: (input: Gauge): IndicatorOf<'gauge'> => freeze({ kind: 'gauge', ...input }),
@@ -604,7 +604,7 @@ const statBound = ({ indicator, checked }: { readonly indicator: Indicator; read
     case 'github-merged-count':
       return target.stat === 'per-hour' && 'min' in target && number !== undefined && number > 0
     case 'github-ready-to-merged':
-      return false
+      return target.stat === 'p95' && within
     case 'latency':
       return target.stat === 'p99' && within
     case 'share':
@@ -669,14 +669,12 @@ const checkTargets = ({
     if (target.scope === 'remote' && indicator.kind !== 'latency') fail('only a latency target has a remote scope')
   })
   if (indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') {
-    if (hasWindow) fail('GitHub indicators own their rolling hour and calendar windows')
     if (indicator.measurement === 'only') {
       if (targets.length !== 0 || hasBreach) fail('measurement only has neither targets nor onBreach')
       return
     }
-    if (indicator.kind === 'github-ready-to-merged') fail('ready-to-merged is measured-only until latency policy is approved')
     if (targets.length !== 1 || statBound({ indicator, checked: targets[0]! }) === false) {
-      fail('targeted GitHub merged count needs one per-hour minimum')
+      fail(indicator.kind === 'github-ready-to-merged' ? 'targeted GitHub latency needs one p95 within target' : 'targeted GitHub merged count needs one per-hour minimum')
     }
     return
   }
@@ -735,6 +733,10 @@ export const objective = <const I extends ObjectiveInput>(input: I): Objective &
     if (minSamples !== undefined && (typeof minSamples !== 'number' || Number.isSafeInteger(minSamples) === false || minSamples <= 0)) {
       fail('minSamples is not a positive integer')
     }
+    if ((indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') &&
+      (durationMs({ value: input.window!.span, fail }) > 30 * 86_400_000 || (minSamples !== undefined && minSamples !== 1))) {
+      fail('GitHub rolling windows must be at most 30d and take no minSamples')
+    }
   }
   const rawTargets = input.targets === undefined && (
     indicator.kind === 'native' || indicator.kind === 'ratio' || indicator.kind === 'gauge' ||
@@ -747,7 +749,14 @@ export const objective = <const I extends ObjectiveInput>(input: I): Objective &
   const numeric = indicator.kind === 'ratio' || indicator.kind === 'gauge'
   if (numeric && (budget === undefined || targets.length !== 0 || window !== undefined)) fail('ratio and gauge need budget and take no diagnostic target or window')
   if (budget !== undefined && (indicator.kind === 'interval' || indicator.kind === 'count')) fail('interval and count take window and targets, not budget')
-  if (budget !== undefined && (indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged')) fail('GitHub measurements do not take claim budgets')
+  if (indicator.kind === 'github-ready-to-merged') {
+    if (window !== undefined) fail('GitHub latency uses its budget horizon, not window')
+    if (indicator.measurement === 'targeted' && (budget === undefined || Math.abs(budget.allowance - 0.05) > Number.EPSILON)) {
+      fail('targeted GitHub latency needs a budget with allowance=0.05')
+    }
+  }
+  if (budget !== undefined && (indicator.kind === 'github-merged-count' ||
+    (indicator.kind === 'github-ready-to-merged' && indicator.measurement === 'only'))) fail('only targeted GitHub latency takes a budget')
   if (indicator.kind === 'native' && (budget !== undefined || window !== undefined || targets.length !== 0)) fail('a native binding inherits targets, window and budget; none may be overridden')
   checkTargets({ indicator, targets, hasWindow: window !== undefined, hasBreach: onBreach !== undefined, fail })
   if (indicator.kind === 'count' && input.window?.minSamples !== undefined) {
