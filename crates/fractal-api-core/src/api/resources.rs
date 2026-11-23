@@ -146,6 +146,34 @@ pub(super) struct ListQuery {
 #[derive(Deserialize)]
 pub(super) struct WaitQuery { after: u64 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ScratchInventoryQuery {
+    host: Option<String>,
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+/// Operator-only observation of host-local custody. No release authority is returned or used.
+pub(super) async fn scratch_inventory(
+    State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>,
+    Query(query): Query<ScratchInventoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    if bound.is_some() || run.is_some() {
+        return Err(ApiError::bad(FractalError::new("scratch-inventory-owner",
+            "host scratch inventory requires the trusted local operator")));
+    }
+    let host = query.host.as_deref().unwrap_or(&state.node);
+    let limit = query.limit.unwrap_or(100);
+    if host != state.node || !(1..=500).contains(&limit) {
+        return Err(ApiError::bad(FractalError::new("scratch-inventory-query",
+            "inventory requires the connected execution host and a limit between 1 and 500")));
+    }
+    let records = state.store.scratch_inventory(host, query.after.as_deref(), limit).map_err(ApiError::internal)?;
+    let next_after = (records.len() == limit).then(|| records.last().map(|row| row.handle.id.clone())).flatten();
+    Ok(Json(json!({ "dryRun": true, "records": records, "nextAfter": next_after })))
+}
+
 pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Json(mut command): Json<Command>) -> Result<Json<Execution>, ApiError> {
     let max_members = require_exec_platform(cfg!(target_os = "macos"), &command.lane.name,
         !cfg!(target_os = "macos") || fractal_runtime::darwin_slot::Helper::detect_in(&std::env::vars().collect()).is_some())?;
@@ -450,6 +478,26 @@ mod tests {
         assert!(found["execution"].is_null());
     }
 
+    #[tokio::test]
+    async fn scratch_inventory_is_bounded_read_only_and_local_operator_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let query = || ScratchInventoryQuery { host: None, after: None, limit: Some(1) };
+        let Json(inventory) = scratch_inventory(State(state.clone()), None, None, Query(query())).await.unwrap();
+        assert_eq!(inventory, json!({ "dryRun": true, "records": [], "nextAfter": null }));
+        let error = scratch_inventory(State(state.clone()), Some(BoundActor::Run("mission-run/other".into())),
+            None, Query(query())).await.unwrap_err();
+        assert_eq!(error.code, "scratch-inventory-owner");
+        for limit in [0, 501] {
+            let error = scratch_inventory(State(state.clone()), None, None,
+                Query(ScratchInventoryQuery { limit: Some(limit), ..query() })).await.unwrap_err();
+            assert_eq!(error.code, "scratch-inventory-query");
+        }
+        let error = scratch_inventory(State(state), None, None,
+            Query(ScratchInventoryQuery { host: Some("other-host".into()), ..query() })).await.unwrap_err();
+        assert_eq!(error.code, "scratch-inventory-query");
+    }
+
     use crate::store::resource_membership::{LaneRequest, Owner};
     fn request() -> LaneRequest {
         LaneRequest { id: "shell:parent".into(), name: "checks".into(), host: "host-a".into(), max_members: 1,
@@ -689,6 +737,7 @@ mod tests {
             ("/v1/internal/resources/owned/cancel/extra", None),
             ("/v1/internal/resources/owned/member-scope/extra", None),
             ("/v1/internal/resources/owned/other", None),
+            ("/v1/internal/resources/scratch/inventory", None),
             ("/v1/internal/resources-extra", None),
             ("/v1/internal/unrelated", None),
         ] {
