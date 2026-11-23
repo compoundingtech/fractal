@@ -1,5 +1,6 @@
 //! Intentional waits shared by diagnostics and stall reporting. Unknown evidence is not a wait.
-use crate::{model::{GateSpec, MissionSpec, StepRunView, StepSpec}, MissionsStore, Store};
+use crate::{model::{GateSpec, MissionSpec, StepRunView, StepSpec}, MissionsStore};
+use crate::store::Store;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -49,7 +50,7 @@ pub struct PredicateDefinitions {
 }
 
 impl PredicateDefinitions {
-    fn gates<'a>(&'a mut self, store: &Store, step: &StepRunView) -> anyhow::Result<&'a [GateSpec]> {
+    fn gates(&mut self, store: &Store, step: &StepRunView) -> anyhow::Result<&[GateSpec]> {
         if !self.generations.contains_key(step.generation.as_str()) {
             self.generations.insert(step.generation.clone(), store.waiting_on_definition(step)?);
         }
