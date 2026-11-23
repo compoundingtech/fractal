@@ -2639,23 +2639,32 @@ impl MissionsStore for Store {
     }
 
     fn waiting_on_field_gates(&self, step: &StepRunView) -> Result<Vec<crate::model::GateSpec>> {
-        let connection = self.readers.get();
-        let path = format!("$.steps.{}.gates", serde_json::to_string(&step.step)?);
-        let mut statement = connection.prepare_cached(
-            "SELECT gate.value FROM step_runs step
+        fn find(mission: MissionSpec, path: &str) -> Vec<crate::model::GateSpec> {
+            for (_, mut step) in mission.steps {
+                if step.path == path {
+                    step.gates.truncate(4);
+                    return step.gates;
+                }
+                if path.strip_prefix(step.path.as_str()).is_some_and(|suffix| suffix.starts_with('/'))
+                    && let Some(nested) = step.nested_mission
+                {
+                    return find(*nested, path);
+                }
+            }
+            Vec::new()
+        }
+        let body: Option<String> = self.readers.get().query_row(
+            "SELECT revision.body FROM step_runs step
              JOIN run_generations generation ON generation.id=step.generation_id
              JOIN mission_runs run ON run.id=step.run_id
              JOIN mission_revisions revision ON revision.mission_id=run.mission_id
                AND revision.revision=generation.revision
-             JOIN json_each(revision.body, ?3) gate
-             WHERE step.subject=?1 AND generation.id=?2
-             ORDER BY gate.key LIMIT 4",
-        )?;
-        let gates = statement.query_map(
-            params![step.subject, step.generation.strip_prefix("run-generation/").unwrap_or(&step.generation), path],
-            |row| row.get::<_, String>(0),
-        )?;
-        gates.map(|gate| Ok(serde_json::from_str(&gate?)?)).collect()
+             WHERE step.subject=?1 AND generation.id=?2",
+            params![step.subject, step.generation.strip_prefix("run-generation/").unwrap_or(&step.generation)],
+            |row| row.get(0),
+        ).optional()?;
+        body.map(|body| Ok(find(serde_json::from_str(&body)?, &step.step)))
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
     fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>> {

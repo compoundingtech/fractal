@@ -260,28 +260,59 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
 
 /// Read no more than four field observations; an unknown earlier gate stops the search.
 fn predicate_wait(store: &Store, step: &StepRunView) -> anyhow::Result<Option<String>> {
-    use crate::reconcile::{FieldGateState, read_field_gate};
+    use crate::reconcile::inspect_field_gate;
     for gate in store.waiting_on_field_gates(step)? {
         let GateSpec::Field { name, subject, path, operator, value } = &gate else {
             return Ok(None);
         };
         // Runtime interpolation needs the run's full context, which this bounded read avoids.
-        if subject.contains("${")
+        if subject.contains("${") || subject.starts_with("exec/") || subject.starts_with("effect/")
+            || (subject.starts_with("resource/") && subject.contains('@'))
             || value.as_str().is_some_and(|text| text.contains("${"))
         {
             return Ok(None);
         }
-        match read_field_gate(store, &gate)? {
-            FieldGateState::Pass => {}
-            FieldGateState::Pending(Some(found)) => {
-                return Ok(Some(format!(
-                    "waits for gate {name:?}: {subject} {path} is {found}, expects {operator} {value}",
-                )));
-            }
-            FieldGateState::Pending(None) | FieldGateState::Fail(_) => return Ok(None),
+        let observation = store.inspect_cached_actual(subject, |actual| {
+            inspect_field_gate(actual, subject, path, operator, value, |found, holds| {
+                (holds, found.filter(|_| !holds).map(|found| format!(
+                    "waits for gate {name:?}: {subject} {path} is {}, expects {operator} {}",
+                    summarize_value(found), summarize_value(value),
+                )))
+            })
+        })?;
+        match observation {
+            Some((true, _)) => {}
+            Some((false, Some(detail))) => return Ok(Some(detail)),
+            _ => return Ok(None),
         }
     }
     Ok(None)
+}
+
+/// Values are hints, not payload exports: containers show only their shape.
+fn summarize_value(value: &Value) -> String {
+    match value {
+        Value::Array(values) => format!("array({} items)", values.len()),
+        Value::Object(fields) => format!("object({} keys)", fields.len()),
+        Value::String(text) => {
+            let mut summary = String::with_capacity(80 * 4);
+            summary.push('"');
+            let mut length = 0;
+            'text: for character in text.chars() {
+                for escaped in character.escape_debug() {
+                    if length == 77 {
+                        summary.push('…');
+                        break 'text;
+                    }
+                    summary.push(escaped);
+                    length += 1;
+                }
+            }
+            summary.push('"');
+            summary
+        }
+        _ => value.to_string(),
+    }
 }
 
 /// A program step moves while its journal does: past its `stalled-after` without a new entry it

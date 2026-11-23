@@ -14448,7 +14448,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 MetricSource::Field { subject, path } => {
                     let subject = crate::mission::interpolate(subject, variables)?;
                     let path = crate::mission::interpolate(path, variables)?;
-                    let Some(actual) = gate_subject_value(&self.store, &subject)? else {
+                    let Some(actual) = self.subject_value(&subject)? else {
                         return Ok(None);
                     };
                     actual_field(&actual, &path)
@@ -14934,7 +14934,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             let resource = crate::mission::interpolate(&for_each.resource, base_variables)?;
             let field = crate::mission::interpolate(&for_each.field, base_variables)?;
-            let Some(actual) = gate_subject_value(&self.store, &resource)? else {
+            let Some(actual) = self.subject_value(&resource)? else {
                 return Ok(false);
             };
             let Some(items) = actual_field(&actual, &field)
@@ -16453,7 +16453,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let variables = run_variables(child, &step, view);
             for product in &step.spec.products {
                 let subject = crate::mission::interpolate(&product.subject, &variables)?;
-                if let Some(value) = gate_subject_value(&self.store, &subject)? {
+                if let Some(value) = self.subject_value(&subject)? {
                     products.insert(subject, value);
                 }
             }
@@ -17303,7 +17303,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 fields.push((field.clone(), expected));
             }
-            let holds = gate_subject_value(&self.store, &subject)?.is_some_and(|actual| {
+            let holds = self.subject_value(&subject)?.is_some_and(|actual| {
                 fields
                     .iter()
                     .all(|(field, expected)| actual_field(&actual, field) == Some(expected))
@@ -20310,7 +20310,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             GateSpec::Exists { subject, .. } => {
                 self.ensure_file_observation(subject)?;
-                if gate_subject_value(&self.store, subject)?.is_some_and(|actual| {
+                if self.subject_value(subject)?.is_some_and(|actual| {
                     actual_field(&actual, "status").and_then(Value::as_str) != Some("unreadable")
                 }) {
                     GateOutcome::Pass
@@ -20348,28 +20348,43 @@ impl<R: RuntimeControl> Reconciler<R> {
                     GateOutcome::Pending
                 }
             }
-            GateSpec::Field { path, subject, .. } => {
+            GateSpec::Field {
+                path,
+                subject,
+                operator,
+                value,
+                ..
+            } => {
                 self.ensure_file_observation(subject)?;
-                match read_field_gate(&self.store, gate)? {
-                    FieldGateState::Pass => GateOutcome::Pass,
-                    FieldGateState::Fail(reason) => GateOutcome::Fail(reason),
-                    FieldGateState::Pending(_) => {
-                        // The driver can report its provider's exit while its wrapper still
-                        // runs. That claim wakes a pass, but the later process exit does not.
-                        // Watch the owner's exec until it ends so this pending predicate does
-                        // not wait for the minute-long fallback pass. Verdicts stay graph-only.
-                        if path == "exit_code"
-                            && subject.starts_with("exec/")
-                            && let Some((desired, _)) =
-                                self.store.desired_subject_with_writer(subject)?
-                            && let Some(member) = desired.member
-                            && member.kind == MemberKind::Exec
-                            && member.host == self.host
-                        {
-                            self.arm_gate_poll(&member.runtime_id);
-                        }
-                        GateOutcome::Pending
+                let Some(actual) = self.subject_value(subject)? else {
+                    return Ok(GateOutcome::Pending);
+                };
+                let found = observed_field_value(&actual, subject, path);
+                if found
+                    .as_ref()
+                    .is_some_and(|found| compare_value(found, operator, value))
+                {
+                    GateOutcome::Pass
+                } else if let Some(reason) =
+                    terminal_exec_field_gate_failure(&self.store, gate, &actual)?
+                {
+                    GateOutcome::Fail(reason)
+                } else {
+                    // The driver can report its provider's exit while its wrapper still
+                    // runs. That claim wakes a pass, but the later process exit does not.
+                    // Watch the owner's exec until it ends so this pending predicate does
+                    // not wait for the minute-long fallback pass. Verdicts stay graph-only.
+                    if path == "exit_code"
+                        && subject.starts_with("exec/")
+                        && let Some((desired, _)) =
+                            self.store.desired_subject_with_writer(subject)?
+                        && let Some(member) = desired.member
+                        && member.kind == MemberKind::Exec
+                        && member.host == self.host
+                    {
+                        self.arm_gate_poll(&member.runtime_id);
                     }
+                    GateOutcome::Pending
                 }
             }
             GateSpec::Every {
@@ -20385,7 +20400,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ..
             } => {
                 self.ensure_file_observation(subject)?;
-                let Some(actual) = gate_subject_value(&self.store, subject)? else {
+                let Some(actual) = self.subject_value(subject)? else {
                     return Ok(GateOutcome::Pending);
                 };
                 let Some(items) = observed_field_value(&actual, subject, path)
@@ -21631,7 +21646,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .map(|bytes| String::from_utf8(bytes).map_err(Into::into))
                 .transpose();
         }
-        let Some(actual) = gate_subject_value(&self.store, subject)? else {
+        let Some(actual) = self.subject_value(subject)? else {
             return Ok(None);
         };
         if let Some(content) = actual_field(&actual, "content").and_then(Value::as_str) {
@@ -21644,6 +21659,29 @@ impl<R: RuntimeControl> Reconciler<R> {
             .get_blob(hash)?
             .map(|bytes| String::from_utf8(bytes).map_err(Into::into))
             .transpose()
+    }
+
+    fn subject_value(&self, subject: &str) -> Result<Option<Value>> {
+        if subject.starts_with("effect/") {
+            return self.store.effect_state(subject)?
+                .map(|(state, record)| {
+                    let mut fields = serde_json::to_value(record)?;
+                    fields["delivered"] = Value::Bool(state == "confirmed");
+                    Ok(serde_json::json!({"fields": fields}))
+                })
+                .transpose();
+        }
+        if subject.starts_with("resource/")
+            && let Some((name, claim_id)) = subject.rsplit_once('@')
+        {
+            return Ok(self
+                .store
+                .claim_by_id(claim_id)?
+                .filter(|claim| claim.subject == name)
+                // A gate on a compact item state reads its compact facts, as on an observation.
+                .map(|claim| fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body)));
+        }
+        self.store.latest_actual_value(subject)
     }
 
     fn ensure_file_observation(&self, subject: &str) -> Result<()> {
@@ -23345,77 +23383,47 @@ fn actual_field<'a>(actual: &'a Value, path: &str) -> Option<&'a Value> {
     Some(value)
 }
 
-fn owned_field(mut value: Value, path: &str) -> Option<Value> {
-    for segment in path.split('.') {
-        value = value.get(segment)?.clone();
-    }
-    Some(value)
-}
-
-/// The read-only outcome of a field predicate on existing observations.
-pub enum FieldGateState {
-    Pass,
-    Pending(Option<Value>),
-    Fail(String),
-}
-
-/// Share field resolution, comparison and terminal-exec semantics with read-only views.
-/// The caller must already have expanded the gate, or know it contains no variables.
-pub fn read_field_gate(store: &Store, gate: &GateSpec) -> Result<FieldGateState> {
-    let GateSpec::Field { subject, path, operator, value, .. } = gate else {
-        anyhow::bail!("read_field_gate requires a field predicate");
-    };
-    let Some(actual) = gate_subject_value(store, subject)? else {
-        return Ok(FieldGateState::Pending(None));
-    };
-    let found = observed_field_value(&actual, subject, path);
-    if found.as_ref().is_some_and(|found| compare_value(found, operator, value)) {
-        Ok(FieldGateState::Pass)
-    } else if let Some(reason) = terminal_exec_field_gate_failure(store, gate, &actual)? {
-        Ok(FieldGateState::Fail(reason))
-    } else {
-        Ok(FieldGateState::Pending(found))
-    }
-}
-
-fn gate_subject_value(store: &Store, subject: &str) -> Result<Option<Value>> {
-    if subject.starts_with("effect/") {
-        return store.effect_state(subject)?
-            .map(|(state, record)| {
-                let mut fields = serde_json::to_value(record)?;
-                fields["delivered"] = Value::Bool(state == "confirmed");
-                Ok(serde_json::json!({"fields": fields}))
-            })
-            .transpose();
-    }
-    if subject.starts_with("resource/")
-        && let Some((name, claim_id)) = subject.rsplit_once('@')
-    {
-        return Ok(store.claim_by_id(claim_id)?
-            .filter(|claim| claim.subject == name)
-            .map(|claim| fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body)));
-    }
-    store.latest_actual_value(subject)
+/// Inspect a field and its comparison without store reads or cloning the selected value.
+/// File JSON is parsed locally, so its selected field is borrowed only for the callback.
+pub fn inspect_field_gate<T>(
+    actual: &Value,
+    subject: &str,
+    path: &str,
+    operator: &str,
+    expected: &Value,
+    inspect: impl FnOnce(Option<&Value>, bool) -> T,
+) -> T {
+    with_observed_field(actual, subject, path, |found| {
+        inspect(found, found.is_some_and(|value| compare_value(value, operator, expected)))
+    })
 }
 
 fn observed_field_value(actual: &Value, subject: &str, path: &str) -> Option<Value> {
+    with_observed_field(actual, subject, path, |found| found.cloned())
+}
+
+fn with_observed_field<T>(
+    actual: &Value,
+    subject: &str,
+    path: &str,
+    inspect: impl FnOnce(Option<&Value>) -> T,
+) -> T {
     if subject.starts_with("file/") {
-        actual_field(actual, "content")
+        let content = actual_field(actual, "content")
             .and_then(Value::as_str)
-            .and_then(|content| serde_json::from_str::<Value>(content).ok())
-            .and_then(|content| owned_field(content, path))
+            .and_then(|content| serde_json::from_str::<Value>(content).ok());
+        let mut found = content.as_ref();
+        for segment in path.split('.') {
+            found = found.and_then(|value| value.get(segment));
+        }
+        inspect(found)
     } else {
         // A pinned resource's value is its claim body, an unpinned one's its folded actual.
-        // Either reads a path in its facts first, then in the whole observation, so `state` and
-        // `facts.state` read the same on both (#4557).
-        let facts = subject
-            .starts_with("resource/")
-            .then(|| actual.get("fields").unwrap_or(actual).get("facts"))
-            .flatten();
-        facts
-            .and_then(|facts| actual_field(facts, path))
-            .or_else(|| actual_field(actual, path))
-            .cloned()
+        // Either reads a path in its facts first, then in the whole observation.
+        let facts = subject.starts_with("resource/")
+            .then(|| actual.get("fields").unwrap_or(actual).get("facts")).flatten();
+        inspect(facts.and_then(|facts| actual_field(facts, path))
+            .or_else(|| actual_field(actual, path)))
     }
 }
 

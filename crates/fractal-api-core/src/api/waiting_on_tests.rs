@@ -398,6 +398,7 @@ fn predicate_waits_name_the_gate_without_turning_elapsed_waits_into_stalls() {
         let subject = &run.steps.iter().find(|step| step.step == "retire").unwrap().subject;
         store.set_step_state(subject, "working", None).unwrap();
         let (work, missions) = published(&store);
+        store.latest_actual_value("mission/garden/schedule").unwrap();
         let steps = store.run_step_states(&run.subject).unwrap().unwrap();
         let cut = store.index().unwrap();
         let late = t0 + 12 * 60 * MINUTE;
@@ -422,6 +423,60 @@ fn predicate_waits_name_the_gate_without_turning_elapsed_waits_into_stalls() {
             assert_eq!(waiting.verdict, RunVerdict::Stalled);
         }
         assert_eq!(store.index().unwrap(), cut, "diagnostic reads write no claims");
+    }
+}
+
+#[test]
+fn nested_predicate_paths_use_the_pinned_definition_and_preserve_mission_slashes() {
+    let t0 = start_time();
+    let _clock = Clock::at(t0);
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("graph.db"), "cedar").unwrap();
+    publish(&store, r#"version 2
+mission "garden/nested" state="ready" {
+  goal "Wait for retirement."
+  step "parent" {
+    mission "child/group" {
+      goal "Keep the nested schedule open."
+      step "retire" {
+        agentless
+        gate "retired explicitly" { field "state" "mission/garden/nested" is "retired" }
+      }
+    }
+  }
+}"#, "nested-predicate");
+    let run = start(&store, "garden/nested", "nested-1");
+    let path = "parent/child/group/retire";
+    let subject = &run.steps.iter().find(|step| step.step == path).unwrap().subject;
+    for step in &run.steps {
+        store.set_step_state(
+            &step.subject, if step.step == path { "working" } else { "completed" }, None,
+        ).unwrap();
+    }
+    let (work, missions) = published(&store);
+    store.latest_actual_value("mission/garden/nested").unwrap();
+    let steps = store.run_step_states(&run.subject).unwrap().unwrap();
+    let waiting = run_waiting_on(&store, &steps, &work, &missions.rows, t0 + 12 * 60 * MINUTE, QUIET).unwrap();
+    assert_eq!(waiting.verdict, RunVerdict::Waiting);
+    let retire = open(&waiting, path);
+    assert_eq!(retire.kind, WaitKind::Hold);
+    assert_eq!(retire.step, *subject);
+    assert!(retire.detail.as_deref().unwrap().contains("gate \"retired explicitly\""));
+    assert!(retire.detail.as_deref().unwrap().contains("mission/garden/nested state is \"ready\""));
+}
+
+#[test]
+fn predicate_values_are_bounded_summaries_not_payloads() {
+    assert_eq!(summarize_value(&json!({"private": "payload"})), "object(1 keys)");
+    assert_eq!(summarize_value(&json!(["payload"])), "array(1 items)");
+    assert_eq!(summarize_value(&json!(false)), "false");
+    assert_eq!(summarize_value(&json!(12)), "12");
+    assert_eq!(summarize_value(&json!(null)), "null");
+    for text in ["x".repeat(200), "界".repeat(200), "\n".repeat(200)] {
+        let summary = summarize_value(&json!(text));
+        assert!(summary.chars().count() <= 80, "{summary}");
+        assert!(summary.ends_with("…\""), "{summary}");
+        assert!(!summary.contains('\n'));
     }
 }
 
