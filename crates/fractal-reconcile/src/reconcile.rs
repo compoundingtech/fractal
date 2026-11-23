@@ -71,6 +71,8 @@ pub mod start_spacing;
 pub mod program;
 mod program_faults;
 pub mod start_jobs;
+mod host_executor;
+mod host_observations;
 pub mod seat_admission;
 mod seat_admission_queue;
 mod resource_lanes;
@@ -576,9 +578,12 @@ pub struct PtyRegistrySnapshot {
     pub start_operations: HashMap<String, (String, String)>,
 }
 
-type PassPtySnapshot = std::sync::OnceLock<Result<PtyRegistrySnapshot>>;
+type PassPtySnapshot = std::sync::OnceLock<Result<Arc<PtyRegistrySnapshot>>>;
 
 pub trait RuntimeControl: Send + Sync + 'static {
+    /// Native registry roots whose changes invalidate retained physical observations.
+    /// Backends without native watches are sampled afresh.
+    fn observation_paths(&self) -> Option<&[PathBuf]> { None }
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>>;
     /// Existing controls can supply provenance separately; native controls read both
     /// from one registry snapshot so the evidence describes the same incarnation.
@@ -763,6 +768,7 @@ type ShellRetirements = Arc<Mutex<BTreeMap<(String, Option<String>), Option<Resu
 pub struct NativeRuntime {
     pty: fractal_runtime::PtyRuntime,
     exec: fractal_runtime::ExecRuntime,
+    observation_paths: Vec<PathBuf>,
     /// Goes first on every member's PATH so its `git` and `gh` calls are recorded.
     recorder: Option<PathBuf>,
     shell_retirements: ShellRetirements,
@@ -778,6 +784,10 @@ impl NativeRuntime {
             )
             .with_binary(pty_binary.to_string_lossy()),
             exec: fractal_runtime::ExecRuntime::new(state_dir.join("exec"), state_dir.join("logs")),
+            observation_paths: vec![
+                pty_root.map(Path::to_path_buf).unwrap_or_else(|| state_dir.join("pty")),
+                state_dir.join("exec"),
+            ],
             recorder: None,
             shell_retirements: Default::default(),
         }
@@ -864,68 +874,11 @@ fn record_member_commands(
     Ok(())
 }
 
-fn observed_pty_status(observation: &fractal_runtime::PtyObservation) -> String {
-    if observation.status == "running"
-        && observation
-            .pid
-            .is_some_and(|pid| !local_process_is_alive(pid))
-    {
-        return "vanished".into();
-    }
-    observation.status.clone()
-}
-
-#[cfg(unix)]
-fn local_process_is_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    let result = unsafe { libc::kill(pid as i32, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(not(unix))]
-fn local_process_is_alive(_pid: u32) -> bool {
-    true
-}
-
-impl NativeRuntime {
-    fn snapshot_pty_registry(&self, include_provenance: bool) -> Result<PtyRegistrySnapshot> {
-        let observations = self.pty()?.snapshot()?;
-        // A PTY server started before st moved servers out of their harness's scope moves here.
-        self.pty()?.protect_servers(&observations)?;
-        let mut start_operations = HashMap::new();
-        let observations = observations
-            .into_iter()
-            .map(|item| {
-                let incarnation_id = match (&item.pid, &item.created_at) {
-                    (Some(pid), Some(created)) => Some(format!("{pid}:{created}")),
-                    _ => None,
-                };
-                let status = observed_pty_status(&item);
-                if include_provenance
-                    && let Some(incarnation) = &incarnation_id
-                    && let Some(operation) = item.tags.get(start_jobs::OPERATION_TAG)
-                {
-                    start_operations.insert(
-                        item.name.clone(),
-                        (incarnation.clone(), operation.clone()),
-                    );
-                }
-                RuntimeObservation {
-                    runtime_id: item.name,
-                    terminal: true,
-                    status,
-                    exit_code: item.exit_code,
-                    incarnation_id,
-                }
-            })
-            .collect();
-        Ok(PtyRegistrySnapshot { observations, start_operations })
-    }
-}
 
 impl RuntimeControl for NativeRuntime {
+    fn observation_paths(&self) -> Option<&[PathBuf]> {
+        Some(&self.observation_paths)
+    }
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
         Ok(self.snapshot_pty_registry(false)?.observations)
     }
@@ -973,33 +926,9 @@ impl RuntimeControl for NativeRuntime {
         self.exec.payload_state(runtime_id, incarnation)
     }
 
+
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
-        Ok(self
-            .exec
-            .observe(runtime_id)?
-            .map(|observation| match observation {
-                fractal_runtime::ExecObservation::Running(generation) => RuntimeObservation {
-                    runtime_id: runtime_id.into(),
-                    terminal: false,
-                    status: "running".into(),
-                    exit_code: None,
-                    incarnation_id: Some(generation.generation_id),
-                },
-                fractal_runtime::ExecObservation::Exited(generation) => RuntimeObservation {
-                    runtime_id: runtime_id.into(),
-                    terminal: false,
-                    status: "exited".into(),
-                    exit_code: generation.exit_code.map(i64::from),
-                    incarnation_id: Some(generation.generation_id),
-                },
-                fractal_runtime::ExecObservation::Indeterminate(reason) => RuntimeObservation {
-                    runtime_id: runtime_id.into(),
-                    terminal: false,
-                    status: "indeterminate".into(),
-                    exit_code: None,
-                    incarnation_id: Some(reason),
-                },
-            }))
+        host_observations::observe_exec(&self.exec, runtime_id)
     }
 
     fn rollout_exited(&self, runtime_id: &str, terminal: bool, incarnation: &str) -> Result<bool> {
@@ -1646,6 +1575,7 @@ pub struct Reconciler<R = NativeRuntime> {
     event_notify: watch::Sender<u64>,
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
+    host_observations: Arc<host_observations::HostObservations>,
     shell_exec_watches: Mutex<BTreeSet<String>>,
     seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
@@ -1960,6 +1890,7 @@ impl Reconciler<NativeRuntime> {
             event_notify,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            host_observations: Default::default(),
             shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -2200,6 +2131,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             event_notify: watch::channel(0_u64).0,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            host_observations: Default::default(),
             shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -2707,33 +2639,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// Mark the items that read a stream item's mailbox or subject, as the change feed marks them
-    /// for a graph `message.sent` or lifecycle claim: the feed reads only the graph's file, and
-    /// mail routed to the messages shard (4c-2b) would otherwise reach these items only at the
-    /// next full pass. The first call only finds where the shard stands, as the first pass reads
-    /// every item.
-    fn observe_stream(&self) -> Result<()> {
-        use crate::store::messages_shard::mailbox_reads;
-        let mut seen = self.stream_seen.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(mut after) = *seen else {
-            *seen = Some(mailbox_reads::position(&self.store)?);
-            return Ok(());
-        };
-        loop {
-            let (next, changed, more) = mailbox_reads::wake_batch(&self.store, after, 1024)?;
-            for (subject, recipient) in changed {
-                if !recipient.is_empty() {
-                    self.incremental.touch(&format!("mailbox:{recipient}"));
-                }
-                self.incremental.touch_subject(&subject);
-            }
-            after = next;
-            *seen = Some(after);
-            if !more {
-                return Ok(());
-            }
-        }
-    }
 
     /// Keep each GitHub watch this host declared true to its seat and deadline: stop the
     /// declaration of a watch that ended, end one whose seat is retired or fresh without a wake,
@@ -3764,19 +3669,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Read-only launch completion evidence and planning share one pass snapshot.
         // A mutation can make it stale: guarded launches and exact native controls
         // still take their own fresh fences before acting on an incarnation.
-        let ptys = pty_snapshot
+        // Keep the immutable snapshot alive for the pass; the lookup index borrows
+        // IDs and observations. Only selected member/stop work needs owned evidence.
+        let pty_observations = pty_snapshot
             .into_inner()
-            .unwrap_or_else(|| self.runtime.snapshot_ptys_with_provenance())
-            .map(|snapshot| snapshot.observations);
+            .unwrap_or_else(|| self.host_pty_snapshot());
+        let ptys = pty_observations.as_ref()
+            .map(|snapshot| snapshot.observations.iter()
+                .map(|item| (item.runtime_id.as_str(), item))
+                .collect::<HashMap<_, _>>());
         if let Ok(snapshot) = &ptys { pty_span.items(snapshot.len()); }
         drop(pty_span);
         let ptys = match ptys {
-            Ok(snapshot) => Some(
-                snapshot
-                    .into_iter()
-                    .map(|item| (item.runtime_id.clone(), item))
-                    .collect::<HashMap<_, _>>(),
-            ),
+            Ok(snapshot) => Some(snapshot),
             Err(error) => {
                 crate::reconcile_telemetry::record_error();
                 // An unavailable snapshot is unknown, not an empty runtime set. Treating it as
@@ -3807,7 +3712,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         "{} {:?} {:?}",
                         item.status, item.incarnation_id, item.exit_code
                     );
-                    (id.clone(), state)
+                    ((*id).to_owned(), state)
                 })
                 .collect()
         }));
@@ -3843,13 +3748,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             && ptys.is_some()
             && !self.incremental.take_full_pass("member", now_ms());
         // Runtime changes must select a member before preparation, including execs and screens.
-        self.incremental.observe_execs(|runtime_id| {
-            self.runtime
-                .observe_exec(runtime_id)
-                .ok()
-                .flatten()
-                .map(|observation| observation.status)
-        });
+        self.host_observations.observe_execs(
+            self.runtime.as_ref(), &self.incremental, !skip_members);
         self.incremental.poll_values(
             "screen:",
             self.screen_poll_every_ms,
@@ -4362,7 +4262,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             let Some(ptys) = ptys.as_ref() else {
                                 return blocked.map_or(Ok(()), Err);
                             };
-                            ptys.get(&member.runtime_id).cloned()
+                            ptys.get(member.runtime_id.as_str()).copied().cloned()
                         } else {
                             smallclaims::touched::note_read(|| {
                                 format!("exec:{}", member.runtime_id)
@@ -7497,7 +7397,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub fn reconcile_stop(
         &self,
         subject: &DesiredSubject,
-        ptys: Option<&HashMap<String, RuntimeObservation>>,
+        ptys: Option<&HashMap<&str, &RuntimeObservation>>,
     ) -> Result<()> {
         self.reconcile_stop_with_origin(subject, ptys, None)
     }
@@ -7565,7 +7465,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &DesiredSubject,
         item: &str,
         skip: bool,
-        ptys: Option<&HashMap<String, RuntimeObservation>>,
+        ptys: Option<&HashMap<&str, &RuntimeObservation>>,
         live_workspaces: &BTreeSet<&str>,
         diagnostic_errors: &mut Vec<String>,
     ) {
@@ -7683,7 +7583,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_stop_with_origin(
         &self,
         subject: &DesiredSubject,
-        ptys: Option<&HashMap<String, RuntimeObservation>>,
+        ptys: Option<&HashMap<&str, &RuntimeObservation>>,
         actual_origin: Option<Option<String>>,
     ) -> Result<()> {
         self.store.owned_desired_guard(subject)?;
@@ -7769,7 +7669,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(ptys) = ptys else {
                 return Ok(());
             };
-            ptys.get(runtime_id).cloned()
+            ptys.get(runtime_id).copied().cloned()
         } else {
             smallclaims::touched::note_read(|| format!("exec:{runtime_id}"));
             self.runtime.observe_exec(runtime_id)?
@@ -8497,16 +8397,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 "allow_terminate_request",
                 true,
             );
-            let stopped = if retirement_operation.is_some() {
-                self.runtime
-                    .stop_with_retirement_proof(runtime_id, terminal, incarnation)
-            } else {
-                self.runtime
-                    .stop(runtime_id, terminal, Some(incarnation))
-                    .map(|()| false)
-            };
-            let verified = match stopped {
-                Ok(verified) => verified,
+            let stopped = host_executor::StopCommand::new(
+                &request, runtime_id, terminal, Some(incarnation),
+                host_executor::StopAction::Terminate {
+                    retirement_proof: retirement_operation.is_some(),
+                },
+            ).dispatch(self.runtime.as_ref(), &self.host_observations);
+            let receipt = match stopped {
+                Ok(receipt) => receipt,
                 Err(error) => {
                     self.store.append_claim(&ClaimInput {
                         subject: subject.into(),
@@ -8523,7 +8421,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return Err(error);
                 }
             };
-            if verified {
+            if receipt.retirement_verified {
                 evidence.record("apply_retirement", "allow_native_retirement_verified", true);
                 let operation =
                     retirement_operation.context("retirement proof has no operation")?;
@@ -8531,7 +8429,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.store.apply_runtime_start_retirement(
                         operation,
                         incarnation,
-                        &request.id
+                        receipt.request
                     )?,
                     "native retirement proof did not match its operation/request"
                 );
@@ -8630,7 +8528,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         }
         evidence.record("kill", "allow_shutdown_deadline_reached", true);
-        self.runtime.kill(runtime_id, terminal, Some(incarnation))?;
+        host_executor::StopCommand::new(
+            &deadline_record, runtime_id, terminal, Some(incarnation),
+            host_executor::StopAction::Kill,
+        ).dispatch(self.runtime.as_ref(), &self.host_observations)?;
         self.store.append_claim(&ClaimInput {
             subject: subject.into(),
             kind: "runtime.action.succeeded".into(),
@@ -11331,6 +11232,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let task = Arc::new(());
         armed.get_mut(subject).unwrap().task = Arc::downgrade(&task);
         let notify = self.notify.clone();
+        let observations = self.host_observations.clone();
         let delayed = self.delayed_restarts.clone();
         let subject = subject.to_owned();
         handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -11350,6 +11252,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return;
                 }
             }
+            observations.invalidate();
             crate::reconcile_telemetry::record_wake(
                 crate::reconcile_telemetry::WakeCause::TimerRestart,
                 Some(restart_wake_kind(&subject)),
@@ -17797,6 +17700,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             armed.insert(key.to_owned(), deadline);
         }
         let notify = self.notify.clone();
+        let observations = self.host_observations.clone();
         let armed = self.step_deadlines.clone();
         let key = key.to_owned();
         handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -17807,6 +17711,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     armed.remove(&key);
                 }
             }
+            observations.invalidate();
             crate::reconcile_telemetry::record_wake(wake, None);
             notify.notify_one();
         }));
@@ -21220,6 +21125,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return;
             }
             let notify = self.notify.clone();
+            let observations = self.host_observations.clone();
             let armed = self.gate_poll_armed.clone();
             let runtimes = self.gate_poll_runtimes.clone();
             let runtime = self.runtime.clone();
@@ -21250,6 +21156,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .unwrap_or_else(PoisonError::into_inner)
                     .clear();
                 armed.store(false, Ordering::Release);
+                observations.invalidate();
                 crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::TimerGatePoll, None);
                 notify.notify_one();
             }));
@@ -21585,11 +21492,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 incarnation.unwrap_or("unknown")
             )),
         })?;
-        if hard {
-            self.runtime.kill(&runtime_id, false, incarnation)?;
-        } else {
-            self.runtime.stop(&runtime_id, false, incarnation)?;
-        }
+        host_executor::StopCommand::new(
+            &request, &runtime_id, false, incarnation,
+            if hard { host_executor::StopAction::Kill }
+            else { host_executor::StopAction::Terminate { retirement_proof: false } },
+        ).dispatch(self.runtime.as_ref(), &self.host_observations)?;
         self.store.append_claim(&ClaimInput {
             subject: subject.into(),
             kind: "runtime.action.succeeded".into(),
@@ -21780,109 +21687,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         watch_error.into_inner().map_or(Ok(()), |error| Err(anyhow::anyhow!(error)))
     }
 
-    fn ensure_file_watch(&self, subject: &str, path: &Path) -> Result<()> {
-        self.file_watchers_used
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(subject.into());
-        let mut watchers = self
-            .file_watchers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let target = std::path::absolute(path)?;
-        // Watching the file itself attaches to its inode and misses later replacements.
-        // Descend from a missing target's nearest existing parent on each observation.
-        let directory = target
-            .parent()
-            .into_iter()
-            .flat_map(Path::ancestors)
-            .find(|candidate| candidate.is_dir())
-            .context("file watch has no existing parent directory")?;
-        let next_component = target
-            .strip_prefix(directory)?
-            .components()
-            .next()
-            .context("file watch has no target component")?;
-        // Backends report canonical directories (notably /private/tmp on macOS).
-        // Keep the lexical target as identity, but compare events in their namespace.
-        let directory = file_subscriptions::canonicalize(directory)?;
-        let relevant = directory.join(next_component);
-        // A file symlink can point outside the lexical parent. Observe its referent's
-        // parent too, so both writes and inode replacements preserve file-gate behavior.
-        let referent = file_subscriptions::canonicalize(&target).ok().filter(|path| *path != relevant);
-        let recursive = target.is_dir();
-        if watchers.get(subject).is_some_and(|watch| {
-            watch.target == target
-                && watch.directory == directory
-                && watch.referent == referent
-                && watch.recursive == recursive
-                && !watch.dirty.load(std::sync::atomic::Ordering::Acquire)
-        }) {
-            return Ok(());
-        }
-        let watched_directory = directory.clone();
-        let watched_referent = referent.clone();
-        let notify = self.notify.clone();
-        let file_changes = self.file_changes.clone();
-        let observations = self.file_observations.clone();
-        let incremental = self.incremental.clone();
-        let revision = self.file_watch_revision.clone();
-        let watched_subject = subject.to_owned();
-        if self.file_subscriptions.get().is_none() {
-            let _ = self.file_subscriptions.set(file_subscriptions::Pool::new()?);
-        }
-        let pool = self.file_subscriptions.get().expect("initialized subscriptions");
-        let mut paths = vec![(directory.clone(), false)];
-        if recursive { paths.push((target.clone(), true)); }
-        if let Some(parent) = referent.as_ref().and_then(|path| path.parent()) {
-            paths.push((parent.to_owned(), false));
-        }
-        let dirty = Arc::new(AtomicBool::new(false));
-        let changed_watch = dirty.clone();
-        let subscription = pool.subscribe_input(paths, Arc::new(move |event| {
-            FileWatch::relevant(event, &relevant, &watched_directory, watched_referent.as_deref())
-        }), Arc::new(move |notification| {
-                    let event = notification.event;
-                    revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
-                        | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
-                        changed_watch.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                    observations
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .remove(&watched_subject);
-                    // A file change is not a claim: mark what read the file.
-                    file_changes.invalidate(&incremental, &watched_subject,
-                        event.need_rescan() && !notification.coverage_changed, &notify);
-            }))?;
-        watchers.insert(subject.into(), FileWatch {
-            _subscription: subscription, target, directory, referent, recursive, dirty,
-        });
-        // A refreshed subscription may now refer to a different file at the same stamp.
-        self.file_observations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(subject);
-        Ok(())
-    }
-
-    fn release_unused_file_watchers(&self) {
-        let used = std::mem::take(
-            &mut *self
-                .file_watchers_used
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-        self.file_watchers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|subject, _| used.contains(subject));
-        self.file_observations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|subject, _| used.contains(subject));
-    }
 }
 
 /// Lay what one look at a GitHub repository recorded into the poller's plugin mirror, with the

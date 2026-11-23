@@ -5,7 +5,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub fn reconcile_placement_away(
         &self,
         subject: &DesiredSubject,
-        ptys: Option<&HashMap<String, RuntimeObservation>>,
+        ptys: Option<&HashMap<&str, &RuntimeObservation>>,
     ) -> Result<()> {
         if !subject.subject.starts_with("agent/")
             || subject.member.as_ref().is_some_and(|m| m.host == self.host)
@@ -51,7 +51,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let observation = if member.terminal {
                 smallclaims::touched::note_read(|| format!("pty:{}", member.runtime_id));
                 let Some(ptys) = ptys else { return Ok(()) };
-                ptys.get(&member.runtime_id).cloned()
+                ptys.get(member.runtime_id.as_str()).copied().cloned()
             } else {
                 smallclaims::touched::note_read(|| format!("exec:{}", member.runtime_id));
                 self.runtime.observe_exec(&member.runtime_id)?
