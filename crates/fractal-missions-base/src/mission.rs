@@ -2010,13 +2010,13 @@ fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, FractalError>
         }
     };
     let resource_kind = property_string(node, "resource-kind")?;
-    if let Some(resource_kind) = &resource_kind {
-        if kind != MissionInputKind::Resource || resource_kind.trim().is_empty() {
-            return Err(FractalError::new(
-                "invalid-mission-input-resource-kind",
-                format!("mission input `{name}` needs a nonempty resource-kind on kind=resource"),
-            ));
-        }
+    if let Some(resource_kind) = &resource_kind
+        && (kind != MissionInputKind::Resource || resource_kind.trim().is_empty())
+    {
+        return Err(FractalError::new(
+            "invalid-mission-input-resource-kind",
+            format!("mission input `{name}` needs a nonempty resource-kind on kind=resource"),
+        ));
     }
     Ok(MissionInputSpec { name, kind, resource_kind })
 }
