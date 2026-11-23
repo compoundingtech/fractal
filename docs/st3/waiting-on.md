@@ -77,6 +77,13 @@ Cold or stale observations, missing fields, runtime interpolation, non-field pre
 subjects, effect subjects, pinned resources, or no false predicate within that bound retain the
 existing `verifying` description. Terminal service-exec checks never run on this read path.
 
+Named and default stall reporters use the same intentional-wait classification. Silence alone
+does not report a run when every unfinished step is a known predicate hold, an unanswered human
+gate, a native person ask, a blocker, a retry backoff, or a live holder's declared wait. Mixed runs
+still report unexplained silence; cold or unknown evidence preserves the previous behavior.
+Child-run waits remain conservative: waiting for a child does not prove its work is healthy.
+The existing one-notice-per-silence identity and terminal-event reports are unchanged.
+
 ## A run's verdict
 
 - **stalled**: some step is `seat-down`, `no-progress` or `unclaimed`. This holds whatever else in

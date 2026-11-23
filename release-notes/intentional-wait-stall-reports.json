@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Do not report intentional mission waits as unexplained stalls",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No database, claim, index or wire change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Named and default stall reporting share intentional-wait classification with waiting-on. A run is suppressed only when every unfinished step positively waits on a known false predicate, an unanswered human gate, a native person ask, a blocker, a retry backoff or a live holder's declared wait. Predicate inspection reuses at most four fresh warm actual-cache observations of the pinned definition. Unknown evidence and mixed runs keep reporting; child-run holds remain conservative. Terminal notices, message identity, idempotency, ask delivery cadence and client-v0 are unchanged."},
+  "downtime": {"status": "none", "detail": "Takes effect on process restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting restores earlier stall behavior without changing stored state."}
+}
