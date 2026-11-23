@@ -216,9 +216,16 @@ impl<'a> Index<'a> {
         let ready_cycles = projection.ready_cycles.iter()
             .map(|((repository, pr), ready)| ((repository.as_str(), pr.as_str()), *ready)).collect();
         let mut index = Self { projection, author_logins, prs: BTreeMap::new(), events: BTreeMap::new(), merges: BTreeMap::new(), ready_cycles, conflicts: BTreeSet::new() };
+        let outside_cohort = |pr: &PullRequestFact| !author_logins.is_empty()
+            && pr.author_login.as_ref().is_some_and(|author| !author_logins.iter().any(|login| login.eq_ignore_ascii_case(author)));
         for pr in &projection.pull_requests {
             let key = (pr.repository_id.as_str(), pr.id.as_str());
-            if index.prs.insert(key, pr).is_some_and(|old| old != pr) { index.conflicts.insert(key); }
+            if let Some(old) = index.prs.insert(key, pr) && old != pr {
+                index.conflicts.insert(key);
+                // Retain a possibly selected image so an ambiguous author conflict
+                // cannot be hidden by input ordering or a later nonmatching image.
+                if !outside_cohort(old) && outside_cohort(pr) { index.prs.insert(key, old); }
+            }
         }
         for event in &projection.lifecycle {
             index.events.entry((&event.repository_id, &event.pull_request_id)).or_default().push(event);
@@ -273,11 +280,6 @@ impl<'a> Index<'a> {
         for (key, merge) in &self.merges {
             if merge.merged_at_ms < start || merge.merged_at_ms >= end || !self.projection.roster.contains(&merge.repository_id, merge.merged_at_ms) { continue; }
             result.observed_merges += 1;
-            if self.conflicts.contains(key) {
-                result.unknown.push(format!("{}/{}: conflicting canonical images", key.0, key.1));
-                if latency { result.unknown_cycles += 1; }
-                continue;
-            }
             let Some(pr) = self.prs.get(key) else {
                 result.unknown.push(format!("{}/{}: missing pull request", key.0, key.1));
                 if latency { result.unknown_cycles += 1; }
@@ -293,6 +295,11 @@ impl<'a> Index<'a> {
                     result.observed_merges -= 1;
                     continue;
                 }
+            }
+            if self.conflicts.contains(key) {
+                result.unknown.push(format!("{}/{}: conflicting canonical images", key.0, key.1));
+                if latency { result.unknown_cycles += 1; }
+                continue;
             }
             if pr.merged_at_ms != Some(merge.merged_at_ms) {
                 result.unknown.push(format!("{}/{}: merge image disagrees with pull request", key.0, key.1));

@@ -384,3 +384,30 @@ fn latency_settlement_window_includes_start_and_excludes_cut() {
     assert_eq!((measured.windows[0].total, measured.windows[0].bad), (1, 0));
     assert_eq!(measured.merged_latency_ms, [10_000]);
 }
+
+#[test]
+fn latency_outside_cohort_conflicts_do_not_poison_selected_evidence_but_ambiguous_authors_do() {
+    let now = at("2026-11-17T12:00:00Z");
+    let mut p = projection(now);
+    merge(&mut p, "selected", now - 10_000, now - 1, Some("example-bot"));
+    merge(&mut p, "outside", now - 10_000, now - 1, Some("another-author"));
+    let mut conflicting = p.pull_requests[1].clone();
+    conflicting.created_as_draft = None;
+    p.pull_requests.push(conflicting);
+    let authors = ["example-bot".into()];
+    assert!(latency_budget(&p, now, 172_800_000, &[86_400_000], &authors).windows[0].complete);
+    p.pull_requests[1].author_login = Some("example-bot".into());
+    assert!(!latency_budget(&p, now, 172_800_000, &[86_400_000], &authors).windows[0].complete);
+    p.pull_requests.reverse();
+    assert!(!latency_budget(&p, now, 172_800_000, &[86_400_000], &authors).windows[0].complete);
+}
+
+#[test]
+fn missing_pr_for_a_relevant_ready_deadline_is_unknown_only_inside_membership() {
+    let now = at("2026-11-17T12:00:00Z");
+    let mut p = projection(now);
+    event(&mut p, "orphan", LifecycleKind::Ready, now - 7_000);
+    assert!(!latency_budget(&p, now, 5_000, &[10_000], &[]).windows[0].complete);
+    p.lifecycle[0].repository_id = "outside-roster".into();
+    assert!(latency_budget(&p, now, 5_000, &[10_000], &[]).windows[0].complete);
+}
