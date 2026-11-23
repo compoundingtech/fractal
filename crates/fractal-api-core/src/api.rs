@@ -31,6 +31,7 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 mod roster_assembly;
+mod roster_presentation;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -3730,13 +3731,26 @@ impl HeardSeats {
 // than only when a new claim invalidates the fold. Expiry changes no durable fact.
 const DECLARATION_RESTART_PRESENTATION_MS: u128 = 120_000;
 
+fn declaration_restart_expired(item: &Value, now: u128) -> bool {
+    item["state"] == "restarting"
+        && item["_restart_until_unix_ms"].as_u64().is_none_or(|deadline| now >= u128::from(deadline))
+}
+
+fn agent_state_after_restart(item: &Value, now: u128) -> Option<&str> {
+    if declaration_restart_expired(item, now)
+        && let Some(previous) = item["_restart_underlying_state"].as_str() {
+        Some(previous)
+    } else {
+        item["state"].as_str()
+    }
+}
+
 fn overlay_declaration_restart(item: &mut Value, now: u128) {
+    let expired = declaration_restart_expired(item, now);
     let fields = item.as_object_mut().expect("agent card");
     let previous = fields.remove("_restart_underlying_state");
-    let deadline = fields.remove("_restart_until_unix_ms").and_then(|value| value.as_u64());
-    if fields.get("state").and_then(Value::as_str) == Some("restarting")
-        && deadline.is_none_or(|deadline| now >= u128::from(deadline))
-        && let Some(previous) = previous
+    fields.remove("_restart_until_unix_ms");
+    if expired && let Some(previous) = previous
     {
         fields.insert("state".into(), previous);
     }
@@ -4506,6 +4520,7 @@ fn client_agent_cards_presented(
             Ok((name, value))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    store.count_agent_roster_enrichment(agents.len());
     agents.sort_by(|(left_name, left), (right_name, right)| {
         left_name
             .cmp(right_name)
@@ -6634,12 +6649,11 @@ pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> 
     let generation = store.agents_publication_build()?;
     let Some(CapturedPresentedAgents { source, subagents, now }) =
         refresh_agent_roster_source(store, history)? else { return Ok(()); };
-    let valid_until = source.valid_until_ms.map_or(now.saturating_add(1000),
-        |deadline| deadline.min(now.saturating_add(1000)));
-    let mut rows = (*source.rows).clone();
-    overlay_agent_resources_at(store, &mut rows, &client_timestamp(u128::from(now)),
-        u128::from(now), Some(subagents))?;
-    store.publish_presented_agents(generation, source, now, Some(valid_until), rows)
+    let (rows, presentation_deadline) =
+        roster_presentation::present(store, &source.rows, subagents, u128::from(now))?;
+    let valid_until = source.valid_until_ms.into_iter()
+        .chain(presentation_deadline.map(|at| at.min(u128::from(u64::MAX)) as u64)).min();
+    store.publish_presented_agents(generation, source, now, valid_until, rows)
 }
 
 struct CapturedPresentedAgents {
@@ -7324,27 +7338,7 @@ pub fn start_native_session_discovery(state: &AppState) {
     crate::external_sessions::start_history_inventory(state.native_session_home.as_deref());
 }
 
-/// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
-/// so refreshing never takes more than about half a core however often readers ask. Reads
-/// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
-/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
-const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
-
-/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
-/// a very cheap fold cannot turn fresh reads into many refreshes a second.
-const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
-
-/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
-/// twice the refresh's own length, though never past the full pause. A host whose seats write a
-/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
-/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
-/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
-/// its half-core bound, as a pause no local claim cuts.
-const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
-
-/// How long a legacy fresh or named-cut read waits for publication: long enough
-/// for the refresher to finish a fold, pause as long, and fold again.
+/// How long a legacy fresh or named-cut read waits for an event-driven publication.
 const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 
 /// Keep the complete agents roster published off the request path. As the daemon starts it
@@ -7360,17 +7354,20 @@ pub fn start_agent_roster(state: &AppState) {
         return;
     };
     let store = state.store.clone();
+    let mut changed = state.event_notify.subscribe();
+    let mut delivery = delivery_presence::subscribe_semantic();
+    let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
+    let inputs = {
+        let wake = Arc::clone(&wake);
+        store.connection.observe_tables(&["claims", "local_observations", "meta"], move |_| wake.notify_one())
+    };
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
-        // Whether a commit holds a claim this node wrote about a subject a card reads is read off
-        // the writer, once for every refresher that pauses on it.
-        let mut local = agent_roster_local_commits(&store);
+        // Subscribe before the first fold so writes during materialization remain pending.
+        let _inputs = inputs;
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
         loop {
-            let started = tokio::time::Instant::now();
-            // Every claim at or before this index is in the fold below or an earlier one.
-            let folded_through = store.index().unwrap_or(u64::MAX);
             let first = std::mem::take(&mut head);
             let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
@@ -7381,56 +7378,39 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            agent_roster_pause(&store, &mut local, started.elapsed(), folded_through).await;
-            // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
-            // paced by the existing refresh pause, never a timer per subscriber.
-            if store.agent_roster_refresh_failed() {
-                wake.notified().await;
-            }
-            wait_for_agent_roster_demand(&store, &wake).await;
+            wait_for_agent_roster_change(&store, &wake, &mut changed, &mut delivery, &mut relayed).await;
         }
     }));
 }
 
-/// Why the refresher's pause between two refreshes ended.
-type AgentRosterPauseEnd = local_commits::PauseEnd;
-
-/// The roster's hold on the store's local-commit scanner: a claim this node wrote cuts the
-/// refresher's pause only when a card reads it (`local_agent_card_input_after`, the subjects the
-/// roster's incremental fold reads).
-fn agent_roster_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
-    let reader = Arc::clone(store);
-    store.local_commits(AGENT_ROSTER_LOCAL_CHECK, Arc::new(move |after, through| reader.local_agent_card_input_after(after, through)))
-}
-
-/// The name the roster's check has on the scanner.
-const AGENT_ROSTER_LOCAL_CHECK: &str = "agents";
-
-/// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
-/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
-/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
-/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
-/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
-/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
-/// fold, so a person waiting to see their own write is not left waiting up to a second for the
-/// next timed fold, while a stream of local writes folds no more than about twice a second and
-/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
-/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
-/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
-/// stream or a node's other writes do not fold the roster any more often. See
-/// [`local_commits::pause_after_fold`].
-async fn agent_roster_pause(
-    store: &Arc<Store>,
-    local: &mut local_commits::LocalCommits,
-    folded: Duration,
-    through: u64,
-) -> AgentRosterPauseEnd {
-    let pace = local_commits::Pace {
-        floor: AGENT_ROSTER_FRESH_PAUSE,
-        local: AGENT_ROSTER_LOCAL_PAUSE,
-        full: AGENT_ROSTER_REFRESH_PAUSE,
-    };
-    local_commits::pause_after_fold(Some(local), store.fresh_agent_roster_wanted(), pace, folded, through).await
+/// Wait for semantic inputs, explicit demand, or the earliest actual evidence boundary.
+async fn wait_for_agent_roster_change(
+    store: &Store,
+    wake: &tokio::sync::Notify,
+    changed: &mut tokio::sync::watch::Receiver<u64>,
+    delivery: &mut tokio::sync::watch::Receiver<u64>,
+    relayed: &mut tokio::sync::watch::Receiver<u64>,
+) {
+    loop {
+        let deadline = (store.agents_publication_demand() && !store.agent_roster_refresh_failed())
+            .then(|| store.agents_publication()
+                .and_then(|publication| publication.valid_until_unix_ms)).flatten();
+        let clock = async {
+            match deadline {
+                Some(at) => tokio::time::sleep(Duration::from_millis(
+                    at.saturating_sub(client_now_ms()).min(u128::from(u64::MAX)) as u64)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = wake.notified() => {},
+            _ = changed.changed() => {},
+            _ = delivery.changed() => {},
+            _ = relayed.changed() => {},
+            _ = clock => {},
+        }
+        if store.agents_publication_demand() { return; }
+    }
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no
@@ -7459,6 +7439,9 @@ async fn refresh_agent_roster_admitted(
     store: Arc<Store>,
     first: bool,
 ) -> Result<anyhow::Result<()>, tokio::task::JoinError> {
+    if !first && !store.agents_publication_demand() {
+        return Ok(Ok(()));
+    }
     let mut admission = store.admit_agent_resources("refresher").await;
     if !first {
         if !store.agents_publication_demand() {
@@ -7531,14 +7514,6 @@ async fn refresh_agent_roster_admitted(
             })
         })
     }).await
-}
-
-async fn wait_for_agent_roster_demand(store: &Store, wake: &tokio::sync::Notify) {
-    // Notifications may have been queued while readers were present. Recheck demand
-    // after consuming them rather than doing one last presentation fold on an idle node.
-    while !store.agents_publication_demand() {
-        wake.notified().await;
-    }
 }
 
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of

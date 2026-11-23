@@ -76,7 +76,7 @@ store
 }
 
 fn folds(store: &Store) -> u64 {
-store.attention_list_folds().values().sum()
+store.attention_list_folds().iter().filter(|(key, _)| !key.contains('/')).map(|(_, count)| count).sum()
 }
 
 fn newest(store: &Store) -> Arc<AttentionPublication> {
@@ -339,10 +339,11 @@ store.publish_attention_list(
         projection: before.projection.clone(),
         evaluated_at_unix_ms: before.evaluated_at_unix_ms,
         due_at_unix_ms: None,
-        future_after: None,
         published_at_unix_ms: now_ms(),
         owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
+        source_snapshot: before.source_snapshot.clone(),
+        presentation_dependencies: before.presentation_dependencies.clone(),
         fleet: None,
         ask_deadline_policy: before.ask_deadline_policy,
     },
@@ -401,7 +402,7 @@ assert_eq!(folds(&store), folded + 1, "a projected message folds nothing");
 }
 
 #[test]
-fn rows_older_than_the_clock_period_fold_again() {
+fn unchanged_rows_have_no_periodic_refold() {
 let (store, _, request) = fixture();
 store.start_attention_list_refresher().unwrap();
 store.ask_person(&request).unwrap();
@@ -415,10 +416,11 @@ store.publish_attention_list(
         projection: before.projection.clone(),
         evaluated_at_unix_ms: stale,
         due_at_unix_ms: None,
-        future_after: None,
         published_at_unix_ms: before.published_at_unix_ms,
         owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
+        source_snapshot: before.source_snapshot.clone(),
+        presentation_dependencies: before.presentation_dependencies.clone(),
         fleet: None,
         ask_deadline_policy: before.ask_deadline_policy,
     },
@@ -426,7 +428,8 @@ store.publish_attention_list(
 );
 let after = refresh_and_check(&store);
 assert!(after.evaluated_at_unix_ms > stale);
-assert_eq!(store.attention_list_folds().get("clock"), Some(&1));
+assert_eq!(store.attention_list_folds().get("clock"), None);
+assert_eq!(store.attention_list_due_at(), None);
 }
 
 /// The deadline policy lives in `meta`, not in claims. Turning deadlines on or off or changing
@@ -530,8 +533,8 @@ store.report_person_presence("person/avery", "host/alder",
     DeviceReport { state: DeviceState::Active, last_input_at: None, observed_at: now_ms() }, now_ms()).unwrap();
 assert!(store.index().unwrap() > published.cut);
 assert_eq!(
-    store.read_snapshot(|index| store.attention_list_delta(&published, index, now_ms())).unwrap(),
-    AttentionDelta::Unchanged(None),
+    store.read_snapshot(|index| store.attention_list_delta(&published, index)).unwrap(),
+    AttentionDelta::Unchanged,
     "status, interruptions and presence fold nothing"
 );
 }
@@ -543,14 +546,14 @@ store.start_attention_list_refresher().unwrap();
 let before = refresh_and_check(&store);
 let index = store.index().unwrap();
 assert_eq!(
-    store.read_snapshot(|index| store.attention_list_delta(&before, index, now_ms())).unwrap(),
-    AttentionDelta::Unchanged(None)
+    store.read_snapshot(|index| store.attention_list_delta(&before, index)).unwrap(),
+    AttentionDelta::Unchanged
 );
 store.ask_person(&request).unwrap();
 let delta = store
-    .read_snapshot(|index| store.attention_list_delta(&before, index, now_ms()))
+    .read_snapshot(|index| store.attention_list_delta(&before, index))
     .unwrap();
-assert!(matches!(delta, AttentionDelta::Refold(_)), "{delta:?}");
+assert!(matches!(delta, AttentionDelta::Subjects { .. }), "{delta:?}");
 assert!(store.index().unwrap() > index);
 }
 
@@ -570,7 +573,7 @@ assert!(asked >= accepted);
 let early = refresh_and_check(&store);
 assert!(early.rows.iter().all(|row| row["source_id"] != ask.subject), "not yet eligible");
 assert_eq!(early.due_at_unix_ms, Some(accepted));
-assert_eq!(store.attention_list_due_at(30_000), Some(accepted));
+assert_eq!(store.attention_list_due_at(), Some(accepted));
 // Once it is due, a refresh with no new claim folds it in.
 while now_ms() < asked {
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -597,10 +600,11 @@ let shared_at = |publication: &AttentionPublication, cut: u64| {
         projection: publication.projection.clone(),
         evaluated_at_unix_ms: publication.evaluated_at_unix_ms,
         due_at_unix_ms: None,
-        future_after: None,
         published_at_unix_ms: now_ms(),
         owners: AttentionPublication::index_owners(&rows),
         rows: Arc::new(rows),
+        source_snapshot: publication.source_snapshot.clone(),
+        presentation_dependencies: publication.presentation_dependencies.clone(),
         fleet: None,
         ask_deadline_policy: publication.ask_deadline_policy,
     }
@@ -610,16 +614,17 @@ let without_at = |publication: &AttentionPublication, cut: u64| AttentionPublica
     projection: publication.projection.clone(),
     evaluated_at_unix_ms: publication.evaluated_at_unix_ms,
     due_at_unix_ms: None,
-    future_after: None,
     published_at_unix_ms: now_ms(),
     owners: publication.owners.clone(),
     rows: Arc::clone(&publication.rows),
+    source_snapshot: publication.source_snapshot.clone(),
+    presentation_dependencies: publication.presentation_dependencies.clone(),
     fleet: None,
     ask_deadline_policy: publication.ask_deadline_policy,
 };
 let delta = |publication: &AttentionPublication| {
     store
-        .read_snapshot(|index| store.attention_list_delta(publication, index, now_ms()))
+        .read_snapshot(|index| store.attention_list_delta(publication, index))
         .unwrap()
 };
 // The covered seat recovers: an ordinary observation from it folds when it shares the item.
@@ -631,11 +636,12 @@ store
         json!({"state":"idle","incarnation_id":"one","driver":"claude"}),
     ))
     .unwrap();
-assert_eq!(
+assert!(matches!(
     delta(&shared_at(&published, published.cut)),
-    AttentionDelta::Refold("harness.observed".into())
-);
-assert_eq!(delta(&without_at(&published, published.cut)), AttentionDelta::Unchanged(None));
+    AttentionDelta::Subjects { subjects, kinds, .. }
+        if subjects.contains("agent/alder.asker") && kinds.contains("harness.observed")
+));
+assert_eq!(delta(&without_at(&published, published.cut)), AttentionDelta::Unchanged);
 // So does work it reports, which ends its login wait.
 let observed = store.index().unwrap();
 {
@@ -646,11 +652,12 @@ let observed = store.index().unwrap();
         .unwrap();
     transaction.commit().unwrap();
 }
-assert_eq!(
+assert!(matches!(
     delta(&shared_at(&published, observed)),
-    AttentionDelta::Refold("work.progress".into())
-);
-assert_eq!(delta(&without_at(&published, observed)), AttentionDelta::Unchanged(None));
+    AttentionDelta::Subjects { subjects, kinds, .. }
+        if subjects.contains("agent/alder.asker") && kinds.contains("work.progress")
+));
+assert_eq!(delta(&without_at(&published, observed)), AttentionDelta::Unchanged);
 }
 
 #[test]
@@ -660,7 +667,7 @@ store.start_attention_list_refresher().unwrap();
 let published = refresh_and_check(&store);
 let delta = |publication: &AttentionPublication| {
     store
-        .read_snapshot(|index| store.attention_list_delta(publication, index, now_ms()))
+        .read_snapshot(|index| store.attention_list_delta(publication, index))
         .unwrap()
 };
 let at = |publication: &AttentionPublication, cut: u64, rows: Vec<Value>| AttentionPublication {
@@ -668,10 +675,11 @@ let at = |publication: &AttentionPublication, cut: u64, rows: Vec<Value>| Attent
     projection: publication.projection.clone(),
     evaluated_at_unix_ms: publication.evaluated_at_unix_ms,
     due_at_unix_ms: None,
-    future_after: None,
     published_at_unix_ms: now_ms(),
     owners: AttentionPublication::index_owners(&rows),
     rows: Arc::new(rows),
+    source_snapshot: publication.source_snapshot.clone(),
+    presentation_dependencies: publication.presentation_dependencies.clone(),
     fleet: None,
     ask_deadline_policy: publication.ask_deadline_policy,
 };
@@ -684,10 +692,11 @@ store
         json!({"state":"blocked","blocked_on":"human","incarnation_id":"one","driver":"claude"}),
     ))
     .unwrap();
-assert_eq!(
+assert!(matches!(
     delta(&at(&published, published.cut, (*published.rows).clone())),
-    AttentionDelta::Refold("harness.observed".into())
-);
+    AttentionDelta::Subjects { subjects, kinds, .. }
+        if subjects.contains("agent/alder.asker") && kinds.contains("harness.observed")
+));
 // Once its prompt is published, the observation that clears it folds too; without a
 // prompt the same ordinary observation does not.
 let blocked = store.index().unwrap();
@@ -704,13 +713,14 @@ store
 let mut prompted = (*published.rows).clone();
 prompted.push(json!({"attention_kind":"harness-prompt","source_id":"agent/alder.asker",
     "targets":["agent/alder.asker"]}));
-assert_eq!(
+assert!(matches!(
     delta(&at(&published, blocked, prompted)),
-    AttentionDelta::Refold("harness.observed".into())
-);
+    AttentionDelta::Subjects { subjects, kinds, .. }
+        if subjects.contains("agent/alder.asker") && kinds.contains("harness.observed")
+));
 assert_eq!(
     delta(&at(&published, blocked, (*published.rows).clone())),
-    AttentionDelta::Unchanged(None)
+    AttentionDelta::Unchanged
 );
 }
 
@@ -958,4 +968,109 @@ fn without_a_roster_the_previous_fleet_stays() {
     let kept = attention_fleet(&store, Some(&previous)).expect("the previous fleet");
     assert!(Arc::ptr_eq(&kept, &previous));
     assert!(attention_fleet(&store, None).is_none());
+}
+
+#[test]
+fn source_snapshot_reduces_only_the_changed_ask_subject() {
+    let (store, _, request) = fixture();
+    custom(&store, "custom/garden/review/v1/first", "person/robin");
+    custom(&store, "custom/garden/review/v1/second", "person/lichen");
+    let before = store.read_snapshot(|_| {
+        store.attention_source_snapshot(None, None, &BTreeSet::new(), now_ms())
+    }).unwrap();
+    let ask = store.ask_person(&request).unwrap();
+    let after = store.read_snapshot(|_| {
+        let now = now_ms();
+        let snapshot = store.attention_source_snapshot(
+            Some(&before),
+            Some(&BTreeSet::from([ask.subject.clone()])),
+            &BTreeSet::from(["work.person-asked".into()]),
+            now,
+        )?;
+        let (full, due) = store.attention_collection_snapshot(None, now)?;
+        assert_eq!(serde_json::to_value(&snapshot.items)?, serde_json::to_value(full)?);
+        assert_eq!(snapshot.valid_until, due);
+        Ok::<_, anyhow::Error>(snapshot)
+    }).unwrap();
+    assert_eq!(after.refolded_subjects, 1, "the two unrelated custom sources are retained");
+    assert_eq!(after.refolded_groups, 0, "an ask changes no grouped source");
+    assert!(after.items.iter().any(|item| item.subject == ask.subject));
+}
+
+#[test]
+fn source_clock_admission_and_unread_commit_do_no_source_reduction() {
+    let (store, _, request) = fixture();
+    let ask = store.ask_person(&request).unwrap();
+    let admission = now_ms() + 60_000;
+    store.connection.lock().expect("fixture writer").execute(
+        /* sqlite-large-value: allow-for-now lv-hfad24949cf08 owner=fractal_daemon::store_tests::attention_list TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1 AND kind='work.person-asked'",
+        params![ask.subject, admission.to_string()],
+    ).unwrap();
+    let before = store.read_snapshot(|_| {
+        store.attention_source_snapshot(None, None, &BTreeSet::new(), admission - 1)
+    }).unwrap();
+    assert_eq!(before.valid_until, Some(admission));
+    assert!(before.items.iter().all(|item| item.subject != ask.subject));
+    store.append_claim(&input(
+        "message/attention-source-unread", "message.sent", Some("person/robin"),
+        json!({"from":"person/robin","to":"agent/alder.asker","content":"A note","status":"sent"}),
+    )).unwrap();
+    let after = store.read_snapshot(|_| {
+        let snapshot = store.attention_source_snapshot(
+            Some(&before), Some(&BTreeSet::new()), &BTreeSet::new(), admission,
+        )?;
+        let (full, due) = store.attention_collection_snapshot(None, admission)?;
+        assert_eq!(serde_json::to_value(&snapshot.items)?, serde_json::to_value(full)?);
+        assert_eq!(snapshot.valid_until, due);
+        Ok::<_, anyhow::Error>(snapshot)
+    }).unwrap();
+    assert_eq!(after.refolded_subjects, 0);
+    assert_eq!(after.refolded_groups, 0);
+    assert!(after.items.iter().any(|item| item.subject == ask.subject));
+    assert_eq!(after.valid_until, None);
+}
+
+#[test]
+fn one_agent_prompt_change_reduces_one_subject_and_retains_its_sibling() {
+    let store = Store::open_memory("node").unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = format!(
+        "version 2\nagent \"first\" {{ workspace {:?}; harness \"claude\" {{}} }}\nagent \"second\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+        workspace.path().display().to_string(), workspace.path().display().to_string(),
+    );
+    let intent = crate::graph::parse_intent(&source, "node").unwrap();
+    let preview = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, "two-prompt-seats", Some("person/avery")).unwrap();
+    for seat in ["agent/node.first", "agent/node.second"] {
+        store.append_claim(&input(seat, "runtime.observed", Some(seat),
+            json!({"status":"running","incarnation_id":"one"}))).unwrap();
+        store.append_claim(&input(seat, "harness.observed", Some(seat),
+            json!({"state":"working","driver":"claude","incarnation_id":"one",
+                "blocked_on":"human","ask":"permission","reason":"Bash",
+                "ownership_sequence":1,"transition_sequence":1}))).unwrap();
+    }
+    let before = store.read_snapshot(|_| {
+        store.attention_source_snapshot(None, None, &BTreeSet::new(), now_ms())
+    }).unwrap();
+    assert_eq!(before.items.iter().filter(|item| item.kind == "harness-prompt").count(), 2);
+    let second = before.items.iter().find(|item| item.subject == "agent/node.second").unwrap().clone();
+    store.append_claim(&input("agent/node.first", "harness.observed", Some("agent/node.first"),
+        json!({"state":"working","driver":"claude","incarnation_id":"one",
+            "blocked_on":"human","ask":"permission","reason":"Read",
+            "ownership_sequence":1,"transition_sequence":2}))).unwrap();
+    let after = store.read_snapshot(|_| {
+        let now = now_ms();
+        let snapshot = store.attention_source_snapshot(
+            Some(&before), Some(&BTreeSet::from(["agent/node.first".into()])),
+            &BTreeSet::from(["harness.observed".into()]), now,
+        )?;
+        let (full, due) = store.attention_collection_snapshot(None, now)?;
+        assert_eq!(serde_json::to_value(&snapshot.items)?, serde_json::to_value(full)?);
+        assert_eq!(snapshot.valid_until, due);
+        Ok::<_, anyhow::Error>(snapshot)
+    }).unwrap();
+    assert_eq!(after.refolded_subjects, 1);
+    assert_eq!(after.refolded_groups, 0);
+    assert_eq!(serde_json::to_value(after.items.iter().find(|item| item.subject == "agent/node.second").unwrap()).unwrap(),
+        serde_json::to_value(second).unwrap());
 }
