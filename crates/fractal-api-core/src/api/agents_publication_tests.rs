@@ -210,7 +210,7 @@ async fn agents_publication_queued_wake_cannot_refresh_without_demand() {
     let mut delivery = delivery_presence::subscribe_semantic();
     let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
     let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
-        store, &wake, &mut changed, &mut delivery, &mut relayed));
+        store, &wake, &mut changed, &mut delivery, &mut relayed, client_now_ms()));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
     assert!(!store.agents_publication_demand());
