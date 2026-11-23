@@ -1130,13 +1130,19 @@ impl Store {
                 return Ok(());
             }
             {
+                // Keep the durable row (and its key index entry) in place. Cursor-only chunks
+                // need no daily-counter write when its value is unchanged.
                 let walk = &cursor.walk;
                 transaction
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h90aea7898bf3 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h60cd4ae8418e owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                        WHERE meta.value IS NOT excluded.value")?
                     .execute(/* sqlite-large-value: allow-for-now lv-hde0878901e21 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![local_walk_key(&walk.checkpoint), format!("{} {}", walk.envelope, walk.claim)])?;
                 let today = deleted_on(&transaction, day)? + claims.len() as u64;
                 transaction
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4d909c3fd602 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-he681ad98b172 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                        WHERE meta.value IS NOT excluded.value")?
                     .execute(/* sqlite-large-value: allow-for-now lv-h5ece9b814a1a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![LOCAL_TRIM_DAY, format!("{day} {today}")])?;
             }
             let committing = std::time::Instant::now();
