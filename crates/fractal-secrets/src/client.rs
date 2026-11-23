@@ -1571,6 +1571,12 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
         // This is a reactive subscription, cancelled by its caller, not a finite HTTP read.
         return Duration::MAX;
     }
+    if path.starts_with("/v1/internal/replication/")
+        && path.split('?').next().is_some_and(|path| path.ends_with("/revision"))
+    {
+        // Store revision waits are caller-cancelled subscriptions, not periodic reads.
+        return Duration::MAX;
+    }
     if path.starts_with("/v1/internal/replication/export")
         || path.starts_with("/v1/internal/replication/receive")
         || path.starts_with(CLIENT_READ_FORWARD_PATH)
@@ -2398,6 +2404,13 @@ mod tests {
     #[test]
     fn request_classes_have_distinct_bounded_deadlines() {
         let deadlines = ClientDeadlines::default();
+        for path in [
+            "/v1/internal/replication/revision",
+            "/v1/internal/replication/shard/messages/revision",
+            "/v1/internal/replication/shard/messages/peers/revision",
+        ] {
+            assert_eq!(request_deadline(path, deadlines), Duration::MAX);
+        }
         assert_eq!(
             request_deadline("/v1/status", deadlines),
             deadlines.request
