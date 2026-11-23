@@ -17,6 +17,10 @@ impl Drop for TurnBudget {
 const TURN_LIMIT: Duration = Duration::from_secs(15);
 const PAGE_LIMIT: usize = relayed_closes::QUEUED;
 
+fn now_ms() -> anyhow::Result<u64> {
+    Ok(u64::try_from(super::client_now_ms())?)
+}
+
 #[derive(Default)]
 struct Work {
     discovery_passes: AtomicU64,
@@ -52,7 +56,7 @@ async fn discover(state: &AppState, budget: &ReadBudget) -> anyhow::Result<()> {
     let reads = tokio::task::spawn_blocking(move || read_budget::with(Some(selecting), || {
         read_budget::check()?;
         relayed_close_work::discovery_batch(&store, PAGE_LIMIT)?;
-        relayed_close_work::read_batch(&store, PAGE_LIMIT, super::client_now_ms())
+        relayed_close_work::read_batch(&store, PAGE_LIMIT, now_ms()?)
     })).await??;
     if reads.is_empty() { return Ok(()); }
     let work = state.store.extension::<Work>();
@@ -90,7 +94,7 @@ async fn discover(state: &AppState, budget: &ReadBudget) -> anyhow::Result<()> {
             // committed to the durable close queue. Cancellation cannot lose either job.
             relayed_closes::queue(&store, closes)?;
             relayed_close_work::read_succeeded(&store, &succeeded)?;
-            relayed_close_work::read_failed(&store, &failed, super::client_now_ms())
+            relayed_close_work::read_failed(&store, &failed, now_ms()?)
         }).await??;
         relayed_closes::wait_idle(&state.store).await?;
     }
@@ -186,8 +190,9 @@ async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
 }
 
 fn read_deadline(store: &crate::store::Store) -> anyhow::Result<Option<tokio::time::Instant>> {
+    let now = now_ms()?;
     Ok(relayed_close_work::next_read_deadline(store)?.map(|at| {
-        tokio::time::Instant::now() + Duration::from_millis(at.saturating_sub(super::client_now_ms()))
+        tokio::time::Instant::now() + Duration::from_millis(at.saturating_sub(now))
     }))
 }
 
@@ -203,7 +208,7 @@ pub async fn run(state: AppState, mut stopped: watch::Receiver<bool>) {
     let mut pending_remote = None;
     let mut followers = BTreeMap::new();
     let mut initial = true;
-    let mut legacy_hosts = Vec::new();
+    let mut legacy_hosts: Vec<String> = Vec::new();
     let mut legacy_deadline = None;
     let mut recovery = None;
     wake.notify_one(); // Register before bootstrap/restart recovery; no lost initial changes.
@@ -270,8 +275,9 @@ pub async fn run(state: AppState, mut stopped: watch::Receiver<bool>) {
                 }
             }
             let pending = relayed_close_work::has_pending(&state.store).and_then(|pending| {
+                let now = now_ms()?;
                 Ok(pending || relayed_close_work::next_read_deadline(&state.store)?
-                    .is_some_and(|at| at <= super::client_now_ms()))
+                    .is_some_and(|at| at <= now))
             });
             if admission_error.is_none() && matches!(pending, Ok(false)) && !force_turn { break; }
             let result = match admission_error {
