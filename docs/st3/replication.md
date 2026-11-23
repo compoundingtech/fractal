@@ -282,8 +282,14 @@ request, alongside its own bounded range listings; the second answer pulls the
 remaining envelopes. Thus gaps within already-shared live ranges converge in one
 compact round (two requests when they fit the existing bounds), even with
 unsettled checkpoint lineages. Larger differences rotate listings across rounds.
-Modern peers, including empty stores with no buckets, never request a whole
-identity inventory.
+Modern root-first exchanges, including empty stores with no buckets, never request
+a whole identity inventory. An empty range answer proves the empty inventory root;
+a root-summary marker instead means its absent ranges are unknown.
+
+Advertising root-first support does not reinterpret an ordinary complete identity
+inventory as bucket proofs. Such requests still receive complete identity answers,
+and their known identities are not reoffered. Both compact and complete-inventory
+payload pages carry the writer signatures of the claims in their envelopes.
 
 An older peer that does not advertise `root-first-v1` receives a full-summary
 exchange before reconciliation continues. An older peer's ordinary request also

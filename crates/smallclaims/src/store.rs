@@ -8178,10 +8178,18 @@ impl Store {
             self.exported_digests(snapshot)?
         };
         note_full_summary_construction(self);
-        if !same && (remote.can(crate::replication::ROOT_FIRST) || !remote.buckets.is_empty()) {
-            // Modern peers always reconcile compactly, even an empty store or a root
-            // probe with deliberately omitted proofs. List bounded live ranges first;
-            // the peer can then push and pull within the same compact round.
+        let root_probe = remote.can(crate::replication::ROOT_FIRST)
+            && remote.can(crate::replication::ROOT_SUMMARY);
+        if !same
+            && (root_probe
+                || !remote.buckets.is_empty()
+                || (remote.can(crate::replication::ROOT_FIRST)
+                    && remote.envelopes.is_empty()
+                    && remote.digest == replication_inventory_digest(&[])))
+        {
+            // Capability support alone does not turn a complete identity inventory into
+            // range proofs. Only a marked root probe omits proofs; an empty modern
+            // range answer proves the empty set, and nonempty ranges carry buckets.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
                 compact_replication_difference_turn(
@@ -8192,6 +8200,7 @@ impl Store {
                     self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
                 )
             };
+            let claim_member_signatures = self.claim_member_signatures_for_envelopes(&missing)?;
             let envelopes = {
                 let _span = crate::profile::span("replication.envelopes");
                 match archive.as_deref_mut() {
@@ -8226,7 +8235,7 @@ impl Store {
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
                 claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
-                claim_member_signatures: Vec::new(),
+                claim_member_signatures,
                 signed_envelopes,
                 unservable_released,
             });

@@ -255,3 +255,28 @@ fn peers_without_root_first_keep_full_summary_semantics() {
     assert!(!answer.inventory.can(ROOT_SUMMARY));
     assert_eq!(answer.inventory.buckets, legacy.buckets);
 }
+
+#[test]
+fn root_first_capability_preserves_complete_identity_request_semantics() {
+    let store = source();
+    let known = store.replication_inventory().unwrap();
+    assert!(known.can(ROOT_FIRST));
+    assert!(known.buckets.is_empty());
+    assert!(!known.envelopes.is_empty());
+    store.append_claim(&ClaimInput {
+        subject: "note/later".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let before = answers();
+    let answer = store.export_replication_exchange(FLEET, &known).unwrap();
+    assert_eq!(answer.envelopes.len(), 1, "never reoffer the known complete range");
+    assert_eq!(answer.envelopes[0].sequence, known.envelopes.last().unwrap().sequence + 1);
+    assert_eq!(answer.inventory.envelopes.len(), known.envelopes.len() + 1);
+    assert!(answer.inventory.buckets.is_empty(), "the answer remains a complete inventory");
+    assert_eq!(answers(), before + 1);
+}
