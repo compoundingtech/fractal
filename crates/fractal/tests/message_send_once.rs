@@ -76,6 +76,9 @@ struct Losses {
     /// Fail the optional post-send status read without changing durable send acceptance.
     delivery_reads_fail: AtomicBool,
     delivery_reads: AtomicUsize,
+    delivery_reads_hold: AtomicBool,
+    delivery_reads_malformed: AtomicBool,
+    release_delivery: Notify,
 }
 
 /// Forward every request on `front` to the daemon on `back`, and close the connection without a
@@ -99,6 +102,14 @@ async fn lossy_proxy(
                 }
                 if line.starts_with("GET /v1/messages/delivery/") {
                     losses.delivery_reads.fetch_add(1, Ordering::SeqCst);
+                    if losses.delivery_reads_hold.load(Ordering::SeqCst) {
+                        losses.release_delivery.notified().await;
+                        return;
+                    }
+                    if losses.delivery_reads_malformed.load(Ordering::SeqCst) {
+                        caller.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+                        return;
+                    }
                 }
                 if line.starts_with("GET /v1/messages/recipient?")
                     && losses.recipient_route_missing.load(Ordering::SeqCst)
@@ -281,10 +292,10 @@ async fn running_the_same_send_twice_sends_one_message() {
     let human = st(&socket, &[], &SEND[1..]).await;
     assert!(human.status.success(), "{}", stderr(&human));
     assert_eq!(
-        String::from_utf8_lossy(&human.stdout).lines().next().unwrap(),
-        first["subject"].as_str().unwrap()
+        String::from_utf8_lossy(&human.stdout),
+        format!("{}\n", first["subject"].as_str().unwrap())
     );
-    assert!(String::from_utf8_lossy(&human.stdout).contains("\nqueued: "), "{}", String::from_utf8_lossy(&human.stdout));
+    assert!(stderr(&human).contains("delivery: queued: "), "{}", stderr(&human));
     assert!(
         stderr(&human).contains("confirmed on retry"),
         "{}",
@@ -719,7 +730,7 @@ async fn a_landed_send_succeeds_when_the_projection_cannot_be_refreshed() {
         stderr(&sent)
     );
     let subject = store.messages(None, true).unwrap()[0].subject.clone();
-    assert_eq!(String::from_utf8_lossy(&sent.stdout).lines().next().unwrap(), subject);
+    assert_eq!(String::from_utf8_lossy(&sent.stdout), format!("{subject}\n"));
     let warning = stderr(&sent);
     assert!(warning.contains(&subject), "{warning}");
     assert!(warning.contains("st3-message:v1:"), "{warning}");
@@ -729,7 +740,7 @@ async fn a_landed_send_succeeds_when_the_projection_cannot_be_refreshed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn human_send_reports_current_delivery_but_status_failure_keeps_acceptance_successful() {
-    for outcome in ["queued", "stopped", "status-error"] {
+    for outcome in ["queued", "stopped", "status-error", "timeout", "malformed"] {
         let root = tempfile::tempdir().unwrap();
         let (back, store, server) = daemon(root.path()).await;
         if outcome == "stopped" {
@@ -744,33 +755,41 @@ async fn human_send_reports_current_delivery_but_status_failure_keeps_acceptance
         let front = root.path().join("front.sock");
         let losses = Arc::new(Losses::default());
         losses.delivery_reads_fail.store(outcome == "status-error", Ordering::SeqCst);
+        losses.delivery_reads_hold.store(outcome == "timeout", Ordering::SeqCst);
+        losses.delivery_reads_malformed.store(outcome == "malformed", Ordering::SeqCst);
         let proxy = lossy_proxy(front.clone(), back, losses.clone()).await;
-        let sent = st(&front, &[], &SEND[1..]).await;
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(10), st(&front, &[], &SEND[1..]),
+        ).await.expect("an optional status read must not hold the send open");
         assert!(sent.status.success(), "{}", stderr(&sent));
         assert_eq!(message_count(&store), 1);
         assert_eq!(losses.delivery_reads.load(Ordering::SeqCst), 1);
         let subject = store.messages(None, true).unwrap()[0].subject.clone();
-        let output = String::from_utf8(sent.stdout).unwrap();
-        let lines = output.lines().collect::<Vec<_>>();
-        assert_eq!(lines[0], subject);
-        if outcome == "status-error" {
-            assert_eq!(lines, [subject.as_str()]);
+        assert_eq!(String::from_utf8_lossy(&sent.stdout), format!("{subject}\n"));
+        let diagnostic = stderr(&sent);
+        let delivery = diagnostic.lines().filter(|line| line.starts_with("delivery: ")).collect::<Vec<_>>();
+        if matches!(outcome, "status-error" | "timeout" | "malformed") {
+            assert!(delivery.is_empty(), "{diagnostic}");
         } else {
-            assert_eq!(lines.len(), 2, "{output}");
-            assert!(lines[1].starts_with("queued: "), "{output}");
+            assert_eq!(delivery.len(), 1, "{diagnostic}");
+            assert!(delivery[0].starts_with("delivery: queued: "), "{diagnostic}");
             if outcome == "stopped" {
-                assert!(lines[1].contains("recipient stopped"), "{output}");
+                assert!(delivery[0].contains("recipient stopped"), "{diagnostic}");
             } else {
-                assert!(lines[1].contains("waiting for delivery"), "{output}");
+                assert!(delivery[0].contains("waiting for delivery"), "{diagnostic}");
             }
         }
         // JSON keeps the existing receipt and does not perform an optional delivery read.
-        let json = value(&st(&front, &[], SEND).await);
+        let json_output = st(&front, &[], SEND).await;
+        let json = value(&json_output);
+        assert!(!stderr(&json_output).contains("delivery: "));
         assert_eq!(json["subject"], subject);
         assert_eq!(json["already_sent"], true);
         assert!(json.get("delivery").is_none());
         assert_eq!(losses.delivery_reads.load(Ordering::SeqCst), 1);
         assert_eq!(message_count(&store), 1);
+        // The timeout fixture never answers until the command has returned and assertions finish.
+        losses.release_delivery.notify_waiters();
         proxy.abort();
         server.abort();
     }

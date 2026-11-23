@@ -232,7 +232,7 @@ pub(super) async fn run_message(
                     "sent" | "staged" => "queued",
                     _ => phase,
                 };
-                println!("{state}: {reason}");
+                eprintln!("delivery: {state}: {reason}");
             }
             Ok(())
         }
