@@ -231,8 +231,10 @@ pub(super) async fn run_message(
                     "sent" | "staged" => "queued",
                     _ => phase,
                 };
-                eprintln!("delivery: {state}: {reason}");
-                let _ = std::io::Write::flush(&mut std::io::stderr());
+                use std::io::Write as _;
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "delivery: {state}: {reason}");
+                let _ = stderr.flush();
             }
             // Keep the ID last even when callers merge stderr into stdout before tail -1.
             print_message_receipt(&receipt, json_output)

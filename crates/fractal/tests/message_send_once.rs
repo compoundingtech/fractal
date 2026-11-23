@@ -828,6 +828,25 @@ async fn human_send_keeps_the_id_last_when_stderr_is_merged_into_stdout() {
     server.abort();
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_send_keeps_durable_acceptance_when_stderr_is_full() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let mut command = st_command(&socket, &[], &SEND[1..]);
+    command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::from(full));
+    let child = command.spawn().unwrap();
+    drop(command);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+        .await.expect("an unwritable diagnostic sink cannot block accepted mail").unwrap();
+    assert!(output.status.success(), "{:?}", output.status);
+    assert_eq!(message_count(&store), 1);
+    let subject = store.messages(None, true).unwrap()[0].subject.clone();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{subject}\n"));
+    server.abort();
+}
+
 /// `--body -` reads a reply's text from stdin, as it does a send's, and a body that is empty or
 /// only whitespace is refused before anything is written (#4585).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
