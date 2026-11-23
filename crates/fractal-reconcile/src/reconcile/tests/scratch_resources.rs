@@ -156,7 +156,9 @@ mission "scratch-history" state="ready" timeout="1h" {
         .current_dir(root.path())
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null()).spawn().unwrap());
-    let subject = "agent/scratch-history";
+    let owned = store.desired_subjects().unwrap().into_iter()
+        .find(|desired| desired.kind == "agent").expect("compiled owner runtime");
+    let subject = owned.subject.as_str();
     for (incarnation, status) in [
         ("previous", "running"), ("previous", "stopped"),
         ("current", "running"), ("current", "exited"),
@@ -175,17 +177,14 @@ mission "scratch-history" state="ready" timeout="1h" {
     assert!(store.runtime_execution_quiescent(subject).unwrap());
     assert!(!reconciler.scratch_runtime_tree_retired(subject).unwrap());
     assert!(store.runtime_cleanup_settled("owned-exec", "current").unwrap());
-    let owned = store.desired_subjects().unwrap().into_iter()
-        .filter(|desired| desired.subject == subject).collect::<Vec<_>>();
-    assert_eq!(owned.len(), 1);
-    reconciler.finalize_mission_scratch(&run, &owned).unwrap();
+    reconciler.finalize_mission_scratch(&run, std::slice::from_ref(&owned)).unwrap();
     assert!(std::path::Path::new(&handle.path).join("result").exists());
     assert_eq!(store.scratch_inventory("node", None, 100).unwrap()[0].state, "held");
     std::io::Write::write_all(descendant.0.stdin.as_mut().unwrap(), b"go\n").unwrap();
     assert!(descendant.0.wait().unwrap().success(), "old descendant still reaches scratch by pathname");
     store.settle_runtime_cleanup(subject, "owned-exec", "previous").unwrap();
     assert!(reconciler.scratch_runtime_tree_retired(subject).unwrap());
-    reconciler.finalize_mission_scratch(&run, &owned).unwrap();
+    reconciler.finalize_mission_scratch(&run, std::slice::from_ref(&owned)).unwrap();
     assert!(!std::path::Path::new(&handle.path).exists());
 }
 
