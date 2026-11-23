@@ -590,7 +590,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&operation.id);
-            self.store.finish_runtime_start(&operation.id, &serde_json::json!({"error": format!("spawn launch worker: {error}"), "producer_closed": true}))?;
+            self.store.finish_runtime_start(&operation.id, &serde_json::json!({
+                "error": format!("spawn launch worker: {error}"),
+                "producer_closed": true,
+                "closure_kind": "before-backend",
+                "verification": "producer-closed",
+            }))?;
             self.store.finish_invocation_trace(&format!("invocation/{}", operation.id), true);
             self.start_changed(&operation.subject);
         }
@@ -826,6 +831,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.start_capture_attempt(&operation, retry.timeouts)?;
                     return Ok(());
                 }
+                // The worker returned before entering the backend. Preserve that exact
+                // non-launch proof when cancellation retires the retry; lost-worker
+                // recovery cannot reconstruct it from a runtime that never existed.
+                self.store.finish_runtime_start(&operation.id, &serde_json::json!({
+                    "error": "environment capture retry was revoked before launching the agent",
+                    "producer_closed": true,
+                    "closure_kind": "before-backend",
+                    "verification": "producer-closed",
+                }))?;
+                let Some(fresh) = self.store.runtime_start_for(&operation.subject)? else {
+                    return Ok(());
+                };
+                operation = fresh;
                 self.start_jobs.capture_retries.lock().unwrap_or_else(PoisonError::into_inner)
                     .remove(&operation.id);
             }

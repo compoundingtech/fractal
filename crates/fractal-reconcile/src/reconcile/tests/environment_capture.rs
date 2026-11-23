@@ -87,3 +87,57 @@ fn capture_attempts(timeouts: u32) {
         assert!(failed.body["fields"]["reason"].as_str().unwrap().contains("timed out after 3 attempts"));
     }
 }
+
+#[test]
+fn cancelling_capture_backoff_releases_lease_and_admits_replacement() {
+    let _clock = Clock;
+    let now = 1_800_000_000_000;
+    smallclaims::store::set_thread_clock(Some(now));
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let source = |command: &str| format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; command {command:?}; }}",
+        repository.display().to_string(),
+    );
+    apply_source(&store, &source("true"), "cancel-capture");
+    let subject = store.desired_subject_with_writer("agent/node.worker").unwrap().unwrap().0;
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.capture_timeouts.lock().unwrap().0 = 1;
+    // Match native backends: a producer that never started has no owner file or
+    // exited generation from which to reconstruct a positive closure proof.
+    runtime.start_closure_unavailable.store(true, Ordering::Release);
+    let reconciler = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    reconciler.wait_for_test_starts.store(false, Ordering::Release);
+    reconciler.perform_start(&subject, subject.member.as_ref().unwrap(), "cancel capture fixture").unwrap();
+    join_capture(&reconciler);
+    reconciler.reconcile_start_jobs().unwrap();
+    let cancelled = store.runtime_start_for(&subject.subject).unwrap().unwrap();
+    assert!(!cancelled.finished);
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err());
+    smallclaims::store::set_thread_clock(Some(now + 1_000));
+    reconciler.revoke_start(&subject.subject).unwrap();
+    reconciler.reconcile_start_jobs().unwrap();
+    assert!(store.runtime_start_for(&subject.subject).unwrap().is_none());
+    assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+    let closed: bool = store.readers.get().query_row(
+        "SELECT cleanup_verified=1 AND json_extract(result,'$.closure_proof.witness.kind')='before-backend' FROM local_runtime_starts WHERE id=?1",
+        [&cancelled.id], |row| row.get(0),
+    ).unwrap();
+    assert!(closed, "cancellation must retain the known non-launch witness");
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_ok(),
+        "cancelled retry retained its workspace lease");
+    assert!(runtime.starts.lock().unwrap().is_empty());
+    assert_eq!(runtime.capture_timeouts.lock().unwrap().1, 1);
+    apply_source(&store, &source("printf replacement"), "replacement-after-capture");
+    let replacement = store.desired_subject_with_writer(&subject.subject).unwrap().unwrap().0;
+    assert!(reconciler.perform_start_for_request(
+        &replacement, replacement.member.as_ref().unwrap(), "replacement capture fixture", None,
+    ).unwrap(), "replacement must be admitted, not held SeatBusy");
+    join_capture(&reconciler);
+    reconciler.reconcile_start_jobs().unwrap();
+    assert_eq!(runtime.starts.lock().unwrap().len(), 1);
+    assert!(store.latest_observation(&subject.subject, "runtime.action.succeeded").unwrap().is_some());
+}

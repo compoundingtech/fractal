@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "No claim fields, wire formats, client interfaces or store versions change. A timeout is not cached, so the next attempt actually captures the environment again. Launch ownership and declaration guards remain in force for every attempt."},
   "downtime": {"status": "none", "detail": "No additional downtime beyond the normal daemon upgrade."},
   "manual": {"status": "none", "detail": "No user action is required."},
-  "recovery": {"status": "none", "detail": "Retries retain the existing guarded start operation and never repeat a backend launch. A daemon restart retains the existing interrupted-worker recovery behavior. Reverting requires no data migration."}
+  "recovery": {"status": "none", "detail": "Retries retain the existing guarded start operation and never repeat a backend launch. Cancelling a waiting retry durably retains its before-backend closure witness, releasing workspace admission so a replacement can start. A daemon restart retains the existing interrupted-worker recovery behavior. Reverting requires no data migration."}
 }
