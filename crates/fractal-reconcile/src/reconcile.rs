@@ -3714,9 +3714,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if crate::otel::export_enabled() {
             tracing::Span::current().record("st.reconcile.items", desired.len() as i64);
         }
-        self.incoming_resumes(&desired)?;
+        self.incoming_resumes(desired)?;
         drop(desired_span);
-        self.cancel_invalid_admissions(&desired)?;
+        self.cancel_invalid_admissions(desired)?;
         // A stopped root ends every task it declared: each runs the exec's own stop below and is
         // not launched or restarted meanwhile. Starting the root again declares them again.
         let stopped_roots = desired
@@ -3822,7 +3822,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| !task_stops.contains(&subject.subject))
             .collect::<Vec<_>>();
-        let eligible = match self.store.owned_desired_subjects(&desired) {
+        let eligible = match self.store.owned_desired_subjects(desired) {
             Ok(eligible) => {
                 self.prune_stop_state(&gate_runners, &eligible);
                 eligible
@@ -3832,7 +3832,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 BTreeSet::new()
             }
         };
-        if let Err(error) = self.publish_model_drift_metrics(&desired, &eligible) {
+        if let Err(error) = self.publish_model_drift_metrics(desired, &eligible) {
             tracing::warn!(%error, "model drift metrics snapshot failed");
         }
         let eligible = |subject: &DesiredSubject| eligible.contains(&subject.subject);
@@ -4814,7 +4814,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         });
         if let Some(intake) = intake {
             self.isolate("stage/observers", &daemon, || {
-                self.reconcile_resource_observers(&intake, &desired)
+                self.reconcile_resource_observers(&intake, desired)
             });
             self.isolate("stage/schedules", &daemon, || {
                 self.reconcile_schedules(&intake)
@@ -4827,17 +4827,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             });
         }
         self.isolate("stage/provider-capacity-retries", &daemon, || {
-            self.reconcile_provider_capacity_retries(&desired)
+            self.reconcile_provider_capacity_retries(desired)
         });
         self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
         self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
-            self.reconcile_disk_space(&desired)
+            self.reconcile_disk_space(desired)
         });
         self.isolate("stage/replication-health", &daemon, || {
             self.reconcile_replication_health()
         });
-        self.isolate("stage/faults", &daemon, || self.deliver_faults(&desired));
+        self.isolate("stage/faults", &daemon, || self.deliver_faults(desired));
         self.isolate("stage/subagents", &daemon, || self.end_stale_subagents());
         self.reconcile_github_watches_stage();
         self.file_watchers_used
