@@ -3,6 +3,7 @@
     mod restart_preparation;
     #[cfg(test)]
     mod file_watch_scope;
+    mod environment_capture;
 
 mod native_effect_convergence {
     use super::*;
@@ -1155,6 +1156,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
+        capture_timeouts: Mutex<(u32, u32)>,
+        start_closure_unavailable: AtomicBool,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         /// Runs once, right after the named exec is next observed: its process ends just then.
@@ -2055,6 +2058,18 @@ mission "cancel-driver" state="ready" {
     }
 
     impl RuntimeControl for FakeRuntime {
+        fn launch_contract(&self, store: &Store, desired: &DesiredSubject, launch: &MemberSpec) -> Result<crate::launch_contract::Contract> {
+            let mut capture = self.capture_timeouts.lock().unwrap();
+            capture.1 += 1;
+            if capture.0 > 0 {
+                capture.0 -= 1;
+                return Err(fractal_runtime::ShellStartupTimeout {
+                    shell: "example-shell".into(), seconds: 10.0,
+                }.into());
+            }
+            crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true)
+                .map(|(contract, _)| contract)
+        }
         fn recover_resource_lanes(&self, store: &Store, host: &str, _now: u64) -> Result<usize> {
             if let Some(before) = self.before_resource_recovery.lock().unwrap().take() { before(store); }
             for execution in store.shell_resources(host, true)? {
@@ -2175,6 +2190,9 @@ mission "cancel-driver" state="ready" {
                 .get(&(id.into(), incarnation.into())).cloned())
         }
         fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
+            if self.start_closure_unavailable.load(Ordering::Acquire) {
+                return Ok(false);
+            }
             if member
                 .driver
                 .as_deref()

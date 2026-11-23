@@ -5172,6 +5172,31 @@ impl<R: RuntimeControl> Reconciler<R> {
         )
     }
 
+    fn record_capture_timeout_diagnostic(&self, subject: &str, retrying: bool) -> Result<()> {
+        let previous = self.store.observations_for(subject, "harness.diagnostic")?
+            .into_iter().rev()
+            .find(|claim| claim.body["fields"]["code"] == "environment-capture-timeout");
+        if !retrying && !previous.as_ref().is_some_and(|claim| claim.body["fields"]["status"] == "warning") {
+            return Ok(());
+        }
+        self.record_once_with_previous(
+            subject,
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("code".into(), Value::from("environment-capture-timeout")),
+                ("severity".into(), Value::from("warning")),
+                ("status".into(), Value::from(if retrying { "warning" } else { "resolved" })),
+                ("reason".into(), Value::from(if retrying {
+                    "login-shell environment capture timed out; retrying before launching the agent"
+                } else {
+                    "login-shell environment capture is no longer blocking the agent"
+                })),
+            ]),
+            Vec::new(),
+            previous.as_ref(),
+        )
+    }
+
     /// A member declaration this build cannot read has no member, so the member loop would
     /// pass over it without a word: never observed, started or stopped. The host that published
     /// it records the fault on it instead, until a build that can read it takes it up.
