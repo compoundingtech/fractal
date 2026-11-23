@@ -357,11 +357,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             Ok(lease) => lease,
             Err(error) => {
                 if prepared.workspace_admission.is_none() {
-                    self.record_once(&operation.subject, "runtime.reconcile-decision", BTreeMap::from([
-                        ("key".into(), Value::from(format!("start-workspace-wait:{}", operation.id))),
-                        ("decision".into(), Value::from("wait")),
-                        ("reason".into(), Value::from("workspace admission is unavailable; queued start will retry")),
-                    ]))?;
+                    if matches!(prepared.subject.kind.as_str(), "agent" | "exec") {
+                        let key = format!("start-workspace-wait:{}", operation.id);
+                        let previous = self.store.observations_for(
+                            &operation.subject, "runtime.reconcile-decision",
+                        )?.into_iter().rev().find(|claim| claim.body["fields"]["key"] == key);
+                        self.record_once_with_previous(
+                            &operation.subject, "runtime.reconcile-decision", BTreeMap::from([
+                                ("key".into(), Value::from(key)),
+                                ("decision".into(), Value::from("workspace-admission-unavailable")),
+                                ("reason".into(), Value::from("workspace admission is unavailable; queued start will retry")),
+                            ]), Vec::new(), previous.as_ref(),
+                        )?;
+                    }
                     return Ok(());
                 }
                 self.refuse_start_workspace(operation, &error)?;
@@ -672,27 +680,31 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn refuse_start_workspace(&self, operation: &RuntimeStartOperation, error: &anyhow::Error) -> Result<()> {
-        // Keep refusal diagnostics within each subject's schema: a rejected
-        // diagnostic must not prevent revocation and durable producer closure.
+        // Producer revocation/closure must never depend on a diagnostic append.
+        self.revoke_start(&operation.subject)?;
+        if operation.revoked_by.is_some() && !operation.dispatched && !operation.finished {
+            self.store.cancel_undispatched_runtime_start(&operation.id)?;
+        }
         let reason = Value::from(format!("{error:#}"));
-        if operation.body["subject"]["kind"] == "agent" {
+        let diagnostic = if operation.body["subject"]["kind"] == "agent" {
             self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
                 ("code".into(), Value::from("start-workspace-refused")),
                 ("reason".into(), reason),
                 ("invocation_id".into(), Value::from(format!("invocation/{}", operation.id))),
-            ]))?;
-        } else {
+            ]))
+        } else if operation.body["subject"]["kind"] == "exec" {
             self.record_once(&operation.subject, "runtime.reconcile-decision", BTreeMap::from([
                 ("key".into(), Value::from(format!("start-workspace-refused:{}", operation.id))),
                 ("decision".into(), Value::from("start-workspace-refused")),
                 ("reason".into(), reason),
-            ]))?;
-        }
-        // Queued cancellation proves the producer never ran. Dispatched producers
-        // still require their normal operation-fenced closure evidence.
-        self.revoke_start(&operation.subject)?;
-        if operation.revoked_by.is_some() && !operation.dispatched && !operation.finished {
-            self.store.cancel_undispatched_runtime_start(&operation.id)?;
+            ]))
+        } else {
+            // Gate subjects do not admit either diagnostic kind.
+            Ok(())
+        };
+        if let Err(error) = diagnostic {
+            tracing::warn!(subject = %operation.subject, error = %format!("{error:#}"),
+                "workspace refusal diagnostic could not be recorded");
         }
         self.start_changed(&operation.subject);
         Ok(())

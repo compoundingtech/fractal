@@ -2023,6 +2023,7 @@ fn a_later_stop_prevents_legacy_queued_restart_dispatch() {
 
 #[test]
 fn refused_legacy_admission_stays_queued_and_retries_without_losing_its_operation() {
+    let _clock = Clock::at(START);
     let root = crate::test_support::canonical_tempdir();
     let repository = crate::checkout::test_support::repository(root.path());
     let database = root.path().join("claims.db");
@@ -2032,7 +2033,18 @@ fn refused_legacy_admission_stays_queued_and_retries_without_losing_its_operatio
             "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
             repository.to_str().unwrap(),
         ), "queued-before-refusal");
-        queue_workspace_start(&store, &repository, &repository, true, None)
+        let request = store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("runtime_id".into(), Value::from("node.worker")),
+                ("incarnation_id".into(), Value::from("incumbent")),
+            ]),
+            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        queue_workspace_start(&store, &repository, &repository, true, Some(request))
     };
     let hidden = root.path().join("temporarily-unavailable");
     std::fs::rename(&repository, &hidden).unwrap();
@@ -2041,8 +2053,15 @@ fn refused_legacy_admission_stays_queued_and_retries_without_losing_its_operatio
     let restarted = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
     );
-    for _ in 0..2 {
-        restarted.reconcile_start_jobs().unwrap();
+    restarted.reconcile_once().unwrap();
+    assert!(store.observations_for("agent/node.worker", "runtime.reconcile-decision").unwrap()
+        .iter().any(|claim| claim.body["fields"]["decision"] == "restart-waiting"),
+        "the broad member pass must interleave its pending-restart diagnostic");
+    let events = restarted.event_notify.subscribe();
+    for _ in 0..5 {
+        restarted.reconcile_once().unwrap();
+        assert!(!events.has_changed().unwrap(),
+            "a refused admission interleaved with restart-waiting must not repeatedly wake reconciliation");
         let queued = store.runtime_start_for("agent/node.worker").unwrap().unwrap();
         assert_eq!(queued.id, id);
         assert!(!queued.dispatched && !queued.finished && queued.revoked_by.is_none());
