@@ -86,7 +86,7 @@ fn a_revision_runs_the_stored_blob_it_pins() {
     let engine = engine(dir.path());
     let hash = engine.store.put_blob(b"export default 1").unwrap();
     // The author's path is provenance only: the member runs the store's bytes.
-    let program = ProgramSpec { bundle: "/nowhere/land.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None };
+    let program = ProgramSpec { bundle: "/nowhere/land.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None, finalizer_grace_ms: None };
     let pinned = engine.pinned_module(&program).unwrap();
     assert_eq!(std::fs::read(&pinned).unwrap(), b"export default 1");
     // A damaged pinned copy is replaced from the blob, never run.
@@ -130,12 +130,12 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         step: step.into(),
         attempt: 2,
         run: "mission-run/run".into(),
-        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
+        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None, finalizer_grace_ms: None },
         payload: BTreeMap::new(),
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new(),
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
@@ -172,12 +172,12 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         step: step.subject.clone(),
         attempt,
         run: step.run.clone(),
-        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None },
+        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None, finalizer_grace_ms: None },
         payload: BTreeMap::new(),
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new(),
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
@@ -295,12 +295,26 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
     engine.lock().running.insert(step.clone(), Running {
         dispatch: Dispatch {
             step: step.clone(), attempt, run: run.subject.clone(),
-            program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
+            program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None, finalizer_grace_ms: None },
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
-        generation, requests: BTreeMap::new(),
+        generation, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]),
     });
+}
+
+#[test]
+fn a_request_backed_operation_cannot_overwrite_the_finalizer_control_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "reserved-finalizer-key");
+    let step = &run.steps[0].subject;
+    running_attempt(&engine, &run, 1, 1);
+    engine.request(step, 1, 1, &"a".repeat(64),
+        &json!({"t": "run", "key": "$finalizers", "mission": "child", "input": {}, "seq": 1})).unwrap();
+    assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "failed");
+    assert!(engine.requests(&run.subject).is_empty());
+    assert!(!engine.journal_claims(step).unwrap().iter().any(|claim| claim.body["fields"]["key"] == "$finalizers"));
 }
 
 #[test]
