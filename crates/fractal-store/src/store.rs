@@ -7365,7 +7365,7 @@ impl Store {
     }
 
     pub fn selected_desired_kind(&self, subject: &str) -> Result<Option<String>> {
-        smallclaims::touched::note_read(|| subject.to_owned());
+        smallclaims::touched::note_read(|| format!("desired:{subject}"));
         let connection = self.readers.get();
         current_desired_row(&connection, subject).map(|row| row.map(|row| row.kind))
     }
@@ -7867,7 +7867,10 @@ impl Store {
     }
 
     pub fn latest_actual_value(&self, subject: &str) -> Result<Option<Value>> {
-        smallclaims::touched::note_read(|| subject.to_owned());
+        // Harness reports are deliberately excluded from ACTUAL_STATE_CLAIM. Their
+        // timestamps must not dirty a reader of the actual-state projection either.
+        smallclaims::touched::note_read(|| format!("actual:{subject}"));
+        smallclaims::touched::note_read(|| "kind:record.repaired".to_owned());
         if subject.starts_with("resource/slo-breach/") {
             return slo_breaches::fact(&self.readers.get(), subject);
         }
@@ -9339,6 +9342,12 @@ fn enforce_mission_run_capacity_excluding(
 }
 
 pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
+    // Naming and repair can change a negative lookup or move an alias to a different
+    // identity. Ordinary declarations remain keyed to the resolved physical subject.
+    for kind in ["agent.renamed", "mission.renamed", "record.repaired"] {
+        smallclaims::touched::note_read(|| format!("kind:{kind}"));
+    }
+    smallclaims::touched::note_read(|| format!("desired:{subject}"));
     let row = connection
         .prepare_cached(
             "SELECT d.kind, d.revision, d.claim_id, d.body, d.member, d.owner_run, d.owner_generation,
@@ -9346,12 +9355,15 @@ pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Opt
                     AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
                          OR EXISTS(SELECT 1 FROM meta WHERE key IN ('operation-conflict-naming-name:' || ?1, 'operation-conflict-naming-name:' || requested.identity)))),h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
-                     AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
+                     AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END,
+                 requested.identity
              FROM (SELECT COALESCE((SELECT identity FROM identity_names WHERE name=?1),?1) AS identity) requested
              LEFT JOIN identity_heads h ON h.identity=requested.identity
              LEFT JOIN desired d ON d.subject=requested.identity",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h6ba84b692e14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h4b8f61721a65 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| {
+            let identity: String = row.get(8)?;
+            smallclaims::touched::note_read(|| format!("desired:{identity}"));
             let desired = if row.get_ref(0)?.data_type() == rusqlite::types::Type::Null {
                 None
             } else { Some(DesiredRow {
@@ -24066,6 +24078,21 @@ pub enum MissionRunEnrichment {
     Evaluation,
 }
 
+/// Current step projection for one generation, without definition or history enrichment.
+pub fn mission_generation_steps_tx(
+    connection: &Connection,
+    generation: &str,
+) -> rusqlite::Result<Vec<StepRunView>> {
+    let mut statement = connection.prepare(
+        "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
+                lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
+         FROM step_runs WHERE generation_id=?1 ORDER BY created_at_unix_ms, step_path",
+    )?;
+    statement
+        .query_map([generation_id_from_subject(generation)], step_run_from_row)?
+        .collect()
+}
+
 pub fn mission_run_view_and_definition_tx(
     connection: &Connection,
     run_id: &str,
@@ -24074,17 +24101,7 @@ pub fn mission_run_view_and_definition_tx(
     let presentation = matches!(enrichment, MissionRunEnrichment::Presentation | MissionRunEnrichment::Created);
     let history = if enrichment == MissionRunEnrichment::Created { WakeHistory::NewStep } else { WakeHistory::Read };
     let mut view = mission_run_header_tx(connection, run_id)?;
-    let mut statement = connection.prepare(
-        "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
-                lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
-         FROM step_runs WHERE generation_id=?1 ORDER BY created_at_unix_ms, step_path",
-    )?;
-    view.steps = statement
-        .query_map(
-            [generation_id_from_subject(&view.generation)],
-            step_run_from_row,
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+    view.steps = mission_generation_steps_tx(connection, &view.generation)?;
     let mission = if presentation || view.steps.is_empty() {
         None
     } else {

@@ -5455,6 +5455,7 @@ impl MissionsStore for Store {
         ) -> Result<(MissionRunView, Option<MissionSpec>)> {
         self.read_snapshot_unindexed(|| {
             let connection = self.readers.get();
+            self.record_mission_read_reconstruction();
             let (view, mission) =
                 mission_run_view_and_definition_tx(&connection, id, MissionRunEnrichment::Evaluation)?;
             note_run_view_reads(&view);
