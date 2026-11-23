@@ -742,7 +742,8 @@ async fn shard_receive_and_wake_do_not_wait_for_projection_and_preserve_admitted
     ).await.unwrap().0;
     assert_eq!(duplicate.receipt.received, 0);
     assert_eq!(target.projection_contention_generation(), generation);
-    shard_replication_wake(State(state.clone()), shard_path()).await.unwrap();
+    let wake = shard_replication_wake(State(state.clone()), shard_path()).await.unwrap().0;
+    assert_eq!(wake["changed"], false, "{wake}");
     assert_eq!(projection_frontier(), frontier);
     assert_eq!(target.projection_contention_generation(), generation);
     drop(gate);
