@@ -2724,7 +2724,7 @@ fn gate_workspace_refusal_retires_even_after_a_stop() {
         ), "gate-refusal");
         let mut desired = store.desired_subjects_named(&["exec/example/gate-fixture".into()])
             .unwrap().remove(0);
-        desired.subject = "gate/workspace-refusal".into();
+        desired.subject = "gate-operation/workspace-refusal".into();
         desired.kind = "gate".into();
         desired.desired = Value::Null;
         let member = desired.member.as_ref().unwrap().clone();
@@ -2743,7 +2743,21 @@ fn gate_workspace_refusal_retires_even_after_a_stop() {
             revoked_by: None, finished: false, result: None, applied: false,
             cleanup_verified: false, dispatched: false, receipted: false,
         };
-        store.admit_runtime_start(&mut operation, 2).unwrap();
+        assert_eq!(store.admit_runtime_start(&mut operation, 2).unwrap(),
+            crate::store::RuntimeStartAdmission::Admitted);
+        // This registered gate family permits lifecycle control but not the
+        // diagnostic whose rejection must never block producer retirement.
+        let refused_diagnostic = store.append_claim(&ClaimInput {
+            subject: desired.subject.clone(), kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("key".into(), Value::from(format!("start-workspace-refused:{}", operation.id))),
+                ("decision".into(), Value::from("start-workspace-refused")),
+                ("reason".into(), Value::from("the gate workspace is unavailable")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap_err();
+        assert_eq!(refused_diagnostic.code, "invalid-claim-subject");
         if stopped {
             let stop = store.append_claim(&ClaimInput {
                 subject: desired.subject.clone(), kind: "runtime.action.requested".into(),
