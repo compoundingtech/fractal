@@ -60,7 +60,7 @@ fn launch_input_change_evaluates_only_its_declaration() {
 
     let store = Arc::new(Store::open_memory("node").unwrap());
     let source = (0..64).fold(String::from("version 2\n"), |mut source, index| {
-        source.push_str(&format!("agent \"scoped/{index}\" {{ command \"true\"; }}\n"));
+        source.push_str(&format!("agent \"scoped/{index}\" {{ command \"true\"; lifecycle \"adopt-only\"; }}\n"));
         source
     });
     apply_source(&store, &source, "scoped-launch-inputs");
@@ -80,4 +80,97 @@ fn launch_input_change_evaluates_only_its_declaration() {
     assert!((0..64).filter(|index| *index != 7).all(|index|
         !reconciler.incremental.needs(&format!("launch-inputs:agent/scoped/{index}"), 0)));
     assert!(global.notified().now_or_never().is_none(), "no full reconcile notification");
+}
+
+#[tokio::test]
+async fn repaired_launch_dependency_retries_only_its_guarded_member() {
+    use super::{FakeRuntime, apply_source};
+    use super::super::Reconciler;
+    use crate::store::Store;
+    use std::{os::unix::fs::PermissionsExt as _, sync::Arc};
+
+    let root = tempfile::tempdir().unwrap();
+    let dependency = root.path().join("provider");
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(r#"version 2
+agent "dependent" {{ workspace {:?}; argv {:?}; }}
+agent "unrelated" {{ workspace {:?}; command "true"; }}
+"#, root.path().display().to_string(), dependency.display().to_string(),
+        root.path().display().to_string()), "repair-launch");
+    let runtime = Arc::new(FakeRuntime::default());
+    let global = Arc::new(Notify::new());
+    let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), global.clone());
+    let desired = store.desired_subject_with_writer("agent/node.dependent").unwrap().unwrap().0;
+    assert!(crate::contract::declared(&store, &desired).is_err());
+    reconciler.watch_launch_inputs(&desired).unwrap();
+    let key = format!("launch-input/{}", dependency.display());
+    assert!(reconciler.file_watchers.lock().unwrap().contains_key(&key));
+    reconciler.file_changes.invalidate(&reconciler.incremental, &key, false, &global);
+    assert_eq!(reconciler.evaluate_changed_launch_inputs().unwrap(), 1);
+    assert!(runtime.starts.lock().unwrap().is_empty(), "missing identity refuses admission");
+    assert!(store.member_reconcile_fault(&desired.subject, None).unwrap().is_some());
+    assert!(global.notified().now_or_never().is_none(),
+        "file selection and refused admission must not notify a full pass");
+
+    std::fs::write(&dependency, "fixture executable identity").unwrap();
+    std::fs::set_permissions(&dependency, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Settle real identity measurement, not the member evaluation under test.
+    crate::contract::declared(&store, &desired).unwrap();
+    reconciler.file_changes.invalidate(&reconciler.incremental, &key, false, &global);
+    *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(|| {
+        panic!("a launch-input repair must not run a full reconcile pass");
+    }));
+    assert_eq!(reconciler.evaluate_changed_launch_inputs().unwrap(), 1);
+    let started = runtime.started_members.lock().unwrap();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].runtime_id, desired.member.as_ref().unwrap().runtime_id);
+    assert!(store.member_reconcile_fault(&desired.subject, None).unwrap().is_none());
+    assert!(store.latest_actual_value("agent/node.unrelated").unwrap().is_none());
+    assert!(store.member_reconcile_fault("agent/node.unrelated", None).unwrap().is_none());
+    // A real dispatched start retains its existing durable-runtime lifecycle wake.
+    // The hook above proves that admission itself did not execute a full pass.
+}
+
+#[tokio::test]
+async fn missing_nested_watch_does_not_collapse_to_first_component() {
+    use super::FakeRuntime;
+    use super::super::{Reconciler, now_ms};
+    use crate::store::Store;
+    use std::{sync::Arc, time::Duration};
+
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("outer/inner/tool");
+    let key = format!("launch-input/{}", target.display());
+    let global = Arc::new(Notify::new());
+    let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+        Arc::new(FakeRuntime::default()), "node".into(), global.clone());
+    reconciler.incremental.evaluated("launch-inputs:agent/selected",
+        BTreeSet::from([key.clone()]), None);
+    reconciler.ensure_file_watch(&key, &target).unwrap();
+    std::fs::create_dir(root.path().join("outer")).unwrap();
+    let sibling = root.path().join("outer/unrelated");
+    std::fs::write(&sibling, "existing sibling").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !reconciler.incremental.needs("launch-inputs:agent/selected", now_ms()) {
+            reconciler.file_changes.notify.notified().await;
+        }
+    }).await.unwrap();
+    while tokio::time::timeout(Duration::from_millis(100),
+        reconciler.file_changes.notify.notified()).await.is_ok() {}
+    reconciler.file_changes.launches.lock().unwrap().clear();
+    reconciler.incremental.evaluated("launch-inputs:agent/selected",
+        BTreeSet::from([key.clone()]), None);
+    // Keep the original ancestor subscription: its relevance target must retain
+    // inner/tool, rather than treating every descendant of outer as relevant.
+    std::fs::write(&sibling, "unrelated sibling changed").unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(250),
+        reconciler.file_changes.notify.notified()).await.is_err());
+    assert!(!reconciler.incremental.needs("launch-inputs:agent/selected", now_ms()));
+    assert!(reconciler.file_changes.launches.lock().unwrap().is_empty());
+    std::fs::create_dir(root.path().join("outer/inner")).unwrap();
+    std::fs::write(&target, "repaired").unwrap();
+    tokio::time::timeout(Duration::from_secs(5),
+        reconciler.file_changes.notify.notified()).await.unwrap();
+    assert!(reconciler.incremental.needs("launch-inputs:agent/selected", now_ms()));
+    assert!(global.notified().now_or_never().is_none());
 }
