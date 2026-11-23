@@ -24113,9 +24113,9 @@ agent "example.reviewer" { workspace "/tmp"; command "true" }"#,
     }
 
     /// A seat's watch wakes it once for each comment and review anyone else posts, once for each
-    /// move of the required checks into pass or fail on the current head, and a last time when
-    /// the pull request merges, which ends that watch only. The baseline and a repeated
-    /// observation wake nobody.
+    /// distinct terminal required-check result on the current head, and a last time when the
+    /// pull request merges, which ends that watch only. The baseline, a repeated observation
+    /// and an identical recurring result without a numeric execution identity wake nobody.
     #[test]
     fn a_watch_wakes_once_per_comment_review_and_check_move_and_ends_on_merge() {
         let fixture = WatchFixture::new();
@@ -24163,8 +24163,9 @@ agent "example.reviewer" { workspace "/tmp"; command "true" }"#,
             "@moss requested changes on acme/garden#12"
         );
 
-        // The required checks fail, are rerun, and fail again on the same head: two wakes. A new
-        // head wakes while pending, then again when its required checks pass.
+        // No execution identities are supplied: fail -> pending -> the same failure at this
+        // head is the documented no-run-ID recurrence limitation, not a distinguishable rerun.
+        // A new head wakes while pending, then again when its required checks pass.
         let checks = |head: &str, state: &str| {
             serde_json::json!({"repository_id": 7, "pull_requests": [watched_pull(12, serde_json::json!({
                 "new": false, "head": head,
@@ -24184,7 +24185,6 @@ agent "example.reviewer" { workspace "/tmp"; command "true" }"#,
         assert_eq!(
             wakes[3..],
             [
-                "Required checks failed on acme/garden#12",
                 "Required checks failed on acme/garden#12",
                 "Pull request changed on acme/garden#12",
                 "Required checks passed on acme/garden#12",

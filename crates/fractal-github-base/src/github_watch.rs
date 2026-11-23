@@ -272,7 +272,7 @@ pub enum WatchEvent {
 }
 
 impl WatchEvent {
-    /// Checks are identified by head, counted aggregate/failed names and workflow run/attempt
+    /// Checks are identified by head, counted names, aggregate/failed names and workflow run/attempt
     /// identities, never by raw display checks, observer IDs or incidental suite/readiness metadata.
     fn key(&self, observation: &str, facts: &Value) -> Value {
         match self {
@@ -291,12 +291,18 @@ impl WatchEvent {
 /// (app, workflow, suite, run, attempt, event): only run and attempt identify a rerun.
 /// No-ID checks include commit statuses, non-workflow third-party apps (possibly Mergemaster,
 /// depending on its reporting), and Actions runs with null databaseId: identical recurrences
-/// at the same head are suppressed. Changes preserving aggregate state, failed names and run
-/// attempts (such as success to skipped) intentionally do not wake.
+/// at the same head are suppressed. Changes preserving counted names, aggregate state, failed
+/// names and run attempts (such as success to skipped) intentionally do not wake.
 fn check_state(facts: &Value, include_runs: bool) -> Value {
     let checks = &facts["required_checks"];
     // These are the producer's selected results, after app-pin and superseded-suite filtering.
     // Raw checks are display facts, not evidence that a counted check changed.
+    let counted = checks["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
     let failed = checks["failed"]
         .as_array()
         .into_iter()
@@ -309,7 +315,7 @@ fn check_state(facts: &Value, include_runs: bool) -> Value {
         .flatten()
         .filter_map(|execution| Some((execution.get(3)?.as_u64()?, execution.get(4)?.as_u64()?)))
         .collect::<std::collections::BTreeSet<_>>());
-    json!(["checks", facts["head_sha"], checks["state"], failed, runs])
+    json!(["checks", facts["head_sha"], counted, checks["state"], failed, runs])
 }
 
 /// The events one observation of a watched item holds, oldest first: the comments and reviews

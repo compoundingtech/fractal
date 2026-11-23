@@ -945,6 +945,28 @@ mod tests {
         assert_eq!(record(&restarted, &recovery).len(), 1);
         assert!(record(&restarted, &recovery).is_empty());
         assert_eq!(restarted.messages(Some(agent), false).unwrap().len(), 4);
+        let mut added = recovery.clone();
+        added["pull_requests"][0]["required_checks"]["checks"] = json!(["build", "lint"]);
+        added["pull_requests"][0]["required_checks"]["state"] = json!("pending");
+        added["pull_requests"][0]["checks"].as_array_mut().unwrap()
+            .push(json!({"name":"lint", "status":"pending", "conclusion":null}));
+        assert!(record(&restarted, &added).is_empty());
+        added["pull_requests"][0]["required_checks"]["state"] = json!("pass");
+        added["pull_requests"][0]["checks"][1] =
+            json!({"name":"lint", "status":"completed", "conclusion":"success"});
+        // Same head and Actions attempt, but the newly counted commit status just passed.
+        assert_eq!(record(&restarted, &added).len(), 1);
+        assert!(record(&restarted, &added).is_empty());
+        assert_eq!(restarted.messages(Some(agent), false).unwrap().len(), 5);
+        // A context first observed already passing is also a new counted result.
+        added["pull_requests"][0]["required_checks"]["checks"] = json!(["build", "lint", "audit"]);
+        added["pull_requests"][0]["checks"].as_array_mut().unwrap()
+            .push(json!({"name":"audit", "status":"completed", "conclusion":"success"}));
+        assert_eq!(record(&restarted, &added).len(), 1);
+        assert!(record(&restarted, &added).is_empty());
+        added["pull_requests"][0]["required_checks"]["checks"] = json!(["audit", "build", "lint"]);
+        assert!(record(&restarted, &added).is_empty(), "counted-name order is not a change");
+        assert_eq!(restarted.messages(Some(agent), false).unwrap().len(), 6);
     }
 
     #[tokio::test]
