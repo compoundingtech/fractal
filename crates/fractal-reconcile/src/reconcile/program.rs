@@ -476,6 +476,8 @@ impl ProgramEngine {
 
     /// Do not replay arbitrary Effect finalizers after losing their worker.
     pub fn finalize_cleanup(&self, run: &MissionRunView) -> Result<bool> {
+        // Host/worker exit changes this non-store barrier and wakes program-effects.
+        smallclaims::touched::note_read(|| "program-effects".to_owned());
         self.release_left(run)?;
         let Some(mission) = self.store.mission_spec(
             run.mission.strip_prefix("mission/").unwrap_or(&run.mission), Some(&run.revision),
