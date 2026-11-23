@@ -7867,6 +7867,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     store.trim_locally(config.trim.local)?;
     store.storage_census.checkpoint_enabled.set(config.checkpoint.enabled)
         .map_err(|_| anyhow::anyhow!("storage checkpoint census already configured"))?;
+    // Existing configurations get the store's UTC-day pacing without another setting.
     if let Some(claims) = config.trim.daily_claims {
         store.trim_locally_at_most(claims);
     }
