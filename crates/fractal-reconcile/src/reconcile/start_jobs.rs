@@ -658,6 +658,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         )
     }
 
+    fn workspace_restart_authority_current(
+        &self,
+        operation: &RuntimeStartOperation,
+        request: &crate::model::ClaimRecord,
+    ) -> Result<bool> {
+        if !self.store.runtime_start_request_retained(request)?
+            || crate::restart::latest_request(&self.store, &operation.subject)?
+                .is_none_or(|latest| latest.id != request.id)
+            || self.store.selected_desired_token(&operation.subject)?.as_deref()
+                != request.body.pointer("/evidence/0").and_then(Value::as_str)
+            || self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some()
+            || self.store.newest_claim_index(&operation.subject, "agent.retired")? > request.store_index
+        {
+            return Ok(false);
+        }
+        let controls = self.store.observations_for(&operation.subject, "runtime.action.requested")?;
+        let superseded = controls.iter().rev().take_while(|claim| claim.id != request.id).any(|claim| {
+            matches!(claim.body["fields"]["action"].as_str(),
+                Some("stop" | "terminate" | "suspend" | "resume"))
+                && !(claim.actor.is_none()
+                    && claim.body["fields"]["action"] == "terminate"
+                    && claim.body["fields"]["operation"].as_str() == Some(operation.id.as_str()))
+        });
+        Ok(!superseded && !crate::suspension::current(&self.store, &operation.subject)?
+            .is_some_and(|suspension| suspension.holds_seat()))
+    }
+
     fn requeue_unadmitted_restart(&self, operation: &RuntimeStartOperation) -> Result<()> {
         if operation.dispatched || !operation.body["workspace_admission"].is_null() {
             return Ok(());
@@ -673,27 +700,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             let head = self.store.claims_for(&operation.subject, None)?
                 .last().map(|claim| claim.id.clone());
             if !prepared.requests_retained(&self.store)?
-                || !self.store.runtime_start_request_retained(request)?
-                || crate::restart::latest_request(&self.store, &operation.subject)?
-                    .is_none_or(|latest| latest.id != request.id)
-                || self.store.selected_desired_token(&operation.subject)?.as_deref()
-                    != request.body.pointer("/evidence/0").and_then(Value::as_str)
-                || self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some()
-                || self.store.newest_claim_index(&operation.subject, "agent.retired")?
-                    > request.store_index
+                || !self.workspace_restart_authority_current(operation, request)?
             {
-                return Ok(());
-            }
-            let controls = self.store.observations_for(&operation.subject, "runtime.action.requested")?;
-            if controls.iter().rev().take_while(|claim| claim.id != request.id).any(|claim| {
-                matches!(claim.body["fields"]["action"].as_str(),
-                    Some("stop" | "terminate" | "suspend" | "resume"))
-                    && !(claim.actor.is_none()
-                        && claim.body["fields"]["action"] == "terminate"
-                        && claim.body["fields"]["operation"].as_str() == Some(operation.id.as_str()))
-            }) || crate::suspension::current(&self.store, &operation.subject)?
-                .is_some_and(|suspension| suspension.holds_seat())
-            {
+                if self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_none() {
+                    self.retire_restart_request(&operation.subject, request,
+                        "later lifecycle intent superseded the queued restart during admission upgrade")?;
+                }
                 return Ok(());
             }
             self.store.append_claim(&ClaimInput {
@@ -707,9 +719,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(key),
             })?
         };
-        // The incumbent may already be gone. Transfer its durable quiet-boundary
-        // proof before retiring the old request, including after an interrupted requeue.
-        if request.body["fields"]["action"] == crate::restart::WHEN_IDLE
+        // Replayed requeues must recheck replacement authority too. Capture its head
+        // before reading controls so a stop racing the proof append defeats the fence.
+        let head = self.store.claims_for(&operation.subject, None)?
+            .last().map(|claim| claim.id.clone());
+        let current = prepared.requests_retained(&self.store)?
+            && self.workspace_restart_authority_current(operation, &requeued)?;
+        if !current {
+            if self.store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))?.is_none() {
+                self.retire_restart_request(&operation.subject, &requeued,
+                    "later lifecycle intent superseded the reissued restart")?;
+            }
+        } else if request.body["fields"]["action"] == crate::restart::WHEN_IDLE
             && let Some(release) = self.store.operation_claim(&crate::restart::release_key(request))?
         {
             self.store.append_claim(&ClaimInput {
@@ -718,9 +739,46 @@ impl<R: RuntimeControl> Reconciler<R> {
                 actor: release.actor,
                 fields: serde_json::from_value(release.body["fields"].clone())?,
                 evidence: vec![requeued.id.clone(), release.id, request.id.clone()],
-                expected_subject: None,
+                expected_subject: Some(head),
                 idempotency_key: Some(crate::restart::release_key(&requeued)),
             })?;
+        }
+        if request.body["fields"]["fresh_session"] == true
+            && request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+        {
+            // A fresh session may already have stopped its incumbent after handoff.
+            // Preserve the acknowledged boundary, not a new preparation timestamp.
+            let head = self.store.claims_for(&operation.subject, None)?
+                .last().map(|claim| claim.id.clone());
+            if !prepared.requests_retained(&self.store)?
+                || !self.workspace_restart_authority_current(operation, &requeued)?
+            {
+                if self.store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))?.is_none() {
+                    self.retire_restart_request(&operation.subject, &requeued,
+                        "later lifecycle intent superseded the reissued restart")?;
+                }
+            } else if let Some(prepare) = self.store.operation_claim(
+                &format!("restart-prepare:{}:{}", operation.subject, request.id),
+            )? && crate::handoff::acknowledged_handoff_since(
+                &self.store, &operation.subject, prepare.accepted_at_unix_ms,
+            )? {
+                self.store.append_claim(&ClaimInput {
+                    subject: operation.subject.clone(),
+                    kind: "runtime.reconcile-decision".into(),
+                    actor: requeued.actor.clone(),
+                    fields: BTreeMap::from([
+                        ("key".into(), Value::from("restart-prepare")),
+                        ("decision".into(), Value::from("ready")),
+                        ("acknowledged_since_unix_ms".into(),
+                            Value::from(prepare.accepted_at_unix_ms.to_string())),
+                    ]),
+                    evidence: vec![requeued.id.clone(), prepare.id, request.id.clone()],
+                    expected_subject: Some(head),
+                    idempotency_key: Some(format!(
+                        "restart-prepare:{}:{}:handoff", operation.subject, requeued.id,
+                    )),
+                })?;
+            }
         }
         self.retire_restart_request(&operation.subject, request,
             &format!("queued restart reissued as {} with fresh workspace admission", requeued.id))?;

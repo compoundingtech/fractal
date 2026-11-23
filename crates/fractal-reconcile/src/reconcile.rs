@@ -5499,6 +5499,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         require_handoff: bool,
     ) -> Result<bool> {
         let key = format!("restart-prepare:{subject}:{trigger}");
+        if require_handoff
+            && let Some(boundary) = self.store.operation_claim(&format!("{key}:handoff"))?
+        {
+            let since = boundary.body["fields"]["acknowledged_since_unix_ms"]
+                .as_str().context("transferred handoff boundary has no acknowledgement time")?
+                .parse::<u128>().context("invalid transferred handoff acknowledgement time")?;
+            return crate::handoff::acknowledged_handoff_since(&self.store, subject, since);
+        }
         let now = now_ms();
         let Some(prepare) = self.store.operation_claim(&key)? else {
             let deadline = (!require_handoff)
