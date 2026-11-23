@@ -649,7 +649,7 @@ pub fn open(graph: &Arc<super::Store>, root: &Path) -> anyhow::Result<Arc<GraphS
         .clone();
     shard.set_member_key(key)?;
     graph.extension::<Slot>().set(shard.clone())?;
-    graph.fractal.mail_objective_inputs.invalidate();
+    graph.fractal.mail_objective_inputs.shard_replaced();
     Ok(shard)
 }
 
