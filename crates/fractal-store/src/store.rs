@@ -26122,26 +26122,68 @@ pub mod checkpoint_capture_epoch_tests_shared_attention_tests;
 /// its seats in full to a member whose `daemon.started` changed. The card's freshness rule ages
 /// the time itself, so an answer needs no expiry: a host that stops pushing reads stale.
 #[derive(Default)]
-pub struct RelayedFreshness(std::sync::Mutex<HashMap<String, (String, u128)>>);
+pub struct RelayedFreshness {
+    heard: std::sync::Mutex<HashMap<String, (String, u128)>>,
+    changes: tokio::sync::watch::Sender<u64>,
+}
 
 impl RelayedFreshness {
     /// Record when the seat's host heard each `(agent, incarnation, heard_at)`, keeping the newest.
     pub fn record(&self, seats: impl IntoIterator<Item = (String, String, u128)>) {
-        let mut heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut heard = self.heard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut changed = false;
         for (agent, incarnation, heard_at) in seats {
             let newer = heard
                 .get(&agent)
                 .is_none_or(|(of, at)| *of != incarnation || *at < heard_at);
             if newer {
                 heard.insert(agent, (incarnation, heard_at));
+                changed = true;
             }
         }
+        drop(heard);
+        if changed {
+            self.changes.send_modify(|revision| *revision += 1);
+        }
+    }
+
+    /// Observe changed freshness evidence, including incarnation replacement.
+    /// Equal or older repetitions do not wake consumers.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// When the seat's host last said it heard `subject`'s `incarnation`.
     pub fn heard_at(&self, subject: &str, incarnation: &str) -> Option<u128> {
-        let heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let heard = self.heard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         heard.get(subject).filter(|(of, _)| of == incarnation).map(|(_, at)| *at)
+    }
+}
+
+#[cfg(test)]
+mod relayed_freshness_change_tests {
+    use super::RelayedFreshness;
+
+    #[test]
+    fn wakes_only_for_changed_evidence() {
+        let freshness = RelayedFreshness::default();
+        let mut changes = freshness.subscribe();
+        let record = |incarnation: &str, at| {
+            freshness.record([("agent/example".into(), incarnation.into(), at)]);
+        };
+        record("one", 100);
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        record("one", 100);
+        record("one", 99);
+        assert!(!changes.has_changed().unwrap());
+        record("one", 101);
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        record("two", 50);
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(freshness.heard_at("agent/example", "one"), None);
+        assert_eq!(freshness.heard_at("agent/example", "two"), Some(50));
     }
 }
 

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Summary counts retain keyed mission, working-agent and machine contributions. Unrelated commits and roster presentation revisions no longer rebuild those contributions, and clock-dependent membership changes use their actual eligibility deadlines instead of a periodic refresh.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim or replay behavior changes. Summary maintenance consumes changed claim subjects and the existing presented roster."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Only volatile summary caches and work counters change; no persistent schema migration is required."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No authority, admission, checkpoint or retention rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The summary collection contract is unchanged. The performance endpoint exposes summary source rebuild counts. Machine recency, peer reachability and mission eligibility expire at their actual transition deadlines; summary demand gates remain in place."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No interruption or additional startup migration. Initial demand builds the in-memory contributions."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or configuration change is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Restarting reconstructs the volatile cache. Rolling back restores the previous summary maintenance behavior without changing stored data."
+  }
+}

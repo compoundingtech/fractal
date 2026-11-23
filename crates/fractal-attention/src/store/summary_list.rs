@@ -29,6 +29,10 @@ pub enum PublishedSummary {
 }
 
 pub trait SummaryListStore {
+    fn with_summary_sources<T>(&self, f: impl FnOnce(&mut SummarySources) -> Result<T>) -> Result<T>;
+    fn summary_valid_until(&self, within_ms: u64) -> Option<u128>;
+    fn summary_work(&self) -> Value;
+    fn summary_peer_inputs(&self, now: u128) -> Result<(Value, Option<u128>)>;
     /// The row published for `person`, and note that a window reads that selection. Only while
     /// the attention list's refresher runs.
     fn published_summary(&self, person: Option<&str>) -> PublishedSummary;
@@ -98,6 +102,57 @@ pub trait SummaryListStore {
 }
 
 impl SummaryListStore for Store {
+    fn summary_peer_inputs(&self, now: u128) -> Result<(Value, Option<u128>)> {
+        let peers = self.readers.get().prepare_cached(
+            "SELECT peer,last_error IS NOT NULL FROM replication_peers ORDER BY peer")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut deadline = None;
+        let mut inputs = Vec::with_capacity(peers.len());
+        for (peer, failed) in peers {
+            let last = self.replication_peer_last_success(&peer)?;
+            let until = last.map(|at| at.saturating_add(if failed {
+                smallclaims::store::PEER_QUIET_EXCHANGE_MS
+            } else {
+                smallclaims::store::PEER_UP_MS
+            }));
+            if let Some(until) = until.filter(|until| *until > now) {
+                deadline = Some(deadline.map_or(until, |held: u128| held.min(until)));
+            }
+            inputs.push(json!([peer, last.map(|at| at.to_string()),
+                smallclaims::store::peer_up(last, failed, now)]));
+        }
+        Ok((Value::Array(inputs), deadline))
+    }
+
+    fn with_summary_sources<T>(&self, f: impl FnOnce(&mut SummarySources) -> Result<T>) -> Result<T> {
+        let mut lists = self.fractal.summary_list.lists.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&mut lists.sources)
+    }
+
+    fn summary_valid_until(&self, within_ms: u64) -> Option<u128> {
+        let list = &self.fractal.summary_list;
+        if list.failing.load(AtomicOrdering::Acquire) {
+            return None;
+        }
+        let now = now_ms() as u64;
+        let lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
+        lists.selections.values().any(|selection|
+            now.saturating_sub(selection.read_at) <= within_ms)
+            .then_some(lists.sources.valid_until).flatten()
+    }
+
+    fn summary_work(&self) -> Value {
+        let lists = self.fractal.summary_list.lists.lock().unwrap_or_else(PoisonError::into_inner);
+        let work = &lists.sources.work;
+        json!({
+            "mission_subject_rebuilds": work.mission_subject_rebuilds,
+            "agent_subject_rebuilds": work.agent_subject_rebuilds,
+            "machine_subject_rebuilds": work.machine_subject_rebuilds,
+            "attention_subject_rebuilds": work.attention_subject_rebuilds,
+        })
+    }
+
 
     fn published_summary(&self, person: Option<&str>) -> PublishedSummary {
         if !self.attention_list_refresher_running() {
@@ -313,3 +368,33 @@ impl SummaryListStore for Store {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_clock_requires_live_selection_and_does_not_retry_failures() {
+        let store = Store::open_memory("summary-clock-fixture").unwrap();
+        let until = now_ms() + 60_000;
+        store.with_summary_sources(|sources| {
+            sources.valid_until = Some(until);
+            Ok(())
+        }).unwrap();
+        assert_eq!(store.summary_valid_until(60_000), None);
+        {
+            let mut lists = store.fractal.summary_list.lists.lock().unwrap();
+            lists.selections.insert(None, Selection {
+                read_at: now_ms() as u64,
+                ..Selection::default()
+            });
+        }
+        assert_eq!(store.summary_valid_until(60_000), Some(until));
+        store.note_summary_shared_failed(true);
+        assert_eq!(store.summary_valid_until(60_000), None);
+        store.note_summary_shared_failed(false);
+        assert_eq!(store.summary_valid_until(60_000), Some(until));
+        store.fractal.summary_list.lists.lock().unwrap().selections.get_mut(&None).unwrap().read_at = 0;
+        assert_eq!(store.summary_valid_until(1), None);
+    }
+}

@@ -9,6 +9,7 @@ use crate::SeatsStore;
 use crate::EvidenceStore;
 use super::*;
 use crate::store::summary_list::{SummaryInputs, SummaryMachines, SummaryShared};
+mod incremental;
 
 #[derive(Debug)]
 pub struct RosterNotPublished;
@@ -87,19 +88,13 @@ pub fn shared(
     } else {
         compute()?.0
     };
-    let missions = missions
+    let active_missions = missions
         .first()
         .and_then(|v| v["missions"].as_array())
         .into_iter()
         .flatten()
-        .map(|m| {
-            (
-                m["id"].as_str().unwrap_or_default().to_owned(),
-                m["system"] == true,
-                m["active"] == true,
-            )
-        })
-        .collect();
+        .filter(|m| m["system"] != true && m["active"] == true)
+        .count();
     // A daemon's reads never fold the roster: count from its newest publication, and say which.
     let mut agents_as_of = None;
     let mut agents = if store.agent_roster_refresher_running() {
@@ -127,7 +122,7 @@ pub fn shared(
         cut: snapshot.store_index,
         evaluated_at_unix_ms: now,
         published_at_unix_ms: client_now_ms(),
-        missions,
+        active_missions,
         working_agents,
         machines,
         agents_as_of,
@@ -137,11 +132,7 @@ pub fn shared(
 /// One selection's summary row: what needs `person` (its `alerts`) beside the counts every
 /// selection shares.
 pub fn row(person: Option<&str>, alerts: usize, shared: &SummaryShared) -> anyhow::Result<Value> {
-    let active = shared
-        .missions
-        .iter()
-        .filter(|(_, system, active)| !system && *active)
-        .count();
+    let active = shared.active_missions;
     let mut value = json!({"person_id":person,"alerts":alerts,"needs_you":alerts,"working_agents":shared.working_agents,"active_missions":active,"machines":shared.machines});
     value["revision"] = json!(smallclaims::hash::canonical_hash(&value)?);
     value["id"] = json!("summary/current");
@@ -201,13 +192,10 @@ pub fn machine_counts(
     json!({"connected":counts[0],"indirect":counts[1],"offline":counts[2]})
 }
 
-/// How often the shared counts are computed again with nothing else changed: delivery
-/// staleness, machine recency and mission deadlines read the clock.
-const PUBLISHED_PERIOD_MS: u128 = 30_000;
 
 /// Publish the summary row of every selection a window read within `idle_ms`. The counts no
 /// person changes are computed once for all of them, in one short snapshot, and again only when
-/// their inputs (cut, roster, clock period) change; each selection then counts what needs its
+/// their semantic inputs or an actual eligibility deadline change; each selection counts its
 /// person from the newest attention publication, in memory. As the daemon starts the shared
 /// counts are computed with no selection until they first succeed (the complete roster they
 /// count agents from may come later), so the first window is served at once. If they
@@ -228,28 +216,25 @@ pub fn refresh_published(
         return Ok(false);
     }
     let before = store.summary_shared();
-    let roster = *store.subscribe_agent_roster().borrow();
+    let roster = store.agents_publication().map_or(0, |p| p.metadata().revision);
     let computed = store.read_snapshot(|index| {
         let now = client_now_ms();
         let inputs = SummaryInputs {
             cut: index,
             roster,
-            period: now / PUBLISHED_PERIOD_MS,
+            peers: store.summary_peer_inputs(now)?.0,
         };
         if before
             .as_ref()
-            .is_some_and(|(_, held)| waiting_only || *held == inputs)
+            .is_some_and(|(_, held)| waiting_only || *held == inputs
+                && store.summary_valid_until(idle_ms).is_none_or(|until| now < until))
         {
             return Ok(None);
         }
         // No shared count depends on the session: a read-only local session reads them all.
         let session = ClientSession::local(None).map_err(|error| anyhow::anyhow!(error.message))?;
-        let request: CollectionSubscribe = serde_json::from_value(json!({
-            "kind":"subscribe", "id":"summary", "collection":"summary", "limit":1,
-        }))?;
         let snapshot = client_snapshot_at(state, index);
-        let machines = published_machines(state, generation, &session, &snapshot, inputs.period)?;
-        Ok(Some((shared(state, &session, &request, &snapshot, now, None, None, Some(machines))?, inputs)))
+        Ok(Some((incremental::shared(state, generation, &session, &snapshot, now)?, inputs)))
     });
     let mut waiting_for_roster = false;
     let shared = match computed {
@@ -317,8 +302,8 @@ pub fn refresh_published(
     let Some(attention) = store.newest_attention_list().1 else {
         return Ok(false);
     };
-    for person in &selections {
-        let alerts = published_attention_alerts(&attention.rows, person.as_deref());
+    let alert_counts = incremental::alerts(store, &attention.rows, &selections)?;
+    for (person, alerts) in selections.iter().zip(alert_counts) {
         let row = crate::store::summary_list::SummaryRow {
             cut: shared.cut,
             published_at_unix_ms: shared.published_at_unix_ms,
@@ -335,22 +320,23 @@ pub fn refresh_published(
 /// The machines the shared counts count at `snapshot`: the ones read before while they still
 /// hold (`Store::summary_machines_hold`), else read again. A runtime with claims since is reduced
 /// again alone: the machines hold while the current runtimes run on the same hosts as before,
-/// whichever runtimes those are. They are read again each clock `period` too, since a peer's replication
-/// successes change them with no claim, as do a new conflicting operation and the fleet's
-/// membership, compared each time.
+/// whichever runtimes those are. Semantic peer receipts and reachability transitions, rather
+/// than a periodic clock bucket, invalidate transport evidence.
 pub fn published_machines(
     state: &AppState,
     generation: u64,
     session: &ClientSession,
     snapshot: &ClientSnapshot,
-    period: u128,
+    now: u128,
 ) -> anyhow::Result<Arc<Vec<Value>>> {
     let store = &state.store;
     let index = snapshot.store_index;
     let conflicts = store.conflicting_operations()?;
     let fleet = store.fleet_view_for_client()?;
+    let (peers, valid_until) = store.summary_peer_inputs(now)?;
     let held = store.summary_machines().filter(|held| {
-        held.period == period && held.conflicts == conflicts && held.fleet == fleet
+        held.peers == peers && held.conflicts == conflicts && held.fleet == fleet
+            && held.valid_until.is_none_or(|until| now < until)
     });
     let kept = match held {
         Some(held) => match store.summary_machines_hold(held.cut, index)? {
@@ -391,7 +377,7 @@ pub fn published_machines(
     };
     store.keep_summary_machines(
         generation,
-        SummaryMachines { cut: index, period, conflicts, fleet, machines: machines.clone(), runtimes },
+        SummaryMachines { cut: index, peers, valid_until, conflicts, fleet, machines: machines.clone(), runtimes },
     );
     Ok(machines)
 }
