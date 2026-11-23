@@ -108,10 +108,9 @@ impl Inputs {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).generation.subscribe()
     }
 
-    /// Replacing the message shard changes source authority, unlike a view reset.
-    pub(super) fn invalidate(&self) {
+    /// Replacing the message shard changes source authority, not graph row identities.
+    pub(super) fn shard_replaced(&self) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        state.routing.clear();
         state.advance();
     }
 

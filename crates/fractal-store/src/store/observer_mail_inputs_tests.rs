@@ -311,6 +311,9 @@ fn desired_old_and_new_recipient_keys_survive_updates_and_removal() {
     store.connection.write().execute(
         /* sqlite-large-value: allow-for-now lv-h01bb0e65c2cc owner=fractal_store::store::observer_mail_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('agent/old','agent','revision/test',(SELECT id FROM claims LIMIT 1),'{}')", [],
     ).unwrap();
+    let before_replacement = *receiver.borrow();
+    store.fractal.mail_objective_inputs.shard_replaced();
+    assert!(store.mail_objective_changes_since(before_replacement).1.is_none());
     let generation = *receiver.borrow();
     store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hbdc2626eee19 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET subject='agent/new' WHERE subject='agent/old'", []).unwrap();
     assert_eq!(store.mail_objective_changes_since(generation).1,
@@ -319,6 +322,13 @@ fn desired_old_and_new_recipient_keys_survive_updates_and_removal() {
     store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h7f1408b5fbc7 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET kind='stop' WHERE subject='agent/new'", []).unwrap();
     assert_eq!(store.mail_objective_changes_since(generation).1,
         Some((BTreeSet::new(), BTreeSet::from(["agent/new".to_owned()]))));
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hc4c979fca1a7 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET kind='agent' WHERE subject='agent/new'", []).unwrap();
+    store.fractal.mail_objective_inputs.shard_replaced();
+    let generation = *receiver.borrow();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hd6c3743ff341 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='agent/new'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::new(), BTreeSet::from(["agent/new".to_owned()]))),
+        "shard replacement preserves the old desired key for raw deletions");
 }
 
 #[test]
