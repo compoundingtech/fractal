@@ -181,7 +181,7 @@ agent "example/worker" { workspace "/tmp"; harness "omp" {}; restart "never"; }
                 }
                 assert_eq!(store.current_harness(AGENT).unwrap().is_some_and(|harness| harness.is_ready()), ready);
                 if preparation != "none" {
-                    assert!(!reconciler.prepare_restart(AGENT, "matrix", "matrix", false).unwrap());
+                    assert!(!reconciler.prepare_restart(AGENT, "matrix", "matrix", false, None).unwrap());
                 }
                 match preparation {
                     "acked" => {
@@ -212,5 +212,50 @@ agent "example/worker" { workspace "/tmp"; harness "omp" {}; restart "never"; }
                     "running={running}, ready={ready}, prepare={preparation}");
             }
         }
+    }
+}
+
+#[test]
+fn transferred_handoff_is_bound_to_the_incarnation_and_native_session_at_use() {
+    for (incarnation, session, accepted) in [
+        ("incumbent", "native-A", true),
+        ("replacement", "native-B", false),
+        ("incumbent", "native-B", false),
+    ] {
+        let _clock = Clock;
+        let origin = 1_800_000_000_000;
+        smallclaims::store::set_thread_clock(Some(origin));
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        apply_source(&store, r#"version 2
+agent "example/worker" { workspace "/tmp"; harness "omp" {}; restart "never"; }
+"#, "handoff-identity");
+        let member = store.desired_subject_with_writer(AGENT).unwrap().unwrap().0.member.unwrap();
+        let observation = running_observation(&member, incarnation);
+        claim(&store, "runtime.observed", serde_json::to_value(
+            member_fields(&member, "running", Some(incarnation), false),
+        ).unwrap(), vec![], "current-incarnation");
+        claim(&store, "harness.session-file", json!({
+            "incarnation_id": incarnation, "harness": "omp", "session_id": session,
+        }), vec![], "current-session");
+        claim(&store, "runtime.reconcile-decision", json!({
+            "reason": serde_json::to_string(&start_jobs::HandoffBoundary {
+                acknowledged_since_unix_ms: origin,
+                incarnation: "incumbent".into(),
+                native_session: Some(("omp".into(), "native-A".into())),
+            }).unwrap(),
+        }), vec![], &format!("restart-prepare:{AGENT}:reissued:handoff"));
+        smallclaims::store::set_thread_clock(Some(origin + 1));
+        store.put_document(
+            &crate::handoff::document_name(AGENT).unwrap(), b"Original handoff", &None, "handoff",
+        ).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+        assert_eq!(reconciler.prepare_restart(
+            AGENT, "reissued", "recovered fresh restart", true, Some(&observation),
+        ).unwrap(), accepted);
+        let preparation = store.operation_claim(&format!("restart-prepare:{AGENT}:reissued")).unwrap();
+        assert_eq!(preparation.is_none(), accepted,
+            "a changed incumbent must receive a new preparation, not the original handoff");
     }
 }
