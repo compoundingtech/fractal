@@ -143,9 +143,14 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn observe_start_worktrees(
         &self,
         observed: BTreeMap<PathBuf, (PathBuf, PathBuf)>,
+        scoped: bool,
     ) {
-        self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
-            .observed = observed;
+        let mut leases = self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner);
+        if scoped {
+            leases.observed.extend(observed);
+        } else {
+            leases.observed = observed;
+        }
     }
 
     pub(super) fn member_activation_lease(
