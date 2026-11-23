@@ -37,6 +37,69 @@ fn join_launch(reconciler: &Reconciler<FakeRuntime>, runtime: &FakeRuntime) -> S
 }
 
 #[test]
+fn render_blockers_fence_requested_restart_and_declared_launch_cutover() {
+    for requested in [true, false] {
+        let root = crate::test_support::canonical_tempdir();
+        let workspace = crate::checkout::test_support::repository(root.path());
+        std::fs::create_dir(workspace.join(".claude")).unwrap();
+        std::fs::write(workspace.join(".claude/settings.local.json"), "{}\n").unwrap();
+        crate::checkout::test_support::git(
+            &workspace, &["add", "-f", ".claude/settings.local.json"],
+        );
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = |revision: &str, render: &str| format!(r#"version 2
+agent "example/worker" {{
+  workspace {:?}
+  harness "omp" {{ args "--restart-fixture={revision}" }}
+  restart "never"
+  {render}
+}}
+"#, workspace.display().to_string());
+        apply_source(&store, &source("one", ""), "initial");
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.driver_state_dir = root.path().join("drivers");
+        reconciler.wait_for_test_starts.store(false, Ordering::Release);
+        reconciler.reconcile_once().unwrap();
+        let incarnation = join_launch(&reconciler, &runtime);
+        let starts = runtime.started_members.lock().unwrap().len();
+        let revision = if requested { "one" } else { "two" };
+        apply_source(&store, &source(
+            revision, r#"render { file ".claude/settings.local.json" "changed" }"#,
+        ), "blocked-relaunch");
+        let desired = store.desired_subject_with_writer(AGENT).unwrap().unwrap().0;
+        let observation = running_observation(desired.member.as_ref().unwrap(), &incarnation);
+        let request = if requested {
+            let token = store.selected_desired_token(AGENT).unwrap().unwrap();
+            Some(claim(&store, "runtime.action.requested", json!({
+                "action":"restart", "incarnation_id":incarnation,
+            }), vec![token], "blocked-restart"))
+        } else {
+            assert!(reconciler.declared_launch_changes(&desired, &observation).unwrap().is_some(),
+                "this declaration would otherwise stop the incumbent for relaunch");
+            None
+        };
+        reconciler.reconcile_once().unwrap();
+        let fault = store.member_reconcile_fault(AGENT, None).unwrap().unwrap();
+        assert!(fault.contains("tracked file"), "{fault}");
+        assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+        assert!(runtime.stops.lock().unwrap().is_empty(), "preparation must fence the physical stop");
+        if let Some(request) = request {
+            let completion = store.operation_claim(&format!("agent-restart-completed:{}", request.id))
+                .unwrap().unwrap();
+            assert_eq!(completion.kind, "runtime.action.failed");
+        }
+        // Explicit stop intents remain independent of launch preparation.
+        apply_source(&store, &format!("version 2\nstop {AGENT:?}\n"), "explicit-stop");
+        reconciler.reconcile_once().unwrap();
+        assert!(!runtime.stops.lock().unwrap().is_empty());
+        assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+    }
+}
+
+#[test]
 fn plain_restart_preparation_keeps_idle_incumbent_observable_until_ack_or_deadline() {
     for (acknowledge, context) in [
         (true, "ordinary"), (false, "ordinary"),
