@@ -40,8 +40,12 @@ or cancelled. Late observations for older occurrences do not replace the newer o
 outcome. Failure and cancellation reasons are terminal-safe and capped at 120 characters,
 including an ellipsis when shortened. Future arming does not hide the preceding work outcome.
 `none` means no outcome in that tail, not that the schedule has never run. Started/failed claims
-are attributed through their linked request within the tail; when a newer observation cannot
-be attributed, the displayed occurrence's outcome is explicitly unknown rather than guessed.
+are attributed through their linked work-requested or occurrence-reached claim within the tail;
+when a newer observation cannot be attributed, the displayed occurrence's outcome is explicitly
+unknown rather than guessed. The display considers only the newest claims in that bounded tail,
+not the full history: if an outcome claim falls outside it, an earlier state can be shown.
+Use `fractal claims ls --subject SCHEDULE --order desc --json` to read full history, following
+its history cursor explicitly when needed.
 
 This CLI-only enrichment uses the existing exact-subject `GET /v1/claims` route for at most the
 first 50 displayed schedules, with at most four reads in flight. Each read has a two-second

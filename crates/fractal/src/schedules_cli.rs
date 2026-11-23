@@ -123,7 +123,8 @@ fn outcome_occurrence(claim: &ClaimRecord, claims: &[ClaimRecord]) -> Option<u64
         "schedule.occurrence-cancelled" => fields["occurrence"].as_u64(),
         "schedule.work-started" | "schedule.work-failed" => {
             let request = fields["request"].as_str()?;
-            claims.iter().find(|claim| claim.id == request && claim.kind == "schedule.work-requested")
+            claims.iter().find(|claim| claim.id == request && matches!(claim.kind.as_str(),
+                "schedule.work-requested" | "schedule.occurrence-reached"))
                 .and_then(|claim| claim.body["fields"]["occurrence"].as_u64())
         }
         _ => None,
@@ -159,7 +160,7 @@ fn latest_outcome(claims: &[ClaimRecord]) -> String {
             short_reason(fields["reason"].as_str().unwrap_or("unknown"))),
         _ => unreachable!(),
     };
-    format!("{occurrence}: {outcome}")
+    format!("occurrence {occurrence}: {outcome}")
 }
 
 fn render(page: &Value, actor: &str, outcomes: &BTreeMap<String, String>) -> Result<String> {
@@ -296,6 +297,23 @@ mod tests {
             claim("reached", "schedule.occurrence-reached", json!({"occurrence":35})),
         ];
         assert_eq!(latest_outcome(&claims), "occurrence 35: outcome unknown");
+    }
+
+    #[test]
+    fn mission_head_failure_links_directly_to_the_reached_tick() {
+        for (code, reason) in [
+            ("no-ready-mission-revision", "mission/example has no ready published head on schedule host"),
+            ("mission-head-unavailable", "cannot read mission/example head: unavailable"),
+        ] {
+            // The timer emits this failure before a work request can be constructed.
+            let claims = [
+                claim("failed", "schedule.work-failed", json!({"request":"reached","code":code,"reason":reason})),
+                claim("reached", "schedule.occurrence-reached", json!({
+                    "revision":"schedule-revision","occurrence":35,"scheduled_at_unix_ms":"1795424400000"
+                })),
+            ];
+            assert_eq!(latest_outcome(&claims), format!("occurrence 35: failed {code}: {reason}"));
+        }
     }
 
     #[test]
