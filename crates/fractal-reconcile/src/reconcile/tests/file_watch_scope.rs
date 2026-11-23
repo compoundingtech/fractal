@@ -53,17 +53,21 @@ fn relevance_preserves_any_path_referents_and_ancestor_replacements() {
 
 #[test]
 fn launch_input_change_evaluates_only_its_declaration() {
-    use super::{FakeRuntime, apply_source};
+    use super::{FakeRuntime, parse_intent};
     use super::super::Reconciler;
     use crate::store::Store;
     use std::sync::Arc;
 
     let store = Arc::new(Store::open_memory("node").unwrap());
     let source = (0..64).fold(String::from("version 2\n"), |mut source, index| {
-        source.push_str(&format!("agent \"scoped/{index}\" {{ command \"true\"; lifecycle \"adopt-only\"; }}\n"));
+        source.push_str(&format!("agent \"scoped/{index}\" {{ command \"true\"; }}\n"));
         source
     });
-    apply_source(&store, &source, "scoped-launch-inputs");
+    let mut intent = parse_intent(&source, "node").unwrap();
+    for subject in intent.subjects.values_mut() {
+        subject.member.as_mut().unwrap().lifecycle = crate::model::MemberLifecycle::AdoptOnly;
+    }
+    store.apply_internal(&intent, "scoped-launch-inputs").unwrap();
     let global = Arc::new(Notify::new());
     let reconciler = Reconciler::new(store, Arc::new(FakeRuntime::default()),
         "node".into(), global.clone());
@@ -101,21 +105,39 @@ agent "unrelated" {{ workspace {:?}; command "true"; }}
     let global = Arc::new(Notify::new());
     let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), global.clone());
     let desired = store.desired_subject_with_writer("agent/node.dependent").unwrap().unwrap().0;
+    // FakeRuntime supplies synthetic executable identity, so represent the native
+    // missing-provider refusal with its existing physical-start failure control.
+    let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+    runtime.failed_starts.lock().unwrap().insert(runtime_id.clone());
     assert!(crate::contract::declared(&store, &desired).is_err());
     reconciler.watch_launch_inputs(&desired).unwrap();
     let key = format!("launch-input/{}", dependency.display());
     assert!(reconciler.file_watchers.lock().unwrap().contains_key(&key));
     reconciler.file_changes.invalidate(&reconciler.incremental, &key, false, &global);
-    assert_eq!(reconciler.evaluate_changed_launch_inputs().unwrap(), 1);
-    assert!(runtime.starts.lock().unwrap().is_empty(), "missing identity refuses admission");
-    assert!(store.member_reconcile_fault(&desired.subject, None).unwrap().is_some());
     assert!(global.notified().now_or_never().is_none(),
-        "file selection and refused admission must not notify a full pass");
+        "file selection must not notify a full pass");
+    assert_eq!(reconciler.evaluate_changed_launch_inputs().unwrap(), 1);
+    assert!(runtime.started_members.lock().unwrap().is_empty(),
+        "a missing-provider refusal must not produce a successful member");
+    assert!(store.member_reconcile_fault(&desired.subject, None).unwrap().is_some());
+    assert_eq!(*runtime.starts.lock().unwrap(), [runtime_id.clone()],
+        "only the dependent member attempted admission");
 
     std::fs::write(&dependency, "fixture executable identity").unwrap();
     std::fs::set_permissions(&dependency, std::fs::Permissions::from_mode(0o755)).unwrap();
     // Settle real identity measurement, not the member evaluation under test.
     crate::contract::declared(&store, &desired).unwrap();
+    runtime.failed_starts.lock().unwrap().remove(&runtime_id);
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+    }
+    let _clock = ResetClock;
+    let failed = store.observations_for(&desired.subject, "runtime.action.failed").unwrap();
+    let retry_at = failed.last().expect("the native start refusal is recorded")
+        .accepted_at_unix_ms + 15_001;
+    // Preserve the normal failed-start admission backoff, without waiting on wall time.
+    smallclaims::store::set_thread_clock(Some(retry_at));
     reconciler.file_changes.invalidate(&reconciler.incremental, &key, false, &global);
     *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(|| {
         panic!("a launch-input repair must not run a full reconcile pass");
@@ -124,6 +146,8 @@ agent "unrelated" {{ workspace {:?}; command "true"; }}
     let started = runtime.started_members.lock().unwrap();
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].runtime_id, desired.member.as_ref().unwrap().runtime_id);
+    assert_eq!(*runtime.starts.lock().unwrap(), [runtime_id.clone(), runtime_id],
+        "the repaired input must retry only its dependent member");
     assert!(store.member_reconcile_fault(&desired.subject, None).unwrap().is_none());
     assert!(store.latest_actual_value("agent/node.unrelated").unwrap().is_none());
     assert!(store.member_reconcile_fault("agent/node.unrelated", None).unwrap().is_none());
@@ -167,7 +191,16 @@ async fn missing_nested_watch_does_not_collapse_to_first_component() {
         reconciler.file_changes.notify.notified()).await.is_err());
     assert!(!reconciler.incremental.needs("launch-inputs:agent/selected", now_ms()));
     assert!(reconciler.file_changes.launches.lock().unwrap().is_empty());
+    // The scoped scheduler refreshes coverage after an ancestor invalidation.
+    reconciler.ensure_file_watch(&key, &target).unwrap();
     std::fs::create_dir(root.path().join("outer/inner")).unwrap();
+    tokio::time::timeout(Duration::from_secs(5),
+        reconciler.file_changes.notify.notified()).await.unwrap();
+    reconciler.ensure_file_watch(&key, &target).unwrap();
+    while tokio::time::timeout(Duration::from_millis(100),
+        reconciler.file_changes.notify.notified()).await.is_ok() {}
+    reconciler.incremental.evaluated("launch-inputs:agent/selected",
+        BTreeSet::from([key.clone()]), None);
     std::fs::write(&target, "repaired").unwrap();
     tokio::time::timeout(Duration::from_secs(5),
         reconciler.file_changes.notify.notified()).await.unwrap();
@@ -199,17 +232,18 @@ mission "roster-owner" state="ready" {
 agent "selected" {{
   workspace {workspace:?}
   command "true"
-  lifecycle "adopt-only"
   render {{ file "shared.txt" "selected" }}
 }}
 {stale_kind} "stale" {{
   workspace {workspace:?}
   command "true"
-  lifecycle "adopt-only"
   render {{ file "shared.txt" "stale" }}
 }}
 "#, workspace = root.path().display().to_string());
         let mut intent = parse_intent(&source, "node").unwrap();
+        for subject in intent.subjects.values_mut() {
+            subject.member.as_mut().unwrap().lifecycle = crate::model::MemberLifecycle::AdoptOnly;
+        }
         let stale = intent.subjects.values_mut()
             .find(|subject| subject.subject.ends_with(".stale")).unwrap();
         let stale_subject = stale.subject.clone();
