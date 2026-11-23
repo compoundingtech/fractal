@@ -2683,9 +2683,10 @@ fn collection_refolds_count_only_changed_keys() {
         mission(&store, name);
     }
     let alpha = start(&store, "garden/alpha", "alpha-count");
-    start(&store, "garden/beta", "beta-count");
+    let beta = start(&store, "garden/beta", "beta-count");
     let (plant, actor) = step(&alpha, "plant");
     store.set_step_state(&plant, "ready", None).unwrap();
+    store.set_step_state(&step(&beta, "plant").0, "ready", None).unwrap();
     let (work, _) = folded_at_once(fold_work(&store, None, None));
     let (missions, _) = folded_at_once(fold_missions(&store, None, None));
     let counts = || (store.published_work_list().refolded(), store.published_missions_list().refolded());
