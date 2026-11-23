@@ -1124,7 +1124,10 @@ transaction-fed retained metadata. Shard lifecycle timestamps come from the sour
 not from the mirror's later wall time; its dedicated replay cursor catches up existing
 history. Retry and alias spellings collapse to one `(message, canonical agent recipient)`
 sample. Current declared host ownership determines the host row. People are outside this
-family; missing agent ownership is unknown, never a successful delivery.
+family. Agent recipients without a declared agent subject/host are excluded, not unknown
+or successful delivery. They appear in the row's `excluded` count and in diagnostics as
+`excluded_undeclared_recipient`; they do not enter the eligible denominator or prevent
+known coverage. A declared recipient owned by this host still needs its native frontier.
 
 The producer reads retained source metadata in indexed 128-row keyset pages and releases
 each SQLite reader before processing another page or message's lifecycle. No read
@@ -1169,7 +1172,7 @@ acknowledges a previously unavailable publication; they do not write into the se
 
 The daemon starts one reactive source publication beside its roster producer. Source events
 invalidate the previous cut immediately; capture failure, startup, missing shard mirror
-coverage, missing ownership, missing/stale driver frontiers and malformed original clocks
+coverage, missing/stale driver frontiers for owned recipients and malformed original clocks
 produce unknown/no-data and cannot recover an owner episode. An idle source subscription
 can renew its own capture heartbeat without querying mail, but cannot advance a native
 producer frontier. One-shot lifecycle/budget/freshness boundaries wake evaluation; no source

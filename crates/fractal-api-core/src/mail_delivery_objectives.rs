@@ -155,7 +155,8 @@ impl Incremental {
             for (total, count) in snapshot.source_work.iter_mut().zip(part.source_work) { *total += count; }
         }
         // A recipient's newer frontier cannot extend another recipient's certified cut.
-        snapshot.unknown += snapshot.samples.iter().filter(|sample| sample.onset_ms > snapshot.source_through_ms).count();
+        snapshot.unknown += snapshot.samples.iter().filter(|sample|
+            !matches!(sample.terminal, LifecycleTerminal::Excluded) && sample.onset_ms > snapshot.source_through_ms).count();
         let connection = store.readers.get();
         let shard = crate::store::messages_shard::mailbox_reads::position(store)?;
         let mirrored = crate::store::stream_mirror::mail_source_sent_through(&connection)?;
@@ -321,6 +322,8 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
     let p95 = latencies.get((latencies.len() * 95).div_ceil(100).saturating_sub(1)).copied();
     row["diagnostics"] = json!({
         "window_ms": 86_400_000, "p95_ms": p95, "censored_open": true,
+        "excluded_undeclared_recipient": samples.iter()
+            .filter(|sample| matches!(sample.terminal, LifecycleTerminal::Excluded)).count(),
         "oldest_open_ms": samples.iter().filter(|sample| matches!(sample.terminal, LifecycleTerminal::Open))
             .map(|sample| now.saturating_sub(sample.onset_ms)).max(),
     });
@@ -338,7 +341,7 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
         "error": snapshot.and_then(|snapshot| snapshot.error.as_deref()),
     });
     let explain = row["explain"].as_str().unwrap_or_default();
-    row["explain"] = json!(format!("{explain} One sample per message and canonical agent recipient on its current declared host. Generic delivered/read assertions never certify acceptance. Native receipts were checked against the physical owner and recipient incarnation when committed; later restarts do not erase historical acceptance. Explicit next-turn holds remain visible separately until their first durable eligibility edge; after release latency still begins at the ORIGINAL durable send, without subtracting hold time. Terminal close/expiry without certified input acceptance is failure, not a successful stop. Unknown ownership, malformed source clocks or historical delivered/read without certified acceptance prevents recovery. Budget evaluation stops at the minimum current native producer frontier, not the daemon cache heartbeat; a missing/stale frontier is unknown. Source capture is reactive and request reads never sample mail."));
+    row["explain"] = json!(format!("{explain} One sample per message and canonical agent recipient on its current declared host. Agent recipients without a declared host are excluded, visible in excluded_undeclared_recipient diagnostics, not successful delivery or unknown coverage. Generic delivered/read assertions never certify acceptance. Native receipts were checked against the physical owner and recipient incarnation when committed; later restarts do not erase historical acceptance. Explicit next-turn holds remain visible separately until their first durable eligibility edge; after release latency still begins at the ORIGINAL durable send, without subtracting hold time. Terminal close/expiry without certified input acceptance is failure, not a successful stop. Malformed source clocks or historical delivered/read without certified acceptance prevents recovery. Budget evaluation stops at the minimum current native producer frontier, not the daemon cache heartbeat; a missing/stale frontier for an owned recipient is unknown. Source capture is reactive and request reads never sample mail."));
     Ok(vec![row])
 }
 
@@ -460,6 +463,7 @@ fn capture_message(store: &Store, now: u64, message: Option<&str>, facts: Option
         let mut source_work = [raw.len(), 0, 0];
         let mut source = BTreeMap::<(String, String), (u64, Value)>::new();
         let mut unknown = 0;
+        let mut excluded = BTreeMap::<(String, String), u64>::new();
         let mut covered_from_ms = now;
         let mut recapture_at_ms: Option<u64> = None;
         let mut source_through_ms = now;
@@ -493,7 +497,10 @@ fn capture_message(store: &Store, now: u64, message: Option<&str>, facts: Option
                 } else { None };
                 recipient_inputs.insert(recipient.clone(), (host, frontier));
             }
-            let Some((Some(host), frontier)) = recipient_inputs.get(&recipient) else { unknown += 1; continue; };
+            let Some((Some(host), frontier)) = recipient_inputs.get(&recipient) else {
+                excluded.entry((message.clone(), recipient)).and_modify(|first| *first = (*first).min(sent)).or_insert(sent);
+                continue;
+            };
             if host != store.origin() { continue; }
             if checked_recipients.insert(recipient.clone()) {
                 match *frontier {
@@ -570,7 +577,9 @@ fn capture_message(store: &Store, now: u64, message: Option<&str>, facts: Option
                 unknown += 1;
             }
         }
-        let mut samples = Vec::with_capacity(source.len());
+        let mut samples = Vec::with_capacity(source.len() + excluded.len());
+        samples.extend(excluded.into_values().map(|onset_ms|
+            LifecycleSample { onset_ms, terminal: LifecycleTerminal::Excluded }));
         let mut held = 0;
         for ((message, recipient), (sent, fields)) in source {
             if uncovered_recipients.contains(&recipient) { continue; }
