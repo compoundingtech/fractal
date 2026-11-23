@@ -27,6 +27,9 @@ Neither read folds claims or replays history. They read state Fractal already ke
   presentations read, which gives each seat's state.
 - For one run, one primary-key read of the run and a range of its own `step_runs` rows. This
   names the steps that are finished or not yet ready. Its cost is the run's own steps.
+- For each open agentless predicate step, one indexed lookup of its pinned definition and at
+  most four field-gate subject observations, stopping at the first known false predicate.
+  These reads do not run gates, refresh observations, fold claims or write diagnostic state.
 
 `fractal missions show RUN` builds a presentation from each step's whole history. On a large store that
 costs minutes of daemon CPU, so it is the wrong tool for "why is this stuck".
@@ -60,6 +63,13 @@ The rest are not causes:
 
 The quiet limit is 30 minutes by default: the time Fractal waits before it nudges an idle holder.
 `--quiet` changes it for one read.
+
+An agentless predicate step with a known false field gate is a `hold`, not active verification.
+Its detail names the gate, subject, field, observed value and expectation; its wait starts at
+the step's execution start and does not become a stall merely because time passes. Field
+predicates are checked in declaration order, with at most four subject lookups. A missing
+observation or field, a gate requiring runtime interpolation, a non-field predicate, a terminal
+failure, or no false predicate within that bound retains the existing `verifying` description.
 
 ## A run's verdict
 

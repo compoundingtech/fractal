@@ -1558,6 +1558,8 @@ pub trait MissionsStore {
     /// waits on: one primary-key read of the run and a range of `step_runs_run_index`. It reads
     /// no claims, so its cost is the run's own steps, never the store's history.
     fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>>;
+    /// At most four gates from this published step's pinned definition, in declaration order.
+    fn waiting_on_field_gates(&self, step: &StepRunView) -> Result<Vec<crate::model::GateSpec>>;
     /// Return every current published mission definition, including definitions with no runs.
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>>;
     /// The definitions of the missions that have no run, as `mission_definitions` reads them,
@@ -2634,6 +2636,26 @@ impl MissionsStore for Store {
             })?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into)
+    }
+
+    fn waiting_on_field_gates(&self, step: &StepRunView) -> Result<Vec<crate::model::GateSpec>> {
+        let connection = self.readers.get();
+        let path = format!("$.steps.{}.gates", serde_json::to_string(&step.step)?);
+        let mut statement = connection.prepare_cached(
+            "SELECT gate.value FROM step_runs step
+             JOIN run_generations generation ON generation.id=step.generation_id
+             JOIN mission_runs run ON run.id=step.run_id
+             JOIN mission_revisions revision ON revision.mission_id=run.mission_id
+               AND revision.revision=generation.revision
+             JOIN json_each(revision.body, ?3) gate
+             WHERE step.subject=?1 AND generation.id=?2
+             ORDER BY gate.key LIMIT 4",
+        )?;
+        let gates = statement.query_map(
+            params![step.subject, step.generation.strip_prefix("run-generation/").unwrap_or(&step.generation), path],
+            |row| row.get::<_, String>(0),
+        )?;
+        gates.map(|gate| Ok(serde_json::from_str(&gate?)?)).collect()
     }
 
     fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>> {

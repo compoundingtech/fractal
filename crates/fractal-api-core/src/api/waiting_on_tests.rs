@@ -80,7 +80,7 @@ fn published(store: &Store) -> (Arc<Publication<WorkRows>>, Arc<Publication<Miss
 fn waits(store: &Store, run: &str, now: u128, quiet: u64) -> RunWaitingOn {
     let (work, missions) = published(store);
     let steps = store.run_step_states(run).unwrap().expect("the run exists");
-    run_waiting_on(&steps, &work, &missions.rows, now, quiet)
+    run_waiting_on(store, &steps, &work, &missions.rows, now, quiet).unwrap()
 }
 
 fn open<'a>(waiting: &'a RunWaitingOn, path: &str) -> &'a StepWait {
@@ -130,7 +130,7 @@ fn a_run_names_what_each_step_waits_on_and_stalls_once_its_holder_and_its_queue_
 
     // The fleet list shows the run once, under its first cause, counting both steps.
     let (work, missions) = published(&store);
-    let blocked = blocked_runs(&work, &missions.rows, late, QUIET);
+    let blocked = blocked_runs(&store, &work, &missions.rows, late, QUIET).unwrap();
     assert_eq!(blocked.runs_read, 1);
     assert_eq!(blocked.groups.len(), 1);
     assert_eq!(blocked.groups[0].cause, WaitKind::NoProgress);
@@ -139,7 +139,7 @@ fn a_run_names_what_each_step_waits_on_and_stalls_once_its_holder_and_its_queue_
     assert_eq!(line.mission.as_deref(), Some("mission/garden/alpha"));
     assert_eq!((line.step.path.as_str(), line.blocked_steps), ("plant", 2));
     // Within the quiet limit nothing is listed.
-    assert!(blocked_runs(&work, &missions.rows, t0 + MINUTE, QUIET).groups.is_empty());
+    assert!(blocked_runs(&store, &work, &missions.rows, t0 + MINUTE, QUIET).unwrap().groups.is_empty());
 
     // A step that ends moves to the finished steps.
     store.set_step_state(&plant, "completed", None).unwrap();
@@ -215,7 +215,7 @@ mission "garden/review" state="ready" {
     assert!(waiting.reason.starts_with("review waits on person/ada for 45m"), "{}", waiting.reason);
 
     let (work, missions) = published(&store);
-    let blocked = blocked_runs(&work, &missions.rows, late, QUIET);
+    let blocked = blocked_runs(&store, &work, &missions.rows, late, QUIET).unwrap();
     assert_eq!(blocked.groups.iter().map(|group| group.cause).collect::<Vec<_>>(), [WaitKind::Ask]);
     assert_eq!(blocked.groups[0].runs[0].step.who.as_deref(), Some("person/ada"));
 }
@@ -244,13 +244,13 @@ fn a_stopped_seat_is_the_cause_of_the_step_it_would_take() {
     )));
     let steps = store.run_step_states(&alpha.subject).unwrap().unwrap();
     // Within the quiet limit: the stopped seat stalls the run at once.
-    let waiting = run_waiting_on(&steps, &work, &rows, t0 + MINUTE, QUIET);
+    let waiting = run_waiting_on(&store, &steps, &work, &rows, t0 + MINUTE, QUIET).unwrap();
     assert_eq!((waiting.verdict, waiting.cause), (RunVerdict::Stalled, Some(WaitKind::SeatDown)));
     let watering = open(&waiting, "water");
     assert_eq!((watering.who.as_deref(), watering.seat_state.as_deref()), (Some(birch.as_str()), Some("stopped")));
     assert_eq!(watering.detail.as_deref(), Some("agent/garden/birch would take it and is stopped"));
     assert_eq!(open(&waiting, "plant").seat_state.as_deref(), Some("running"));
-    let blocked = blocked_runs(&work, &rows, t0 + MINUTE, QUIET);
+    let blocked = blocked_runs(&store, &work, &rows, t0 + MINUTE, QUIET).unwrap();
     assert_eq!(blocked.groups.iter().map(|group| group.cause).collect::<Vec<_>>(), [WaitKind::SeatDown]);
 }
 
@@ -339,6 +339,90 @@ mission "garden/program" state="ready" {{
     assert_eq!(keys, [("render", "completed"), ("review", "completed"), ("merge", "started")]);
     assert_eq!(program.journal.entries[1].child.as_deref(), Some("mission-run/garden/child"));
     assert_eq!(program.journal.open, ["merge"]);
+}
+
+#[test]
+fn predicate_waits_name_the_gate_without_turning_elapsed_waits_into_stalls() {
+    for (selector, gates, expected) in [
+        (
+            "agentless",
+            r#"gate "retired explicitly" { field "state" "mission/garden/schedule" is "retired" }"#,
+            WaitKind::Hold,
+        ),
+        (
+            "agentless",
+            r#"gate "ready" { field "state" "mission/garden/schedule" is "ready" }
+               gate "retired explicitly" { field "state" "mission/garden/schedule" is "retired" }"#,
+            WaitKind::Hold,
+        ),
+        (
+            "agentless",
+            r#"gate "ready" { field "state" "mission/garden/schedule" is "ready" }"#,
+            WaitKind::Verifying,
+        ),
+        (
+            "agentless",
+            r#"gate "unknown" { field "state" "mission/garden/absent" is "retired" }
+               gate "retired explicitly" { field "state" "mission/garden/schedule" is "retired" }"#,
+            WaitKind::Verifying,
+        ),
+        (
+            "agentless",
+            r#"gate "one" { field "state" "mission/garden/schedule" is "ready" }
+               gate "two" { field "state" "mission/garden/schedule" is "ready" }
+               gate "three" { field "state" "mission/garden/schedule" is "ready" }
+               gate "four" { field "state" "mission/garden/schedule" is "ready" }
+               gate "retired explicitly" { field "state" "mission/garden/schedule" is "retired" }"#,
+            WaitKind::Verifying,
+        ),
+        (
+            r#"assigned-to "agent/garden/ash""#,
+            r#"gate "retired explicitly" { field "state" "mission/garden/schedule" is "retired" }"#,
+            WaitKind::NoProgress,
+        ),
+    ] {
+        let t0 = start_time();
+        let _clock = Clock::at(t0);
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("graph.db"), "cedar").unwrap();
+        publish(
+            &store,
+            &format!(
+                "version 2\nmission \"garden/schedule\" state=\"ready\" {{\n\
+                 goal \"Keep the schedule open until retired.\"\n\
+                 step \"retire\" {{ {selector}\n{gates}\n }}\n}}"
+            ),
+            "publish-schedule",
+        );
+        let run = start(&store, "garden/schedule", "schedule-1");
+        let subject = &run.steps.iter().find(|step| step.step == "retire").unwrap().subject;
+        store.set_step_state(subject, "working", None).unwrap();
+        let (work, missions) = published(&store);
+        let steps = store.run_step_states(&run.subject).unwrap().unwrap();
+        let cut = store.index().unwrap();
+        let late = t0 + 12 * 60 * MINUTE;
+        let waiting = run_waiting_on(&store, &steps, &work, &missions.rows, late, QUIET).unwrap();
+        let retire = open(&waiting, "retire");
+        assert_eq!(retire.kind, expected, "{waiting:#?}");
+        if expected == WaitKind::Hold {
+            assert_eq!((waiting.verdict, waiting.cause), (RunVerdict::Waiting, Some(WaitKind::Hold)));
+            assert_eq!(
+                retire.detail.as_deref(),
+                Some("waits for gate \"retired explicitly\": mission/garden/schedule state is \"ready\", expects is \"retired\""),
+            );
+            assert_eq!(retire.since_unix_ms, work.rows.rows[subject].view.execution_started_at_unix_ms);
+            let later = run_waiting_on(&store, &steps, &work, &missions.rows, late + MINUTE, QUIET).unwrap();
+            assert_eq!(open(&later, "retire"), retire);
+            let blocked = blocked_runs(&store, &work, &missions.rows, late, QUIET).unwrap();
+            assert_eq!(blocked.groups[0].cause, WaitKind::Hold);
+            assert_eq!(blocked.groups[0].runs[0].step.detail, retire.detail);
+        } else if expected == WaitKind::Verifying {
+            assert_eq!(waiting.verdict, RunVerdict::Moving);
+        } else {
+            assert_eq!(waiting.verdict, RunVerdict::Stalled);
+        }
+        assert_eq!(store.index().unwrap(), cut, "diagnostic reads write no claims");
+    }
 }
 
 #[tokio::test]
