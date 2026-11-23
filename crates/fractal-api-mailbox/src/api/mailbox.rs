@@ -796,6 +796,10 @@ where
         } else { previous };
         let (mark, seat, mut messages) = if let Some((mark, (mut seat, mut messages))) = previous {
             let changes = if let Some(subjects) = routed {
+                // Routing identifies content, not authority. A replacement can commit
+                // after consuming the hint or the native pre-read check, so validate
+                // ownership again inside the same pinned snapshot as the point reads.
+                store.check_mailbox(binding)?;
                 // The dispatcher already identified this recipient's changed identities.
                 // Keep the durable cursor: safety reconciliation must still cover global
                 // projection repairs and missed routing, without trusting this local hint.
@@ -1239,6 +1243,11 @@ async fn stream_with_timers_inner<F, S, H>(
                 }
             } else { false };
             if repaired { previous = None; }
+            #[cfg(test)]
+            if let Some(gate) = &control.dirty_gate {
+                let hook = gate.before_snapshot.lock().unwrap().take();
+                if let Some(hook) = hook { hook(); }
+            }
             let result = crate::api::read_deadline::store_read(&admission_store, move || {
                 crate::profile::task("task mailbox-update", || {
                     work.updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4063,6 +4072,45 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn routed_message_fences_a_binding_replaced_after_hint_consumption() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        crate::store::mailbox_tests::ready(&state.store, "current");
+        let fence = state.store.bind_mailbox(
+            &Fence::new("agent/eval.worker", "current", "delivery"),
+        ).unwrap();
+        let mut stream = controlled_stream(
+            state.clone(), &fence, &root.path().join("owner-race.sock"),
+        ).await;
+        let store = state.store.clone();
+        let old = fence.clone();
+        *stream.dirty_gate.before_snapshot.lock().unwrap() = Some(Box::new(move || {
+            // The routed identities have been consumed, and any native pre-read
+            // check has finished. Replacement is visible in the ensuing read snapshot.
+            let replacement = store.bind_mailbox(
+                &Fence::new(&old.subject, &old.incarnation, &old.component),
+            ).unwrap();
+            assert_ne!(replacement.token, old.token);
+        }));
+        state.store.append_claim(&ClaimInput {
+            subject: "message/replaced-before-read".into(), kind: "message.sent".into(),
+            actor: Some("person/fixture".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("sent")), ("from".into(), json!("person/fixture")),
+                ("to".into(), json!(fence.subject)), ("content".into(), json!("Current owner only.")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        signal_changed(&state);
+        // No mailbox offer may precede fencing, even though the original wake was
+        // message-only. Waiting for the next frame makes the old failure deterministic.
+        assert!(matches!(next(&mut stream.socket).await, Frame::Fenced { .. }));
+        assert!(stream.dirty_gate.before_snapshot.lock().unwrap().is_none());
+        assert_eq!(stream.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        stream.server.abort();
+    }
+
     async fn controlled_stream(state: AppState, fence: &Fence, path: &Path) -> ControlledStream {
         controlled_stream_with_peer(state, fence, path, None).await
     }
@@ -4081,6 +4129,7 @@ mod tests {
             notifications: std::sync::atomic::AtomicUsize::new(0),
             replay_proofs: std::sync::atomic::AtomicUsize::new(0),
             attachment_evaluations: std::sync::atomic::AtomicUsize::new(0),
+            before_snapshot: std::sync::Mutex::new(None),
         });
         let fixture_gate = dirty_gate.clone();
         let app = Router::new()
