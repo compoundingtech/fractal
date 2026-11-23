@@ -437,3 +437,143 @@ fn a_paced_cut_uses_its_full_daily_budget_but_not_at_midnight() {
         assert_eq!(deleted_on(&store.readers.get(), 2).unwrap(), trim_burst(daily));
     }
 }
+
+fn paced_cut_fixture(
+    path: &std::path::Path,
+    daily: u64,
+    count: usize,
+    grouped: bool,
+) -> (Store, Vec<ClaimRecord>, Option<EnvelopeTombstone>) {
+    let store = Store::open(path, "alder", Arc::new(Plain)).unwrap();
+    store.trim_locally(true).unwrap();
+    store.trim_locally_at_most(daily);
+    let mut claims: Vec<ClaimRecord> = Vec::new();
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        for n in 0..count {
+            let batch = if grouped { claims.first().map(|claim| claim.batch_id.as_str()) } else { None };
+            claims.push(append_claim_record_tx(
+                &tx, "alder", &format!("note/{n}"), "example.note", None,
+                &json!({"fields": {"text": n}}), &[], batch,
+            ).unwrap());
+        }
+        if grouped {
+            seed_replica_envelopes_tx(&tx, "alder", None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let envelope = grouped.then(|| {
+        store.readers.get().query_row(
+            "SELECT writer, sequence, envelope_hash FROM replica_envelopes WHERE batch_id=?1",
+            [&claims[0].batch_id],
+            |row| Ok(EnvelopeTombstone {
+                writer: row.get(0)?,
+                sequence: row.get(1)?,
+                envelope_hash: row.get(2)?,
+                accepted_at_unix_ms: claims[0].accepted_at_unix_ms,
+            }),
+        ).unwrap()
+    });
+    store.set_checkpoint_state("checkpoint/paced", 1, "trimming").unwrap();
+    let tombstones: Vec<_> = claims.iter().map(|claim| ClaimTombstone {
+        id: claim.id.clone(),
+        operation_id: claim.operation_id.clone(),
+        writer: envelope.as_ref().map_or_else(|| "alder".into(), |envelope| envelope.writer.clone()),
+        sequence: envelope.as_ref().map_or(0, |envelope| envelope.sequence),
+        envelope_hash: envelope.as_ref().map_or_else(String::new, |envelope| envelope.envelope_hash.clone()),
+        subject: claim.subject.clone(),
+        kind: claim.kind.clone(),
+        actor: claim.actor.clone(),
+        predecessors: claim.predecessors.clone(),
+        request_digest: claim.request_digest.clone(),
+        accepted_at_unix_ms: claim.accepted_at_unix_ms,
+    }).collect();
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        record_checkpoint_tombstones_tx(
+            &tx, "checkpoint/paced", envelope.as_slice(), &tombstones,
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+    (store, claims, envelope)
+}
+
+fn run_paced_cut_at(store: &Store, now: u64) {
+    store.trim_day.store(now / TRIM_DAY_MS, Ordering::Relaxed);
+    store.trim_now_ms.store(now, Ordering::Relaxed);
+    store.finish_trim_paced(true, "checkpoint/paced", &mut Vec::new(), |_| {}).unwrap();
+}
+
+#[test]
+fn a_same_day_backward_clock_neither_refills_nor_reduces_the_durable_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, claims, _) = paced_cut_fixture(&dir.path().join("claims.sqlite3"), 144, 40, false);
+    let quarter_day = TRIM_DAY_MS + TRIM_DAY_MS / 4;
+    run_paced_cut_at(&store, quarter_day);
+    assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), 37);
+    let cursor = store.local_walk("checkpoint/paced").unwrap().claim;
+    for now in [TRIM_DAY_MS + TRIM_DAY_MS / 8, quarter_day] {
+        assert_eq!(trim_allowance(144, now, 37), 0);
+        run_paced_cut_at(&store, now);
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), 37);
+        assert_eq!(store.local_walk("checkpoint/paced").unwrap().claim, cursor);
+        assert_eq!(claims.iter().filter(|claim| store.claim_by_id(&claim.id).unwrap().is_none()).count(), 37);
+    }
+    run_paced_cut_at(&store, quarter_day + TRIM_DAY_MS / 144);
+    assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), 38);
+    assert_eq!(claims.iter().filter(|claim| store.claim_by_id(&claim.id).unwrap().is_none()).count(), 38);
+}
+
+#[test]
+fn an_oversized_envelope_keeps_its_rewind_cursor_across_reopen_until_its_claims_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let (store, claims, envelope) = paced_cut_fixture(&path, 288, 5, true);
+    let envelope = envelope.unwrap();
+    let before = store.local_walk("checkpoint/paced").unwrap().envelope;
+    let check = |store: &Store, deleted: usize, held: bool| {
+        let connection = store.readers.get();
+        let mut retired = 0;
+        for claim in &claims {
+            let absent = store.claim_by_id(&claim.id).unwrap().is_none();
+            let retired_claim = super::super::retired::claim_retired(&connection, &claim.id).unwrap();
+            assert_eq!(retired_claim, absent, "only a deleted claim is retired");
+            retired += usize::from(retired_claim);
+        }
+        assert_eq!(retired, deleted);
+        let retired_total: usize = connection.query_row(
+            "SELECT COUNT(*) FROM retired_claim_ids", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retired_total, deleted, "no other claim is retired");
+        let present: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_envelopes WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)",
+            params![envelope.writer, envelope.sequence, envelope.envelope_hash], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(present, held);
+        assert_eq!(
+            super::super::retired::envelope_retired(
+                &connection, &envelope.writer, envelope.sequence, &envelope.envelope_hash,
+            ).unwrap(),
+            !held,
+        );
+        assert_eq!(deleted_on(&connection, 1).unwrap(), deleted as u64);
+    };
+    run_paced_cut_at(&store, TRIM_DAY_MS);
+    check(&store, 2, true);
+    assert_eq!(store.local_walk("checkpoint/paced").unwrap().envelope, before);
+    drop(store);
+    let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+    store.trim_locally(true).unwrap();
+    store.trim_locally_at_most(288);
+    assert_eq!(store.local_walk("checkpoint/paced").unwrap().envelope, before);
+    run_paced_cut_at(&store, TRIM_DAY_MS);
+    check(&store, 2, true);
+    run_paced_cut_at(&store, TRIM_DAY_MS + TRIM_DAY_MS / 144);
+    check(&store, 4, true);
+    assert_eq!(store.local_walk("checkpoint/paced").unwrap().envelope, before);
+    run_paced_cut_at(&store, TRIM_DAY_MS + 2 * TRIM_DAY_MS / 144);
+    check(&store, 5, false);
+    assert_eq!(local_checkpoint(&store.readers.get(), "checkpoint/paced").unwrap().unwrap().0, "trimmed");
+}
