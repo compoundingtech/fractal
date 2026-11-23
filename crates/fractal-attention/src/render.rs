@@ -42,6 +42,19 @@ pub fn apply_all_admitted(
     guard: &dyn Fn(&DesiredSubject) -> Result<()>,
     admit: &mut dyn FnMut(&DesiredSubject) -> Result<()>,
 ) -> BTreeMap<String, Result<RenderResult>> {
+    apply_selected_admitted(store, desired, host, guard, admit, &|_| true)
+}
+
+/// Validate shared render ownership across the roster, but admit, commit and
+/// report only selected declarations. Unselected plans are read-only evidence.
+pub fn apply_selected_admitted(
+    store: &Store,
+    desired: &[&DesiredSubject],
+    host: &str,
+    guard: &dyn Fn(&DesiredSubject) -> Result<()>,
+    admit: &mut dyn FnMut(&DesiredSubject) -> Result<()>,
+    selected: &dyn Fn(&DesiredSubject) -> bool,
+) -> BTreeMap<String, Result<RenderResult>> {
     let mut plans = BTreeMap::new();
     let mut results = BTreeMap::new();
     for subject in desired {
@@ -59,7 +72,7 @@ pub fn apply_all_admitted(
         }
         // A missing observed workspace may have been reclaimed. Give admission the
         // opportunity to reject it before planning loses its repository identity.
-        if subject.member.as_ref().is_some_and(|member| !Path::new(&member.workspace).is_dir())
+        if selected(subject) && subject.member.as_ref().is_some_and(|member| !Path::new(&member.workspace).is_dir())
             && let Err(error) = admit(subject)
         {
             results.insert(subject.subject.clone(), Err(error));
@@ -155,6 +168,10 @@ pub fn apply_all_admitted(
         .collect::<BTreeMap<_, _>>();
     let mut admitted_plans = BTreeMap::new();
     for (subject, (mut writes, mut warnings)) in plans {
+        if !desired.iter().find(|declaration| declaration.subject == subject)
+            .is_some_and(|declaration| selected(declaration)) {
+            continue;
+        }
         if results.contains_key(&subject) {
             continue;
         }
@@ -261,6 +278,9 @@ pub fn apply_all_admitted(
             });
         results.insert(subject, result);
     }
+    results.retain(|subject, _| desired.iter()
+        .find(|declaration| declaration.subject == *subject)
+        .is_some_and(|declaration| selected(declaration)));
     results
 }
 
