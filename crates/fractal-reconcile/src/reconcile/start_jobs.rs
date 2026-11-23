@@ -186,7 +186,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 None
             }
         };
-        anyhow::ensure!(workspace.is_dir(), "workspace reclaimed before start");
+        anyhow::ensure!(workspace.is_dir(), "workspace reclaimed before start: {}", workspace.display());
         if subject.kind == "agent"
             && let Some(checkout) = Checkout::from_desired(&subject.desired)
         {
@@ -809,11 +809,22 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn refuse_start_workspace(&self, operation: &RuntimeStartOperation, error: &anyhow::Error) -> Result<()> {
-        self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
-            ("code".into(), Value::from("start-workspace-refused")),
-            ("reason".into(), Value::from(format!("{error:#}"))),
-            ("operation".into(), Value::from(operation.id.clone())),
-        ]))?;
+        // Keep refusal diagnostics within each subject's schema: a rejected
+        // diagnostic must not prevent revocation and durable producer closure.
+        let reason = Value::from(format!("{error:#}"));
+        if operation.body["subject"]["kind"] == "agent" {
+            self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
+                ("code".into(), Value::from("start-workspace-refused")),
+                ("reason".into(), reason),
+                ("invocation_id".into(), Value::from(format!("invocation/{}", operation.id))),
+            ]))?;
+        } else {
+            self.record_once(&operation.subject, "runtime.reconcile-decision", BTreeMap::from([
+                ("key".into(), Value::from(format!("start-workspace-refused:{}", operation.id))),
+                ("decision".into(), Value::from("start-workspace-refused")),
+                ("reason".into(), reason),
+            ]))?;
+        }
         self.requeue_unadmitted_restart(operation)?;
         // Queued cancellation proves the producer never ran. Dispatched producers
         // still require their normal operation-fenced closure evidence.

@@ -1751,6 +1751,13 @@ fn unchanged_full_render_passes_spawn_no_leases_but_disk_drift_is_repaired() {
         store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
     ).skipping_unneeded(true);
     reconciler.reconcile_once().unwrap();
+    // Starting records the request; the fake runtime needs an explicit running observation.
+    *runtime.ptys.lock().unwrap() = runtime.started_members.lock().unwrap().iter()
+        .map(|member| RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("current".into()),
+        }).collect();
+    assert_eq!(runtime.ptys.lock().unwrap().len(), 1);
     let before = crate::checkout::test_support::lease_count(&repository);
     let starts = runtime.started_members.lock().unwrap().len();
     smallclaims::store::set_thread_clock(Some(START + crate::incremental::FULL_PASS_INTERVAL_MS));
@@ -1983,7 +1990,8 @@ fn assert_old_format_restart_recovery(
             subject: desired.subject.clone(),
             kind: "runtime.observed".into(),
             actor: None,
-            fields: member_fields(desired.member.as_ref().unwrap(), "stopped", Some("incumbent"), false),
+            fields: member_fields(desired.member.as_ref().unwrap(),
+                if fresh { "running" } else { "stopped" }, Some("incumbent"), false),
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
@@ -1996,6 +2004,11 @@ fn assert_old_format_restart_recovery(
                     ("harness".into(), Value::from("omp")),
                     ("session_id".into(), Value::from("native-A")),
                 ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.append_claim(&ClaimInput {
+                subject: desired.subject.clone(), kind: "runtime.observed".into(), actor: None,
+                fields: member_fields(desired.member.as_ref().unwrap(), "stopped", Some("incumbent"), false),
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
@@ -2072,7 +2085,7 @@ fn assert_old_format_restart_recovery(
     let store = Arc::new(Store::open(&database, "node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
     if changed_incumbent {
-        let mut member = store.desired_subjects_named(&[original.subject.clone()])
+        let mut member = store.desired_subjects_named(std::slice::from_ref(&original.subject))
             .unwrap().remove(0).member.unwrap();
         member.tags.insert(start_jobs::OPERATION_TAG.into(), "fixture-incumbent".into());
         runtime.started_members.lock().unwrap().push(member.clone());
@@ -2080,6 +2093,11 @@ fn assert_old_format_restart_recovery(
         runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), observation);
         assert_eq!(runtime.observe_start(&member).unwrap().unwrap().incarnation_id.as_deref(),
             Some("replacement"), "recovery must observe the replacement, not an absent incumbent");
+        store.append_claim(&ClaimInput {
+            subject: original.subject.clone(), kind: "runtime.observed".into(), actor: None,
+            fields: member_fields(&member, "running", Some("replacement"), false),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
         store.append_claim(&ClaimInput {
             subject: original.subject.clone(), kind: "harness.session-file".into(), actor: None,
             fields: BTreeMap::from([

@@ -230,6 +230,11 @@ fn transferred_handoff_is_bound_to_the_incarnation_and_native_session_at_use() {
         apply_source(&store, r#"version 2
 agent "example/worker" { workspace "/tmp"; harness "omp" {}; restart "never"; }
 "#, "handoff-identity");
+        let member = store.desired_subject_with_writer(AGENT).unwrap().unwrap().0.member.unwrap();
+        let observation = running_observation(&member, incarnation);
+        claim(&store, "runtime.observed", serde_json::to_value(
+            member_fields(&member, "running", Some(incarnation), false),
+        ).unwrap(), vec![], "current-incarnation");
         claim(&store, "harness.session-file", json!({
             "incarnation_id": incarnation, "harness": "omp", "session_id": session,
         }), vec![], "current-session");
@@ -242,8 +247,6 @@ agent "example/worker" { workspace "/tmp"; harness "omp" {}; restart "never"; }
         store.put_document(
             &crate::handoff::document_name(AGENT).unwrap(), b"Original handoff", &None, "handoff",
         ).unwrap();
-        let member = store.desired_subject_with_writer(AGENT).unwrap().unwrap().0.member.unwrap();
-        let observation = running_observation(&member, incarnation);
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
         assert_eq!(reconciler.prepare_restart(
