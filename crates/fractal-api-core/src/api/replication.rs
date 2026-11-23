@@ -672,8 +672,8 @@ pub(crate) async fn stream_admitted(state: &AppState) {
         .send_modify(|generation| *generation = generation.saturating_add(1));
 }
 
-/// Receive a peer's shard exchange, then admit and project what it brought. A shard carries
-/// no transport observations or sync notices: those describe the graph's exchanges.
+/// Receive and durably admit a peer's shard exchange without waiting for projection.
+/// A shard carries no transport observations or sync notices.
 pub async fn shard_replication_receive(
     State(state): State<AppState>,
     AxumPath(shard): AxumPath<String>,
@@ -682,6 +682,7 @@ pub async fn shard_replication_receive(
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let deadline_unix_ms = receive_deadline(&headers)?;
     let store = replication_shard(&state, &shard)?;
+    let quiet_retry_now = tokio::time::Instant::now().into_std();
     let response = blocking_action(move || {
         let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
         smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
@@ -699,12 +700,19 @@ pub async fn shard_replication_receive(
             },
         )?;
         // Held envelopes get another pass when the graph's membership moved since the last one.
-        if replication_receive_has_new_data(receipt.received + receipt.signatures)
+        let (admission, repairs) = if replication_receive_has_new_data(receipt.received + receipt.signatures)
             || store.fleet_moved_since_admission().map_err(internal)?
         {
-            store.validate_replication_backlog().map_err(internal)?;
-            store.apply_replication_repairs().map_err(internal)?;
-            store.project_replication_backlog().map_err(internal)?;
+            let admission = store.validate_replication_backlog().map_err(internal)?;
+            let repairs = store.apply_replication_repairs().map_err(internal)?;
+            (admission, repairs)
+        } else {
+            (Default::default(), 0)
+        };
+        if admission.changed || repairs != 0 {
+            admitted_projection_result(store.try_project_replication_backlog_unless_catching_up())?;
+        } else if store.replication_projection_deferred() {
+            admitted_projection_result(store.try_project_replication_backlog_after_quiet_exchange(quiet_retry_now))?;
         }
         let store_index = store.index().map_err(internal)?;
         Ok(ReplicationReceiveResponse {
@@ -741,11 +749,21 @@ pub async fn shard_replication_wake(
     AxumPath(shard): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let store = replication_shard(&state, &shard)?;
+    let quiet_retry_now = tokio::time::Instant::now().into_std();
     let changed = blocking_store(move || {
         let admission = store.validate_replication_backlog()?;
         let repairs = store.apply_replication_repairs()?;
-        let projected = store.project_replication_backlog()?;
-        Ok(projected && (admission.changed || repairs != 0))
+        let was_deferred = store.replication_projection_deferred();
+        let projection = if admission.changed || repairs != 0 {
+            store.try_project_replication_backlog_unless_catching_up()
+        } else if was_deferred {
+            store.try_project_replication_backlog_after_quiet_exchange(quiet_retry_now)
+        } else {
+            Ok(Some(true))
+        };
+        let projected = admitted_projection_result(projection)
+            .map_err(anyhow::Error::new)?.unwrap_or(false);
+        Ok(admission.changed || repairs != 0 || (projected && was_deferred))
     })
     .await?;
     if changed {

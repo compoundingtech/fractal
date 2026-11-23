@@ -409,3 +409,65 @@ async fn a_provider_task_that_has_returned_is_settled_and_one_that_has_not_is_no
     assert!(!provider_task_settled(&running).await);
     running.abort();
 }
+
+#[tokio::test(start_paused = true)]
+async fn shard_projection_retry_recovers_without_another_receive() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = Arc::new(Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap());
+    graph.bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
+    let shard = fractal_store::store::messages_shard::open(&graph, dir.path()).unwrap();
+    let projection_frontier = || shard.readers.get().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap();
+    let before = projection_frontier();
+    let source_dir = tempfile::tempdir().unwrap();
+    let source_graph = Arc::new(Store::open(&source_dir.path().join("claims.sqlite3"), "source").unwrap());
+    let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    source_graph.bind_fleet(fleet).unwrap();
+    let source = fractal_store::store::messages_shard::open(&source_graph, source_dir.path()).unwrap();
+    source.append_claim(&smallclaims::ClaimInput {
+        subject: "message/0123456789abcdef".into(),
+        kind: "message.sent".into(),
+        actor: Some("agent/birch".into()),
+        fields: serde_json::from_value(json!({
+            "from": "agent/birch", "to": "agent/cedar", "content": "hello", "status": "sent",
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let exchange = source.export_replication_exchange(fleet, &shard.replication_inventory().unwrap()).unwrap();
+    let gate = shard.projection.lock();
+    let receipt = shard.receive_replication_exchange("source", fleet, &exchange).unwrap();
+    assert!(receipt.received > 0);
+    assert!(shard.validate_replication_backlog().unwrap().changed);
+    let target = shard.index().unwrap();
+    assert!(target > before);
+    assert_eq!(projection_frontier(), before);
+    assert_eq!(shard.try_project_replication_backlog_unless_catching_up().unwrap(), None);
+    assert!(shard.replication_projection_deferred());
+    let (events, mut changed) = watch::channel(0u64);
+    let (polls, mut polled) = watch::channel(false);
+    let worker = retry_projection_contention_for_store(
+        Arc::downgrade(&graph), Arc::new(Notify::new()), events, dir.path().to_owned(), true,
+        move |backoff| { polls.send_replace(backoff); },
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    loop {
+        let backoff = *polled.borrow_and_update();
+        if backoff { break; }
+        polled.changed().await.unwrap();
+    }
+    drop(gate);
+    // A graph projection owner cannot prevent the shard's independent retry.
+    let graph_gate = graph.projection.lock();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    changed.changed().await.unwrap();
+    assert!(!shard.replication_projection_deferred());
+    assert_eq!(projection_frontier(), target);
+    assert_eq!(target, shard.index().unwrap());
+    drop(graph_gate);
+    worker.abort();
+}
