@@ -844,7 +844,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h25bdee44f9bb owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h9dec72335295 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -885,10 +885,6 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
--- Bridge requests carry the durable admitted count; roster reads seek one current-incarnation row.
-CREATE INDEX IF NOT EXISTS claims_model_return_attempt_index
-ON claims(subject, json_extract(body,'$.fields.incarnation_id'), json_extract(body,'$.fields.model_return_attempt') DESC)
-WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.operation')='model-return-v1';
 CREATE INDEX IF NOT EXISTS claims_idle_action_index
 ON claims(subject, store_index)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle';
@@ -1509,12 +1505,6 @@ WHERE kind='harness.timeline'
 CREATE INDEX IF NOT EXISTS local_observations_roster_frontier_index
 ON local_observations(id, after_store_index)
 WHERE kind='harness.timeline' AND subject LIKE 'agent/%';
--- Held main-loop usage can refresh model-drift evidence without publishing a new claim.
--- Keep its frontier separate from timeline rows so both seeks remain partial-index bounded.
-CREATE INDEX IF NOT EXISTS local_observations_roster_model_frontier_index
-ON local_observations(id, after_store_index)
-WHERE kind='harness.usage' AND subject LIKE 'agent/%'
-  AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative');
 -- Retry receipts survive local observation trimming. Device event IDs are unique
 -- across payload kinds; the device queue expires after seven days.
 CREATE TABLE IF NOT EXISTS client_diagnostic_receipts (

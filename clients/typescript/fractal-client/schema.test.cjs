@@ -72,7 +72,14 @@ test('strict agent decoders preserve optional model drift contract fields', asyn
             // Nullable fields use the shared Option codec: missing and null both encode as null.
             assert.equal(encoded.declared_model, wire.declared_model ?? null);
             if (wire.model_drift) {
-                assert.deepEqual(encoded.model_drift, wire.model_drift);
+                // Shared Timestamp codecs preserve instants, encoding UTC with millisecond precision.
+                assert.deepEqual(encoded.model_drift, {
+                    ...wire.model_drift,
+                    drift_since: wire.model_drift.drift_since === null ? null
+                        : new Date(wire.model_drift.drift_since).toISOString(),
+                    observed_at: wire.model_drift.observed_at === null ? null
+                        : new Date(wire.model_drift.observed_at).toISOString(),
+                });
             } else {
                 assert.equal(Object.hasOwn(encoded, 'model_drift'), false);
             }
@@ -82,8 +89,9 @@ test('strict agent decoders preserve optional model drift contract fields', asyn
                 model_drift: { ...extension.model_drift, state } }).model_drift.state, state);
         }
         for (const fallback_reason of ['transient', 'quota', 'auth', 'unknown', null]) {
-            assert.equal(decode({ ...base, ...extension,
-                model_drift: { ...extension.model_drift, fallback_reason } }).model_drift.fallback_reason, fallback_reason);
+            const decoded = decode({ ...base, ...extension,
+                model_drift: { ...extension.model_drift, fallback_reason } });
+            assert.equal(Schema.encodeSync(schema.Agent)(decoded).model_drift.fallback_reason, fallback_reason);
         }
         for (const invalid of [{ state: 'healthy' }, { fallback_reason: 'model-mismatch' },
             { drift_age_seconds: -1 }, { return_attempts: -1 }, { return_attempts: 0.5 },
