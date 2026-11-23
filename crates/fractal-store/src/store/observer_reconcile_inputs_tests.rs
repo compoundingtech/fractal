@@ -11,7 +11,7 @@ fn fixture() -> Store {
     }
     for (subject, owner) in [("resource/first", "mission-run/first"), ("resource/second", "mission-run/second")] {
         store.connection.write().execute(
-            "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run)
+            /* sqlite-large-value: allow-for-now lv-h862543af3dec owner=fractal_store::store::observer_reconcile_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run)
              VALUES(?1,'resource','test',(SELECT id FROM claims LIMIT 1),'{}',?2)",
             params![subject, owner],
         ).unwrap();
@@ -41,7 +41,7 @@ fn desired_inputs_rebuild_only_changed_keys_and_track_raw_removals() {
     inputs.refresh(&store).unwrap();
     assert_eq!(store.reconcile_input_work(), initial, "unrelated claim rebuilds zero subjects");
     store.connection.write().execute(
-        "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/first'", [],
+        /* sqlite-large-value: allow-for-now lv-h5351379a643a owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/first'", [],
     ).unwrap();
     inputs.refresh(&store).unwrap();
     assert_eq!(inputs.changed_subjects, ["resource/first"]);
@@ -49,7 +49,7 @@ fn desired_inputs_rebuild_only_changed_keys_and_track_raw_removals() {
     assert_eq!(changed["full_rebuilds"], initial["full_rebuilds"]);
     assert_eq!(changed["subjects_rebuilt"].as_u64(), initial["subjects_rebuilt"].as_u64().map(|count| count + 1));
     assert_eq!(inputs.desired[0].desired["changed"], true);
-    store.connection.write().execute("DELETE FROM desired WHERE subject='resource/first'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h0b5273afe7b4 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/first'", []).unwrap();
     inputs.refresh(&store).unwrap();
     assert_eq!(inputs.desired.len(), 1);
     assert_eq!(inputs.desired[0].subject, "resource/second");
@@ -67,12 +67,12 @@ fn projection_marker_changes_evaluate_only_owning_run_fence() {
     assert_eq!(store.reconcile_input_work(), initial);
     let aggregate = Aggregate::RunPart("first".into());
     let key = pending_run_rebuild_key(&aggregate).unwrap();
-    store.connection.write().execute("INSERT INTO meta(key,value) VALUES(?1,?2)",
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h4c364653eba0 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
         params![key, serde_json::to_string(&aggregate).unwrap()]).unwrap();
     assert_eq!(inputs.pending_subjects(&store).unwrap(), BTreeSet::from(["resource/first".into()]));
     let changed = store.reconcile_input_work();
     assert_eq!(changed["projection_fences_rebuilt"].as_u64(), initial["projection_fences_rebuilt"].as_u64().map(|count| count + 1));
-    store.connection.write().execute("DELETE FROM meta WHERE key=?1", [&key]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hbe733ff69aee owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [&key]).unwrap();
     assert!(inputs.pending_subjects(&store).unwrap().is_empty());
     assert_eq!(store.reconcile_input_work()["projection_fences_rebuilt"].as_u64(), initial["projection_fences_rebuilt"].as_u64().map(|count| count + 2));
 }

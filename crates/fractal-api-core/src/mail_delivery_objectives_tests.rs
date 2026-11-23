@@ -526,11 +526,11 @@ fn incremental_mail_work_is_changed_message_only_and_frontiers_reuse_source_fact
     }).unwrap();
     store.seal_local_batches().unwrap();
     for sql in [
-        "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('resource/mail-unrelated','resource','revision/test',(SELECT id FROM claims LIMIT 1),'{}')",
-        "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/mail-unrelated'",
-        "DELETE FROM desired WHERE subject='resource/mail-unrelated'",
+        /* sqlite-large-value: allow-for-now lv-h264ac1d5dbbf owner=fractal_api_core::mail_delivery_objectives_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('resource/mail-unrelated','resource','revision/test',(SELECT id FROM claims LIMIT 1),'{}')",
+        /* sqlite-large-value: allow-for-now lv-h16edf8e42749 owner=fractal_api_core::mail_delivery_objectives_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/mail-unrelated'",
+        /* sqlite-large-value: allow-for-now lv-h08e8cdfb5399 owner=fractal_api_core::mail_delivery_objectives_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/mail-unrelated'",
     ] {
-        store.connection.write().execute(sql, []).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h574ba13a3a53 owner=fractal_api_core::mail_delivery_objectives_tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
         objective.capture(&store, at).unwrap();
     }
     store.forget_current_views();
@@ -645,7 +645,7 @@ fn incremental_mail_known_deletions_only_recheck_the_affected_message() {
     assert_eq!(objective.capture(&store, at).unwrap().samples.len(), 2);
     let before = work_counts(&store);
     store.connection.write().execute(
-        "DELETE FROM local_mail_delivery_steps_v1 WHERE message='message/example-delete-first'", [],
+        /* sqlite-large-value: allow-for-now lv-hd7f010cccc43 owner=fractal_api_core::mail_delivery_objectives_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mail_delivery_steps_v1 WHERE message='message/example-delete-first'", [],
     ).unwrap();
     let after = objective.capture(&store, at).unwrap();
     let work = work_counts(&store);

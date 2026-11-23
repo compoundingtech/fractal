@@ -98,6 +98,33 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Changed-key reconciliation inputs
+
+Inventory review: [reconciliation input maintenance](https://github.com/compoundingtech/fractal/pull/7062).
+The `fractal_store::store::attention_snapshot` maintainer owns
+`lv-hc01ae9454288`, `lv-h5210e0457dfb`, `lv-h8f9121f82761` and
+`lv-h17ae5bb9d200`: existing claim, desired-member and mission-deadline reads
+now choose a trusted optional subject predicate. They retain the existing inline
+claim bodies, declaration JSON and subject keys; no producer format or value
+limit changes. Trace the dynamic templates to those representations before
+replacing their variable-sized values or index keys.
+
+The `fractal_store::store::observer_reconcile_inputs` maintainer owns
+`lv-h16532348b1c9`, an integer-rowid probe returning one existing desired subject.
+Its execution sink remains conservatively inventoried despite the fixed query:
+trace the bound integer and returned subject to the existing subject-key
+representation rather than treating a single row as a byte-size proof.
+
+The source maintainers of `mail_delivery_objectives_tests`,
+`observer_mail_inputs_tests` and `observer_reconcile_inputs_tests` own their
+new fixture-only entries. These insert, mutate or delete invented desired,
+mail-ledger, replica-record and projection-marker values to prove changed-key
+routing, deletion safety and work counts. They do not add production writers.
+Their inline test values preserve the existing storage contracts; representation
+work must keep equivalent authority/reset/deletion regressions when those
+contracts change. The inventory records identify each fixture statement and
+its concrete producer/cleanup category.
+
 ### Roster paging and read-budget probe inventory repair
 
 The `fractal_api_core::api` maintainer owns `lv-hc92b1baa7e5f`; the

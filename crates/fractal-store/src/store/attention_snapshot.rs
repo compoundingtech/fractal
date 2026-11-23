@@ -684,7 +684,7 @@ impl Store {
         }
         let connection = self.readers.get();
         let source_filter = if subject.is_some() { "subject=?1" } else { "?1 IS NULL" };
-        let mut query = connection.prepare(&canonical_sql(&format!("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc01ae9454288 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(&format!("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
             FROM claims WHERE kind='reconcile.fault' AND {source_filter} ORDER BY CANONICAL_ASC(claims)")))?;
         let mut latest = BTreeMap::new();
         for claim in query.query_map([subject], claim_from_row)? {
@@ -893,7 +893,7 @@ impl Store {
         smallclaims::touched::note_read(|| subject.map(str::to_owned).unwrap_or_else(|| "kind:intent.desired".into()));
         let connection = self.readers.get();
         let source_filter = if subject.is_some() { "subject=?2" } else { "?2 IS NULL" };
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h5210e0457dfb owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
              FROM desired WHERE kind=?1 AND {source_filter} ORDER BY subject",
         ))?;
@@ -1001,7 +1001,7 @@ impl Store {
         // Only the absence matters: batch indexed probes instead of hydrating/sorting
         // the latest observation and resolving identities for every running member.
         let source_filter = if subject.is_some() { "subject=?1" } else { "?1 IS NULL" };
-        let mut candidates = connection.prepare_cached(&format!(
+        let mut candidates = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8f9121f82761 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
              FROM desired WHERE kind='agent' AND member IS NOT NULL AND {source_filter}
                AND NOT EXISTS(SELECT 1 FROM local_observations
@@ -1082,7 +1082,7 @@ impl Store {
                 ));
             }
         }
-        let runs = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb0803b017360 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
+        let runs = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h17ae5bb9d200 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "SELECT mission_runs.id FROM mission_runs
              CROSS JOIN mission_run_deadlines AS deadlines
              WHERE {OPEN_MISSION_RUN} AND deadlines.run_id=mission_runs.id

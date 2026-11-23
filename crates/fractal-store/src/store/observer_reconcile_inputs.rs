@@ -250,7 +250,7 @@ impl WriterObserver for Observer {
                 if let Some(previous) = state.rows.remove(&rowid) {
                     state.changed.insert(previous, generation);
                 }
-                if let Some(subject) = statement.query_row([rowid], |row| row.get::<_, String>(0)).optional()? {
+                if let Some(subject) = statement.query_row(/* sqlite-large-value: allow-for-now lv-h16532348b1c9 owner=fractal_store::store::observer_reconcile_inputs TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, String>(0)).optional()? {
                     state.changed.insert(subject.clone(), generation);
                     state.rows.insert(rowid, subject);
                 }

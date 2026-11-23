@@ -294,11 +294,11 @@ fn unrelated_desired_updates_and_deletes_do_not_advance_mail_inputs() {
     let receiver = store.subscribe_mail_objective_inputs();
     let initial = *receiver.borrow();
     for sql in [
-        "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('resource/unrelated','resource','revision/test',(SELECT id FROM claims LIMIT 1),'{}')",
-        "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/unrelated'",
-        "DELETE FROM desired WHERE subject='resource/unrelated'",
+        /* sqlite-large-value: allow-for-now lv-h2c4ec6a16f2e owner=fractal_store::store::observer_mail_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('resource/unrelated','resource','revision/test',(SELECT id FROM claims LIMIT 1),'{}')",
+        /* sqlite-large-value: allow-for-now lv-hb2137ade0af5 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/unrelated'",
+        /* sqlite-large-value: allow-for-now lv-h94fbb19ea262 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/unrelated'",
     ] {
-        store.connection.write().execute(sql, []).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h623bc4b03841 owner=fractal_store::store::observer_mail_inputs_tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
         assert_eq!(*receiver.borrow(), initial, "{sql}");
     }
 }
@@ -309,14 +309,14 @@ fn desired_old_and_new_recipient_keys_survive_updates_and_removal() {
     append(&store, "agent/old", "runtime.observed");
     let receiver = store.subscribe_mail_objective_inputs();
     store.connection.write().execute(
-        "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('agent/old','agent','revision/test',(SELECT id FROM claims LIMIT 1),'{}')", [],
+        /* sqlite-large-value: allow-for-now lv-h01bb0e65c2cc owner=fractal_store::store::observer_mail_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('agent/old','agent','revision/test',(SELECT id FROM claims LIMIT 1),'{}')", [],
     ).unwrap();
     let generation = *receiver.borrow();
-    store.connection.write().execute("UPDATE desired SET subject='agent/new' WHERE subject='agent/old'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hbdc2626eee19 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET subject='agent/new' WHERE subject='agent/old'", []).unwrap();
     assert_eq!(store.mail_objective_changes_since(generation).1,
         Some((BTreeSet::new(), BTreeSet::from(["agent/old".to_owned(), "agent/new".to_owned()]))));
     let generation = *receiver.borrow();
-    store.connection.write().execute("UPDATE desired SET kind='stop' WHERE subject='agent/new'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h7f1408b5fbc7 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET kind='stop' WHERE subject='agent/new'", []).unwrap();
     assert_eq!(store.mail_objective_changes_since(generation).1,
         Some((BTreeSet::new(), BTreeSet::from(["agent/new".to_owned()]))));
 }
@@ -328,13 +328,13 @@ fn runtime_record_authority_routes_to_its_recipient_instead_of_the_mail_populati
     let receiver = store.subscribe_mail_objective_inputs();
     let generation = *receiver.borrow();
     store.connection.write().execute(
-        "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h9b6541dfb2fd owner=fractal_store::store::observer_mail_inputs_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
          VALUES('record/runtime','local',1,'digest/runtime',0,X'','valid',?1,'0')", [&runtime],
     ).unwrap();
     assert_eq!(store.mail_objective_changes_since(generation).1,
         Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
     let generation = *receiver.borrow();
-    store.connection.write().execute("UPDATE replica_records SET state='invalid' WHERE record_ref='record/runtime'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h80bda2fca424 owner=fractal_store::store::observer_mail_inputs_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref='record/runtime'", []).unwrap();
     assert_eq!(store.mail_objective_changes_since(generation).1,
         Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
 }
@@ -344,12 +344,12 @@ fn mail_deletion_without_a_retained_old_key_still_requires_a_full_rebuild() {
     let store = Store::open_memory("local").unwrap();
     let receiver = store.subscribe_mail_objective_inputs();
     store.connection.write().execute(
-        "INSERT INTO local_mail_delivery_source_v1 VALUES('message/missing-key','agent/test',1,'{\"sent_clock_valid\":1}')", [],
+        /* sqlite-large-value: allow-for-now lv-hecc57f564f0f owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_delivery_source_v1 VALUES('message/missing-key','agent/test',1,'{\"sent_clock_valid\":1}')", [],
     ).unwrap();
     let generation = *receiver.borrow();
     store.fractal.mail_objective_inputs.0.lock().unwrap().routing.clear();
     store.connection.write().execute(
-        "DELETE FROM local_mail_delivery_source_v1 WHERE message='message/missing-key'", [],
+        /* sqlite-large-value: allow-for-now lv-h3f913de5c038 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mail_delivery_source_v1 WHERE message='message/missing-key'", [],
     ).unwrap();
     assert!(store.mail_objective_changes_since(generation).1.is_none());
 }
