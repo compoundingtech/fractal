@@ -23383,31 +23383,47 @@ fn actual_field<'a>(actual: &'a Value, path: &str) -> Option<&'a Value> {
     Some(value)
 }
 
-fn owned_field(mut value: Value, path: &str) -> Option<Value> {
-    for segment in path.split('.') {
-        value = value.get(segment)?.clone();
-    }
-    Some(value)
+/// Inspect a field and its comparison without store reads or cloning the selected value.
+/// File JSON is parsed locally, so its selected field is borrowed only for the callback.
+pub fn inspect_field_gate<T>(
+    actual: &Value,
+    subject: &str,
+    path: &str,
+    operator: &str,
+    expected: &Value,
+    inspect: impl FnOnce(Option<&Value>, bool) -> T,
+) -> T {
+    with_observed_field(actual, subject, path, |found| {
+        inspect(found, found.is_some_and(|value| compare_value(value, operator, expected)))
+    })
 }
 
 fn observed_field_value(actual: &Value, subject: &str, path: &str) -> Option<Value> {
+    with_observed_field(actual, subject, path, |found| found.cloned())
+}
+
+fn with_observed_field<T>(
+    actual: &Value,
+    subject: &str,
+    path: &str,
+    inspect: impl FnOnce(Option<&Value>) -> T,
+) -> T {
     if subject.starts_with("file/") {
-        actual_field(actual, "content")
+        let content = actual_field(actual, "content")
             .and_then(Value::as_str)
-            .and_then(|content| serde_json::from_str::<Value>(content).ok())
-            .and_then(|content| owned_field(content, path))
+            .and_then(|content| serde_json::from_str::<Value>(content).ok());
+        let mut found = content.as_ref();
+        for segment in path.split('.') {
+            found = found.and_then(|value| value.get(segment));
+        }
+        inspect(found)
     } else {
         // A pinned resource's value is its claim body, an unpinned one's its folded actual.
-        // Either reads a path in its facts first, then in the whole observation, so `state` and
-        // `facts.state` read the same on both (#4557).
-        let facts = subject
-            .starts_with("resource/")
-            .then(|| actual.get("fields").unwrap_or(actual).get("facts"))
-            .flatten();
-        facts
-            .and_then(|facts| actual_field(facts, path))
-            .or_else(|| actual_field(actual, path))
-            .cloned()
+        // Either reads a path in its facts first, then in the whole observation.
+        let facts = subject.starts_with("resource/")
+            .then(|| actual.get("fields").unwrap_or(actual).get("facts")).flatten();
+        inspect(facts.and_then(|facts| actual_field(facts, path))
+            .or_else(|| actual_field(actual, path)))
     }
 }
 
