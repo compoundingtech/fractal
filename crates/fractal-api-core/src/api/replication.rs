@@ -285,6 +285,8 @@ pub async fn replication_receive(
         finalizer_client_messages_ms = counters.finalizer_time[Finalizer::ClientMessages as usize].as_secs_f64() * 1000.0,
         admit_ms = counters.admit_time.as_secs_f64() * 1000.0,
         project_ms = counters.project_time.as_secs_f64() * 1000.0,
+        gate_wait_ms = counters.gate_wait.as_secs_f64() * 1000.0,
+        discovery_ms = counters.projection_discovery_time.as_secs_f64() * 1000.0,
         receipt_ingest = ?counters.phases[smallclaims::receive_metrics::Stage::ReceiptIngest as usize],
         admission_prelude = ?counters.phases[smallclaims::receive_metrics::Stage::AdmissionPrelude as usize],
         admission = ?counters.phases[smallclaims::receive_metrics::Stage::Admission as usize],
@@ -369,10 +371,10 @@ fn replication_receive_phases(
         } else {
             (Default::default(), 0)
         };
-        // A catching-up node defers projection; the first receive after the deferral window,
-        // with or without new data, projects what it admitted meanwhile.
+        // Only newly admitted or repaired work may project inline. Empty and
+        // duplicate receives leave a deferred frontier to the autonomous retry.
         let was_deferred = store.replication_projection_deferred();
-        let projection = if new_data || was_deferred {
+        let projection = if admission.changed || repairs != 0 {
             let _projection = smallclaims::receive_metrics::Timer::start(
                 smallclaims::receive_metrics::Stage::Projection,
             );
@@ -385,7 +387,7 @@ fn replication_receive_phases(
                 "st.replication.projection", "receive", receive,
             );
             let result = admitted_projection_result(
-                store.project_replication_backlog_unless_catching_up(),
+                store.try_project_replication_backlog_unless_catching_up(),
             );
             if let Some(span) = span.as_mut() {
                 span.set_attribute(opentelemetry::KeyValue::new(
@@ -410,7 +412,7 @@ fn replication_receive_phases(
             }
             result?
         } else {
-            Some(true)
+            (!was_deferred).then_some(true)
         };
         let _response = smallclaims::receive_metrics::Timer::start(
             smallclaims::receive_metrics::Stage::ResponsePostcommit,

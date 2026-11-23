@@ -140,6 +140,83 @@ async fn quiet_node_recovers_automatically_after_busy_writer_releases() {
     assert_eq!(frontier(), target);
     assert_eq!(visible(), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn gate_deferred_admission_projects_once_without_another_peer_page() {
+    let dir = tempfile::tempdir().unwrap();
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    let source = Store::open_memory("source").unwrap();
+    source.append_client_claim(&smallclaims::ClaimInput {
+        subject: "resource/quiet-gate".into(),
+        kind: "resource.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("kind".into(), json!("custom.test.replication"))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    let store = Arc::new(Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap());
+    store.bind_fleet(FLEET).unwrap();
+    store.project_replication_backlog().unwrap();
+    let before = store.projection_frontier().unwrap();
+    let inventory = store.export_replication_summary(FLEET).unwrap().inventory;
+    let exchange = source.export_replication_exchange(FLEET, &inventory).unwrap();
+    let gate = store.projection.lock();
+    let receipt = store.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+    assert!(receipt.received > 0);
+    assert!(store.validate_replication_backlog().unwrap().changed);
+    let target = store.index().unwrap();
+    assert!(target > before);
+    let generation = store.projection_contention_generation();
+    assert_eq!(store.try_project_replication_backlog_unless_catching_up().unwrap(), None);
+    assert!(store.projection_contention_generation() > generation);
+    assert!(store.replication_projection_deferred());
+    assert_eq!(store.projection_frontier().unwrap(), before);
+    let visible = || store.readers.get().query_row(
+        "SELECT COUNT(*) FROM events WHERE subject='resource/quiet-gate' AND kind='resource.observed'",
+        [], |row| row.get::<_, i64>(0),
+    ).unwrap();
+    assert_eq!(visible(), 0);
+    let (events, mut received) = watch::channel(0u64);
+    let (polls, mut polled) = watch::channel(false);
+    let worker = retry_projection_contention_observed(
+        Arc::downgrade(&store),
+        Arc::new(Notify::new()),
+        events,
+        dir.path().to_owned(),
+        move |backoff| { polls.send_replace(backoff); },
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    loop {
+        let backoff = *polled.borrow_and_update();
+        if backoff { break; }
+        polled.changed().await.unwrap();
+    }
+    // Entering backoff must not clear deferred health or advance the good frontier.
+    assert!(store.replication_projection_deferred());
+    assert_eq!(store.projection_frontier().unwrap(), before);
+    assert_eq!(visible(), 0);
+    drop(gate);
+    assert!(store.replication_projection_deferred());
+    // Only the existing background worker runs after this release: no new page,
+    // receive notification, or direct projection call can finish the admission.
+    tokio::time::advance(Duration::from_secs(30)).await;
+    received.changed().await.unwrap();
+    assert_eq!(*received.borrow_and_update(), 1);
+    assert!(!store.replication_projection_deferred());
+    assert_eq!(store.projection_frontier().unwrap(), target);
+    assert_eq!(visible(), 1);
+    assert_eq!(store.claims_for("resource/quiet-gate", Some("resource.observed")).unwrap().len(), 1);
+    polled.borrow_and_update();
+    tokio::time::advance(Duration::from_secs(500)).await;
+    polled.changed().await.unwrap();
+    worker.abort();
+    assert_eq!(*received.borrow(), 1, "recovery must not schedule another projection");
+    assert_eq!(store.projection_frontier().unwrap(), target);
+    assert_eq!(visible(), 1);
+}
 #[tokio::test(start_paused = true)]
 async fn retry_worker_does_not_keep_store_alive_during_scheduled_backoff() {
     let dir = tempfile::tempdir().unwrap();
