@@ -1558,6 +1558,8 @@ pub trait MissionsStore {
     /// waits on: one primary-key read of the run and a range of `step_runs_run_index`. It reads
     /// no claims, so its cost is the run's own steps, never the store's history.
     fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>>;
+    /// At most four gates from this published step's pinned definition, in declaration order.
+    fn waiting_on_field_gates(&self, step: &StepRunView) -> Result<Vec<crate::model::GateSpec>>;
     /// Return every current published mission definition, including definitions with no runs.
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>>;
     /// The definitions of the missions that have no run, as `mission_definitions` reads them,
@@ -2634,6 +2636,35 @@ impl MissionsStore for Store {
             })?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into)
+    }
+
+    fn waiting_on_field_gates(&self, step: &StepRunView) -> Result<Vec<crate::model::GateSpec>> {
+        fn find(mission: MissionSpec, path: &str) -> Vec<crate::model::GateSpec> {
+            for (_, mut step) in mission.steps {
+                if step.path == path {
+                    step.gates.truncate(4);
+                    return step.gates;
+                }
+                if path.strip_prefix(step.path.as_str()).is_some_and(|suffix| suffix.starts_with('/'))
+                    && let Some(nested) = step.nested_mission
+                {
+                    return find(*nested, path);
+                }
+            }
+            Vec::new()
+        }
+        let body: Option<String> = self.readers.get().query_row(
+            "SELECT revision.body FROM step_runs step
+             JOIN run_generations generation ON generation.id=step.generation_id
+             JOIN mission_runs run ON run.id=step.run_id
+             JOIN mission_revisions revision ON revision.mission_id=run.mission_id
+               AND revision.revision=generation.revision
+             WHERE step.subject=?1 AND generation.id=?2",
+            params![step.subject, step.generation.strip_prefix("run-generation/").unwrap_or(&step.generation)],
+            |row| row.get(0),
+        ).optional()?;
+        body.map(|body| Ok(find(serde_json::from_str(&body)?, &step.step)))
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
     fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>> {
