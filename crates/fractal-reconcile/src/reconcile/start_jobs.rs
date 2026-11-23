@@ -55,6 +55,13 @@ impl Default for StartJobs {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WorkspaceAdmission {
+    NonGit,
+    Git { owner: PathBuf, repository: PathBuf },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PreparedStart {
     pub subject: DesiredSubject,
     pub member: MemberSpec,
@@ -73,6 +80,9 @@ pub struct PreparedStart {
     pub control_request_receipt: Option<crate::model::ClaimRecord>,
     pub expected_incarnation: Option<String>,
     pub resume_operation: Option<String>,
+    // Missing on stored operations from older binaries: refuse launch, but still retire.
+    #[serde(default)]
+    pub workspace_admission: Option<WorkspaceAdmission>,
 }
 
 impl PreparedStart {
@@ -128,7 +138,16 @@ impl<R: RuntimeControl> Reconciler<R> {
             .observed = observed;
     }
 
-    pub(super) fn member_activation_lease(&self, member: &MemberSpec) -> Result<Option<ActivationLease>> {
+    pub(super) fn member_activation_lease(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+    ) -> Result<Option<ActivationLease>> {
+        let identity = self.capture_workspace_admission(member)?;
+        self.admit_start_workspace(subject, member, &identity)
+    }
+
+    fn capture_workspace_admission(&self, member: &MemberSpec) -> Result<WorkspaceAdmission> {
         let workspace = Path::new(&member.workspace);
         let observed = self.start_jobs.activation_leases.lock()
             .unwrap_or_else(PoisonError::into_inner).observed.get(workspace).cloned();
@@ -137,29 +156,58 @@ impl<R: RuntimeControl> Reconciler<R> {
             let owner = crate::checkout::workspace_worktree(workspace)?;
             Some((owner, repository))
         });
-        let lease = if let Some((owner, repository)) = identity {
-            let lease = self.worktree_activation_lease(&owner, &repository)?;
-            anyhow::ensure!(
-                crate::repositories::workspace_repository(workspace).as_ref() == Some(&repository),
-                "workspace reclaimed or repository changed before start"
-            );
-            Some(lease)
-        } else {
-            None
+        match identity {
+            Some((owner, repository)) => {
+                let expected = std::fs::canonicalize(&repository)
+                    .with_context(|| format!("repository {} is unavailable", repository.display()))?;
+                let repository = crate::repositories::workspace_repository(&expected).unwrap_or(expected);
+                Ok(WorkspaceAdmission::Git { owner, repository })
+            }
+            None => Ok(WorkspaceAdmission::NonGit),
+        }
+    }
+
+    fn admit_start_workspace(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        identity: &WorkspaceAdmission,
+    ) -> Result<Option<ActivationLease>> {
+        let workspace = Path::new(&member.workspace);
+        let lease = match identity {
+            WorkspaceAdmission::Git { owner, repository } => {
+                let lease = self.worktree_activation_lease(owner, repository)?;
+                anyhow::ensure!(
+                    crate::repositories::workspace_repository(workspace).as_ref() == Some(repository),
+                    "workspace reclaimed or repository changed before start"
+                );
+                Some(lease)
+            }
+            WorkspaceAdmission::NonGit => {
+                anyhow::ensure!(crate::repositories::workspace_repository(workspace).is_none(),
+                    "non-Git workspace replaced by a Git workspace before start");
+                None
+            }
         };
-        // Preparation owns directory creation. Start must not turn a reclaimed checkout
-        // into a plain directory, including recovered starts without a pass observation.
         anyhow::ensure!(workspace.is_dir(), "workspace reclaimed before start");
+        if subject.kind == "agent"
+            && let Some(checkout) = Checkout::from_desired(&subject.desired)
+        {
+            checkout.validate_workspace(workspace)?;
+        }
         Ok(lease)
     }
 
-    fn retain_start_activation_lease(&self, id: &str, member: &MemberSpec) -> Result<Option<ActivationLease>> {
-        if let Some(lease) = self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
-            .starts.get(id)
-        {
-            return Ok(Some(lease.clone()));
-        }
-        let lease = self.member_activation_lease(member)?;
+    fn retain_start_activation_lease(
+        &self,
+        id: &str,
+        prepared: &PreparedStart,
+    ) -> Result<Option<ActivationLease>> {
+        // Reuse the per-owner holder, but revalidate the declaration even when a
+        // queued operation already retains admission.
+        let identity = prepared.workspace_admission.as_ref()
+            .context("stored start lacks workspace admission; refusing recovery launch")?;
+        let lease = self.admit_start_workspace(&prepared.subject, &prepared.member, identity)?;
         if let Some(lease) = &lease {
             self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
                 .starts.insert(id.to_owned(), lease.clone());
@@ -168,7 +216,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
-        let activation_lease = self.member_activation_lease(&prepared.member)?;
+        prepared.workspace_admission = Some(self.capture_workspace_admission(&prepared.member)?);
+        let identity = prepared.workspace_admission.as_ref().expect("captured workspace admission");
+        let activation_lease = self.admit_start_workspace(&prepared.subject, &prepared.member, identity)?;
         if let Some(run) = &prepared.subject.owner_run
             && self.store.run_projection_pending(run)?
         {
@@ -301,7 +351,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
         // Recovered queued operations reacquire admission before any launch work.
-        let activation_lease = self.retain_start_activation_lease(&operation.id, &prepared.member)?;
+        let activation_lease = match self.retain_start_activation_lease(&operation.id, &prepared) {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.refuse_start_workspace(operation, &error)?;
+                return Ok(());
+            }
+        };
         let Some(launch_permit) = self.admit_incarnation_launch()? else {
             return Ok(());
         };
@@ -605,13 +661,41 @@ impl<R: RuntimeControl> Reconciler<R> {
         )
     }
 
+    fn refuse_start_workspace(&self, operation: &RuntimeStartOperation, error: &anyhow::Error) -> Result<()> {
+        self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
+            ("code".into(), Value::from("start-workspace-refused")),
+            ("reason".into(), Value::from(format!("{error:#}"))),
+            ("operation".into(), Value::from(operation.id.clone())),
+        ]))?;
+        // Queued cancellation proves the producer never ran. Dispatched producers
+        // still require their normal operation-fenced closure evidence.
+        self.revoke_start(&operation.subject)?;
+        if operation.revoked_by.is_some() && !operation.dispatched && !operation.finished {
+            self.store.cancel_undispatched_runtime_start(&operation.id)?;
+        }
+        self.start_changed(&operation.subject);
+        Ok(())
+    }
+
     pub(super) fn reconcile_start_operation(
         &self,
         mut operation: RuntimeStartOperation,
         snapshot: &PassPtySnapshot,
     ) -> Result<()> {
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
-        let _activation_lease = self.retain_start_activation_lease(&operation.id, &prepared.member)?;
+        // Retirement is runtime/store work, not workspace activation. A missing or
+        // incompatible workspace revokes the operation rather than blocking cleanup.
+        let _activation_lease = match self.retain_start_activation_lease(&operation.id, &prepared) {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.refuse_start_workspace(&operation, &error)?;
+                let Some(fresh) = self.store.runtime_start_for(&operation.subject)? else {
+                    return Ok(());
+                };
+                operation = fresh;
+                None
+            }
+        };
         if let Some(run) = &prepared.subject.owner_run
             && self.store.run_projection_pending(run)?
         {

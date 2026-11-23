@@ -189,7 +189,13 @@ pub fn apply_all_admitted(
             continue;
         }
         let workspace = native_workspaces.get(subject.as_str());
-        let cleanup = workspace.is_some_and(|workspace| legacy_cleanup_needed(workspace));
+        let cleanup = match workspace.map(|workspace| legacy_cleanup_needed(workspace)).transpose() {
+            Ok(cleanup) => cleanup.unwrap_or(false),
+            Err(error) => {
+                results.insert(subject, Err(error.context("inspect legacy render cleanup")));
+                continue;
+            }
+        };
         let changed = writes.iter().any(|write|
             write_needed_with_bytes(write, planned_bytes(write, &excludes)));
         if changed || cleanup {
@@ -391,12 +397,21 @@ fn native_harness(subject: &DesiredSubject) -> bool {
 /// and excluded `.st3/` from Git. Nothing else uses `.st3`.
 const LEGACY_ST3_DIRECTORY: &str = ".st3";
 
-fn legacy_cleanup_needed(workspace: &Path) -> bool {
-    fs::symlink_metadata(workspace.join(LEGACY_ST3_DIRECTORY))
-        .is_ok_and(|metadata| metadata.is_dir())
-        || git_exclude_destination(workspace).ok().flatten()
-            .and_then(|exclude| fs::read_to_string(exclude).ok())
-            .is_some_and(|current| current.lines().any(is_legacy_st3_exclude))
+fn legacy_cleanup_needed(workspace: &Path) -> Result<bool> {
+    match fs::symlink_metadata(workspace.join(LEGACY_ST3_DIRECTORY)) {
+        Ok(metadata) if metadata.is_dir() => return Ok(true),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let Some(exclude) = git_exclude_destination(workspace)? else {
+        return Ok(false);
+    };
+    match fs::read_to_string(exclude) {
+        Ok(current) => Ok(current.lines().any(is_legacy_st3_exclude)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Remove what older releases rendered for a typed harness: the workspace's `.st3` directory,
@@ -496,6 +511,38 @@ fn shared_worktrees(exclude: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use fractal_seats::render::shared_tests_attention_tests::{git, harness_agent};
+
+    #[test]
+    fn cleanup_only_render_requires_admission() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        git(workspace.path(), &["init", "-q"]);
+        fs::create_dir(workspace.path().join(".st3")).unwrap();
+        fs::write(workspace.path().join(".st3/boot.md"), "legacy").unwrap();
+        let intent = harness_agent(workspace.path());
+        let desired = intent.subjects.values().collect::<Vec<_>>();
+        assert!(apply_all_admitted(&store, &desired, "node", &|_| Ok(()),
+            &mut |_| anyhow::bail!("cleanup admission refused"))["agent/node.one"].is_err());
+        assert!(workspace.path().join(".st3/boot.md").exists());
+        let mut admissions = 0;
+        assert!(apply_all_admitted(&store, &desired, "node", &|_| Ok(()),
+            &mut |_| { admissions += 1; Ok(()) })["agent/node.one"].is_ok());
+        assert_eq!(admissions, 1);
+        assert!(!workspace.path().join(".st3").exists());
+        assert!(apply_all_admitted(&store, &desired, "node", &|_| Ok(()),
+            &mut |_| panic!("clean native workspace needs no admission"))["agent/node.one"].is_ok());
+    }
+
+    #[test]
+    fn legacy_cleanup_inspection_does_not_swallow_read_failures() {
+        let workspace = tempfile::tempdir().unwrap();
+        git(workspace.path(), &["init", "-q"]);
+        fs::create_dir(workspace.path().join(".git/info/exclude.directory")).unwrap();
+        fs::remove_file(workspace.path().join(".git/info/exclude")).unwrap();
+        fs::rename(workspace.path().join(".git/info/exclude.directory"),
+            workspace.path().join(".git/info/exclude")).unwrap();
+        assert!(legacy_cleanup_needed(workspace.path()).is_err());
+    }
 
     #[test]
     fn same_repository_replacement_during_admission_never_receives_a_stale_plan() {

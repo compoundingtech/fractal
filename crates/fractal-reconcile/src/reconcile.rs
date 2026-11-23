@@ -3957,8 +3957,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     member_errors.insert(subject.subject.clone(), error);
                     continue;
                 }
-                if let Some(repository) = checkout.as_ref().map(|checkout| checkout.repository.clone())
-                    .or_else(|| crate::repositories::workspace_repository(workspace))
+                // Retain the repository identity, not an authored alias or linked
+                // worktree path that may itself disappear before start admission.
+                if let Some(repository) = crate::repositories::workspace_repository(workspace)
                 {
                     let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
                         &crate::checkout::workspace_worktree(workspace)
@@ -8769,7 +8770,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             )?;
             self.signal_changed();
         }
-        let _activation_lease = self.member_activation_lease(member)?;
+        let _activation_lease = self.member_activation_lease(subject, member)?;
         let workspace = Path::new(&member.workspace);
         anyhow::ensure!(workspace.is_dir(),
             "workspace reclaimed before start; preparing on a later pass");
@@ -8971,6 +8972,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // together, only after its writer validates this captured declaration.
         guard()?;
         self.dispatch_start(start_jobs::PreparedStart {
+            workspace_admission: None,
             subject: subject.clone(),
             member: member.clone(),
             launch_member,
