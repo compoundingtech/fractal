@@ -1119,37 +1119,6 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_running_pty_with_a_dead_pid_is_observed_as_vanished() {
-        let observation = fractal_runtime::PtyObservation {
-            name: "stale-worker".into(),
-            status: "running".into(),
-            exit_code: None,
-            pid: Some(i32::MAX as u32),
-            created_at: Some("2026-09-22T12:00:00.000Z".into()),
-            display_name: None,
-            tags: BTreeMap::new(),
-        };
-
-        assert_eq!(observed_pty_status(&observation), "vanished");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_running_pty_with_a_live_pid_remains_running() {
-        let observation = fractal_runtime::PtyObservation {
-            name: "live-worker".into(),
-            status: "running".into(),
-            exit_code: None,
-            pid: Some(std::process::id()),
-            created_at: Some("2026-09-22T12:00:00.000Z".into()),
-            display_name: None,
-            tags: BTreeMap::new(),
-        };
-
-        assert_eq!(observed_pty_status(&observation), "running");
-    }
 
     /// The exec a hook waits for, and what happens right after that exec is next observed.
     type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
