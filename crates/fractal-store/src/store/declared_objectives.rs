@@ -72,7 +72,7 @@ impl DeclaredObjectiveInputs {
                 // Do not publish a new cursor or partial inputs when any selected read fails.
                 let mut replacements = Vec::with_capacity(changed.len());
                 for subject in changed {
-                    let row = statement./* sqlite-large-value: allow-for-now lv-h059cdabeb1e9 owner=fractal_store::store::declared_objectives TODO=trace-statement-and-value-representation */ query_row([&subject], |row| Ok((
+                    let row = statement.query_row(/* sqlite-large-value: allow-for-now lv-h059cdabeb1e9 owner=fractal_store::store::declared_objectives TODO=trace-statement-and-value-representation */ [&subject], |row| Ok((
                         row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?, row.get::<_, String>(3)?,
                     ))).optional()?;
