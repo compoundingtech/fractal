@@ -371,7 +371,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 kind: "runtime.reconcile-decision".into(),
                                 actor: None,
                                 fields: BTreeMap::from([
-                                    ("key".into(), Value::from(key)),
+                                    ("key".into(), Value::from(key.as_str())),
                                     ("decision".into(), Value::from("workspace-admission-unavailable")),
                                     ("reason".into(), Value::from(
                                         "workspace admission is unavailable; queued start will retry")),
