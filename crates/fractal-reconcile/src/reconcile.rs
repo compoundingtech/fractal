@@ -4538,7 +4538,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut evaluated_member_wakes = BTreeSet::new();
         let mut diagnostic_errors = Vec::new();
         let unreadable_span = crate::reconcile_telemetry::phase("pass/unreadable-members");
-        self.record_unreadable_members(&active, &mut diagnostic_errors);
+        self.record_unreadable_members(active, &mut diagnostic_errors);
         drop(unreadable_span);
         let mut members_span = crate::reconcile_telemetry::phase("pass/members");
         members_span.items(active.len());

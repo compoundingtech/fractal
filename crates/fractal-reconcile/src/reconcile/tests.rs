@@ -8346,10 +8346,10 @@ agent "import/omp/fixture" {{
             scoped_started.wait();
             // Deterministically exercise admission while the first evaluation is in capture.
             // Without this gate, a scoped evaluation can replace/remove its pending map entry.
-            let protected = match reconciler.file_changes.launch_input_registration.try_lock() {
-                Err(std::sync::TryLockError::WouldBlock) => true,
-                _ => false,
-            };
+            let protected = matches!(
+                reconciler.file_changes.launch_input_registration.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock),
+            );
             resume.wait();
             let _ = full_pass.join().unwrap();
             let _ = scoped.join().unwrap();

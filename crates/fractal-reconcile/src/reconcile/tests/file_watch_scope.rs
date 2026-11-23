@@ -126,7 +126,7 @@ agent "unrelated" {{ workspace {:?}; command "true"; }}
     assert!(runtime.started_members.lock().unwrap().is_empty(),
         "a missing-provider refusal must not produce a successful member");
     assert!(store.member_reconcile_fault(&desired.subject, None).unwrap().is_some());
-    assert_eq!(*runtime.starts.lock().unwrap(), [runtime_id.clone()],
+    assert_eq!(runtime.starts.lock().unwrap().as_slice(), std::slice::from_ref(&runtime_id),
         "only the dependent member attempted admission");
 
     std::fs::write(&dependency, "fixture executable identity").unwrap();
@@ -269,7 +269,7 @@ agent "selected" {{
             // projection is pending, as in the dispatch-deferral regression.
             let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
             store.connection.write().execute(
-                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                /* sqlite-large-value: allow-for-now lv-h832cd32cd126 owner=fractal_reconcile::reconcile::tests::file_watch_scope TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
                 rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
             ).unwrap();
             assert!(store.run_projection_pending(&run.subject).unwrap());
