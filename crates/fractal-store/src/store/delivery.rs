@@ -605,6 +605,9 @@ impl Store {
                 .query_map([], claim_from_row)?
                 .collect::<Result<Vec<_>, _>>()?;
             for failure in failures {
+                if failure.accepted_at_unix_ms > as_of {
+                    smallclaims::touched::note_due(failure.accepted_at_unix_ms);
+                }
                 if failure.accepted_at_unix_ms > as_of
                     || !person_work::declaration_live(&connection, &failure.subject)?
                     || !subscription_failure_is_current_tx(&connection, &failure)?

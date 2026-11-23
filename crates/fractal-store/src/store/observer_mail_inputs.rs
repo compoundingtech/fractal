@@ -3,8 +3,8 @@
 //! The rowid ledgers cover send/eligibility, lifecycle, acceptance, frontiers and owners.
 //! `pending`, identity names/heads and canonical claim positions are WITHOUT ROWID: their
 //! producers are observed instead (ledger triggers, naming dirty/source rows and canonical
-//! claim/record rows). Runtime projection resets fence the cut explicitly. Native schema
-//! verification also checks the derived schema, so losing those producer edges fails closed.
+//! claim/record rows). Projection mutations are observed at those source edges rather than
+//! presentation resets. Native and derived schema boundaries still fence missed facts.
 use super::*;
 use smallclaims::sqlite::WriterObserver;
 
@@ -60,6 +60,7 @@ impl Default for Inputs {
         Self(Mutex::new(State {
             generation: tokio::sync::watch::channel(0).0,
             pending: BTreeSet::new(),
+            record_updates: BTreeSet::new(),
             dirty: false,
             verify_schema: true,
             coverage_failed: true,
@@ -78,6 +79,7 @@ impl Default for Inputs {
 struct State {
     generation: tokio::sync::watch::Sender<u64>,
     pending: BTreeSet<(&'static str, i64)>,
+    record_updates: BTreeSet<i64>,
     dirty: bool,
     verify_schema: bool,
     coverage_failed: bool,
@@ -106,6 +108,7 @@ impl Inputs {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).generation.subscribe()
     }
 
+    /// Replacing the message shard changes source authority, unlike a view reset.
     pub(super) fn invalidate(&self) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.routing.clear();
@@ -165,13 +168,18 @@ impl WriterObserver for Observer {
             // An insert already pending in this transaction has no old published key.
             state.dirty = true;
         }
-        if action == rusqlite::hooks::Action::SQLITE_DELETE { state.routing.remove(&(table, rowid)); }
+        if table == "replica_records" && action != rusqlite::hooks::Action::SQLITE_INSERT
+            && !state.pending.contains(&(table, rowid))
+            && state.record_updates.len() < PENDING_LIMIT {
+            state.record_updates.insert(rowid);
+        }
+        let routed_delete = action == rusqlite::hooks::Action::SQLITE_DELETE
+            && (table == "desired" || (table.starts_with("local_mail") && state.routing.contains_key(&(table, rowid))));
         if table == "identity_dirty"
-            || action == rusqlite::hooks::Action::SQLITE_DELETE
+            || (action == rusqlite::hooks::Action::SQLITE_DELETE && !routed_delete)
             || (table == "claims" && action == rusqlite::hooks::Action::SQLITE_UPDATE)
-            || (table == "desired" && action == rusqlite::hooks::Action::SQLITE_UPDATE)
             || state.pending.len() >= PENDING_LIMIT {
-            // Deletes may have lost a routing key, and retention can change legacy ranks.
+            // Unknown old keys and retention's legacy-rank changes still fail closed.
             state.dirty = true;
         }
         if state.pending.len() < PENDING_LIMIT {
@@ -218,6 +226,7 @@ impl WriterObserver for Observer {
         self.actuals.published(connection);
         let mut state = self.mail.0.lock().unwrap_or_else(PoisonError::into_inner);
         let pending = std::mem::take(&mut state.pending);
+        let record_updates = std::mem::take(&mut state.record_updates);
         let mut changed = std::mem::take(&mut state.dirty);
         let mut messages = BTreeSet::new();
         let mut recipients = BTreeSet::new();
@@ -232,8 +241,52 @@ impl WriterObserver for Observer {
                 }
                 changed |= state.coverage_failed;
                 state.coverage_failed = false;
+                // Desired row keys are small recipient dependencies, not message history.
+                // Seed them at verified boundaries so updates/deletes of pre-existing agent
+                // declarations can invalidate their old recipient without a population scan.
+                state.routing.retain(|(table, _), _| *table != "desired");
+                let mut query = connection.prepare("SELECT rowid,subject FROM desired WHERE kind='agent'")?;
+                for row in query.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))? {
+                    let (rowid, subject) = row?;
+                    state.routing.insert(("desired", rowid), subject);
+                }
             }
             for (table, rowid) in pending {
+                if table == "desired" {
+                    let previous = state.routing.remove(&(table, rowid));
+                    let next = connection.query_row("SELECT subject FROM desired WHERE rowid=?1 AND kind='agent'",
+                        [rowid], |row| row.get::<_, String>(0)).optional()?;
+                    if let Some(subject) = &next { state.routing.insert((table, rowid), subject.clone()); }
+                    changed |= previous.is_some() || next.is_some();
+                    recipients.extend(previous);
+                    recipients.extend(next);
+                    continue;
+                }
+                if table == "replica_records" {
+                    let previous = state.routing.remove(&(table, rowid));
+                    let subject = connection.query_row(
+                        "SELECT c.subject FROM replica_records r JOIN claims c ON c.id=r.claim_id
+                         WHERE r.rowid=?1 AND c.kind='runtime.observed'
+                           AND (r.kind_hint IS NULL OR r.kind_hint='runtime.observed')",
+                        [rowid], |row| row.get::<_, String>(0)).optional()?;
+                    changed |= previous.is_some() || subject.is_some();
+                    // A newly admitted runtime envelope has no previous authority. An
+                    // update with no retained old key may have replaced naming authority.
+                    full |= subject.is_some() && previous.is_none() && record_updates.contains(&rowid);
+                    recipients.extend(previous);
+                    if let Some(subject) = subject {
+                        if state.routing.len() >= PENDING_LIMIT {
+                            state.routing.retain(|(table, _), _| *table == "desired");
+                            full = true;
+                        }
+                        state.routing.insert((table, rowid), subject.clone());
+                        recipients.insert(subject);
+                    } else if relevant(connection, &mut state, table, rowid)? {
+                        changed = true;
+                        full = true;
+                    }
+                    continue;
+                }
                 if table.starts_with("local_mail") {
                     let (column, target) = if matches!(table, "local_mail_acceptance_frontier_v1" | "local_mailbox_owners") {
                         ("subject", &mut recipients)
@@ -241,16 +294,19 @@ impl WriterObserver for Observer {
                     let column = if table == "local_mail_acceptance_frontier_v1" { "recipient" } else { column };
                     let subject = connection.query_row(/* sqlite-large-value: allow-for-now lv-h62abcfe1465d owner=fractal_store::store::observer_mail_inputs TODO=trace-statement-and-value-representation */ &format!("SELECT {column} FROM {table} WHERE rowid=?1"),
                         [rowid], |row| row.get::<_, String>(0)).optional()?;
+                    if let Some(previous) = state.routing.remove(&(table, rowid)) {
+                        target.insert(previous);
+                    } else if subject.is_none() {
+                        full = true;
+                    }
                     if let Some(subject) = subject {
                         if state.routing.len() >= PENDING_LIMIT && !state.routing.contains_key(&(table, rowid)) {
-                            state.routing.clear();
+                            state.routing.retain(|(table, _), _| *table == "desired");
                             full = true;
                         }
-                        if let Some(previous) = state.routing.insert((table, rowid), subject.clone()) {
-                            target.insert(previous);
-                        }
+                        state.routing.insert((table, rowid), subject.clone());
                         target.insert(subject);
-                    } else { full = true; }
+                    }
                     changed = true;
                 } else if relevant(connection, &mut state, table, rowid)? {
                     changed = true;
@@ -258,10 +314,6 @@ impl WriterObserver for Observer {
                         let runtime = connection.query_row("SELECT subject FROM claims WHERE rowid=?1 AND kind='runtime.observed'",
                             [rowid], |row| row.get::<_, String>(0)).optional()?;
                         if let Some(subject) = runtime { recipients.insert(subject); } else { full = true; }
-                    } else if table == "desired" {
-                        let subject = connection.query_row("SELECT subject FROM desired WHERE rowid=?1",
-                            [rowid], |row| row.get::<_, String>(0)).optional()?;
-                        if let Some(subject) = subject { recipients.insert(subject); } else { full = true; }
                     } else if table == "batches" {
                         let rows = connection.prepare_cached(
                             "SELECT DISTINCT subject FROM claims INDEXED BY claims_batch_index
@@ -325,7 +377,6 @@ fn relevant(connection: &Connection, state: &mut State, table: &str, rowid: i64)
     let sql = match table {
         "claims" => "SELECT kind IN ('runtime.observed','agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired','record.repaired') OR EXISTS(SELECT 1 FROM claims sibling INDEXED BY claims_batch_index WHERE sibling.batch_id=c.batch_id AND sibling.kind='runtime.observed' AND sibling.store_index>c.store_index AND NOT EXISTS(SELECT 1 FROM claim_positions WHERE claim_id=sibling.id)) FROM claims c WHERE c.rowid=?1",
         "replica_records" => "SELECT kind_hint IS NULL OR kind_hint IN ('runtime.observed','agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired','record.repaired') OR EXISTS(SELECT 1 FROM claims WHERE id=r.claim_id AND kind='runtime.observed') FROM replica_records r WHERE r.rowid=?1",
-        "desired" => "SELECT kind='agent' FROM desired WHERE rowid=?1",
         "batches" => "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index WHERE batch_id=(SELECT id FROM batches WHERE rowid=?1) AND kind='runtime.observed')",
         "operations" => "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index WHERE json_extract(body,'$._operation.id')=(SELECT +id FROM operations WHERE rowid=?1) AND kind IN ('runtime.observed','agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired'))",
         "projection_digest_repaired_claims" => "SELECT EXISTS(SELECT 1 FROM claims WHERE id=(SELECT id FROM projection_digest_repaired_claims WHERE rowid=?1) AND kind IN ('runtime.observed','agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired'))",
