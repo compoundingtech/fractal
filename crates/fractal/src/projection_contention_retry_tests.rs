@@ -281,8 +281,10 @@ async fn quiet_receive_rearms_exhausted_retry_budget_only_after_cooldown() {
     // Drive the real retry schedule and its real projection calls without a timer race.
     // A separate SQLite writer holds every scheduled attempt busy through the budget.
     store.connection.write().busy_timeout(Duration::ZERO).unwrap();
-    let writer = rusqlite::Connection::open(&path).unwrap();
-    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut writer = rusqlite::Connection::open(&path).unwrap();
+    let held_writer = writer.transaction_with_behavior(
+        rusqlite::TransactionBehavior::Immediate,
+    ).unwrap();
     let now = tokio::time::Instant::now();
     let mut schedule = ProjectionContentionRetry::default();
     store.projection_retry_episode_started();
@@ -300,7 +302,7 @@ async fn quiet_receive_rearms_exhausted_retry_budget_only_after_cooldown() {
     assert_eq!(schedule.poll(exhausted_at, generation, true), None);
     assert!(schedule.due.is_none());
     assert_eq!(store.projection_frontier().unwrap(), before);
-    writer.execute_batch("ROLLBACK").unwrap();
+    held_writer.rollback().unwrap();
 
     let quiet = ReplicationReceiveRequest {
         exchange: source.export_replication_summary(FLEET).unwrap(),
