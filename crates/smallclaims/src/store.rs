@@ -9654,10 +9654,11 @@ impl Store {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         // Keep one error detail per maintenance episode, not per quiet exchange.
-        if {
+        let already_logged = {
             let episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
             episode.active && episode.logged_failure
-        } {
+        };
+        if already_logged {
             return;
         }
         let emission = {
