@@ -70,6 +70,53 @@ fn desired_inputs_rebuild_only_changed_keys_and_track_raw_removals() {
 }
 
 #[test]
+fn desired_journal_rollover_bounds_deleted_keys_and_rebuilds_stale_rosters() {
+    let store = fixture();
+    let mut inputs = DesiredInputs::default();
+    inputs.refresh(&store).unwrap();
+    let stale = inputs.generation.unwrap();
+    let initial = store.reconcile_input_work();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hab0cd697de5c owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/first'", [],
+    ).unwrap();
+    const BATCH: usize = 128;
+    for batch in 0..=CHANGED_SUBJECT_LIMIT / BATCH {
+        {
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            {
+                let mut insert = transaction.prepare(
+                    /* sqlite-large-value: allow-for-now lv-h58a0560e9304 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body)
+                     VALUES(?1,'resource','test',(SELECT id FROM claims LIMIT 1),'{}')",
+                ).unwrap();
+                for item in 0..BATCH {
+                    insert.execute(/* sqlite-large-value: allow-for-now lv-h13caf0b5c1cf owner=fractal_store::store::observer_reconcile_inputs_tests TODO=trace-statement-and-value-representation */ [format!("resource/churn-{}", batch * BATCH + item)]).unwrap();
+                }
+            }
+            transaction.commit().unwrap();
+        }
+        assert!(store.fractal.reconcile_inputs.0.lock().unwrap().changed.len() <= CHANGED_SUBJECT_LIMIT);
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h403d3ff20c2a owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject GLOB 'resource/churn-*'", [],
+        ).unwrap();
+        let state = store.fractal.reconcile_inputs.0.lock().unwrap();
+        assert!(state.changed.len() <= CHANGED_SUBJECT_LIMIT);
+        assert_eq!(state.rows.len(), 1, "deleted keys remain only in the bounded journal");
+    }
+    let (current, changes) = store.desired_changes_since(Some(stale));
+    assert!(current > stale);
+    assert!(changes.is_none(), "a cursor predating eviction must rebuild");
+    assert!(inputs.refresh(&store).unwrap());
+    assert_eq!(inputs.desired.iter().map(|entry| entry.subject.as_str()).collect::<Vec<_>>(),
+        ["resource/second"], "full refresh removes declarations missed while the consumer lagged");
+    let rebuilt = store.reconcile_input_work();
+    assert_eq!(rebuilt["full_rebuilds"].as_u64(), initial["full_rebuilds"].as_u64().map(|count| count + 1));
+    assert!(!inputs.refresh(&store).unwrap());
+    assert_eq!(store.reconcile_input_work(), rebuilt, "the current cursor does no extra work");
+    assert_eq!(store.desired_changes_since(Some(current)), (current, Some(Vec::new())));
+}
+
+#[test]
 fn projection_marker_changes_evaluate_only_owning_run_fence() {
     let store = fixture();
     let mut inputs = DesiredInputs::default();

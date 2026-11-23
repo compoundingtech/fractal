@@ -2,6 +2,8 @@
 use super::*;
 use smallclaims::sqlite::WriterObserver;
 
+const CHANGED_SUBJECT_LIMIT: usize = 8192;
+
 #[cfg(test)]
 #[path = "observer_reconcile_inputs_tests.rs"]
 mod tests;
@@ -177,7 +179,7 @@ impl Store {
         run_projection_pending_tx(&transaction, subject).map_err(anyhow::Error::new)
     }
 
-    /// `None` means native coverage changed; callers must refresh the complete roster.
+    /// `None` means native coverage changed or retained deltas expired; refresh the complete roster.
     pub fn desired_changes_since(&self, generation: Option<u64>) -> (u64, Option<Vec<String>>) {
         let state = self.fractal.reconcile_inputs.0.lock().unwrap_or_else(PoisonError::into_inner);
         let delta = generation.filter(|generation| *generation >= state.full
@@ -278,7 +280,16 @@ impl WriterObserver for Observer {
             if !changed.is_empty() {
                 state.generation = state.generation.saturating_add(1);
                 let generation = state.generation;
-                for subject in changed { state.changed.insert(subject, generation); }
+                for subject in changed {
+                    state.changed.insert(subject, generation);
+                    if state.changed.len() > CHANGED_SUBJECT_LIMIT {
+                        // Independent consumers can lag indefinitely. Drop historical keys,
+                        // including removals, and require stale cursors to read the live roster.
+                        state.full = generation;
+                        state.changed.clear();
+                        break;
+                    }
+                }
             }
             Ok(())
         })();

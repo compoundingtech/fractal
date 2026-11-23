@@ -120,6 +120,11 @@ The source maintainers of `mail_delivery_objectives_tests`,
 new fixture-only entries. These insert, mutate or delete invented desired,
 mail-ledger, replica-record and projection-marker values to prove changed-key
 routing, deletion safety and work counts. They do not add production writers.
+`observer_reconcile_inputs_tests` also owns journal-retention fixtures
+`lv-hab0cd697de5c`, `lv-h58a0560e9304`, `lv-h13caf0b5c1cf` and `lv-h403d3ff20c2a`.
+They create and delete synthetic desired keys beyond the retained journal limit,
+then prove that an evicted cursor rebuilds the small live roster. The claim ID,
+subject bindings and declaration bodies remain fixture-only inline values.
 Their inline test values preserve the existing storage contracts; representation
 work must keep equivalent authority/reset/deletion regressions when those
 contracts change. The inventory records identify each fixture statement and
