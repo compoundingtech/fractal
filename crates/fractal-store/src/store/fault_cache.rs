@@ -398,7 +398,7 @@ mod family_tests {
         assert_eq!(read(&store, 2_000_000).len(), 2);
         assert_eq!(store.fault_family_work(), before,
             "an unrelated commit and elapsed former rebuild interval do no source work");
-        fault(&store, "daemon/first", "healthy", 4_000);
+        fault(&store, "daemon/first", "recovered", 4_000);
         let remaining = read(&store, 2_000_001);
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].subject, "daemon/second");
@@ -433,12 +433,12 @@ mod family_tests {
     fn fault_delivery_revisits_unmaterialized_step_when_owning_run_projection_finishes() {
         let store = Store::open_memory("node").unwrap();
         crate::store::tests_shared_missions::publish_carry(&store, r#"version 2
-mission "fault-projection" state="ready" {
+mission "carry" state="ready" {
   goal "Keep projection-dependent faults current."
   step "work" { agentless }
 }"#, "declare-fault-projection");
         let run = store.create_mission_run_inner(&crate::model::MissionRunRequest {
-            mission: "fault-projection".into(),
+            mission: "carry".into(),
             revision: None,
             workspace: "/tmp".into(),
             requester: Some("person/operator".into()),
