@@ -76,6 +76,7 @@ pub struct Counters {
     pub project_time: Duration,
     pub projection_chunks: u64,
     pub gate_wait: Duration,
+    pub projection_discovery_time: Duration,
     pub writer_wait: Duration,
     pub final_drain_count: u64,
     pub final_drain_time: Duration,
@@ -201,6 +202,11 @@ pub fn projection_chunk() {
 
 pub fn projection_gate_wait(elapsed: Duration) {
     record(|counters| counters.gate_wait += elapsed);
+}
+
+/// Accumulate off-writer projection conflict discovery and verdict elapsed time.
+pub fn projection_discovery_time(elapsed: Duration) {
+    record(|counters| counters.projection_discovery_time += elapsed);
 }
 
 pub fn projection_writer_wait(elapsed: Duration) {
@@ -671,26 +677,32 @@ mod tests {
             commit();
             projection_gate_wait(Duration::from_millis(2));
             projection_writer_wait(Duration::from_millis(3));
+            projection_discovery_time(Duration::from_millis(7));
             final_drain(Duration::from_millis(5));
             std::thread::spawn(|| {
                 commit();
                 rebuild_part(Duration::from_secs(1));
+                projection_discovery_time(Duration::from_secs(1));
             }).join().unwrap();
             {
                 let _inner = inner.enter();
                 projection_chunk();
                 envelopes_admitted(2);
                 contended();
+                projection_discovery_time(Duration::from_millis(11));
             }
             rebuild_part(Duration::from_millis(3));
+            projection_discovery_time(Duration::from_millis(13));
         }
         commit();
+        projection_discovery_time(Duration::from_secs(1));
         assert_eq!(outer.snapshot().commits, 1);
         assert_eq!(outer.snapshot().rebuild_part_count, 1);
         assert_eq!(outer.snapshot().rebuild_part_time, Duration::from_millis(3));
         assert_eq!(outer.snapshot().projection_chunks, 0);
         assert_eq!(outer.snapshot().gate_wait, Duration::from_millis(2));
         assert_eq!(outer.snapshot().writer_wait, Duration::from_millis(3));
+        assert_eq!(outer.snapshot().projection_discovery_time, Duration::from_millis(20));
         assert_eq!(outer.snapshot().final_drain_count, 1);
         assert_eq!(outer.snapshot().final_drain_time, Duration::from_millis(5));
         assert!(!outer.snapshot().contended);
@@ -698,6 +710,7 @@ mod tests {
         assert_eq!(inner.snapshot().projection_chunks, 1);
         assert!(inner.snapshot().contended);
         assert_eq!(inner.snapshot().commits, 0);
+        assert_eq!(inner.snapshot().projection_discovery_time, Duration::from_millis(11));
         assert_eq!(inner.snapshot().final_drain_count, 0);
     }
 }
