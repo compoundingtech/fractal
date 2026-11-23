@@ -284,3 +284,37 @@ fn mail_subject_journal_rollover_and_projection_reset_require_a_full_rebuild() {
     store.fractal.mail_objective_inputs.invalidate();
     assert!(store.mail_objective_changes_since(generation).1.is_none());
 }
+
+#[test]
+fn unrelated_claim_routing_does_not_scan_later_batch_ballast() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h13d1dca582cf owner=fractal_store::store::observer_mail_inputs_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(id TEXT PRIMARY KEY,batch_id TEXT,kind TEXT,store_index INTEGER);
+         CREATE INDEX claims_batch_index ON claims(batch_id,store_index);
+         CREATE INDEX claims_kind_index ON claims(kind,store_index);
+         CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY);
+         WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<10000)
+         INSERT INTO claims SELECT 'ballast-'||n,'batch','harness.observed',n FROM seq;"
+    ).unwrap();
+    let inputs = Inputs::default();
+    let mut state = inputs.0.lock().unwrap();
+    let steps = Arc::new(AtomicUsize::new(0));
+    let counted = steps.clone();
+    connection.progress_handler(1, Some(move || {
+        counted.fetch_add(1, Ordering::Relaxed);
+        false
+    }));
+    assert!(!relevant(&connection, &mut state, "claims", 1).unwrap());
+    connection.progress_handler(0, None::<fn() -> bool>);
+    assert!(steps.load(Ordering::Relaxed) < 200,
+        "routing one unrelated claim must not visit its 9,999 later unrelated siblings");
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h65fd8fd826b9 owner=fractal_store::store::observer_mail_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES('runtime','batch','runtime.observed',10001)", [],
+    ).unwrap();
+    assert!(relevant(&connection, &mut state, "claims", 1).unwrap(),
+        "a later legacy runtime still depends on the earlier sibling's rank");
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h5343abc9850d owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_positions VALUES('runtime')", []).unwrap();
+    assert!(!relevant(&connection, &mut state, "claims", 1).unwrap(),
+        "an immutable runtime position does not depend on legacy sibling ranks");
+}
