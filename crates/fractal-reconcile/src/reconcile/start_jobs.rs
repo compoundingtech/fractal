@@ -746,6 +746,22 @@ impl<R: RuntimeControl> Reconciler<R> {
         if request.body["fields"]["fresh_session"] == true
             && request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
         {
+            let incarnation = request.body["fields"]["incarnation_id"].as_str();
+            let session = if let (Some(incarnation), Some(control)) =
+                (incarnation, prepared.control_request_receipt.as_ref())
+            {
+                self.store.claims_for(&operation.subject, Some("harness.session-file"))?
+                    .into_iter().rev()
+                    .find(|claim| claim.store_index <= control.store_index
+                        && claim.body["fields"]["incarnation_id"].as_str() == Some(incarnation))
+                    .and_then(|claim| Some((
+                        claim.body["fields"]["harness"].as_str()?.to_owned(),
+                        claim.body["fields"]["session_id"].as_str()?.to_owned(),
+                    )))
+            } else {
+                None
+            };
+            let incumbent = self.runtime.observe_start(&prepared.member)?;
             // A fresh session may already have stopped its incumbent after handoff.
             // Preserve the acknowledged boundary, not a new preparation timestamp.
             let head = self.store.claims_for(&operation.subject, None)?
@@ -761,7 +777,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart-prepare:{}:{}", operation.subject, request.id),
             )? && crate::handoff::acknowledged_handoff_since(
                 &self.store, &operation.subject, prepare.accepted_at_unix_ms,
-            )? {
+            )? && let Some(incarnation) = incarnation
+                && (prepared.member.driver.is_none() || session.is_some())
+                && self.handoff_incumbent_matches(
+                    &operation.subject, incarnation, session.as_ref(), incumbent.as_ref(),
+                )?
+            {
                 self.store.append_claim(&ClaimInput {
                     subject: operation.subject.clone(),
                     kind: "runtime.reconcile-decision".into(),
@@ -771,6 +792,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ("decision".into(), Value::from("ready")),
                         ("acknowledged_since_unix_ms".into(),
                             Value::from(prepare.accepted_at_unix_ms.to_string())),
+                        ("incarnation_id".into(), Value::from(incarnation)),
+                        ("native_session".into(), serde_json::to_value(&session)?),
                     ]),
                     evidence: vec![requeued.id.clone(), prepare.id, request.id.clone()],
                     expected_subject: Some(head),

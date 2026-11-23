@@ -1928,30 +1928,42 @@ fn old_format_queued_start_is_retired_then_restarted_under_a_fresh_lease() {
 
 #[test]
 fn old_format_queued_explicit_restart_is_reissued_and_started_with_a_fresh_lease() {
-    assert_old_format_restart_recovery("restart", false, false, false);
+    assert_old_format_restart_recovery("restart", false, false, false, false);
 }
 
 #[test]
 fn old_format_queued_idle_restart_keeps_its_already_reached_quiet_boundary() {
-    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, false, false, false);
+    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, false, false, false, false);
 }
 
 #[test]
 fn old_format_queued_restart_does_not_revive_authority_after_a_later_stop() {
-    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true, false, false);
+    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true, false, false, false);
 }
 
 #[test]
 fn interrupted_restart_requeue_does_not_transfer_quiescence_after_a_stop() {
-    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true, true, false);
+    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true, true, false, false);
 }
 
 #[test]
 fn old_format_fresh_restart_carries_its_acknowledged_handoff_boundary() {
-    assert_old_format_restart_recovery("restart", false, false, true);
+    assert_old_format_restart_recovery("restart", false, false, true, false);
 }
 
-fn assert_old_format_restart_recovery(action: &str, later_stop: bool, interrupted: bool, fresh: bool) {
+#[test]
+fn interrupted_fresh_restart_requeue_keeps_the_same_incumbents_handoff() {
+    assert_old_format_restart_recovery("restart", false, true, true, false);
+}
+
+#[test]
+fn interrupted_fresh_restart_requeue_does_not_carry_handoff_to_another_incumbent() {
+    assert_old_format_restart_recovery("restart", false, true, true, true);
+}
+
+fn assert_old_format_restart_recovery(
+    action: &str, later_stop: bool, interrupted: bool, fresh: bool, changed_incumbent: bool,
+) {
     let _clock = Clock::at(START);
     let root = crate::test_support::canonical_tempdir();
     let repository = crate::checkout::test_support::repository(root.path());
@@ -1973,6 +1985,17 @@ fn assert_old_format_restart_recovery(action: &str, later_stop: bool, interrupte
             expected_subject: None,
             idempotency_key: None,
         }).unwrap();
+        if fresh {
+            store.append_claim(&ClaimInput {
+                subject: desired.subject.clone(), kind: "harness.session-file".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("incarnation_id".into(), Value::from("incumbent")),
+                    ("harness".into(), Value::from("omp")),
+                    ("session_id".into(), Value::from("native-A")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
         original = store.append_claim(&ClaimInput {
             subject: "agent/node.worker".into(),
             kind: "runtime.action.requested".into(),
@@ -2045,6 +2068,21 @@ fn assert_old_format_restart_recovery(action: &str, later_stop: bool, interrupte
     smallclaims::store::set_thread_clock(Some(START + 2));
     let store = Arc::new(Store::open(&database, "node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
+    if changed_incumbent {
+        let member = store.desired_subjects_named(&[original.subject.clone()])
+            .unwrap().remove(0).member.unwrap();
+        let observation = running_observation(&member, "replacement");
+        runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), observation);
+        store.append_claim(&ClaimInput {
+            subject: original.subject.clone(), kind: "harness.session-file".into(), actor: None,
+            fields: BTreeMap::from([
+                ("incarnation_id".into(), Value::from("replacement")),
+                ("harness".into(), Value::from("omp")),
+                ("session_id".into(), Value::from("native-B")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
     let restarted = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
     );
@@ -2074,6 +2112,13 @@ fn assert_old_format_restart_recovery(action: &str, later_stop: bool, interrupte
     assert_eq!(requeued.body["fields"], original.body["fields"]);
     assert_eq!(requeued.body["evidence"][0], original.body["evidence"][0]);
     assert!(store.operation_claim(&format!("agent-restart-attempt:{}", requeued.id)).unwrap().is_none());
+    if changed_incumbent {
+        assert!(store.operation_claim(&format!("restart-prepare:{}:{}:handoff",
+            requeued.subject, requeued.id)).unwrap().is_none(),
+            "a different running incarnation/session must prepare its own handoff");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        return;
+    }
     if fresh {
         assert!(store.operation_claim(&format!("restart-prepare:{}:{}:handoff",
             requeued.subject, requeued.id)).unwrap().is_some());

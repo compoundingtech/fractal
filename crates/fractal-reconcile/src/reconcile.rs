@@ -5485,7 +5485,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(true);
             }
         }
-        self.prepare_restart(subject, trigger, reason, false)
+        self.prepare_restart(subject, trigger, reason, false, Some(observation))
+    }
+
+    fn handoff_incumbent_matches(
+        &self,
+        subject: &str,
+        incarnation: &str,
+        session: Option<&(String, String)>,
+        incumbent: Option<&RuntimeObservation>,
+    ) -> Result<bool> {
+        let Some(incumbent) = incumbent.filter(|observation| observation.status == "running") else {
+            return Ok(true);
+        };
+        Ok(incumbent.incarnation_id.as_deref() == Some(incarnation)
+            && crate::suspension::bound_session(&self.store, subject, incarnation)?.as_ref() == session)
     }
 
     /// Fresh sessions wait for acknowledgement without a restart-anyway deadline, even
@@ -5497,10 +5511,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         trigger: &str,
         reason: &str,
         require_handoff: bool,
+        incumbent: Option<&RuntimeObservation>,
     ) -> Result<bool> {
         let key = format!("restart-prepare:{subject}:{trigger}");
         if require_handoff
             && let Some(boundary) = self.store.operation_claim(&format!("{key}:handoff"))?
+            && let Some(incarnation) = boundary.body["fields"]["incarnation_id"].as_str()
+            && let Some(session) = boundary.body["fields"].get("native_session")
+                .and_then(|value| serde_json::from_value::<Option<(String, String)>>(value.clone()).ok())
+            && self.handoff_incumbent_matches(subject, incarnation, session.as_ref(), incumbent)?
         {
             let since = boundary.body["fields"]["acknowledged_since_unix_ms"]
                 .as_str().context("transferred handoff boundary has no acknowledgement time")?
@@ -10172,7 +10191,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 "a fresh session was requested by {}",
                 request.actor.as_deref().unwrap_or("the operator"),
             );
-            if !self.prepare_restart(&subject.subject, &request.id, &reason, true)? {
+            if !self.prepare_restart(&subject.subject, &request.id, &reason, true, observation)? {
                 let deadline = request.accepted_at_unix_ms
                     .saturating_add(crate::restart::ATTENTION_AFTER_MS);
                 if now_ms() < deadline {
