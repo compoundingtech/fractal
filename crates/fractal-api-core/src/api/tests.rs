@@ -33,6 +33,9 @@ async fn performance_exports_native_writer_work_counts() {
     ] {
         assert_eq!(report["relayed_close_work"][counter].as_u64(), Some(0), "{counter}: {report}");
     }
+    for collection in ["work", "missions", "runtimes"] {
+        assert_eq!(report["published_list_work"][collection]["refolded"], 0, "{collection}: {report}");
+    }
 }
 
 #[test]

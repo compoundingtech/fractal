@@ -41,15 +41,16 @@ pub fn fold(
                     digest: base.rows.digest.clone(), time_unix_ms },
             }, false)));
         }
-        let status = if let Some(affected) = &affected {
-            store.status_for_subject_names_for_generic_reads_at(
-                affected.clone(), index, false, crate::store::ClaimsReduction::Runtime,
-            )?
-        } else {
-            store.status_for_claim_kind_for_generic_reads_at(
-                "runtime.observed", Some(index), false, crate::store::ClaimsReduction::Runtime,
-            )?
+        let subjects = match &affected {
+            Some(affected) => affected.clone(),
+            None => store.runtime_list_subjects(index)?,
         };
+        // Count owner reductions, not visible output rows: a changed owner may
+        // disappear into history or be excluded by generic-read visibility.
+        store.published_runtime_list().note_refolded(subjects.len());
+        let status = store.status_for_subject_names_for_generic_reads_at(
+            subjects, index, false, crate::store::ClaimsReduction::Runtime,
+        )?;
         let updated = runtime_resources_from_status_access(store, "runtime-publication", &client_timestamp(time_unix_ms), status, true, true)?;
         if let (Some(base), Some(affected)) = (base, &affected)
             && base.rows.items.iter()

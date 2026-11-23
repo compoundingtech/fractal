@@ -91,7 +91,7 @@ pub async fn get(
             let ended = states.get(&id).and_then(|state| state.completed_at_unix_ms);
             if matches!(steps.status.as_str(), "completed" | "failed" | "cancelled")
                 && ended.is_none_or(|at| now.saturating_sub(at) >= DAY_MS) { continue; }
-            let wait = waiting_on::run_waiting_on(&steps, &sources.work, &sources.missions.rows, now, DEFAULT_QUIET_AFTER_MS);
+            let wait = waiting_on::run_waiting_on(&store, &steps, &sources.work, &sources.missions.rows, now, DEFAULT_QUIET_AFTER_MS)?;
             let eta = if wait.verdict == RunVerdict::Finished {None} else {store.mission_run_eta(&id, now)?};
             if let Some(value) = row(&wait, eta, deadline, ended, person.as_deref(), now) { rows.push(value); }
         }
