@@ -8187,11 +8187,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
     {
         let store = store.clone();
         let state_dir = config.state_dir.clone();
+        let inputs = Arc::new(std::sync::Mutex::new(
+            fractal_daemon::store::declared_objectives::DeclaredObjectiveInputs::default(),
+        ));
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let domain = fractal_daemon::declared_objectives::github_rows(&store, &state_dir, now_ms() as u64)?;
-                let mut rows = fractal_daemon::api::slo_rows(&store, domain)?;
+                let mut inputs = inputs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                inputs.refresh(&store)?;
+                let domain = fractal_daemon::declared_objectives::github_rows_from_declarations(
+                    &store, &state_dir, now_ms() as u64, inputs.declarations(),
+                )?;
+                let mut rows = fractal_daemon::api::slo_rows_from_declarations(
+                    &store, domain, inputs.declarations(),
+                )?;
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
