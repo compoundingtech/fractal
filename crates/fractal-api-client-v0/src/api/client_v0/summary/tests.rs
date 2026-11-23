@@ -751,7 +751,7 @@ fn published_machines_are_reused_until_a_claim_can_change_them() {
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(runtimes.keys().collect::<Vec<_>>(), ["agent/alder", "agent/birch"]);
 
-    // A runtime on another host, a host's status and the clock are read again.
+    // A runtime on another host or a host's status changes membership; time alone does not.
     runtime(&peer, "cypress", "running");
     import();
     let (third, runtimes) = read(0);
@@ -762,7 +762,7 @@ fn published_machines_are_reused_until_a_claim_can_change_them() {
     let (fourth, _) = read(0);
     assert!(!Arc::ptr_eq(&third, &fourth));
     let (fifth, _) = read(1);
-    assert!(!Arc::ptr_eq(&fourth, &fifth));
+    assert!(Arc::ptr_eq(&fourth, &fifth), "there is no periodic machine rebuild");
 
     // A runtime that stops is no longer current. Its host stays while it runs another.
     runtime(&state.store, "birch", "stopped");
@@ -774,4 +774,86 @@ fn published_machines_are_reused_until_a_claim_can_change_them() {
     let (seventh, runtimes) = read(1);
     assert!(!Arc::ptr_eq(&sixth, &seventh));
     assert_eq!(runtimes.keys().collect::<Vec<_>>(), ["agent/alder"]);
+}
+
+#[test]
+fn summary_mission_work_is_keyed_and_ignores_unrelated_commits() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    let mut steps = Vec::new();
+    for name in ["alder", "birch"] {
+        let source = format!("version 2\nmission \"summary-{name}\" state=\"ready\" {{ goal \"Summary fixture\"; step \"build\" {{ assigned-to \"agent/builder\"; goal \"Build fixture\" }} }}\n");
+        let intent = crate::graph::parse_intent(&source, "summary-work-fixture").unwrap();
+        let planned = store.mission(&intent, crate::model::IntentInput {
+            kdl: source, source_name: None,
+        }).unwrap();
+        store.apply(&intent, &planned.subject_tokens, &format!("summary-{name}-publication")).unwrap();
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: format!("summary-{name}"),
+            revision: None,
+            workspace: root.path().display().to_string(),
+            requester: Some("person/avery".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: format!("summary-{name}-run"),
+        }).unwrap();
+        let step = run.steps.first().unwrap().subject.clone();
+        store.set_step_state(&step, "working", None).unwrap();
+        steps.push(step);
+    }
+    let now = client_now_ms();
+    let read = |at| store.read_snapshot(|cut| store.client_summary_counts(at, cut, active)).unwrap();
+    read(now);
+    let before = store.summary_work()["mission_subject_rebuilds"].as_u64().unwrap();
+    assert_eq!(before, 2);
+    read(now);
+    assert_eq!(store.summary_work()["mission_subject_rebuilds"], before);
+    store.append_claim(&crate::model::ClaimInput {
+        subject: "document/unrelated-summary-fixture".into(),
+        kind: "custom.summary-fixture".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({})).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    read(now + 1);
+    assert_eq!(store.summary_work()["mission_subject_rebuilds"], before,
+        "an unrelated commit rebuilds no mission input");
+    store.set_step_state(&steps[1], "blocked", None).unwrap();
+    read(now + 2);
+    assert_eq!(store.summary_work()["mission_subject_rebuilds"], before + 1);
+    store.with_summary_sources(|sources| {
+        assert_eq!(sources.missions["summary-alder"].evaluated_at, now);
+        assert_eq!(sources.missions["summary-birch"].evaluated_at, now + 2);
+        Ok(())
+    }).unwrap();
+    read(now + 3);
+    assert_eq!(store.summary_work()["mission_subject_rebuilds"], before + 1);
+}
+
+#[test]
+fn summary_rejects_future_shared_counts_even_with_unchanged_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    store.start_attention_list_refresher().unwrap();
+    let _ = store.published_summary(None);
+    refresh_published(&state, 60_000, false).unwrap();
+    assert!(store.summary_shared().is_some());
+    // Model a clock rollback without a sleep or a process-wide clock override.
+    for waiting_only in [false, true] {
+        let (shared, inputs) = store.summary_shared().unwrap();
+        let mut future = (*shared).clone();
+        future.evaluated_at_unix_ms = u128::MAX;
+        future.working_agents = 99;
+        let (generation, _) = store.summary_selections(60_000, false);
+        store.publish_summary_shared(generation, Arc::new(future), inputs);
+        refresh_published(&state, 60_000, waiting_only).unwrap();
+        let (recomputed, _) = store.summary_shared().unwrap();
+        assert_ne!(recomputed.evaluated_at_unix_ms, u128::MAX,
+            "unchanged source identities cannot validate counts evaluated in the future");
+        assert_eq!(recomputed.working_agents, 0);
+    }
 }

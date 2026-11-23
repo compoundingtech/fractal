@@ -12,6 +12,11 @@
 //! `running`. A ready path that still runs a replaced st binary does deliver, with its old code,
 //! so it is `outdated` rather than stale; its reason says whether it will follow the daemon's
 //! binary or needs a seat restart.
+//!
+//! Incremental roster readers use `assess_current_semantic`: its revision excludes elapsed
+//! display ages but includes attachment-push inventory. Subscribe before reading, refresh
+//! deadlines on report notifications, and wake at the returned absolute deadline; no polling
+//! timer is needed to observe startup grace, channel loss, or a stopped delivery process.
 
 use crate::DeliveryStore;
 use std::collections::HashMap;
@@ -118,6 +123,8 @@ pub fn bind_recovered(fence: &crate::mailbox::Fence) {
         && let Ok(mut rows) = presence().refusals.lock()
     {
         rows.remove(&fence.subject);
+        drop(rows);
+        notify_semantic();
     }
 }
 
@@ -216,6 +223,8 @@ struct Presence {
     state_since: Mutex<HashMap<String, IncarnationStateClocks>>,
     /// Attachment-push title streams waiting on a subject, one sender per watched subject.
     watchers: Mutex<HashMap<String, watch::Sender<u64>>>,
+    semantic_watch: watch::Sender<u64>,
+    semantic_rows: Mutex<HashMap<String, Vec<SemanticRow>>>,
     /// The title binding of each live stream that has been sent an attachment frame.
     pushed: Mutex<HashMap<String, crate::mailbox::Fence>>,
 }
@@ -233,6 +242,8 @@ fn presence() -> &'static Presence {
         refusals: Mutex::default(),
         state_since: Mutex::default(),
         watchers: Mutex::new(HashMap::new()),
+        semantic_watch: watch::channel(0).0,
+        semantic_rows: Mutex::default(),
         pushed: Mutex::new(HashMap::new()),
     })
 }
@@ -281,6 +292,8 @@ pub fn proof_pending(fence: &crate::mailbox::Fence, owner: u64, failures: u8) {
             };
         }
         row.failures = failures.min(3);
+        drop(rows);
+        notify_semantic();
     }
 }
 pub fn clear_proof_pending(fence: &crate::mailbox::Fence, owner: u64, valid: bool) {
@@ -371,6 +384,8 @@ pub fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
     }
     if let Ok(mut monitors) = presence().monitors.lock() {
         monitors.insert(fence.subject.clone(), beat);
+        drop(monitors);
+        notify_semantic();
         return true;
     }
     false
@@ -544,13 +559,25 @@ fn replace_beat(recipient: &str, beat: Beat) -> bool {
     let changed = proof(beats.get(recipient), now) != proof(Some(&beat), now);
     beats.insert(recipient.to_owned(), beat);
     drop(beats);
+    notify_semantic();
     if changed {
         notify(recipient);
     }
     true
 }
 
+/// Report mutations wake roster readers so they can update both semantics and moved deadlines.
+/// Heartbeat-only mutations do not advance an assessment's semantic revision.
+pub fn subscribe_semantic() -> watch::Receiver<u64> {
+    presence().semantic_watch.subscribe()
+}
+
+fn notify_semantic() {
+    presence().semantic_watch.send_modify(|revision| *revision = revision.wrapping_add(1));
+}
+
 fn notify(recipient: &str) {
+    notify_semantic();
     if let Ok(watchers) = presence().watchers.lock()
         && let Some(sender) = watchers.get(recipient)
     {
@@ -648,6 +675,8 @@ impl AttachmentWatch {
 pub fn note_pushed(fence: &crate::mailbox::Fence) {
     if let Ok(mut pushed) = presence().pushed.lock() {
         pushed.insert(fence.subject.clone(), fence.clone());
+        drop(pushed);
+        notify_semantic();
     }
 }
 
@@ -659,6 +688,8 @@ pub fn forget_pushed(fence: &crate::mailbox::Fence) {
             .is_some_and(|held| same_binding(held, fence))
     {
         pushed.remove(&fence.subject);
+        drop(pushed);
+        notify_semantic();
     }
 }
 
@@ -714,6 +745,8 @@ pub fn record_ownership(fence: &crate::mailbox::Fence, legacy: bool) {
         if !legacy {
             row.shape = None;
         }
+        drop(ownership);
+        notify_semantic();
     }
 }
 
@@ -776,6 +809,8 @@ pub fn finish_legacy_shape(
         && row.peers[..row.used].contains(&pid)
     {
         row.shape = Some((Instant::now(), bounded));
+        drop(rows);
+        notify_semantic();
     }
 }
 
@@ -848,8 +883,79 @@ pub fn assess(recipient: &str, driver: &str) -> Assessment {
 pub fn assess_current(recipient: &str, driver: &str, incarnation: Option<&str>) -> Assessment {
     assess_selected(recipient, driver, incarnation, true)
 }
+/// A roster projection: elapsed display ages are deliberately absent from the assessment.
+/// Revision changes only when visible semantics (including attachment-push inventory) change.
+/// Deadlines are absolute reader-clock milliseconds, not a polling interval or cache lifetime.
+pub struct SemanticAssessment {
+    pub assessment: Assessment,
+    pub revision: u64,
+    pub next_deadline_ms: Option<u64>,
+}
+
+struct SemanticRow {
+    driver: String,
+    incarnation: Option<String>,
+    assessment: Assessment,
+    push: &'static str,
+    revision: u64,
+}
+
+pub fn assess_current_semantic(
+    recipient: &str,
+    driver: &str,
+    incarnation: Option<&str>,
+) -> SemanticAssessment {
+    let (assessment, mut deadline) = assess_selected_mode(recipient, driver, incarnation, true, true);
+    let push = attachment_push(recipient, incarnation);
+    if driver == "claude"
+        && push == "not-negotiated"
+        && let Ok(monitors) = presence().monitors.lock()
+        && let Some(beat) = monitors.get(recipient)
+    {
+        let expires = beat.at + POLL_STALE_AFTER + Duration::from_millis(1);
+        if expires > tokio::time::Instant::now() {
+            deadline = Some(deadline.map_or(expires, |at| at.min(expires)));
+        }
+    }
+    let mut rows = presence().semantic_rows.lock().expect("presence semantic rows poisoned");
+    if !rows.contains_key(recipient) {
+        rows.insert(recipient.to_owned(), Vec::new());
+    }
+    let rows = rows.get_mut(recipient).expect("inserted semantic subject");
+    let row = if let Some(index) = rows.iter().position(|row|
+        row.driver == driver && row.incarnation.as_deref() == incarnation)
+    {
+        &mut rows[index]
+    } else {
+        rows.push(SemanticRow {
+            driver: driver.into(),
+            incarnation: incarnation.map(str::to_owned),
+            assessment: assessment.clone(),
+            push,
+            revision: 1,
+        });
+        rows.last_mut().expect("inserted semantic assessment")
+    };
+    if row.assessment != assessment || row.push != push {
+        row.assessment = assessment.clone();
+        row.push = push;
+        row.revision = row.revision.wrapping_add(1);
+    }
+    let next_deadline_ms = deadline.map(|at| unix_ms().saturating_add(
+        u64::try_from(at.saturating_duration_since(tokio::time::Instant::now())
+            .as_nanos().div_ceil(1_000_000))
+            .unwrap_or(u64::MAX)));
+    SemanticAssessment { assessment, revision: row.revision, next_deadline_ms }
+}
+
 
 fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, current: bool) -> Assessment {
+    assess_selected_mode(recipient, driver, incarnation, current, false).0
+}
+
+fn assess_selected_mode(
+    recipient: &str, driver: &str, incarnation: Option<&str>, current: bool, semantic: bool,
+) -> (Assessment, Option<tokio::time::Instant>) {
     let presence = presence();
     let eligible = |beat: &&Beat| {
         if !current { return true; }
@@ -882,7 +988,25 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
     }
     let non_ready = beat.as_ref().is_some_and(|(at, report)|
         at.elapsed() <= POLL_STALE_AFTER && report.ready == Some(false));
-    let assessment = assess_beat(
+    let now = tokio::time::Instant::now();
+    let mut deadline = match beat.as_ref() {
+        None => startup_grace().checked_sub(uptime(presence))
+            .filter(|remaining| !remaining.is_zero()).map(|remaining| now + remaining),
+        Some((at, report)) => {
+            let mut expires = *at + POLL_STALE_AFTER + Duration::from_millis(1);
+            if driver == "claude" && !report.legacy && report.ready != Some(false)
+                && let Some(age) = report.channel.as_ref().and_then(|channel| channel.age_ms)
+                && age <= CHANNEL_STALE_AFTER_MS
+            {
+                let channel_expires = *at + Duration::from_millis(CHANNEL_STALE_AFTER_MS - age + 1);
+                if channel_expires > now {
+                    expires = expires.min(channel_expires);
+                }
+            }
+            (expires > now).then_some(expires)
+        }
+    };
+    let assessment = assess_beat_mode(
         uptime(presence),
         presence.image.as_deref(),
         beat.map(|(at, mut report)| {
@@ -894,6 +1018,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
             (at.elapsed(), report)
         }),
         driver,
+        semantic,
     );
     let owner = presence.ownership.lock().ok().and_then(|rows| {
         rows.get(recipient)
@@ -909,26 +1034,34 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         } else {
             ""
         };
-        assessment.reason = Some(format!(
-            "{LEGACY_REASON}; {shape}; sampled {}s ago (not health or enforcement){cap}",
-            at.elapsed().as_secs()
-        ));
+        assessment.reason = Some(if semantic {
+            format!("{LEGACY_REASON}; {shape}; sampled (not health or enforcement){cap}")
+        } else {
+            format!("{LEGACY_REASON}; {shape}; sampled {}s ago (not health or enforcement){cap}",
+                at.elapsed().as_secs())
+        });
     }
     if let Some(proof) = presence.uncertain.lock().ok().and_then(|rows|
         rows.get(recipient).filter(|r| incarnation == Some(r.fence.incarnation.as_str())).cloned()) {
         assessment.state = "unknown";
-        assessment.reason = Some(format!("ownership proof unavailable{}; established stream retained, new effects held and automatic recovery deferred; {}s",
-            if proof.failures >= 3 { ": suspect after three checks" } else { "" }, proof.since.elapsed().as_secs()));
+        let suspect = if proof.failures >= 3 { ": suspect after three checks" } else { "" };
+        assessment.reason = Some(if semantic {
+            format!("ownership proof unavailable{suspect}; established stream retained, new effects held and automatic recovery deferred")
+        } else {
+            format!("ownership proof unavailable{suspect}; established stream retained, new effects held and automatic recovery deferred; {}s", proof.since.elapsed().as_secs())
+        });
+        deadline = None;
     }
     if let Some(refusal) = presence.refusals.lock().ok().and_then(|rows|
         rows.get(recipient).filter(|r| incarnation.is_none_or(|i| i == r.incarnation)).cloned())
     {
         assessment.state = "refused";
         assessment.reason = Some(format!("delivery refused: {}", refusal.code));
+        deadline = None;
     }
     if let Some(since) = state_since(presence, recipient, incarnation.unwrap_or_default(), assessment.state) {
         assessment.since_unix_ms = Some(since);
-        if assessment.state == "stale" && non_ready {
+        if !semantic && assessment.state == "stale" && non_ready {
             let reason = assessment.reason.take().unwrap_or_default();
             assessment.reason = Some(format!(
                 "{reason}; channel non-ready for {}s",
@@ -936,7 +1069,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
             ));
         }
     }
-    assessment
+    (assessment, deadline)
 }
 
 /// When this incarnation's assessments entered `state`, restarting the clock when the state changes.
@@ -987,20 +1120,32 @@ pub fn known(recipient: &str) -> Option<Assessment> {
     ))
 }
 
+#[cfg(test)]
 fn assess_beat(
     uptime: Duration,
     daemon_image: Option<&str>,
     beat: Option<(Duration, Report)>,
     driver: &str,
 ) -> Assessment {
+    assess_beat_mode(uptime, daemon_image, beat, driver, false)
+}
+
+fn assess_beat_mode(
+    uptime: Duration,
+    daemon_image: Option<&str>,
+    beat: Option<(Duration, Report)>,
+    driver: &str,
+    semantic: bool,
+) -> Assessment {
     let Some((age, report)) = beat else {
         if uptime < startup_grace() {
             return Assessment {
                 state: "unknown",
-                reason: Some(format!(
-                    "the daemon started {}s ago and this seat has not polled its mailbox yet",
-                    uptime.as_secs()
-                )),
+                reason: Some(if semantic {
+                    "the daemon is starting and this seat has not polled its mailbox yet".into()
+                } else {
+                    format!("the daemon started {}s ago and this seat has not polled its mailbox yet", uptime.as_secs())
+                }),
                 polled_seconds_ago: None,
                 transport: None,
                 since_unix_ms: None,
@@ -1008,10 +1153,11 @@ fn assess_beat(
         }
         return Assessment {
             state: "stale",
-            reason: Some(format!(
-                "no delivery process has polled this seat's mailbox since the daemon started {}s ago",
-                uptime.as_secs()
-            )),
+            reason: Some(if semantic {
+                "no delivery process has polled this seat's mailbox since the daemon started".into()
+            } else {
+                format!("no delivery process has polled this seat's mailbox since the daemon started {}s ago", uptime.as_secs())
+            }),
             polled_seconds_ago: None,
             transport: None,
             since_unix_ms: None,
@@ -1020,15 +1166,16 @@ fn assess_beat(
     let stale = |reason: String| Assessment {
         state: "stale",
         reason: Some(reason),
-        polled_seconds_ago: Some(age.as_secs()),
+        polled_seconds_ago: (!semantic).then_some(age.as_secs()),
         transport: report.transport.clone(),
         since_unix_ms: None,
     };
     if age > POLL_STALE_AFTER {
-        return stale(format!(
-            "the delivery process last polled this seat's mailbox {}s ago",
-            age.as_secs()
-        ));
+        return stale(if semantic {
+            "the delivery process stopped polling this seat's mailbox".into()
+        } else {
+            format!("the delivery process last polled this seat's mailbox {}s ago", age.as_secs())
+        });
     }
     if report.legacy {
         return Assessment {
@@ -1037,7 +1184,7 @@ fn assess_beat(
                 "a legacy delivery process (pid {}) is polling; its binary and readiness are not reported",
                 report.pid.unwrap_or_default()
             )),
-            polled_seconds_ago: Some(age.as_secs()),
+            polled_seconds_ago: (!semantic).then_some(age.as_secs()),
             transport: report.transport,
             since_unix_ms: None,
         };
@@ -1084,15 +1231,15 @@ fn assess_beat(
         let Some(channel) = report.channel.as_ref() else {
             return stale("the Claude channel has not reported that it is running".into());
         };
-        if channel
-            .age_ms
-            .is_none_or(|age| age > CHANNEL_STALE_AFTER_MS)
-        {
-            return stale(format!(
-                "the Claude channel (pid {}) stopped reporting {}s ago",
-                channel.pid.unwrap_or_default(),
-                channel.age_ms.unwrap_or_default() / 1000
-            ));
+        let channel_age = channel.age_ms.map(|reported|
+            reported.saturating_add(u64::try_from(age.as_millis()).unwrap_or(u64::MAX)));
+        if channel_age.is_none_or(|age| age > CHANNEL_STALE_AFTER_MS) {
+            return stale(if semantic {
+                format!("the Claude channel (pid {}) stopped reporting", channel.pid.unwrap_or_default())
+            } else {
+                format!("the Claude channel (pid {}) stopped reporting {}s ago",
+                    channel.pid.unwrap_or_default(), channel_age.unwrap_or_default() / 1000)
+            });
         }
         if outdated.is_none() && !current_image(channel.image.as_deref()) {
             outdated = Some(replaced("Claude channel", channel.pid));
@@ -1106,7 +1253,7 @@ fn assess_beat(
                 "current"
             },
             reason: outdated,
-            polled_seconds_ago: Some(age.as_secs()),
+            polled_seconds_ago: (!semantic).then_some(age.as_secs()),
             transport: report.transport,
             since_unix_ms: None,
         },
@@ -1124,6 +1271,103 @@ pub fn claude_channel_attached(store: &crate::store::Store, subject: &str, incar
 pub fn claude_channel_proof_pending(store: &crate::store::Store, subject: &str, incarnation: &str) -> bool {
     pending_proof(subject, incarnation)
         .is_some_and(|fence| store.check_mailbox(&fence).is_ok())
+}
+
+#[cfg(test)]
+mod semantic_tests {
+    use super::*;
+
+    fn ready(subject: &str, driver: &str, channel_age: Option<u64>) {
+        let fence = crate::mailbox::Fence::new(subject, "current", "delivery");
+        let transport = if driver == "claude" { "claude-channel" } else { "omp-channel" };
+        assert!(record_fenced(&fence, &json!({
+            "transport": transport, "ready": true, "image": presence().image,
+            "channel": { "pid": 42, "image": presence().image, "age_ms": channel_age }
+        }).to_string()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_and_elapsed_age_do_not_change_semantic_revision() {
+        let subject = "agent/semantic/heartbeat";
+        ready(subject, "omp", None);
+        let first = assess_current_semantic(subject, "omp", Some("current"));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let aged = assess_current_semantic(subject, "omp", Some("current"));
+        assert_eq!(aged.revision, first.revision);
+        assert_eq!(aged.assessment, first.assessment);
+        assert_eq!(aged.assessment.polled_seconds_ago, None);
+        let changes = subscribe_semantic();
+        ready(subject, "omp", None);
+        assert!(changes.has_changed().unwrap());
+        let refreshed = assess_current_semantic(subject, "omp", Some("current"));
+        assert_eq!(refreshed.revision, first.revision);
+        assert!(refreshed.next_deadline_ms > aged.next_deadline_ms);
+        tokio::time::advance(POLL_STALE_AFTER + Duration::from_millis(1)).await;
+        let stale = assess_current_semantic(subject, "omp", Some("current"));
+        assert_eq!(stale.assessment.state, "stale");
+        assert_ne!(stale.revision, first.revision);
+        assert_eq!(stale.next_deadline_ms, None);
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert_eq!(assess_current_semantic(subject, "omp", Some("current")).revision, stale.revision);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_deadline_accounts_for_age_already_reported() {
+        let subject = "agent/semantic/channel-deadline";
+        ready(subject, "claude", Some(9_000));
+        let first = assess_current_semantic(subject, "claude", Some("current"));
+        assert_eq!(first.assessment.state, "current");
+        let remaining = first.next_deadline_ms.unwrap().saturating_sub(unix_ms());
+        assert!((999..=1_001).contains(&remaining));
+        tokio::time::advance(Duration::from_millis(1_000)).await;
+        assert_eq!(assess_current_semantic(subject, "claude", Some("current")).revision, first.revision);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let expired = assess_current_semantic(subject, "claude", Some("current"));
+        assert_eq!(expired.assessment.state, "stale");
+        assert_ne!(expired.revision, first.revision);
+        assert!(expired.next_deadline_ms.is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(assess_current_semantic(subject, "claude", Some("current")).revision, expired.revision);
+    }
+
+    #[test]
+    fn startup_deadline_and_revision_follow_grace_not_display_age() {
+        let subject = "agent/semantic/startup";
+        let pin = uptime_pin::pin(Duration::ZERO);
+        let first = assess_current_semantic(subject, "omp", Some("current"));
+        if !startup_grace().is_zero() {
+            assert_eq!(first.assessment.state, "unknown");
+            assert!(first.next_deadline_ms.is_some());
+            pin.set(startup_grace() / 2);
+            assert_eq!(assess_current_semantic(subject, "omp", Some("current")).revision, first.revision);
+        }
+        pin.set(startup_grace());
+        let expired = assess_current_semantic(subject, "omp", Some("current"));
+        assert_eq!(expired.assessment.state, "stale");
+        assert_eq!(expired.next_deadline_ms, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn title_inventory_expiry_and_push_are_semantic_changes() {
+        let subject = "agent/semantic/title";
+        let title = crate::mailbox::Fence::new(subject, "current", "title");
+        assert!(record_fenced(&title, r#"{"transport":"claude-channel","ready":true}"#));
+        let _pin = uptime_pin::pin(STARTUP_GRACE * 2);
+        let first = assess_current_semantic(subject, "claude", Some("current"));
+        assert_eq!(attachment_push(subject, Some("current")), "not-negotiated");
+        assert!(first.next_deadline_ms.is_some());
+        tokio::time::advance(POLL_STALE_AFTER + Duration::from_millis(1)).await;
+        let expired = assess_current_semantic(subject, "claude", Some("current"));
+        assert_eq!(attachment_push(subject, Some("current")), "unknown");
+        assert_ne!(expired.revision, first.revision);
+        let changes = subscribe_semantic();
+        note_pushed(&title);
+        assert!(changes.has_changed().unwrap());
+        let pushed = assess_current_semantic(subject, "claude", Some("current"));
+        assert_ne!(pushed.revision, expired.revision);
+        forget_pushed(&title);
+        assert_ne!(assess_current_semantic(subject, "claude", Some("current")).revision, pushed.revision);
+    }
 }
 
 #[cfg(test)]
