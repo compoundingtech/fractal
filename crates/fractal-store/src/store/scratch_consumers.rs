@@ -1,175 +1,186 @@
-//! Directory custody captured by producers while holding the existing store writer.
-//! Saved ancestry proves retention only; exclusion requires current directory evidence.
-use super::*;
-use super::scratch_resources::OwnerObservation;
-use std::fs::File;
-use rustix::fs::{Mode, OFlags, openat};
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+//! Same-UID host check backing the owning execution-tree contract.
+//! This is defense in depth, not proof against privileged or non-dumpable consumers.
+use rustix::fd::OwnedFd;
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct DirectoryIdentity {
-    pub resolved_path: PathBuf,
-    /// Historical cwd and parents through the filesystem root; never current exclusion proof.
-    pub ancestors: Vec<(u64, u64)>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostScan {
+    Clear { uninspectable: u32 },
+    Hit { uninspectable: u32 },
+    Unknown { uninspectable: u32 },
 }
 
-impl DirectoryIdentity {
-    pub fn capture(path: &Path) -> Result<Self> {
-        let resolved_path = path.canonicalize()?;
-        let mut directory = File::open(&resolved_path)?;
-        let first = directory.metadata()?;
-        anyhow::ensure!(first.is_dir(), "consumer cwd is not a directory");
-        let mut ancestors = vec![(first.dev(), first.ino())];
-        loop {
-            let descriptor = openat(&directory, c"..",
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty())?;
-            let parent = File::from(descriptor);
-            let metadata = parent.metadata()?;
-            let identity = (metadata.dev(), metadata.ino());
-            if ancestors.last() == Some(&identity) { break; }
-            anyhow::ensure!(!ancestors.contains(&identity), "consumer directory ancestry changed during capture");
-            ancestors.push(identity);
-            directory = parent;
+impl HostScan {
+    pub(super) fn uninspectable(self) -> u32 {
+        match self {
+            Self::Clear { uninspectable } | Self::Hit { uninspectable }
+                | Self::Unknown { uninspectable } => uninspectable,
         }
-        let current = std::fs::metadata(&resolved_path)?;
-        anyhow::ensure!(ancestors.first() == Some(&(current.dev(), current.ino())),
-            "consumer cwd changed during capture");
-        Ok(Self { resolved_path, ancestors })
     }
 }
 
-fn relation(value: Option<&Value>, path: Option<&str>, allocation: &str,
-    object: Option<(u64, u64)>) -> Result<OwnerObservation>
-{
-    if let (Some(value), Some(object)) = (value.filter(|value| !value.is_null()), object) {
-        let Some(ancestors) = value.get("ancestors").and_then(Value::as_array) else {
-            return Ok(OwnerObservation::Unknown);
+#[cfg(target_os = "linux")]
+fn gone(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error())
+}
+
+fn link_hit(path: &std::path::Path, root: &[u8], reuse: &mut Vec<u8>) -> std::io::Result<bool> {
+    let target = rustix::fs::readlinkat(rustix::fs::CWD, path, std::mem::take(reuse))?;
+    let bytes = target.to_bytes();
+    let hit = bytes.starts_with(root) && (bytes.len() == root.len() || bytes[root.len()] == b'/');
+    *reuse = target.into_bytes();
+    Ok(hit)
+}
+
+/// One sequential procfs pass. Only the exact allocation descriptor held by this
+/// caller is exempt: other descriptors in this process remain possible hits.
+#[cfg(target_os = "linux")]
+pub(super) fn host_consumers(root: &OwnedFd) -> HostScan {
+    use std::fs;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    let unknown = || HostScan::Unknown { uninspectable: 0 };
+    let Ok(allocation) = fs::read_link(format!("/proc/self/fd/{}", root.as_raw_fd())) else { return unknown(); };
+    if !allocation.is_absolute() { return unknown(); }
+    let allocation = allocation.as_os_str().as_bytes();
+    let Ok(owner) = fs::metadata("/proc/self") else { return unknown(); };
+    let Ok(processes) = fs::read_dir("/proc") else { return unknown(); };
+    let own_pid = std::process::id();
+    let exempt = root.as_raw_fd().to_string();
+    let mut uninspectable = 0;
+    let mut link = PathBuf::new();
+    let mut target = Vec::new();
+    for entry in processes {
+        let Ok(entry) = entry else { return HostScan::Unknown { uninspectable }; };
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|name| name.parse::<u32>().ok()) else { continue; };
+        let base = entry.path();
+        match fs::metadata(&base) {
+            Ok(metadata) if metadata.uid() == owner.uid() => {},
+            Ok(_) => continue,
+            Err(error) if gone(&error) => continue,
+            Err(_) => return HostScan::Unknown { uninspectable },
+        }
+        match link_hit(&base.join("cwd"), allocation, &mut target) {
+            Ok(true) => return HostScan::Hit { uninspectable },
+            Ok(false) => {},
+            Err(error) if gone(&error) => continue,
+            Err(_) => { uninspectable += 1; continue; },
+        }
+        let descriptors = match fs::read_dir(base.join("fd")) {
+            Ok(descriptors) => descriptors,
+            Err(error) if gone(&error) => continue,
+            Err(_) => { uninspectable += 1; continue; },
         };
-        if ancestors.is_empty() || value.get("resolvedPath").and_then(Value::as_str).is_none() {
-            return Ok(OwnerObservation::Unknown);
-        }
-        let mut contains = false;
-        for ancestor in ancestors {
-            let Some(pair) = ancestor.as_array().filter(|pair| pair.len() == 2) else {
-                return Ok(OwnerObservation::Unknown);
+        link.clear();
+        link.push(&base);
+        link.push("fd");
+        for descriptor in descriptors {
+            let descriptor = match descriptor {
+                Ok(descriptor) => descriptor,
+                Err(error) if gone(&error) => continue,
+                Err(_) => { uninspectable += 1; break; },
             };
-            let (Some(device), Some(inode)) = (pair[0].as_u64(), pair[1].as_u64()) else {
-                return Ok(OwnerObservation::Unknown);
-            };
-            contains |= (device, inode) == object;
-        }
-        return Ok(if contains { OwnerObservation::Live } else { OwnerObservation::Unknown });
-    }
-    // Historical/unavailable evidence cannot be reconstructed from a mutable alias.
-    // Lexical containment is positive evidence only, never proof of being outside.
-    Ok(if path.is_some_and(|path| Path::new(path).starts_with(allocation)) {
-        OwnerObservation::Live
-    } else { OwnerObservation::Unknown })
-}
-
-/// Walk the held directory's current parents, never a saved ancestry or pathname.
-fn current_directory(mut directory: File, object: (u64, u64)) -> Result<OwnerObservation> {
-    let mut seen = Vec::new();
-    loop {
-        let metadata = directory.metadata()?;
-        anyhow::ensure!(metadata.is_dir(), "consumer cwd is not a directory");
-        anyhow::ensure!(metadata.nlink() != 0, "consumer cwd was unlinked");
-        let identity = (metadata.dev(), metadata.ino());
-        if identity == object { return Ok(OwnerObservation::Live); }
-        if seen.last() == Some(&identity) { return Ok(OwnerObservation::Terminal); }
-        anyhow::ensure!(!seen.contains(&identity), "consumer ancestry changed during observation");
-        seen.push(identity);
-        directory = File::from(openat(&directory, c"..",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty())?);
-    }
-}
-
-fn current_disk(value: Option<&Value>, object: Option<(u64, u64)>) -> OwnerObservation {
-    let observe = || -> Option<OwnerObservation> {
-        let value = value?;
-        let object = object?;
-        let expected = value.get("ancestors")?.as_array()?.first()?.as_array()?;
-        let expected = (expected.first()?.as_u64()?, expected.get(1)?.as_u64()?);
-        let path = value.get("resolvedPath")?.as_str()?;
-        let directory = File::from(openat(rustix::fs::CWD, path,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty()).ok()?);
-        let metadata = directory.metadata().ok()?;
-        // A removed/replaced launch address cannot replace the original custody.
-        if (metadata.dev(), metadata.ino()) != expected { return None; }
-        current_directory(directory, object).ok()
-    };
-    observe().unwrap_or(OwnerObservation::Unknown)
-}
-
-fn current_execution(root: &Value, object: Option<(u64, u64)>) -> OwnerObservation {
-    #[cfg(target_os = "linux")]
-    let observe = || -> Option<OwnerObservation> {
-        let object = object?;
-        let execution = root.get("execution")?;
-        let pid = u32::try_from(execution.get("pid")?.as_u64()?).ok()?;
-        let token = execution.get("startToken")?.as_u64()?;
-        if pid == 0 || fractal_runtime::process_start_token(pid).ok()? != token { return None; }
-        // Follow procfs's cwd magic link once, then hold the resulting directory fd.
-        let directory = File::from(openat(rustix::fs::CWD, format!("/proc/{pid}/cwd"),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty()).ok()?);
-        let observation = current_directory(directory, object).ok()?;
-        if fractal_runtime::process_start_token(pid).ok()? != token { return None; }
-        Some(observation)
-    };
-    #[cfg(target_os = "linux")]
-    { observe().unwrap_or(OwnerObservation::Unknown) }
-    #[cfg(not(target_os = "linux"))]
-    { let _ = (root, object); OwnerObservation::Unknown }
-}
-
-pub(super) fn observation(connection: &Connection, host: &str, allocation: &str,
-    object: Option<(u64, u64)>) -> Result<OwnerObservation>
-{
-    let mut observation = OwnerObservation::Terminal;
-    let mut merge = |next| {
-        if next == OwnerObservation::Live { observation = OwnerObservation::Live; }
-        else if next == OwnerObservation::Unknown && observation != OwnerObservation::Live {
-            observation = OwnerObservation::Unknown;
-        }
-    };
-    let mut execution_members = Vec::new();
-    let mut members = connection.prepare("SELECT body FROM resource_memberships_v1 WHERE host=?1 AND state NOT IN ('retired','refused','cancelled')")?;
-    for body in members.query_map([host], |row| row.get::<_, String>(0))? {
-        let member: Value = serde_json::from_str(&body?)?;
-        if let Some(path) = member.pointer("/request/diskPath").and_then(Value::as_str) {
-            let historical = relation(member.get("diskDirectory"), Some(path), allocation, object)?;
-            merge(if historical == OwnerObservation::Live { historical }
-                else { current_disk(member.get("diskDirectory"), object) });
-        }
-        if let Some(roots) = member.get("roots").and_then(Value::as_array) {
-            // Payload exit is not descendant retirement. Keep every prepared root
-            // until the enclosing membership has positively retired its whole tree.
-            for root in roots {
-                let historical = relation(root.get("cwdDirectory"), None, allocation, object)?;
-                merge(if historical == OwnerObservation::Live { historical }
-                    else { current_execution(root, object) });
+            let name = descriptor.file_name();
+            if pid == own_pid && name == std::ffi::OsStr::new(&exempt) { continue; }
+            link.push(name);
+            let hit = link_hit(&link, allocation, &mut target);
+            link.pop();
+            match hit {
+                Ok(true) => return HostScan::Hit { uninspectable },
+                Ok(false) => {},
+                Err(error) if gone(&error) => {},
+                Err(_) => { uninspectable += 1; break; },
             }
-            if !roots.is_empty() { execution_members.push(member); }
         }
     }
-    let mut commands = connection.prepare("SELECT body FROM shell_resources_v1 WHERE host=?1 AND state NOT IN ('completed','failed','cancelled','refused')")?;
-    for body in commands.query_map([host], |row| row.get::<_, String>(0))? {
-        let command: Value = serde_json::from_str(&body?)?;
-        let historical = relation(command.get("cwdDirectory"),
-            command.pointer("/command/cwd").and_then(Value::as_str), allocation, object)?;
-        let current = execution_members.iter()
-            .filter(|member| member.pointer("/request/id") == command.pointer("/command/lane/id")
-                && member.pointer("/request/owner") == command.pointer("/command/lane/owner"))
-            .filter_map(|member| member.get("roots").and_then(Value::as_array))
-            .flatten()
-            .find(|root| root.get("runtimeId") == command.pointer("/command/id"))
-            .map(|root| current_execution(root, object)).unwrap_or(OwnerObservation::Unknown);
-        merge(if historical == OwnerObservation::Live { historical } else { current });
+    HostScan::Clear { uninspectable }
+}
+
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+
+    struct Consumer(Child);
+    impl Consumer {
+        fn start(cwd: &Path, script: &str, argument: &Path) -> Self {
+            let mut child = Command::new("/bin/sh").args(["-c", script, "consumer"])
+                .arg(argument).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped())
+                .spawn().unwrap();
+            let mut ready = [0; 5];
+            child.stdout.as_mut().unwrap().read_exact(&mut ready).unwrap();
+            assert_eq!(&ready, b"ready");
+            Self(child)
+        }
     }
-    Ok(observation)
+    impl Drop for Consumer {
+        fn drop(&mut self) { self.0.kill().unwrap(); self.0.wait().unwrap(); }
+    }
+
+    fn directory(path: &Path) -> OwnedFd {
+        rustix::fs::open(path, rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty()).unwrap()
+    }
+
+    #[test]
+    fn clear_exempts_only_held_self_descriptor_and_checks_component_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let allocation = root.path().join("allocation");
+        std::fs::create_dir(&allocation).unwrap();
+        let held = directory(&allocation);
+        let sibling = root.path().join("allocation-other");
+        std::fs::create_dir(&sibling).unwrap();
+        let _sibling = directory(&sibling);
+        assert!(matches!(host_consumers(&held), HostScan::Clear { .. }));
+        let other = directory(&allocation);
+        assert!(matches!(host_consumers(&held), HostScan::Hit { .. }));
+        drop(other);
+        let file = std::fs::File::create(allocation.join("open-file")).unwrap();
+        assert!(matches!(host_consumers(&held), HostScan::Hit { .. }));
+        drop(file);
+        assert!(matches!(host_consumers(&held), HostScan::Clear { .. }));
+    }
+
+    #[test]
+    fn live_cwd_in_allocation_hits() {
+        let root = tempfile::tempdir().unwrap();
+        let held = directory(root.path());
+        let _consumer = Consumer::start(root.path(), "printf ready; read answer", root.path());
+        assert!(matches!(host_consumers(&held), HostScan::Hit { .. }));
+    }
+
+    #[test]
+    fn live_open_file_in_allocation_hits() {
+        let root = tempfile::tempdir().unwrap();
+        let allocation = root.path().join("allocation");
+        std::fs::create_dir(&allocation).unwrap();
+        let file = allocation.join("file");
+        std::fs::write(&file, b"held").unwrap();
+        let held = directory(&allocation);
+        let _consumer = Consumer::start(root.path(), "exec 3<\"$1\"; printf ready; read answer", &file);
+        assert!(matches!(host_consumers(&held), HostScan::Hit { .. }));
+    }
+
+    #[test]
+    fn current_kernel_path_catches_cwd_renamed_into_allocation() {
+        let root = tempfile::tempdir().unwrap();
+        let allocation = root.path().join("allocation");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&allocation).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let held = directory(&allocation);
+        let consumer = Consumer::start(&outside, "printf ready; read answer", &outside);
+        assert!(matches!(host_consumers(&held), HostScan::Clear { .. }));
+        std::fs::rename(&outside, allocation.join("moved")).unwrap();
+        assert!(matches!(host_consumers(&held), HostScan::Hit { .. }));
+        drop(consumer);
+        assert!(matches!(host_consumers(&held), HostScan::Clear { .. }));
+    }
 }

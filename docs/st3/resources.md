@@ -453,8 +453,10 @@ Linux release captures the allocation with a no-replace rename into a private qu
 held by a verified descriptor, then checks its device and inode before recursive removal. A
 replacement occupying the allocation basename is restored rather than adopted. The empty private
 quarantine inode remains after release because removing it through the exposed root would recreate
-that namespace race. Interrupted quarantine creation, identity mismatch or restoration failure
-retains custody and cannot publish a release receipt. Non-Linux hosts do not perform physical
+that namespace race. Restoration intent is committed before moving an allocation back;
+replay reconciles both names against the recorded inode and never treats an empty quarantine
+as released while the allocation exists. Interrupted creation, identity mismatch or restoration
+failure retains custody and cannot publish a release receipt. Non-Linux hosts do not perform physical
 retirement; release retains custody instead of claiming a weaker deletion. Renaming an ancestor or
 swapping in a symlink cannot redirect removal into another directory.
 
@@ -467,12 +469,23 @@ competing finalization and recovery use the same serialized writer. A cleanup re
 retains custody and raises an inspectable `final-scratch-release` fault without replacing the
 normal-work outcome.
 
-Consumer checks include native execution `cwd` independently of the lane's `diskPath`, as well
-as shell execution `cwd`. Historical directory identities provide positive retention only. Linux
-release observes each exact native process's current kernel cwd through a held descriptor and
-checks its PID start token before and after the walk. A directory renamed into the allocation
-after launch therefore remains a consumer. Missing, mismatched, unreadable, legacy or non-Linux
-observations are `unknown` and retain scratch until retirement is positively proven.
+Dedicated scratch may be consumed **only by the owning run's execution tree**. Release
+requires positive terminal evidence for that tree, including native cgroup/scope retirement;
+payload exit alone is not enough. The existing native retirement operation closes owned
+membership scopes before creating the scratch release proof. Processes outside this owner
+tree are out of contract; scratch is not a shared workspace or cross-run exchange.
+
+As defense in depth, Linux performs one sequential host check before removal: inspect the
+current `/proc` cwd and open-fd links of same-UID processes, matching the held allocation's
+canonical path with component boundaries. Kernel paths catch directories renamed into the
+allocation. Exempt only the exact allocation descriptor held by the releasing process,
+not that process's other descriptors. A hit or a failed host observation retains custody.
+Processes that vanish during the scan are skipped. Other UIDs, including privileged system
+services, are outside this contract. Same-UID non-dumpable processes are also outside the
+contract: they are skipped and counted as `uninspectable` in the durable receipt and inventory.
+This snapshot is a backstop, not a security sandbox or a replacement for owner-tree retirement.
+No per-consumer ancestry history, PID/cwd exclusion proofs, or scratch-specific descendant
+registry is maintained. Non-Linux hosts retain physical custody.
 
 ### Dry-run orphan inventory
 
@@ -494,8 +507,9 @@ empty continuation. Reading inventory never creates, releases or deletes an allo
 
 Program authors can also read `Fractal.resources.scratchInventory({ host, after, limit })`,
 which returns a bounded page of the same records (maximum 1,000). Each record separates its
-custody state from `ownerObservation` and `consumerObservation`. Inventory does not probe
-processes or scan host execution history: consumers remain `unknown` until a persisted release
+custody state from `ownerObservation` and `consumerObservation`. `uninspectable`, when present,
+reports the skipped same-UID process count from the last release host check. Inventory does not
+probe processes or scan execution history: consumers remain `unknown` until a persisted release
 receipt proves retirement. An unreleased allocation
 with a positively observed terminal owner **of the recorded generation** is an orphan
 candidate, not deletion authorization. Missing owners, different generations and unavailable

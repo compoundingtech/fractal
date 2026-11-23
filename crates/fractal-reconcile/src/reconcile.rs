@@ -1458,7 +1458,7 @@ impl NativeRuntime {
                         .find(|slot| cwd.starts_with(slot.root()))
                         .context("darwin-custody-cwd: shell cwd is outside its admitted slot")?)
                 } else { None };
-                let cwd = store.prepare_resource_membership_cwd(&grant, &member.runtime_id, &cwd)?;
+                store.prepare_resource_membership(&grant, &member.runtime_id)?;
                 let guarded = || -> Result<()> {
                     if let Some(guard) = guard { guard()?; }
                     anyhow::ensure!(matches!(store.resource_membership(&request.id, &request.owner, now())?,
@@ -13559,10 +13559,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // handle never reached the worker. A mission deadline deliberately skips final release;
         // read-only inventory retains that terminal owner's evidence for operator review.
         if scratch_pending && scratch_quiescent && live.is_empty() && shells_live.is_empty() {
-            let proof = crate::store::scratch_resources::ScratchReleaseProof::after_quiescence(
-                &run.subject, &run.generation,
-            );
-            self.finalize_mission_scratch(run, &proof)?;
+            self.finalize_mission_scratch(run)?;
         } else if scratch_pending && !run.deadline_at_unix_ms.is_some_and(|deadline| deadline <= now_ms()) {
             self.record_fault(&run.subject, "final-scratch-release", Err(anyhow::anyhow!(
                 "scratch final release skipped: execution quiescence unconfirmed; custody retained"

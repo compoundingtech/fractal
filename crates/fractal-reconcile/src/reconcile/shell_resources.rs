@@ -429,8 +429,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut member = MemberSpec {
                 kind: MemberKind::Exec, host: self.host.clone(), runtime_id: execution.command.id.clone(),
                 workspace: execution.command.cwd.clone(), workspace_create: false,
-                cwd: execution.cwd_directory.as_ref().map(|directory| directory.resolved_path.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| execution.command.cwd.clone()), terminal: false,
+                cwd: execution.command.cwd.clone(), terminal: false,
                 launch: LaunchSpec::Argv(argv), environment, tags: BTreeMap::new(), display_name: None,
                 lifecycle: MemberLifecycle::Service, terminal_binding: None, one_shot: false,
                 restart: RestartType::Never, restart_intensity: RestartIntensity::default(), shutdown_timeout_ms: 5_000,

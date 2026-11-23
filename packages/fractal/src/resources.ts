@@ -136,6 +136,7 @@ export const ScratchInventoryRow = Schema.Struct({
   state: Schema.String,
   ownerObservation: Schema.Literals(['live', 'terminal', 'unknown']),
   consumerObservation: Schema.Literals(['live', 'terminal', 'unknown']),
+  uninspectable: Schema.optionalKey(Schema.Number),
 })
 export type ScratchInventoryRow = typeof ScratchInventoryRow.Type
 

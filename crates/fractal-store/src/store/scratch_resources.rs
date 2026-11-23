@@ -5,7 +5,9 @@ use std::fs;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Component, Path};
 use rustix::fd::OwnedFd;
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use rustix::fs::{Mode, OFlags};
+#[cfg(target_os = "linux")]
+use rustix::fs::{AtFlags, Dir, FileType};
 
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
@@ -44,6 +46,7 @@ fn open_custody_root(record: &Record) -> Result<OwnedFd> {
     Ok(directory)
 }
 
+#[cfg(target_os = "linux")]
 fn verify_entry(parent: &OwnedFd, name: &std::ffi::CStr, expected: (u64, u64)) -> Result<()> {
     let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
     let observed = stat_identity(&stat)?;
@@ -54,6 +57,7 @@ fn verify_entry(parent: &OwnedFd, name: &std::ffi::CStr, expected: (u64, u64)) -
 /// Mutations use only held parent capabilities and single-component names.
 /// An entry replaced between stat and open is rejected; O_NOFOLLOW prevents a
 /// replacement symlink from becoming a traversal. There is no pathname retry.
+#[cfg(target_os = "linux")]
 fn remove_contents(directory: &OwnedFd) -> Result<()> {
     for entry in Dir::read_from(directory)? {
         let entry = entry?;
@@ -110,8 +114,8 @@ pub struct ScratchReleaseProof {
 
 impl ScratchReleaseProof {
     /// The native mission finalizer must stop intake, finish authored finalizers,
-    /// and positively observe BOTH owned native runtimes and shells empty before
-    /// calling this constructor. Missing/failed observations are not emptiness.
+    /// and positively observe the owning run's entire execution tree (cgroup or
+    /// scope) terminal. Missing/failed observations are not terminal evidence.
     pub fn after_quiescence(owner: &str, owner_generation: &str) -> Self {
         Self { owner: owner.into(), owner_generation: owner_generation.into() }
     }
@@ -124,6 +128,8 @@ pub struct ScratchInventoryRow {
     pub state: String,
     pub owner_observation: OwnerObservation,
     pub consumer_observation: OwnerObservation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uninspectable: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -136,6 +142,8 @@ struct Record {
     object: Option<(u64, u64)>,
     #[serde(default)]
     quarantine: Option<Quarantine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uninspectable: Option<u32>,
 }
 
 /// Names and inode receipts live in the allocation's existing custody row.
@@ -153,6 +161,42 @@ struct Quarantine {
 }
 
 #[cfg(target_os = "linux")]
+fn entry_identity(parent: &OwnedFd, name: &std::ffi::OsStr) -> Result<Option<(u64, u64)>> {
+    match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => Ok(Some(stat_identity(&stat)?)),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Journal restoration before either namespace can change. Replay accepts only
+/// the recorded inode in exactly one location; disappearance is never release.
+#[cfg(target_os = "linux")]
+fn restore_allocation(connection: &Connection, record: &mut Record, root: &OwnedFd,
+    name: &std::ffi::OsStr, directory: &OwnedFd) -> Result<()> {
+    record.quarantine.as_mut().expect("reserved quarantine").phase = "restoring".into();
+    write(connection, record)?;
+    #[cfg(test)]
+    tests::quarantine_boundary("restoring");
+    let quarantine = record.quarantine.as_ref().expect("reserved quarantine");
+    let entry = std::ffi::OsStr::new(&quarantine.entry);
+    let expected = record.object.ok_or_else(|| anyhow::anyhow!("missing allocation identity"))?;
+    match (entry_identity(root, name)?, entry_identity(directory, entry)?) {
+        (None, Some(observed)) if observed == expected => {
+            rustix::fs::renameat_with(directory, entry, root, name, rustix::fs::RenameFlags::NOREPLACE)?;
+        }
+        (Some(observed), None) if observed == expected => {}
+        _ => anyhow::bail!("scratch restoration locations conflict or custody is unknown"),
+    }
+    rustix::fs::fsync(directory)?;
+    rustix::fs::fsync(root)?;
+    #[cfg(test)]
+    tests::quarantine_boundary("restored");
+    record.quarantine.as_mut().expect("reserved quarantine").phase = "prepared".into();
+    write(connection, record)
+}
+
+#[cfg(target_os = "linux")]
 fn retire_quarantined(
     connection: &Connection,
     record: &mut Record,
@@ -162,9 +206,13 @@ fn retire_quarantined(
 ) -> Result<bool> {
     use rustix::fs::{renameat_with, RenameFlags};
     if record.quarantine.is_none() {
-        // Legacy interrupted removals and never-created intents have no object
-        // left to hand off. The caller has already checked their allowed state.
-        let Some(object) = object.as_ref() else { rustix::fs::fsync(root)?; return Ok(true); };
+        // No physical removal is possible before quarantine intent. A missing
+        // receipted allocation is unknown, not a legacy deletion shortcut.
+        let Some(object) = object.as_ref() else {
+            anyhow::ensure!(record.object.is_none(), "receipted allocation disappeared without quarantine; custody unknown");
+            rustix::fs::fsync(root)?;
+            return Ok(true);
+        };
         record.quarantine = Some(Quarantine {
             name: format!(".retire-{}", uuid::Uuid::new_v4()),
             entry: uuid::Uuid::new_v4().to_string(),
@@ -191,6 +239,10 @@ fn retire_quarantined(
     anyhow::ensure!(fd_identity(&directory)? == expected_directory, "scratch quarantine identity changed");
     anyhow::ensure!(rustix::fs::fstat(&directory)?.st_mode & 0o077 == 0, "scratch quarantine is not private");
     let expected = record.object.ok_or_else(|| anyhow::anyhow!("missing allocation identity"))?;
+    if quarantine.phase == "restoring" {
+        restore_allocation(connection, record, root, name, &directory)?;
+        return Ok(false);
+    }
     let present = match rustix::fs::statat(&directory, quarantine.entry.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => Some(stat_identity(&stat)?),
         Err(rustix::io::Errno::NOENT) => None,
@@ -241,16 +293,13 @@ fn retire_quarantined(
     };
     if let Some(candidate) = candidate {
         anyhow::ensure!(fd_identity(&candidate)? == expected, "quarantined allocation identity changed");
-        // Observe current cwd ancestry again after the namespace handoff. A
-        // live cwd moved into the allocation during handoff must retain it.
-        if consumers(connection, record)? != OwnerObservation::Terminal {
-            let restored = renameat_with(&directory, quarantine.entry.as_str(), root, name, RenameFlags::NOREPLACE);
-            rustix::fs::fsync(&directory)?;
-            rustix::fs::fsync(root)?;
-            if restored.is_ok() {
-                record.quarantine.as_mut().expect("reserved quarantine").phase = "prepared".into();
-                write(connection, record)?;
-            }
+        // The source descriptor is redundant after capture. Only the single
+        // verified candidate descriptor is exempt from our same-UID host scan.
+        drop(object);
+        let scan = super::scratch_consumers::host_consumers(&candidate);
+        record.uninspectable = Some(scan.uninspectable());
+        if !matches!(scan, super::scratch_consumers::HostScan::Clear { .. }) {
+            restore_allocation(connection, record, root, name, &directory)?;
             return Ok(false);
         }
         record.quarantine.as_mut().expect("reserved quarantine").phase = "deleting".into();
@@ -265,6 +314,8 @@ fn retire_quarantined(
     } else {
         anyhow::ensure!(quarantine.phase == "deleting" || quarantine.phase == "removed",
             "quarantined allocation disappeared before deletion intent");
+        anyhow::ensure!(entry_identity(root, name)?.is_none(),
+            "allocation exists outside quarantine after deletion intent; custody unknown");
     }
     rustix::fs::fsync(&directory)?;
     rustix::fs::fsync(root)?;
@@ -372,10 +423,6 @@ fn owner_observation(connection: &Connection, record: &Record) -> Result<OwnerOb
     } else { OwnerObservation::Unknown })
 }
 
-fn consumers(connection: &Connection, record: &Record) -> Result<OwnerObservation> {
-    super::scratch_consumers::observation(
-        connection, &record.request.host, &record.handle.path, record.object)
-}
 
 impl Store {
     pub fn acquire_scratch(&self, request: &ScratchRequest) -> Result<ScratchHandle> {
@@ -411,7 +458,7 @@ impl Store {
                 owner_generation: request.owner_generation.clone(),
                 path: Path::new(&request.root).join(format!("scratch-{generation}")).to_string_lossy().into_owned(),
                 generation, authority_epoch: authority.clone(),
-            }, state: "intent".into(), root_device, root_inode, object: None, quarantine: None };
+            }, state: "intent".into(), root_device, root_inode, object: None, quarantine: None, uninspectable: None };
             let transaction = connection.transaction()?;
             write(&transaction, &record)?;
             transaction.commit()?;
@@ -448,7 +495,6 @@ impl Store {
         anyhow::ensure!(proof.owner == record.request.owner
             && proof.owner_generation == record.request.owner_generation, "scratch finalization proof owner mismatch");
         if owner_observation(&connection, &record)? == OwnerObservation::Unknown { return Ok(false); }
-        if consumers(&connection, &record)? != OwnerObservation::Terminal { return Ok(false); }
         // Only Linux supplies the required atomic no-replace namespace handoff.
         // Other platforms retain custody rather than claiming physical retirement.
         if !cfg!(target_os = "linux") { return Ok(false); }
@@ -522,7 +568,7 @@ impl Store {
                 OwnerObservation::Terminal
             } else { OwnerObservation::Unknown };
             rows.push(ScratchInventoryRow { owner_observation: owner_observation(&connection, &record)?,
-                consumer_observation, handle: record.handle, state: record.state });
+                consumer_observation, handle: record.handle, state: record.state, uninspectable: record.uninspectable });
         }
         Ok(rows)
     }

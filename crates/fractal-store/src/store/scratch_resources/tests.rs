@@ -73,7 +73,7 @@ fn interrupted_intent_create_and_receipt_resume_exact_allocation() {
 }
 
 #[test]
-fn release_intent_resumes_after_removal_and_before_completion_receipt() {
+fn missing_receipted_object_without_quarantine_is_unknown_not_released() {
     let (store, _directory, request) = fixture();
     let handle = store.acquire_scratch(&request).unwrap();
     let mut interrupted = record(&store, &request.id);
@@ -81,8 +81,8 @@ fn release_intent_resumes_after_removal_and_before_completion_receipt() {
     save(&store, &interrupted);
     assert!(store.acquire_scratch(&request).is_err());
     fs::remove_dir_all(&handle.path).unwrap();
-    assert!(release(&store, &handle).unwrap());
-    assert_eq!(record(&store, &request.id).state, "released");
+    assert!(release(&store, &handle).is_err());
+    assert_ne!(record(&store, &request.id).state, "released");
 }
 
 #[test]
@@ -122,19 +122,21 @@ fn generation_epoch_and_concurrent_release_are_fenced() {
 }
 
 #[test]
-fn live_and_unknown_consumers_retain_custody() {
+fn live_open_file_retains_custody_and_inventory_stays_non_probing() {
     let (store, _directory, request) = fixture();
     let handle = store.acquire_scratch(&request).unwrap();
-    for state in ["running", "uncertain"] {
-        let body = json!({"state":state,"command":{"cwd":handle.path}}).to_string();
-        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hedc321694261 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES('consumer','host-a',?1,?2)
-            ON CONFLICT(id) DO UPDATE SET state=excluded.state,body=excluded.body", params![state, body]).unwrap();
-        assert!(!release(&store, &handle).unwrap());
-        assert!(Path::new(&handle.path).is_dir());
-        assert_ne!(store.scratch_inventory("host-a", None, 1).unwrap()[0].consumer_observation, OwnerObservation::Terminal);
-    }
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb652bf2a21a3 owner=fractal_store::store::scratch_resources::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET state='completed' WHERE id='consumer'", []).unwrap();
+    let payload = Path::new(&handle.path).join("payload");
+    fs::write(&payload, b"owned").unwrap();
+    let consumer = fs::File::open(&payload).unwrap();
+    assert!(!release(&store, &handle).unwrap());
+    assert_eq!(fs::read(&payload).unwrap(), b"owned");
+    let row = store.scratch_inventory("host-a", None, 1).unwrap().remove(0);
+    assert_eq!(row.consumer_observation, OwnerObservation::Unknown);
+    assert!(row.uninspectable.is_some());
+    drop(consumer);
     assert!(release(&store, &handle).unwrap());
+    assert_eq!(store.scratch_inventory("host-a", None, 1).unwrap()[0].consumer_observation,
+        OwnerObservation::Terminal);
 }
 
 #[test]
@@ -258,10 +260,8 @@ fn persisted_intent_and_release_resume_across_store_reopen() {
         assert_eq!(resumed.path, handle.path);
         assert_eq!(resumed.generation, handle.generation);
         assert_eq!(resumed.authority_epoch, "epoch-b");
-        let mut interrupted = record(&store, &request.id);
-        interrupted.state = "releasing".into();
-        save(&store, &interrupted);
-        fs::remove_dir_all(&handle.path).unwrap();
+        INTERRUPT_QUARANTINE.with(|interrupt| interrupt.set(Some("removed")));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| release(&store, &resumed))).is_err());
     }
     let store = Store::open(&database, "host-a").unwrap();
     store.start_resource_authority("host-a", "epoch-c").unwrap();
@@ -416,6 +416,49 @@ fn quarantine_handoff_and_removal_interruptions_resume_after_reopen() {
         assert!(release(&store, &handle).unwrap(), "{boundary}");
         assert!(!Path::new(&handle.path).exists());
         assert_eq!(record(&store, &request.id).state, "released");
+    }
+}
+
+#[test]
+fn restoring_intent_reconciles_both_locations_after_interruption() {
+    for boundary in ["restoring", "restored"] {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = fs::canonicalize(directory.path()).unwrap();
+        let database = canonical.join("store.sqlite");
+        let request = ScratchRequest { id: "scratch/restore-reopen".into(), host: "host-a".into(),
+            owner: "mission-run/owner".into(), owner_generation: "run-generation/generation-a".into(),
+            root: canonical.join("dedicated").to_string_lossy().into_owned() };
+        let store = Store::open(&database, "host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch-a").unwrap();
+        owner(&store, "running", "normal", "generation-a");
+        let handle = store.acquire_scratch(&request).unwrap();
+        fs::write(Path::new(&handle.path).join("payload"), b"owned").unwrap();
+        INTERRUPT_QUARANTINE.with(|interrupt| interrupt.set(Some("deleting")));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| release(&store, &handle))).is_err());
+        let custody = record(&store, &request.id);
+        let quarantine = custody.quarantine.unwrap();
+        assert_eq!(quarantine.phase, "deleting");
+        let private_payload = Path::new(&request.root).join(&quarantine.name).join(&quarantine.entry).join("payload");
+        let consumer = fs::File::open(&private_payload).unwrap();
+        INTERRUPT_QUARANTINE.with(|interrupt| interrupt.set(Some(boundary)));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| release(&store, &handle))).is_err());
+        let custody = record(&store, &request.id);
+        assert_eq!(custody.quarantine.unwrap().phase, "restoring");
+        assert_eq!(Path::new(&handle.path).exists(), boundary == "restored");
+        drop(store);
+
+        let store = Store::open(&database, "host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch-b").unwrap();
+        let handle = store.scratch_handle(&request.id).unwrap().unwrap();
+        assert!(!release(&store, &handle).unwrap(), "{boundary}: restoration is not a release receipt");
+        assert_ne!(record(&store, &request.id).state, "released");
+        assert_eq!(fs::read(Path::new(&handle.path).join("payload")).unwrap(), b"owned");
+        assert!(!release(&store, &handle).unwrap(), "{boundary}: the live file still retains custody");
+        assert_eq!(store.scratch_inventory("host-a", None, 1).unwrap()[0].consumer_observation,
+            OwnerObservation::Unknown);
+        drop(consumer);
+        assert!(release(&store, &handle).unwrap());
+        assert!(!Path::new(&handle.path).exists());
     }
 }
 

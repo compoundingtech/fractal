@@ -1216,33 +1216,23 @@ costs. The maintainer must qualify bounded physical key/value units and a
 generation-keyed retention/reclamation representation while preserving release
 tombstones and idempotent replay; automatic reclamation is not introduced here.
 
-Consumer directory evidence stays in the existing membership and shell execution
-records, not a second ledger. Canonical launch addresses and ancestor device/inode
-pairs add variable JSON bytes to those existing producers; their representation
-and retention exceptions remain unproven. Descriptor-relative deletion and the
-consumer identity checks establish custody safety, not physical SQLite size or
-host-history scan cost bounds.
-
-The optional quarantine handoff state is part of the same bounded custody record and
-does not add a table or index. Native execution records may additionally persist a
-PID and start token in their existing generation identity. Those additive fields do
-not establish physical row, transition or host-history scan bounds.
+Scratch ownership remains in the existing custody row, not a second ledger.
+The optional quarantine handoff/restoration state and the scalar skipped-process
+count do not add a table or index. Consumer ancestry and PID/start-token snapshots
+are not persisted: the owner-tree contract reuses native scope retirement and a
+single same-UID procfs cwd/open-fd pass provides defense in depth. Those custody
+checks do not establish physical row, transition or lifetime-history size bounds.
 
 The `fractal_store::store::scratch_resources::tests` maintainer owns
-`lv-he0bc37451fe9`, `lv-h40d4f40c9604`, `lv-hedc321694261`,
-`lv-hb652bf2a21a3`, `lv-ha2b4809b35ad`, `lv-h1bbc5325cd30` and
-`lv-h5eee83bba1b5`. These isolated fixtures insert/update one fixed owner,
-publish a bounded consumer JSON record, and remove owner evidence or arm an
-expired deadline to exercise fail-closed behavior. They do not add production
+`lv-he0bc37451fe9`, `lv-h40d4f40c9604`, `lv-ha2b4809b35ad`,
+`lv-h1bbc5325cd30` and `lv-h5eee83bba1b5`. These isolated fixtures insert/update
+one fixed owner and remove owner evidence or arm an expired deadline to exercise
+fail-closed behavior. They do not add production
 writers to mission or shell history. Their remaining representation work is
 to preserve these exact interruption and uncertainty cases through the owning
 bounded fixture/native-store APIs, not to generalize the test registrations
 into permission for new unbounded production writes.
 
 The `fractal_store::store::scratch_resources` maintainer also owns the fixed
-non-Linux owner fixture `lv-h80ef1a553e5e`. The
-`fractal_reconcile::reconcile::tests::scratch_consumer_custody` maintainer owns
-`lv-h1fbf8fba44aa`, which rewrites one existing bounded fixture membership to
-remove or mismatch its process-generation evidence. These test-only producers
-exercise unknown retention; their remaining work is migration to bounded
-fixture/native-store APIs, not permission for production history growth.
+non-Linux owner fixture `lv-h80ef1a553e5e`. Its remaining work is migration to
+bounded fixture/native-store APIs, not permission for production history growth.

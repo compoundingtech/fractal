@@ -113,14 +113,26 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn finalize_mission_scratch(
         &self,
         run: &MissionRunView,
-        proof: &crate::store::scratch_resources::ScratchReleaseProof,
     ) -> Result<()> {
         if run.deadline_at_unix_ms.is_some_and(|deadline| deadline <= now_ms()) {
             return Ok(());
         }
         let release = self.ensure_resource_authority().and_then(|()| {
+            // Reuse native scope retirement: payload exit alone is not proof
+            // that the owning execution tree has stopped consuming scratch.
+            for membership in self.store.resource_memberships_for_host(&self.host)? {
+                if membership.request.owner.run == run.subject
+                    && !matches!(membership.state.as_str(), "retired" | "refused" | "withdrawn")
+                {
+                    anyhow::ensure!(self.retire_program_membership(&membership)?,
+                        "scratch owner execution tree retirement unconfirmed; custody retained");
+                }
+            }
+            let proof = crate::store::scratch_resources::ScratchReleaseProof::after_quiescence(
+                &run.subject, &run.generation,
+            );
             anyhow::ensure!(
-                self.store.release_scratch_for_owner(&self.host, &run.subject, &run.generation, proof)?,
+                self.store.release_scratch_for_owner(&self.host, &run.subject, &run.generation, &proof)?,
                 "scratch final release refused: live or unknown consumers; custody retained"
             );
             Ok(())
@@ -780,7 +792,6 @@ mission "window-child" state="ready" {{
         let roots = vec![crate::store::resource_membership::ExecutionRoot {
             runtime_id: id.clone(), execution: None,
             payload_released_at: None, execution_ended_at: None,
-            cwd_directory: None,
         }];
         assert!(command_root(&roots, "request-key", &id).unwrap().is_some());
         for changed in [

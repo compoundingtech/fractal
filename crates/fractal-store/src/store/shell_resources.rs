@@ -84,9 +84,6 @@ pub struct Execution {
     /// Frozen host admission evidence, retained after membership retirement and in receipts.
     #[serde(default)]
     pub admission_decision: Option<resource_membership::AdmissionDecision>,
-    /// Frozen at acceptance under the store writer, independently of the lane disk path.
-    #[serde(default)]
-    pub cwd_directory: Option<super::scratch_consumers::DirectoryIdentity>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -425,12 +422,12 @@ impl Store {
         let environment = std::mem::take(&mut command.environment);
         // Serialize submission with launch lookup; absence after restart refuses launch.
         let mut environments = self.shell_environments.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
+        let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
             cancellation_kill_generation: None, retirement_retry_at_unix_ms: None, retirement_retry_delay_ms: 0,
             root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None,
-            learning_decision: None, admission_decision: None, cwd_directory: None };
+            learning_decision: None, admission_decision: None };
         let mut connection = self.connection.write();
         let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         expire_request_cancellations(&transaction, now)?;
@@ -483,10 +480,6 @@ impl Store {
                 return Err(FractalError::new("resource-exec-owner", "request executions belong to ended owners").into());
             }
         }
-        // Capture and durable acceptance share the scratch-release writer. Missing
-        // observations remain unknown; they are never reconstructed from a later alias.
-        execution.cwd_directory = super::scratch_consumers::DirectoryIdentity::capture(
-            Path::new(&execution.command.cwd)).ok();
         // One row per command does not bound its serialized argv/result bytes.
         let inserted = transaction.execute(/* sqlite-large-value: allow-for-now lv-h319ba7a29fc7 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
             rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
@@ -628,8 +621,6 @@ impl Store {
         // Admission evidence comes from the host membership, never mutable execution input.
         // Once copied, it remains frozen even after retirement or later host observations.
         next.admission_decision.clone_from(&previous.admission_decision);
-        // Consumer custody is host-captured acceptance evidence, not caller-mutable input.
-        next.cwd_directory.clone_from(&previous.cwd_directory);
         if next.admission_decision.is_none() {
             let decision: Option<String> = transaction.query_row(
                 "SELECT json_extract(body,'$.admissionDecision') FROM resource_memberships_v1 WHERE id=?1 AND host=?2",
