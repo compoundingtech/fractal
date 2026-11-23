@@ -323,7 +323,7 @@ fn relevant(connection: &Connection, state: &mut State, table: &str, rowid: i64)
         return Ok(previous || next);
     }
     let sql = match table {
-        "claims" => "SELECT kind IN ('runtime.observed','agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired','record.repaired') OR EXISTS(SELECT 1 FROM claims sibling INDEXED BY claims_batch_index WHERE sibling.batch_id=c.batch_id AND sibling.kind='runtime.observed' AND sibling.store_index>c.store_index AND NOT EXISTS(SELECT 1 FROM claim_positions WHERE claim_id=sibling.id)) FROM claims c WHERE c.rowid=?1",
+        "claims" => "SELECT kind IN ('runtime.observed','agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired','record.repaired') OR EXISTS(SELECT 1 FROM claims sibling INDEXED BY claims_kind_index WHERE sibling.batch_id=c.batch_id AND sibling.kind='runtime.observed' AND sibling.store_index>c.store_index AND NOT EXISTS(SELECT 1 FROM claim_positions WHERE claim_id=sibling.id)) FROM claims c WHERE c.rowid=?1",
         "replica_records" => "SELECT kind_hint IS NULL OR kind_hint IN ('runtime.observed','agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired','record.repaired') OR EXISTS(SELECT 1 FROM claims WHERE id=r.claim_id AND kind='runtime.observed') FROM replica_records r WHERE r.rowid=?1",
         "desired" => "SELECT kind='agent' FROM desired WHERE rowid=?1",
         "batches" => "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index WHERE batch_id=(SELECT id FROM batches WHERE rowid=?1) AND kind='runtime.observed')",
@@ -331,7 +331,9 @@ fn relevant(connection: &Connection, state: &mut State, table: &str, rowid: i64)
         "projection_digest_repaired_claims" => "SELECT EXISTS(SELECT 1 FROM claims WHERE id=(SELECT id FROM projection_digest_repaired_claims WHERE rowid=?1) AND kind IN ('runtime.observed','agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired'))",
         _ => return Ok(true),
     };
-    // Every routing lookup starts at a native rowid or an existing indexed batch/operation key.
+    // Seek later runtime claims by kind, not every later sibling in a potentially huge
+    // batch. Unrelated claims cannot affect legacy runtime ranks unless such a row exists.
+    // Every routing lookup starts at a native rowid or an existing indexed kind/operation key.
     // A vanished row (including rolled-back insertion) is conservatively invalidated.
     Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd5ff7420c93f owner=fractal_store::store::observer_mail_inputs TODO=trace-statement-and-value-representation */ sql)?.query_row(/* sqlite-large-value: allow-for-now lv-h17b5bb19b99e owner=fractal_store::store::observer_mail_inputs TODO=trace-statement-and-value-representation */ [rowid], |row| row.get(0)).optional()?.unwrap_or(true))
 }

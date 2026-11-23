@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Mail input publication seeks later legacy runtime claims through the existing kind index instead of repeatedly scanning unrelated batch history. Large unrelated claim batches no longer cause quadratic post-commit routing work.",
+  "replay": { "status": "none", "detail": "No replay or state conversion." },
+  "schema": { "status": "none", "detail": "Uses the existing claims_kind_index; no table or index change." },
+  "rules": { "status": "none", "detail": "Legacy runtime rank dependencies and immutable-position invalidation semantics are unchanged." },
+  "compatibility": { "status": "none", "detail": "No public protocol or durable data changes." },
+  "downtime": { "status": "none", "detail": "Ordinary rolling deployment." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback." }
+}
