@@ -429,6 +429,21 @@ impl FleetContext {
         });
     }
 
+    fn observe_inbound_capabilities(&self, name: &str, member_key: Option<&str>, exchange: &ReplicationExchange) {
+        if !exchange.inventory.can(crate::replication::ROOT_FIRST) {
+            self.observe_capabilities(name, member_key, exchange);
+            return;
+        }
+        // Inbound bodies are authenticated but replayable. They may revoke or
+        // invalidate state, never enable a capability without a fresh outbound challenge.
+        let mut capabilities = self.capabilities.write().expect("capabilities lock poisoned");
+        if capabilities.get(name).is_some_and(|known| {
+            known.sender.member_key.as_deref() != member_key || known.build != exchange.build
+        }) {
+            capabilities.remove(name);
+        }
+    }
+
     /// A node without membership: config peers only, as before.
     #[cfg(any(test, feature = "test-support"))]
     pub fn legacy(config_peers: BTreeSet<String>) -> Self {
@@ -3044,7 +3059,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
                 }
             };
-            state.fleet.observe_capabilities(
+            state.fleet.observe_inbound_capabilities(
                 &relay,
                 sender.member_key.as_deref().filter(|_| sender.member_signature_valid),
                 &request,
@@ -3665,10 +3680,15 @@ async fn exchange_inner<B: Backend>(
         .export(auth.fleet_id(), &summary, true, &[])
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalExport, attempt, None))?
         .exchange;
-    let query = ReplicationExchange {
+    let mut query = ReplicationExchange {
         envelopes: Vec::new(),
         ..first
     };
+    if !query.inventory.can(crate::replication::ROOT_SUMMARY) {
+        // A complete bucket list can be empty. The marker keeps modern peers on
+        // their bounded range-answer path when bootstrapping an empty store.
+        query.inventory.capabilities.push(crate::replication::RANGE_PROOFS.to_owned());
+    }
     let started = std::time::Instant::now();
     let (remote, peer_inflates, authenticated_member_key) =
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
@@ -4010,6 +4030,13 @@ fn overloaded_error(
     anyhow::Error::new(PeerOverloaded { retry_after }).context(failure)
 }
 
+#[derive(Serialize)]
+struct ChallengedExchange<'a> {
+    #[serde(flatten)]
+    exchange: &'a ReplicationExchange,
+    request_nonce: [u8; 16],
+}
+
 /// Send one signed exchange, compressed when `compress` is set and the body is large, and return
 /// the peer's verified answer and whether the peer takes compressed requests.
 #[allow(clippy::too_many_arguments)]
@@ -4028,6 +4055,12 @@ async fn post_signed<B: Backend>(
     let attempted = crate::store::now_ms();
     let started = std::time::Instant::now();
     let mut last_overload = None;
+    let mut request_nonce = [0; 16];
+    getrandom::fill(&mut request_nonce).context("generate exchange request nonce")?;
+    // Legacy readers ignore this additive field. The signed response binds the
+    // entire request digest, so an old response cannot answer this challenge.
+    // Keep it stable while polling the same admitted server job after overload.
+    let request = ChallengedExchange { exchange, request_nonce };
     for _ in 0..MAX_OVERLOAD_POLLS {
         let capability = fleet.capability_class(&peer.name);
         record_worker(backend, &peer.name, "exchange", attempted, None, None).await;
@@ -4040,7 +4073,7 @@ async fn post_signed<B: Backend>(
                 auth,
                 fleet,
                 EXCHANGE_PATH,
-                exchange,
+                &request,
                 compress,
             ),
         )
@@ -4287,6 +4320,12 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
             .as_ref()
             .and_then(|value| value["code"].as_str())
             .unwrap_or_default();
+        if path == EXCHANGE_PATH && code == "replication-exchange-metadata-too-large" {
+            // A rollback can retain its member key. Do not keep probing it with a
+            // previously negotiated capability after an authenticated incompatibility.
+            // The next ordinary round renegotiates using complete bucket proofs.
+            fleet.capabilities.write().expect("capabilities lock poisoned").remove(&peer.name);
+        }
         if path == EXCHANGE_PATH
             && status == StatusCode::SERVICE_UNAVAILABLE
             && code == "replication-overloaded"

@@ -1410,12 +1410,14 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
 
 mod root_first_compatibility {
     use super::*;
-    use crate::replication::{ROOT_FIRST, ROOT_SUMMARY};
+    use crate::replication::{RANGE_PROOFS, ROOT_FIRST, ROOT_SUMMARY};
 
     #[derive(Clone)]
     struct Advertisement {
         root_first: bool,
         build: Option<String>,
+        sign_refusals: bool,
+        replay_response: bool,
     }
 
     #[derive(Default)]
@@ -1423,6 +1425,8 @@ mod root_first_compatibility {
         requests: Vec<ReplicationInventory>,
         failures: Vec<String>,
         exchange_failures: usize,
+        request_digests: Vec<String>,
+        signed_response: Option<(HeaderMap, Vec<u8>)>,
     }
 
     struct Fixture {
@@ -1479,6 +1483,8 @@ mod root_first_compatibility {
             let advertisement = Arc::new(Mutex::new(Advertisement {
                 root_first,
                 build: build.map(str::to_owned),
+                sign_refusals: true,
+                replay_response: false,
             }));
             let observed = Arc::new(Mutex::new(Observed::default()));
             let advertised = advertisement.clone();
@@ -1498,6 +1504,14 @@ mod root_first_compatibility {
                             serde_json::from_slice(&body).unwrap();
                         let advertisement = advertised.lock().unwrap().clone();
                         observations.lock().unwrap().requests.push(query.inventory.clone());
+                        observations.lock().unwrap().request_digests.push(FleetAuth::body_digest(&body));
+                        if advertisement.replay_response {
+                            let (headers, bytes) = observations.lock().unwrap()
+                                .signed_response.clone().expect("a previous signed answer");
+                            let mut response = (StatusCode::OK, bytes).into_response();
+                            response.headers_mut().extend(headers);
+                            return response;
+                        }
                         assert_eq!(
                             query.inventory.digest,
                             remote.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
@@ -1507,13 +1521,16 @@ mod root_first_compatibility {
                         // bucketless scalar probe and refuses before admitting any envelopes.
                         let refused = !advertisement.root_first
                             && (query.inventory.can(ROOT_SUMMARY)
-                                || query.inventory.buckets.is_empty());
+                                || (query.inventory.buckets.is_empty()
+                                    && !query.inventory.can(RANGE_PROOFS)));
                         let (status, bytes) = if refused {
                             let code = "replication-exchange-metadata-too-large";
                             observations.lock().unwrap().failures.push(code.into());
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
-                                serde_json::to_vec(&serde_json::json!({"code": code})).unwrap(),
+                                serde_json::to_vec(&PeerResponse::new(
+                                    "target", 0, serde_json::json!({"code": code}),
+                                )).unwrap(),
                             )
                         } else {
                             remote.receive_replication_exchange(
@@ -1537,9 +1554,15 @@ mod root_first_compatibility {
                             )
                         };
                         let mut response = (status, bytes.clone()).into_response();
-                        response.headers_mut().extend(signing.response_headers_for(
-                            EXCHANGE_PATH, "target", &bytes, &FleetAuth::body_digest(&body),
-                        ).unwrap());
+                        if !refused || advertisement.sign_refusals {
+                            response.headers_mut().extend(signing.response_headers_for(
+                                EXCHANGE_PATH, "target", &bytes, &FleetAuth::body_digest(&body),
+                            ).unwrap());
+                        }
+                        if !refused {
+                            observations.lock().unwrap().signed_response =
+                                Some((response.headers().clone(), bytes));
+                        }
                         response
                     }
                 },
@@ -1644,6 +1667,8 @@ mod root_first_compatibility {
             *fixture.advertisement.lock().unwrap() = Advertisement {
                 root_first: true,
                 build: new_build.map(str::to_owned),
+                sign_refusals: true,
+                replay_response: false,
             };
             // This complete summary receives the first signed ROOT_FIRST advertisement.
             fixture.equal_round(&http, false).await;
@@ -1651,6 +1676,218 @@ mod root_first_compatibility {
             fixture.equal_round(&http, true).await;
             fixture.assert_no_failures(5);
         }
+    }
+
+    #[tokio::test]
+    async fn signed_downgrade_refusal_invalidates_negotiation_without_an_in_round_retry() {
+        let fixture = Fixture::new(true, Some("modern-build")).await;
+        let http = replication_http_client();
+        fixture.equal_round(&http, false).await;
+        fixture.equal_round(&http, true).await;
+        fixture.advertisement.lock().unwrap().root_first = false;
+        let error = exchange(
+            &http, &Local(fixture.source.clone()), "source", &fixture.peer,
+            &fixture.auth, &fixture.fleet,
+        ).await.unwrap_err();
+        assert!(format!("{error:#}").contains("replication-exchange-metadata-too-large"));
+        {
+            let observed = fixture.observed.lock().unwrap();
+            assert_eq!(observed.requests.len(), 3, "the refused round sends no fallback retry");
+            assert!(observed.requests[2].can(ROOT_SUMMARY));
+            assert_eq!(observed.failures, ["replication-exchange-metadata-too-large"]);
+        }
+        assert_eq!(fixture.fleet.capability_class("target"), "unknown");
+        fixture.equal_round(&http, false).await;
+        fixture.equal_round(&http, false).await;
+        let observed = fixture.observed.lock().unwrap();
+        assert_eq!(observed.requests.len(), 5);
+        assert_eq!(observed.failures.len(), 1, "no repeated root-probe failure loop");
+    }
+
+    #[tokio::test]
+    async fn unsigned_refusal_cannot_invalidate_a_negotiated_capability() {
+        let fixture = Fixture::new(true, Some("modern-build")).await;
+        let http = replication_http_client();
+        fixture.equal_round(&http, false).await;
+        {
+            let mut advertisement = fixture.advertisement.lock().unwrap();
+            advertisement.root_first = false;
+            advertisement.sign_refusals = false;
+        }
+        exchange(
+            &http, &Local(fixture.source.clone()), "source", &fixture.peer,
+            &fixture.auth, &fixture.fleet,
+        ).await.unwrap_err();
+        assert_eq!(fixture.observed.lock().unwrap().requests.len(), 2);
+        assert_eq!(fixture.fleet.capability_class("target"), "root_first");
+        fixture.advertisement.lock().unwrap().root_first = true;
+        fixture.equal_round(&http, true).await;
+        assert_eq!(fixture.observed.lock().unwrap().requests.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn empty_unknown_peer_bootstraps_with_explicit_complete_proofs_and_bounded_answers() {
+        let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+        let auth = FleetAuth::test(fleet_id, &[6; 32]);
+        let source = Arc::new(plain_memory("source").unwrap());
+        let target = Arc::new(plain_memory("target").unwrap());
+        source.bind_fleet(fleet_id).unwrap();
+        target.bind_fleet(fleet_id).unwrap();
+        target.append_claim(&ClaimInput {
+            subject: "note/bootstrap".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert!(source.export_replication_summary(fleet_id).unwrap().inventory.buckets.is_empty());
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let requests = observed.clone();
+        let signing = auth.clone();
+        let app = Router::new().route(EXCHANGE_PATH, post(
+            move |headers: HeaderMap, body: Bytes| {
+                let remote = target.clone();
+                let requests = requests.clone();
+                let signing = signing.clone();
+                async move {
+                    signing.verify_sender(
+                        &headers, "POST", EXCHANGE_PATH, &body, None, None,
+                    ).unwrap();
+                    let query: ReplicationExchange = serde_json::from_slice(&body).unwrap();
+                    requests.lock().unwrap().push(query.inventory.clone());
+                    remote.receive_replication_exchange("source", fleet_id, &query).unwrap();
+                    let answer = remote.export_replication_exchange_answering(
+                        fleet_id, &query.inventory, &query.signature_requests,
+                    ).unwrap();
+                    assert!(
+                        answer.envelopes.len() <= query.inventory.accepts.unwrap_or(512) as usize,
+                        "bootstrap response respects the sender's envelope bound",
+                    );
+                    let bytes = serde_json::to_vec(&PeerResponse::new("target", 0, answer)).unwrap();
+                    let mut response = (StatusCode::OK, bytes.clone()).into_response();
+                    response.headers_mut().extend(signing.response_headers_for(
+                        EXCHANGE_PATH, "target", &bytes, &FleetAuth::body_digest(&body),
+                    ).unwrap());
+                    response
+                }
+            },
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(axum::serve(listener, app).into_future());
+        let peer = PeerConfig { name: "target".into(), url: format!("http://{address}") };
+        let result = exchange(
+            &replication_http_client(), &Local(source.clone()), "source", &peer, &auth,
+            &FleetContext::legacy(BTreeSet::from(["target".into()])),
+        ).await;
+        server.abort();
+        assert!(result.expect("empty bootstrap must not trigger a metadata refusal"));
+        assert!(source.latest_claim("note/bootstrap", Some("example.note")).unwrap().is_some());
+        let requests = observed.lock().unwrap();
+        assert!(!requests.is_empty());
+        assert!(requests.len() <= 2, "one bounded pull and at most one reverse push");
+        assert!(requests[0].buckets.is_empty());
+        assert!(requests[0].can(RANGE_PROOFS), "empty does not mean unknown bucket coverage");
+        assert!(!requests[0].can(ROOT_SUMMARY), "unknown peer has not negotiated root-only");
+    }
+
+    #[test]
+    fn inbound_advertisement_replay_cannot_grant_root_first_but_can_revoke_it() {
+        let fleet = FleetContext::legacy(BTreeSet::from(["target".into()]));
+        let store = plain_memory("source").unwrap();
+        let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+        store.bind_fleet(fleet_id).unwrap();
+        let mut advertisement = store.export_replication_root_summary(fleet_id).unwrap();
+        advertisement.build = Some("modern-build".into());
+        for _ in 0..2 {
+            fleet.observe_inbound_capabilities("target", None, &advertisement);
+            assert_eq!(fleet.capability_class("target"), "unknown");
+        }
+        fleet.observe_capabilities("target", None, &advertisement);
+        assert_eq!(fleet.capability_class("target"), "root_first");
+        let replay = advertisement.clone();
+        advertisement.inventory.capabilities.clear();
+        fleet.observe_inbound_capabilities("target", None, &advertisement);
+        assert_eq!(fleet.capability_class("target"), "legacy");
+        fleet.observe_inbound_capabilities("target", None, &replay);
+        assert_ne!(fleet.capability_class("target"), "root_first");
+        fleet.observe_capabilities("target", None, &replay);
+        assert_eq!(fleet.capability_class("target"), "root_first");
+    }
+
+    #[tokio::test]
+    async fn replaying_a_previous_signed_answer_cannot_reenable_root_first() {
+        let fixture = Fixture::new(true, Some("modern-build")).await;
+        let http = replication_http_client();
+        fixture.equal_round(&http, false).await;
+        let mut revoked = fixture.source.export_replication_summary(fixture.auth.fleet_id()).unwrap();
+        revoked.inventory.capabilities.clear();
+        revoked.build = Some("modern-build".into());
+        fixture.fleet.observe_inbound_capabilities("target", None, &revoked);
+        assert_eq!(fixture.fleet.capability_class("target"), "legacy");
+        fixture.advertisement.lock().unwrap().replay_response = true;
+        exchange(
+            &http, &Local(fixture.source.clone()), "source", &fixture.peer,
+            &fixture.auth, &fixture.fleet,
+        ).await.expect_err("the old response signature must not authenticate the fresh request");
+        assert_ne!(fixture.fleet.capability_class("target"), "root_first");
+        {
+            let observed = fixture.observed.lock().unwrap();
+            assert_eq!(observed.requests.len(), 2, "failed replay sends no fallback retry");
+            assert!(!observed.requests[1].can(ROOT_SUMMARY));
+            assert_ne!(
+                observed.request_digests[0], observed.request_digests[1],
+                "fresh requests challenge identical summaries with different signed bodies",
+            );
+        }
+        fixture.advertisement.lock().unwrap().replay_response = false;
+        fixture.equal_round(&http, false).await;
+        fixture.equal_round(&http, true).await;
+    }
+
+    #[tokio::test]
+    async fn signed_inbound_exchange_replays_cannot_enable_root_first_and_can_revoke_it() {
+        let fixture = Fixture::new(true, Some("modern-build")).await;
+        let state = PeerState::new(
+            Local(fixture.source.clone()), "source".into(),
+            fixture.auth.clone(), fixture.fleet.clone(),
+        );
+        let mut advertisement = fixture.source.export_replication_summary(
+            fixture.auth.fleet_id(),
+        ).unwrap();
+        advertisement.peer = "target".into();
+        advertisement.build = Some("modern-build".into());
+        let advertised_body = serde_json::to_vec(&advertisement).unwrap();
+        let advertised_headers = fixture.auth.request_headers("target", &advertised_body).unwrap();
+        for _ in 0..2 {
+            let response = receive_exchange(
+                None, State(state.clone()), advertised_headers.clone(),
+                Bytes::from(advertised_body.clone()),
+            ).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_ne!(fixture.fleet.capability_class("target"), "root_first");
+        }
+        let http = replication_http_client();
+        fixture.equal_round(&http, false).await;
+        assert_eq!(fixture.fleet.capability_class("target"), "root_first");
+        advertisement.inventory.capabilities.clear();
+        let revoked_body = serde_json::to_vec(&advertisement).unwrap();
+        let response = receive_exchange(
+            None, State(state.clone()),
+            fixture.auth.request_headers("target", &revoked_body).unwrap(),
+            Bytes::from(revoked_body),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(fixture.fleet.capability_class("target"), "legacy");
+        let response = receive_exchange(
+            None, State(state), advertised_headers, Bytes::from(advertised_body),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(fixture.fleet.capability_class("target"), "root_first");
+        fixture.equal_round(&http, false).await;
+        fixture.equal_round(&http, true).await;
     }
 
     #[test]
