@@ -135,7 +135,7 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new(),
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, finalizing: false, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
@@ -177,7 +177,7 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new(),
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, finalizing: false, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
