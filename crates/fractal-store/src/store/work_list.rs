@@ -271,14 +271,31 @@ impl WorkRows {
     /// subject, as the direct read sorts them.
     pub fn sort(&mut self) {
         let mut order = self.rows.values().map(|row| &row.view).collect::<Vec<_>>();
-        order.sort_by(|left, right| {
-            work_state_rank(&left.status)
-                .cmp(&work_state_rank(&right.status))
-                .then_with(|| left.readiness_epoch.cmp(&right.readiness_epoch))
-                .then_with(|| left.step.cmp(&right.step))
-                .then_with(|| left.subject.cmp(&right.subject))
-        });
+        order.sort_by(|left, right| Self::compare(left, right));
         self.order = order.into_iter().map(|view| view.subject.clone()).collect();
+    }
+
+    fn compare(left: &StepRunView, right: &StepRunView) -> std::cmp::Ordering {
+        work_state_rank(&left.status)
+            .cmp(&work_state_rank(&right.status))
+            .then_with(|| left.readiness_epoch.cmp(&right.readiness_epoch))
+            .then_with(|| left.step.cmp(&right.step))
+            .then_with(|| left.subject.cmp(&right.subject))
+    }
+
+    /// Reinsert only changed keys; elapsed-time and queue-only changes do not order rows.
+    pub fn update_order(&mut self, steps: &BTreeSet<String>) {
+        if steps.is_empty() {
+            return;
+        }
+        self.order.retain(|step| !steps.contains(step));
+        for step in steps {
+            let Some(row) = self.rows.get(step) else { continue; };
+            let at = self.order.binary_search_by(|other| {
+                Self::compare(&self.rows[other].view, &row.view)
+            }).unwrap_or_else(|at| at);
+            self.order.insert(at, step.clone());
+        }
     }
 
     /// The agent seats the rows name, each of which may read its own list: whose queue order

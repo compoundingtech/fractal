@@ -5727,6 +5727,17 @@ impl Store {
         self.status_for_claim_kind_view(kind, at_index, include_history, claims, true)
     }
 
+    /// Runtime owner keys at a snapshot, including owners later filtered into history.
+    pub fn runtime_list_subjects(&self, store_index: u64) -> Result<BTreeSet<String>> {
+        let connection = self.readers.get();
+        // One seek per runtime instead of every runtime observation.
+        connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h11ef4fb3e9cb owner=fractal_store::store TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
+            .query_map([store_index], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(Into::into)
+    }
+
     fn status_for_claim_kind_view(
         &self, kind: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction, generic: bool,
     ) -> Result<StatusResponse> {
@@ -5737,11 +5748,7 @@ impl Store {
             connection.prepare_cached("SELECT subject FROM arrangements ORDER BY subject")?
                 .query_map([], |row| row.get::<_,String>(0))?.collect::<Result<BTreeSet<_>,_>>()?
         } else if kind == "runtime.observed" {
-            // One seek per runtime instead of every runtime observation.
-            connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h11ef4fb3e9cb owner=fractal_store::store TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
-                .query_map([store_index], |row| row.get::<_, String>(0))?
-                .collect::<Result<BTreeSet<_>, _>>()?
+            self.runtime_list_subjects(store_index)?
         } else {
             connection
                 .prepare(
@@ -7890,6 +7897,26 @@ impl Store {
                 "SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1 AND kind=?2",
             )?
             .query_row(/* sqlite-large-value: allow-for-now lv-hf5a6039f365d owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, kind], |row| row.get(0))?)
+    }
+
+    /// Inspect only an already-warm actual value; never fill the cache or fold history.
+    /// A single seek checks the newest claim of any kind. Ignored newer claims conservatively
+    /// make this unavailable too, rather than walking kinds or accepting stale evidence.
+    pub fn inspect_cached_actual<T>(
+        &self,
+        subject: &str,
+        inspect: impl FnOnce(&Value) -> T,
+    ) -> Result<Option<T>> {
+        let newest: Option<u64> = self.readers.get().query_row(
+            "SELECT store_index FROM claims INDEXED BY claims_subject_index
+             WHERE subject=?1 ORDER BY store_index DESC LIMIT 1",
+            [subject], |row| row.get(0),
+        ).optional()?;
+        let cache = self.fractal.actual_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(cache.get(subject)
+            .filter(|(index, _)| Some(*index) == newest)
+            .and_then(|(_, value)| value.as_ref())
+            .map(inspect))
     }
 
     pub fn latest_actual_value(&self, subject: &str) -> Result<Option<Value>> {
