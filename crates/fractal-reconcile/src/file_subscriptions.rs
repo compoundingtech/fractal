@@ -22,6 +22,9 @@ type Users = Arc<Mutex<Subscribers>>;
 #[derive(Default)]
 struct Subscribers {
     leases: BTreeMap<u64, (Paths, Callback)>,
+    // Physical watch roots select candidates; input predicates retain declared-path
+    // identity even when many missing inputs share one existing ancestor.
+    // Predicates filter ordinary events, not replacement of shared watch coverage.
     roots: BTreeMap<PathBuf, BTreeSet<u64>>,
     inputs: BTreeMap<u64, Predicate>,
 }
@@ -406,6 +409,122 @@ mod tests {
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
             .add_path(PathBuf::from("/a/bc/input"));
         assert_eq!(dispatch(&users, &event, false), 1);
+    }
+
+    #[test]
+    fn shared_ancestor_routes_each_event_to_only_intersecting_declared_inputs() {
+        use std::sync::atomic::AtomicUsize;
+        const LEASES: usize = 430;
+        let directory = PathBuf::from("/workspace");
+        let users = Users::default();
+        let counts: Vec<_> = (0..LEASES).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        for (id, count) in counts.iter().enumerate() {
+            let target = directory.join(format!(".local/bin/input-{id}"));
+            let parent = directory.clone();
+            let count = count.clone();
+            let mut subscribers = lock(&users);
+            subscribers.insert(id as u64, (vec![(directory.clone(), false)], Arc::new(move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            })));
+            subscribers.inputs.insert(id as u64, Arc::new(move |event|
+                super::super::FileWatch::relevant(event, &target, &parent, None)));
+        }
+        let target = directory.join(".local/bin/input-7");
+        let sibling = directory.join(".local/bin/input-7-backup");
+        for path in [directory.join(".local/state/daemon/state"), sibling.clone()] {
+            let event = notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path);
+            assert_eq!(dispatch(&users, &event, false), 0);
+        }
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(target.clone());
+        assert_eq!(dispatch(&users, &event, false), 1);
+        let renamed = notify::Event::new(EventKind::Modify(ModifyKind::Name(
+            notify::event::RenameMode::Both,
+        ))).add_path(sibling).add_path(target.clone()).add_path(target);
+        assert_eq!(dispatch(&users, &renamed, false), 1, "multi-path events deliver each lease once");
+        for (id, count) in counts.iter().enumerate() {
+            assert_eq!(count.load(Ordering::Relaxed), usize::from(id == 7) * 2);
+        }
+        let ancestor = notify::Event::new(EventKind::Create(notify::event::CreateKind::Folder))
+            .add_path(directory.join(".local/bin"));
+        assert_eq!(dispatch(&users, &ancestor, false), LEASES,
+            "creating a missing shared ancestor must discover all declared inputs");
+        let overflow = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert_eq!(dispatch(&users, &overflow, false), LEASES, "genuine lost events require rereads");
+        for (id, count) in counts.iter().enumerate() {
+            assert_eq!(count.load(Ordering::Relaxed), 2 + usize::from(id == 7) * 2);
+        }
+    }
+
+    #[test]
+    fn missing_nested_input_ignores_own_writes_but_observes_ancestor_changes() {
+        use notify::event::{CreateKind, RemoveKind, RenameMode};
+        let directory = PathBuf::from("/workspace");
+        let target = directory.join(".local/bin/declared-tool");
+        let users = Users::default();
+        lock(&users).insert(0, (vec![(directory.clone(), false)], Arc::new(|_| {})));
+        let parent = directory.clone();
+        let declared = target.clone();
+        lock(&users).inputs.insert(0, Arc::new(move |event|
+            super::super::FileWatch::relevant(event, &declared, &parent, None)));
+
+        // These mutations share the nearest existing ancestor with a missing input.
+        // They model state/log output and unrelated source writes without exclusions.
+        for path in [
+            ".local/state/fractal/daemon/events.jsonl",
+            ".local/state/fractal/daemon/database",
+            ".local/bin/another-tool",
+            ".local/bin/declared-tool.tmp",
+            ".fractal/launch/output.log",
+            "src/unrelated.rs",
+        ] {
+            for kind in [
+                EventKind::Create(CreateKind::File),
+                EventKind::Modify(ModifyKind::Any),
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                EventKind::Remove(RemoveKind::File),
+            ] {
+                let event = notify::Event::new(kind).add_path(directory.join(path));
+                assert_eq!(dispatch(&users, &event, false), 0, "unrelated mutation: {event:?}");
+            }
+        }
+        for path in [&target, &directory.join(".local"), &directory.join(".local/bin")] {
+            for kind in [
+                EventKind::Create(CreateKind::Folder),
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                EventKind::Remove(RemoveKind::Folder),
+            ] {
+                let event = notify::Event::new(kind).add_path(path.clone());
+                assert_eq!(dispatch(&users, &event, false), 1, "declared-path intersection: {event:?}");
+            }
+        }
+        let replacement = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(directory.join(".local/bin/declared-tool.tmp")).add_path(target);
+        assert_eq!(dispatch(&users, &replacement, false), 1, "atomic input replacement is relevant");
+    }
+
+    #[test]
+    fn coverage_replacement_bypasses_input_predicate_only_for_intersecting_roots() {
+        use std::sync::atomic::AtomicUsize;
+        let users = Users::default();
+        let counts: Vec<_> = (0..3).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        for (id, (path, count)) in ["/workspace/a", "/workspace/a/nested", "/workspace/ab"]
+            .into_iter().zip(&counts).enumerate() {
+            let count = count.clone();
+            let mut subscribers = lock(&users);
+            subscribers.insert(id as u64, (vec![(PathBuf::from(path), true)], Arc::new(move |notification| {
+                assert!(notification.coverage_changed);
+                count.fetch_add(1, Ordering::Relaxed);
+            })));
+            subscribers.inputs.insert(id as u64, Arc::new(|_| false));
+        }
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from("/workspace/a")).set_flag(notify::event::Flag::Rescan);
+        assert_eq!(dispatch(&users, &event, true), 2,
+            "a scoped synthetic rescan must not become a global overflow");
+        assert_eq!(counts[0].load(Ordering::Relaxed), 1);
+        assert_eq!(counts[1].load(Ordering::Relaxed), 1);
+        assert_eq!(counts[2].load(Ordering::Relaxed), 0);
     }
 
     #[cfg(target_os = "macos")]
