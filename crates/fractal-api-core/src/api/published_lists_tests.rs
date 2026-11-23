@@ -2260,7 +2260,8 @@ struct Refresher<R: 'static> {
 
 impl<R: Send + Sync + 'static> Refresher<R> {
     fn start(&self, store: &Arc<Store>) {
-        spawn(Arc::clone(store), self.list, self.name, self.label, self.fold, true, Wakes { roster: false, local: self.local });
+        let tables = if self.name == "work" { WORK_TABLES } else { MISSION_TABLES };
+        spawn(Arc::clone(store), self.list, self.name, self.label, self.fold, true, Wakes { roster: false, local: self.local, tables });
     }
 
     fn folds(&self, store: &Store) -> usize {
@@ -2503,9 +2504,18 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
         claim.id
     }
     fn check(store: &Store, base: &mut Publication<RuntimeRows>) -> bool {
+        let list = store.published_runtime_list();
+        let affected = store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap();
+        let before = list.refolded();
         let (next, changed) = runtimes(store, Some(base)).unwrap().unwrap();
+        assert_eq!(list.refolded() - before, affected.len() as u64,
+            "incremental reductions visit only affected runtime owners");
         *store.fractal.subject_cache.lock().unwrap() = Default::default();
+        let before = list.refolded();
+        let initial_subjects = store.runtime_list_subjects(store.index().unwrap()).unwrap();
         let (oracle, _) = runtimes(store, None).unwrap().unwrap();
+        assert_eq!(list.refolded() - before, initial_subjects.len() as u64,
+            "full folds count every initial owner, not just visible rows");
         assert_eq!(next.cut, oracle.cut);
         assert_eq!(next.rows.items, oracle.rows.items);
         assert_eq!(next.rows.digest, oracle.rows.digest);
@@ -2615,4 +2625,90 @@ mission "garden/runtime" state="ready" {
     assert!(check(&store, &mut base));
     assert!(base.rows.items.is_empty(), "the implicit stop moves the runtime to history");
     assert_eq!(store.selected_desired_tokens(&["agent/garden/meadow"]).unwrap()["agent/garden/meadow"], receipt_claim);
+}
+
+#[test]
+fn runtime_publication_counts_only_changed_owners_including_history_transitions() {
+    use crate::api::client_v0::published_runtimes::fold as runtimes;
+    let store = Store::open_memory("cedar").unwrap();
+    let observe = |owner: &str, status: &str| {
+        store.append_claim(&crate::model::ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("runtime_id".into(), json!(owner)),
+                ("status".into(), json!(status)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    observe("agent/cedar.a", "running");
+    observe("agent/cedar.b", "running");
+    observe("agent/cedar.history", "stopped");
+    let list = store.published_runtime_list();
+    let (mut base, _) = runtimes(&store, None).unwrap().unwrap();
+    assert_eq!(list.refolded(), 3, "initial owners include hidden history");
+    assert_eq!(base.rows.items.len(), 2);
+
+    let original = Arc::clone(&base.rows.items);
+    crate::test_support::note_local_claim(&store, "message/unrelated-runtime-count");
+    let (next, changed) = runtimes(&store, Some(&base)).unwrap().unwrap();
+    assert!(!changed);
+    assert_eq!(list.refolded(), 3, "unrelated commits reduce no runtime owners");
+    assert!(Arc::ptr_eq(&original, &next.rows.items));
+    base = next;
+    assert!(runtimes(&store, Some(&base)).unwrap().is_none());
+    assert_eq!(list.refolded(), 3, "an unchanged cut reduces no owners");
+
+    observe("agent/cedar.a", "stopped");
+    let (next, changed) = runtimes(&store, Some(&base)).unwrap().unwrap();
+    assert!(changed);
+    assert_eq!(list.refolded(), 4, "only the changed owner is reduced");
+    assert_eq!(next.rows.items.len(), 1);
+    assert_eq!(next.rows.items[0]["owner_id"], "agent/cedar.b");
+    base = next;
+
+    observe("agent/cedar.history", "running");
+    let (next, changed) = runtimes(&store, Some(&base)).unwrap().unwrap();
+    assert!(changed);
+    assert_eq!(list.refolded(), 5, "a returning owner alone is reduced");
+    assert_eq!(next.rows.items.len(), 2);
+    assert!(next.rows.items.iter().any(|row| row["owner_id"] == "agent/cedar.history"));
+}
+
+#[test]
+fn collection_refolds_count_only_changed_keys() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    for name in ["garden/alpha", "garden/beta"] {
+        mission(&store, name);
+    }
+    let alpha = start(&store, "garden/alpha", "alpha-count");
+    let beta = start(&store, "garden/beta", "beta-count");
+    let (plant, actor) = step(&alpha, "plant");
+    store.set_step_state(&plant, "ready", None).unwrap();
+    store.set_step_state(&step(&beta, "plant").0, "ready", None).unwrap();
+    let (work, _) = folded_at_once(fold_work(&store, None, None));
+    let (missions, _) = folded_at_once(fold_missions(&store, None, None));
+    let counts = || (store.published_work_list().refolded(), store.published_missions_list().refolded());
+    let cold = counts();
+    assert!(cold.0 > 1 && cold.1 == 2);
+    assert!(matches!(fold_work(&store, Some(&work), None).unwrap(), Folded::Current));
+    assert!(matches!(fold_missions(&store, Some(&missions), None).unwrap(), Folded::Current));
+    assert_eq!(counts(), cold, "unchanged input reduces no keys");
+
+    crate::test_support::note_local_claim(&store, "message/unrelated-list-count");
+    let (work, _) = folded_at_once(fold_work(&store, Some(&work), None));
+    let (missions, _) = folded_at_once(fold_missions(&store, Some(&missions), None));
+    assert_eq!(counts(), cold, "unrelated commits reduce no keys");
+
+    act(&store, &plant, &actor, "claim", "claim-count");
+    let (work, _) = folded_at_once(fold_work(&store, Some(&work), None));
+    let (missions, _) = folded_at_once(fold_missions(&store, Some(&missions), None));
+    assert_eq!(counts(), (cold.0 + 1, cold.1 + 1), "one changed step reduces only its row and mission");
+    let mut work_sorted = work.rows.clone();
+    work_sorted.sort();
+    assert_eq!(work.rows.order, work_sorted.order);
+    let mut missions_sorted = missions.rows.clone();
+    missions_sorted.sort();
+    assert_eq!(missions.rows.order, missions_sorted.order);
 }

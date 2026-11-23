@@ -42,9 +42,18 @@ pub struct ReplicationInventory {
 /// [`SignedEnvelope`]s (`store::signed_claims`).
 pub const SIGNED_CLAIMS: &str = "signed-claims-v1";
 
+/// A peer can compare scalar roots before requesting bucket proofs.
+pub const ROOT_FIRST: &str = "root-first-v1";
+/// An additive inventory marker: this message intentionally omits bucket proofs.
+/// Only a peer advertising [`ROOT_FIRST`] may answer it with another root summary.
+pub const ROOT_SUMMARY: &str = "root-summary-v1";
+/// An additive inventory marker: the bucket list is complete, even when empty.
+/// Unlike [`ROOT_FIRST`], this describes this message, not the peer's capabilities.
+pub const RANGE_PROOFS: &str = "range-proofs-v1";
+
 /// What this build lists in its inventories' `capabilities`.
 pub fn replication_capabilities() -> Vec<String> {
-    vec![SIGNED_CLAIMS.to_owned()]
+    vec![SIGNED_CLAIMS.to_owned(), ROOT_FIRST.to_owned()]
 }
 
 impl ReplicationInventory {
@@ -318,13 +327,12 @@ pub struct ReplicationExportRequest {
     pub inventory: ReplicationInventory,
     #[serde(default)]
     pub summary_only: bool,
-    /// Classify a full summary requested only by the local recent-inbound guard.
-    /// Older local daemons ignore this field; it never changes the exported exchange.
+    /// Compatibility for independently supervised older workers' local guard requests.
+    /// Current workers use revision subscriptions; this flag never changes the exchange.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authority_guard: bool,
-    /// Local-daemon only: the scalar guard does not consume inventory buckets. Honored only
-    /// for a summary with `authority_guard`; ordinary/default and peer exchanges stay full.
-    /// Older local daemons ignore this option and return the complete response in one call.
+    /// Older-worker compatibility: omit buckets only for a marked local guard summary.
+    /// This flag never appears in signed peer exchanges.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authority_digest_only: bool,
     /// The other side's signature requests, to answer in the exported exchange.
@@ -546,7 +554,34 @@ impl ReplicationHealth {
             Self::NoTargets => "replication worker is live; this fleet has no other current member to exchange with",
             Self::WorkerMissing => "fleet replication is configured but no replication worker heartbeat has reached this daemon; start the replication-worker service",
             Self::WorkerStale => "replication worker heartbeat is stale (over 25 seconds); inspect and restart the replication-worker service",
-            Self::ExchangeStale => "replication worker is live but no successful exchange with a current peer occurred within 60 seconds; inspect fleet routes, including the bootstrap sponsor, and replication-worker logs",
+            Self::ExchangeStale => "replication worker is live but no successful exchange with a current peer occurred within 60 seconds; inspect replication status and replication-worker logs",
+        }
+    }
+
+    /// Summarize existing failure evidence without volatile timings or peer ordering.
+    pub(crate) fn message_with_failures<'a>(
+        self,
+        failures: impl IntoIterator<Item = Option<&'a ReplicationExchangeFailure>>,
+    ) -> String {
+        if self != Self::ExchangeStale {
+            return self.message().into();
+        }
+        let mut counts = BTreeMap::new();
+        let mut peers = 0;
+        for failure in failures {
+            peers += 1;
+            if let Some(failure) = failure {
+                *counts.entry((failure.phase.as_str(), failure.code.as_str())).or_insert(0usize) += 1;
+            }
+        }
+        // The ordered map breaks equal-count ties lexically, independent of peer order.
+        let dominant = counts.iter().max_by_key(|(_, count)| **count);
+        match dominant {
+            Some(((phase, code), count)) => format!(
+                "{}; last failures: {phase} {code} on {count}/{peers} peers",
+                self.message(),
+            ),
+            None => format!("{}; no recorded last failures for current peers", self.message()),
         }
     }
 }
@@ -650,6 +685,35 @@ mod replication_health_tests {
         let health = ReplicationHealth::observe(true, GRACE, Some(Duration::from_secs(10)), 1, Some(Duration::from_secs(30)));
         assert_eq!(health, ReplicationHealth::Healthy);
         assert_eq!(health.status(), "pass");
+    }
+
+    #[test]
+    fn stale_failure_summary_counts_missing_evidence_and_breaks_ties_stably() {
+        let local = ReplicationExchangeFailure::from_error(
+            &anyhow::anyhow!("operation failed"),
+            ReplicationFailurePhase::LocalReceive,
+            Duration::from_secs(120),
+            None,
+        );
+        let transport = ReplicationExchangeFailure::from_error(
+            &anyhow::anyhow!("operation failed"),
+            ReplicationFailurePhase::Dial,
+            Duration::ZERO,
+            None,
+        );
+        let health = ReplicationHealth::ExchangeStale;
+        assert_eq!(
+            health.message_with_failures([Some(&local), Some(&transport), Some(&local), None]),
+            format!("{}; last failures: local-receive replication-operation-failed on 2/4 peers", health.message()),
+        );
+        assert_eq!(
+            health.message_with_failures([Some(&local), Some(&transport)]),
+            health.message_with_failures([Some(&transport), Some(&local)]),
+        );
+        assert_eq!(
+            health.message_with_failures([None]),
+            format!("{}; no recorded last failures for current peers", health.message()),
+        );
     }
 }
 
@@ -764,6 +828,20 @@ pub enum ReplicationFailurePhase {
     Verify,
     LocalReceive,
     FollowUpExport,
+}
+
+impl ReplicationFailurePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dial => "dial",
+            Self::LocalExport => "local-export",
+            Self::RequestHeaders => "request-headers",
+            Self::ResponseBody => "response-body",
+            Self::Verify => "verify",
+            Self::LocalReceive => "local-receive",
+            Self::FollowUpExport => "follow-up-export",
+        }
+    }
 }
 
 /// Last observed HTTP client boundary. Pool acquisition is not exposed by reqwest.
