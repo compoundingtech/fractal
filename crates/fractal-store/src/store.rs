@@ -2989,6 +2989,24 @@ impl Store {
         Self::finish_open(graph, fractal)
     }
 
+    /// Open an offline backup source without migrations, projection repair, or writer workers.
+    pub fn open_backup_read_only(database: &Path) -> Result<Self> {
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_backup_read_only(database, fractal.clone())?;
+        anyhow::ensure!(!graph.origin.is_empty(), "read-only backup requires a persisted local writer identity");
+        let store = Self::from_open_graph(graph, fractal, None);
+        let shard_path = backup_shards::database_path(
+            store.path.parent().context("backup database has no parent directory")?,
+        )?;
+        if shard_path.try_exists()? {
+            let shard = GraphStore::open_backup_read_only(
+                &shard_path, Arc::new(messages_shard::MessagesRuntime::default()),
+            ).with_context(|| format!("open read-only messages shard {}", shard_path.display()))?;
+            store.extension::<messages_shard::Slot>().set(Arc::new(shard))?;
+        }
+        Ok(store)
+    }
+
     /// Open only through the directory descriptor retained by explicit-store admission.
     pub fn open_admitted(
         admitted: Arc<smallclaims::store::AdmittedStore>,
@@ -3016,7 +3034,15 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        Ok(Self::from_open_graph(graph, fractal, resource_backfill))
+    }
+
+    fn from_open_graph(
+        graph: GraphStore,
+        fractal: Arc<FractalRuntime>,
+        resource_backfill: Option<resource_references::BackfillWorker>,
+    ) -> Self {
+        Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             storage_census: Default::default(),
             shell_environments: Default::default(),
@@ -3025,7 +3051,7 @@ impl Store {
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
-            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
+            last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() }
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and

@@ -1035,6 +1035,57 @@ impl Store {
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
+    /// Open a cleanly stopped, checkpointed current-schema store without changing any source files.
+    pub fn open_backup_read_only(path: &Path, runtime: Arc<dyn Runtime>) -> Result<Self> {
+        let connection = crate::sqlite::open_immutable_read_connection(path)?;
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        anyhow::ensure!(
+            (CURRENT_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+            "read-only backup requires schema version {CURRENT_SCHEMA_VERSION} through {MAX_SUPPORTED_SCHEMA_VERSION}; source has schema version {version}; migrate with a compatible daemon before exporting"
+        );
+        let path = crate::sqlite::opened_database_path(&connection, path)?;
+        let origin = connection.query_row(
+            "SELECT value FROM meta WHERE key IN ('local_node_writer','backup_restore_writer')
+             ORDER BY CASE key WHEN 'local_node_writer' THEN 0 ELSE 1 END LIMIT 1",
+            [], |row| row.get::<_, String>(0),
+        ).optional()?.unwrap_or_default();
+        let identities: u64 = connection.query_row(
+            "SELECT COUNT(DISTINCT value) FROM meta WHERE key IN ('local_node_writer','backup_restore_writer')",
+            [], |row| row.get(0),
+        )?;
+        anyhow::ensure!(identities <= 1, "read-only backup refuses ambiguous persisted writer identity");
+        let index = current_index(&connection)?;
+        let seeded_batch_rowid = connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key='seeded_batch_rowid'",
+            [], |row| row.get(0),
+        ).optional()?.unwrap_or(0);
+        let readers = ReadPool::new_immutable(&path)?;
+        let committed_index = Arc::new(AtomicU64::new(index));
+        let writer = WriterConnection::read_only(committed_index.clone());
+        Self::from_open_parts(
+            writer, readers, origin, path, false, runtime, committed_index,
+            seeded_batch_rowid, false,
+        )
+    }
+
+    /// Check actual envelope coverage, including batches older than the persisted sealing cursor.
+    /// Call inside the export's pinned snapshot; this never repairs or seals history.
+    pub fn check_backup_sealed(&self) -> Result<()> {
+        let missing: bool = self.readers.get().query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM batches b
+               WHERE NOT EXISTS(SELECT 1 FROM replica_envelopes e WHERE e.batch_id=b.id)
+                 AND NOT EXISTS(SELECT 1 FROM released_envelopes e WHERE e.batch_id=b.id)
+             )",
+            [], |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            !missing,
+            "read-only backup refuses unsealed history; let the daemon finish sealing before exporting"
+        );
+        Ok(())
+    }
+
     /// Open only through an admitted, locked directory, without recreating it.
     pub fn open_admitted(
         admitted: Arc<AdmittedStore>,
@@ -1375,6 +1426,24 @@ impl Store {
         if auto_schedule {
             Self::install_deferred_drain(&connection, runtime.clone());
         }
+        Self::from_open_parts(
+            connection, readers, origin, path, shared_memory, runtime,
+            committed_index, seeded_batch_rowid, projection_pending,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_open_parts(
+        connection: WriterConnection,
+        readers: ReadPool,
+        origin: String,
+        path: PathBuf,
+        shared_memory: bool,
+        runtime: Arc<dyn Runtime>,
+        committed_index: Arc<AtomicU64>,
+        seeded_batch_rowid: i64,
+        projection_pending: bool,
+    ) -> Result<Self> {
         Ok(Self {
             connection,
             admitted: None,
