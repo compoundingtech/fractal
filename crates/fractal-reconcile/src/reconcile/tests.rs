@@ -8488,10 +8488,12 @@ agent "import/omp/fixture" {{
 
     #[tokio::test]
     async fn launch_input_watchers_follow_recursive_rules_and_missing_inputs() {
+        use futures_util::FutureExt as _;
         let root = tempfile::tempdir().unwrap();
         let notify = Arc::new(Notify::new());
         let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
             Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+        let scoped_notify = &reconciler.file_changes.notify;
         let rules = root.path().join("rules");
         let missing = root.path().join("missing.md");
         for path in [&rules, &missing] {
@@ -8502,11 +8504,16 @@ agent "import/omp/fixture" {{
             "old".into(), "second".into(),
         ]), None);
         std::fs::create_dir_all(rules.join("nested")).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
+        assert!(reconciler.file_changes.launches.lock().unwrap().contains("test"));
+        assert!(notify.notified().now_or_never().is_none(),
+            "launch input creation must not wake the common reconciliation loop");
         reconciler.ensure_file_watch(&format!("launch-input/{}", rules.display()), &rules).unwrap();
         for path in [rules.join("nested/new.md"), missing] {
             std::fs::write(path, "new instruction").unwrap();
-            tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
+            assert!(notify.notified().now_or_never().is_none(),
+                "launch input mutation must not wake the common reconciliation loop");
         }
         reconciler.ensure_file_watch("old", &rules.join("old")).unwrap();
         for key in ["second", "old"] {
@@ -8514,10 +8521,10 @@ agent "import/omp/fixture" {{
             std::fs::create_dir(&rules).unwrap();
             let path = rules.join(key);
             while key == "old" && !reconciler.file_watchers.lock().unwrap()["old"].dirty.load(Ordering::Acquire) {
-                tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
             }
             reconciler.ensure_file_watch(key, &path).unwrap(); // Acquire before releasing the old lease.
-            while tokio::time::timeout(Duration::from_millis(50), notify.notified()).await.is_ok() {}
+            while tokio::time::timeout(Duration::from_millis(50), scoped_notify.notified()).await.is_ok() {}
             reconciler.incremental.evaluated("replacement", BTreeSet::from([key.into()]), None);
             std::fs::write(&path, "new inode").unwrap();
             // An earlier logical callback can wake us before this dependency is touched.
