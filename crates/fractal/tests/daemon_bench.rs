@@ -32,7 +32,6 @@
 
 use fractal_daemon::MissionsStore;
 use fractal_daemon::PersonWorkStore;
-use fractal_daemon::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
