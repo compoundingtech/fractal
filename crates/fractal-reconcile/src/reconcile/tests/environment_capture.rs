@@ -64,9 +64,17 @@ fn capture_attempts(timeouts: u32) {
         join_capture(&reconciler);
         now = due;
     }
-    reconciler.reconcile_start_jobs().unwrap();
+    // Inspect the worker's returned result before adoption removes settled starts
+    // from the pending-only runtime_start_for lookup.
     let operation = store.runtime_start_for(&subject.subject).unwrap().unwrap();
-    assert!(operation.finished && operation.applied);
+    assert!(operation.finished && !operation.applied);
+    if timeouts == 3 {
+        assert!(operation.result.as_ref().unwrap()["error"].as_str().unwrap()
+            .contains("environment capture timed out after 3 attempts"));
+    }
+    reconciler.reconcile_start_jobs().unwrap();
+    assert!(store.runtime_start_for(&subject.subject).unwrap().is_none(),
+        "adoption must retire the completed start from the pending queue");
     let warnings = warnings(&store, &subject.subject);
     assert_eq!(warnings.len(), 1, "unchanged warnings are deduplicated across attempts and passes");
     assert_eq!(warnings[0].body["fields"]["severity"], "warning");

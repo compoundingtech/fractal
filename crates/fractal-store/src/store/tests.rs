@@ -26,6 +26,39 @@ use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
 
+#[test]
+fn cached_actual_inspection_never_fills_a_cold_or_stale_entry() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "resource/github/acme/garden/pull-request/12";
+    let append = |state: &str| store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "resource.observed".into(), actor: None,
+        fields: BTreeMap::from([
+            ("kind".into(), json!("vcs.pull-request")),
+            ("facts".into(), json!({"number": 12, "state": state, "merged": false, "title": "Garden"})),
+            ("observer".into(), json!("observer/repo")),
+            ("baseline".into(), json!(false)),
+            ("changed_fields".into(), json!(["state"])),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    append("open");
+    store.fractal.actual_cache.lock().unwrap().clear();
+    assert_eq!(store.inspect_cached_actual(subject, |_| true).unwrap(), None);
+    assert!(store.fractal.actual_cache.lock().unwrap().is_empty());
+    assert!(store.latest_actual_value(subject).unwrap().is_some());
+    assert_eq!(store.inspect_cached_actual(subject, |_| true).unwrap(), Some(true));
+    let cached_index = store.fractal.actual_cache.lock().unwrap()[subject].0;
+    append("closed");
+    assert_eq!(store.inspect_cached_actual(subject, |_| true).unwrap(), None);
+    assert_eq!(store.fractal.actual_cache.lock().unwrap()[subject].0, cached_index);
+    let plan: String = store.readers.get().query_row(
+        "EXPLAIN QUERY PLAN SELECT store_index FROM claims INDEXED BY claims_subject_index
+         WHERE subject=?1 ORDER BY store_index DESC LIMIT 1",
+        [subject], |row| row.get(3),
+    ).unwrap();
+    assert!(plan.contains("COVERING INDEX claims_subject_index"), "{plan}");
+}
+
 fn assert_open_indexes_reviewed(connection: &rusqlite::Connection) {
     #[derive(serde::Deserialize)]
     struct Allowlist {

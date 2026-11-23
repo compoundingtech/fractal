@@ -27,6 +27,13 @@ Neither read folds claims or replays history. They read state Fractal already ke
   presentations read, which gives each seat's state.
 - For one run, one primary-key read of the run and a range of its own `step_runs` rows. This
   names the steps that are finished or not yet ready. Its cost is the run's own steps.
+- For each open agentless predicate step, one indexed lookup of its pinned definition, with
+  nested paths resolved in that definition, and at most four read-only actual-cache peeks.
+  Each peek checks freshness with a covering seek on `claims_subject_index`, reading no claim
+  body. Cold or stale entries are unavailable; the peek never fills the cache or folds history.
+  These reads do not run gates, refresh observations, walk launch lineage or write diagnostics.
+  Nested work rows omit gate-kind metadata; waiting-on resolves predicate eligibility and gates
+  from the pinned definition without changing the work row's client representation.
 
 `fractal missions show RUN` builds a presentation from each step's whole history. On a large store that
 costs minutes of daemon CPU, so it is the wrong tool for "why is this stuck".
@@ -60,6 +67,15 @@ The rest are not causes:
 
 The quiet limit is 30 minutes by default: the time Fractal waits before it nudges an idle holder.
 `--quiet` changes it for one read.
+
+An agentless predicate step with a known false field gate is a `hold`, not active verification.
+Its detail names the gate, subject, field, observed value and expectation. Scalars are limited
+to 80 characters with explicit truncation; arrays and objects show only their type and size.
+The wait starts at the step's execution start and does not become a stall merely because time
+passes. Field predicates are checked in declaration order, with at most four cache peeks.
+Cold or stale observations, missing fields, runtime interpolation, non-field predicates, exec
+subjects, effect subjects, pinned resources, or no false predicate within that bound retain the
+existing `verifying` description. Terminal service-exec checks never run on this read path.
 
 ## A run's verdict
 

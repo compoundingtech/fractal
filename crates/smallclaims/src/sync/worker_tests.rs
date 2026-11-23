@@ -85,20 +85,8 @@ async fn idle_dialer_backs_off_and_wake_inbound_and_movement_restart_the_sequenc
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed = completed.clone();
     let server = tokio::spawn(axum::serve(
-        listener,
-        Router::new().route(EXCHANGE_PATH, post(receive_exchange))
-            .layer(axum::middleware::from_fn(move |request: Request<Body>, next: axum::middleware::Next| {
-                let observed = observed.clone();
-                async move {
-                    let response = next.run(request).await;
-                    observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    response
-                }
-            }))
-            .with_state(state),
+        listener, peer_router(state, Router::new()),
     ).into_future());
     let (_routes, routes) = watch::channel(vec![Route::Http(format!("http://{address}"))]);
     let (notify, _) = watch::channel(0);
@@ -165,25 +153,21 @@ async fn idle_dialer_backs_off_and_wake_inbound_and_movement_restart_the_sequenc
     tokio::time::advance(Duration::from_secs(60)).await;
     idle_at(&local, 30).await;
     assert!(local.latest_claim("host/target", Some("transport.observed")).unwrap().is_some());
-    tokio::time::advance(REPLICATION_WAKE_COALESCE).await;
-    let (raw, events) = watch::channel(0_u64);
-    let pacer = tokio::spawn(coalesce_replication_wakes(events, notify.clone()));
     let mut broadcasts = notify.subscribe();
-    let before = *broadcasts.borrow();
-    let round_before = completed.load(std::sync::atomic::Ordering::Relaxed);
-    let started = tokio::time::Instant::now();
-    raw.send_modify(|generation| *generation += 1);
-    broadcasts.changed().await.unwrap(); // leading wake
+    let follower = tokio::spawn(follow_authority(
+        Local(local.clone()), fleet.clone(), notify.clone(),
+    ));
+    broadcasts.changed().await.unwrap();
+    broadcasts.borrow_and_update();
     for _ in 0..100 {
-        raw.send_modify(|generation| *generation += 1);
+        local.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h3ed4d61d1aec owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */
+            "INSERT INTO meta(key,value) VALUES('worker_test_progress','1')
+             ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", [],
+        ).unwrap();
     }
-    let leading_wall = std::time::Instant::now();
-    while completed.load(std::sync::atomic::Ordering::Relaxed) == round_before {
-        assert!(leading_wall.elapsed() < Duration::from_secs(10), "leading round did not finish");
-        tokio::task::yield_now().await;
-    }
-    tokio::time::advance(Duration::from_millis(500)).await;
-    // A real write after the irrelevant burst must survive the trailing coalesced wake.
+    assert!(!broadcasts.has_changed().unwrap(), "local progress emitted a replication wake");
+    // A genuine write still propagates through its authority subscription.
     local.append_claim(&ClaimInput {
         subject: "host/source".into(),
         kind: "transport.observed".into(),
@@ -193,17 +177,14 @@ async fn idle_dialer_backs_off_and_wake_inbound_and_movement_restart_the_sequenc
         expected_subject: None,
         idempotency_key: None,
     }).unwrap();
-    raw.send_modify(|generation| *generation += 1);
-    tokio::time::advance(Duration::from_millis(500)).await;
-    broadcasts.changed().await.unwrap(); // trailing wake
+    broadcasts.changed().await.unwrap();
+    tokio::time::advance(REPLICATION_WAKE_COALESCE).await;
     let wall = std::time::Instant::now();
     while remote.latest_claim("host/source", Some("transport.observed")).unwrap().is_none() {
-        assert!(wall.elapsed() < Duration::from_secs(10), "trailing write did not propagate");
+        assert!(wall.elapsed() < Duration::from_secs(10), "authority write did not propagate");
         tokio::task::yield_now().await;
     }
-    assert_eq!(*broadcasts.borrow(), before + 2);
-    assert_eq!(started.elapsed(), REPLICATION_WAKE_COALESCE);
-    pacer.abort();
+    follower.abort();
     dialer.abort();
     server.abort();
     awake.abort();
@@ -486,7 +467,6 @@ async fn a_peer_refusing_the_shard_is_a_shard_mismatch() {
         node: "cedar".into(),
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["birch".into()])),
-        outbound_notify: watch::channel(0_u64).0,
         shards: Default::default(),
     };
     let server = tokio::spawn(async move {
@@ -714,7 +694,6 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         node: right.origin.clone(),
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from([left.origin.clone()])),
-        outbound_notify: watch::channel(0_u64).0,
         shards: Default::default(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -741,13 +720,25 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
                     !query.inventory.digest.is_empty(),
                     "a request keeps its digest"
                 );
-                observed.lock().unwrap().push((
+                let shape = (
                     query.inventory.buckets.is_empty(),
                     query.inventory.envelopes.len(),
                     query.envelopes.len(),
-                ));
-                next.run(Request::from_parts(parts, Body::from(bytes)))
-                    .await
+                );
+                let response = next.run(Request::from_parts(parts, Body::from(bytes))).await;
+                let (parts, body) = response.into_parts();
+                let bytes = to_bytes(body, MAX_EXCHANGE_BYTES).await.unwrap();
+                let decoded = if deflated(&parts.headers) {
+                    inflate(&bytes, "test response").unwrap()
+                } else {
+                    bytes.to_vec()
+                };
+                let answer: PeerResponse<ReplicationExchange> = serde_json::from_slice(&decoded).unwrap();
+                let answer = answer.value;
+                assert!(answer.inventory.envelopes.len() <= 512, "bounded response listing");
+                assert!(!answer.inventory.buckets.is_empty(), "mismatch answers carry proofs");
+                observed.lock().unwrap().push(shape);
+                Response::from_parts(parts, Body::from(bytes))
             }
         },
     ));
@@ -770,16 +761,17 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
     );
     {
         let requests = requests.lock().unwrap();
-        assert!(
-            requests.len() <= 2,
-            "one compact round, never a full-inventory round or an unbounded retry"
+        assert_eq!(
+            requests.len(), 2,
+            "one scalar probe and one compact push/pull, never a full-inventory round or retry"
         );
-        assert!(
-            requests
-                .iter()
-                .all(|(bare, listed, _)| !bare && *listed <= 512),
-            "every request carries range digests and a bounded listing: {requests:?}"
+        assert_eq!(
+            requests[0], (true, 0, 0),
+            "the first request stays scalar even with checkpoint divergence"
         );
+        let (bare, listed, pushed) = requests[1];
+        assert!(!bare && listed > 0 && listed <= 512, "bounded complete range listings: {requests:?}");
+        assert!(pushed > 0, "the second request already pushes the reverse difference");
     }
     for store in [&left, &right] {
         store.validate_replication_backlog().unwrap();
@@ -1015,7 +1007,6 @@ async fn an_authenticated_failure_has_a_request_bound_signature() {
             node: "target".into(),
             auth: auth.clone(),
             fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
-            outbound_notify: watch::channel(0_u64).0,
             shards: Default::default(),
         }),
         auth.request_headers("source", &body).unwrap(),
@@ -1045,7 +1036,6 @@ async fn the_peer_route_accepts_an_exchange_above_axums_default_body_limit() {
         node: "target".into(),
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
-        outbound_notify: watch::channel(0_u64).0,
         shards: Default::default(),
     };
     let exchange = ReplicationExchange {
@@ -1161,7 +1151,6 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
         node: "target".into(),
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
-        outbound_notify: watch::channel(0_u64).0,
         shards: Default::default(),
     };
     let exchange = ReplicationExchange {
@@ -1270,7 +1259,6 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         node: "target".into(),
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
-        outbound_notify: watch::channel(0_u64).0,
         shards: Default::default(),
     };
     let connection_ports = Arc::new(Mutex::new(BTreeSet::new()));
@@ -1362,6 +1350,8 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         1,
         "the two-phase exchanges and later wakeup should reuse one TCP connection"
     );
+    let source_full = source.full_summary_constructions.load(std::sync::atomic::Ordering::Relaxed);
+    let target_full = target.full_summary_constructions.load(std::sync::atomic::Ordering::Relaxed);
     let moved = exchange(
         &replication_http_client(),
         &Local(source.clone()),
@@ -1377,10 +1367,30 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         "converged nodes store nothing, so the worker may rest"
     );
     assert_eq!(
+        source.full_summary_constructions.load(std::sync::atomic::Ordering::Relaxed),
+        source_full,
+        "the unchanged sender must not construct full summaries",
+    );
+    assert_eq!(
+        target.full_summary_constructions.load(std::sync::atomic::Ordering::Relaxed),
+        target_full,
+        "the unchanged HTTP receiver must not construct full summaries",
+    );
+    assert_eq!(
         connection_ports.lock().unwrap().len(),
         2,
         "a fresh client should demonstrate the former extra dial"
     );
+    // The opposite compatibility direction: an old requester sends no capabilities.
+    // A modern receiver must retain its full-summary response, even on equal roots.
+    let mut legacy_query = source.export_replication_summary(fleet).unwrap();
+    legacy_query.inventory.capabilities.clear();
+    let (legacy_answer, _, _) = post_signed(
+        &http, &Local(source.clone()), &peer, "source", &auth,
+        &FleetContext::legacy(BTreeSet::from(["target".into()])), &legacy_query, false,
+    ).await.unwrap();
+    assert!(!legacy_answer.inventory.can(crate::replication::ROOT_SUMMARY));
+    assert!(!legacy_answer.inventory.buckets.is_empty());
     let summary = source.export_replication_summary(fleet).unwrap();
     assert!(summary.inventory.envelopes.is_empty());
     assert!(!summary.inventory.digest.is_empty());
@@ -1389,6 +1399,74 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         .unwrap();
     assert!(converged.inventory.envelopes.is_empty());
     assert!(converged.envelopes.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn root_probe_falls_back_to_full_summary_for_a_legacy_peer() {
+    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+    let auth = FleetAuth::test(fleet_id, &[6; 32]);
+    let source = Arc::new(plain_memory("source").unwrap());
+    let target = Arc::new(plain_memory("target").unwrap());
+    for (store, subject) in [(&source, "note/source"), (&target, "note/target")] {
+        store.bind_fleet(fleet_id).unwrap();
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let remote = target.clone();
+    let signing = auth.clone();
+    let app = Router::new().route(EXCHANGE_PATH, post(move |headers: HeaderMap, body: Bytes| {
+        let observed = observed.clone();
+        let remote = remote.clone();
+        let signing = signing.clone();
+        async move {
+            signing.verify_sender(&headers, "POST", EXCHANGE_PATH, &body, None, None).unwrap();
+            let mut query: ReplicationExchange = serde_json::from_slice(&body).unwrap();
+            observed.lock().unwrap().push(query.inventory.clone());
+            remote.receive_replication_exchange("source", fleet_id, &query).unwrap();
+            // Model an old reader: it ignores every newly introduced capability.
+            query.inventory.capabilities.clear();
+            let mut answer = remote.export_replication_exchange_answering(
+                fleet_id, &query.inventory, &query.signature_requests,
+            ).unwrap();
+            answer.inventory.capabilities.clear();
+            let bytes = serde_json::to_vec(&PeerResponse::new("target", 0, answer)).unwrap();
+            let mut response = (StatusCode::OK, bytes.clone()).into_response();
+            response.headers_mut().extend(signing.response_headers_for(
+                EXCHANGE_PATH, "target", &bytes, &FleetAuth::body_digest(&body),
+            ).unwrap());
+            response
+        }
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let peer = PeerConfig { name: "target".into(), url: format!("http://{address}") };
+    let fleet = FleetContext::legacy(BTreeSet::from(["target".into()]));
+    let http = replication_http_client();
+    for _ in 0..4 {
+        if !exchange(&http, &Local(source.clone()), "source", &peer, &auth, &fleet).await.unwrap() {
+            break;
+        }
+    }
+    assert_eq!(
+        source.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
+        target.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
+    );
+    let requests = requests.lock().unwrap();
+    assert!(requests[0].can(crate::replication::ROOT_SUMMARY));
+    assert!(requests[0].buckets.is_empty());
+    assert!(!requests[1].can(crate::replication::ROOT_SUMMARY));
+    assert!(!requests[1].buckets.is_empty(), "legacy fallback sends complete range proofs");
     server.abort();
 }
 
@@ -1415,13 +1493,12 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
         .export_replication_exchange(fleet, &ReplicationInventory::default())
         .unwrap();
     let body = Bytes::from(serde_json::to_vec(&exchange).unwrap());
-    let (outbound_notify, mut outbound_wake) = watch::channel(0_u64);
+    let mut outbound_wake = target.subscribe_replication_revision(crate::sync::revision::RevisionKind::Authority);
     let state = PeerState {
         backend: Local(target),
         node: "target".into(),
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
-        outbound_notify,
         shards: Default::default(),
     };
 
@@ -1888,7 +1965,6 @@ async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
         node: "a".into(),
         auth: FleetAuth::test(fleet, &[9; 32]).with_member_key(Some(anchor.clone())),
         fleet: member_context(&store, &anchor, &[], &[], false),
-        outbound_notify: watch::channel(0_u64).0,
         shards: Default::default(),
     };
     let body = serde_json::json!({
@@ -1963,7 +2039,6 @@ async fn members_exchange_with_signatures_and_a_removed_member_is_refused() {
         node: "a".into(),
         auth: FleetAuth::test(fleet, &secret).with_member_key(Some(anchor.clone())),
         fleet: a_fleet.clone(),
-        outbound_notify: watch::channel(0_u64).0,
         shards: Default::default(),
     };
     let server = tokio::spawn(async move {
@@ -2838,7 +2913,7 @@ async fn dial_out_pull_cannot_pin_leave_and_a_listening_confirmer_can_finish() {
         .export_replication_exchange(fleet_id, &ReplicationInventory::default())
         .unwrap();
     admit_fixture_exchange(&fixture.leaving, "c", fleet_id, &dial_out);
-    refresh_fleet_view(&Local(fixture.leaving.clone()), &fixture.leaving_fleet).await;
+    refresh_fleet_view(&Local(fixture.leaving.clone()), &fixture.leaving_fleet).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let leaver = PeerConfig {
         name: "b".into(),
@@ -3403,7 +3478,7 @@ async fn interrupted_leave_admission_keeps_first_receive_bound_and_denies_failed
         serde_json::from_slice(&persisted).unwrap(),
     ));
     restarted.state_dir = Some(root.path().join("missing-fleet"));
-    refresh_fleet_view(&fixture.receiver.backend, &restarted).await;
+    refresh_fleet_view(&fixture.receiver.backend, &restarted).await.unwrap();
     {
         let leave = restarted.leave.lock().await;
         assert!(
@@ -3425,7 +3500,7 @@ async fn interrupted_leave_admission_keeps_first_receive_bound_and_denies_failed
     restarted.leave = Arc::new(tokio::sync::Mutex::new(
         serde_json::from_slice(&persisted).unwrap(),
     ));
-    refresh_fleet_view(&fixture.receiver.backend, &restarted).await;
+    refresh_fleet_view(&fixture.receiver.backend, &restarted).await.unwrap();
     let leave = restarted.leave.lock().await;
     assert_eq!(
         leave.receiver_deadlines_unix_ms[&key],
@@ -3476,7 +3551,6 @@ mod retry_tests {
                     node: "beacon".into(),
                     auth: auth.clone(),
                     fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
-                    outbound_notify: watch::channel(0).0,
                     shards: Default::default(),
                 },
                 Router::new(),
@@ -3659,7 +3733,6 @@ mod retry_tests {
                 node: "beacon".into(),
                 auth: auth.clone(),
                 fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
-                outbound_notify: watch::channel(0).0,
                 shards: Default::default(),
             },
             Router::new(),
@@ -3797,7 +3870,6 @@ mod retry_tests {
                         node: "beacon".into(),
                         auth: FleetAuth::test("invented-fleet", &[42; 32]),
                         fleet: fleet.clone(),
-                        outbound_notify: watch::channel(0).0,
                         shards: Default::default(),
                     },
                     Router::new(),
@@ -3916,7 +3988,6 @@ mod retry_tests {
                 node: names[index].into(),
                 auth: auth.clone(),
                 fleet: contexts[index].clone(),
-                outbound_notify: wakes[index].clone(),
                 shards: Default::default(),
             };
             tasks.push(tokio::spawn(async move {
@@ -4282,7 +4353,6 @@ mod retry_tests {
                 node: "beacon".into(),
                 auth: auth.clone(),
                 fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
-                outbound_notify: watch::channel(0).0,
                 shards: Default::default(),
             },
             Router::new(),
@@ -4587,6 +4657,11 @@ mod retry_tests {
             )
         });
         let wakes = names.map(|_| watch::channel(0).0);
+        let authority_followers = (0..names.len()).map(|index| {
+            tokio::spawn(follow_authority(
+                Local(stores[index].clone()), contexts[index].clone(), wakes[index].clone(),
+            ))
+        }).collect::<Vec<_>>();
         let mut tasks = Vec::new();
         let mut addresses = Vec::new();
         let mut shutdowns = Vec::new();
@@ -4598,7 +4673,6 @@ mod retry_tests {
                 node: names[index].into(),
                 auth: auth.clone(),
                 fleet: contexts[index].clone(),
-                outbound_notify: wakes[index].clone(),
                 shards: Default::default(),
             };
             let (shutdown, stopped) = tokio::sync::oneshot::channel();
@@ -4817,7 +4891,6 @@ mod retry_tests {
             node: names[0].into(),
             auth: auth.clone(),
             fleet: contexts[0].clone(),
-            outbound_notify: wakes[0].clone(),
             shards: Default::default(),
         };
         tasks.push(tokio::spawn(async move {
@@ -4831,6 +4904,9 @@ mod retry_tests {
             task.abort();
         }
         for task in tasks {
+            task.abort();
+        }
+        for task in authority_followers {
             task.abort();
         }
     }
@@ -4964,6 +5040,13 @@ struct ReceiptBarrier {
 }
 
 impl Backend for SlowExport {
+    async fn wait_revision(
+        &self,
+        request: crate::sync::revision::RevisionRequest,
+    ) -> Result<crate::sync::revision::StoreRevision> {
+        self.local.wait_revision(request).await
+    }
+
     async fn export(
         &self,
         fleet_id: &str,
@@ -6477,7 +6560,6 @@ mod early_recovery {
                 node: "beacon".into(),
                 auth: auth.clone(),
                 fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
-                outbound_notify: watch::channel(0).0,
                 shards: Default::default(),
             },
             Router::new(),
@@ -6969,7 +7051,6 @@ async fn a_claim_walk_runs_over_the_signed_peer_route() {
         node: "source".into(),
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["target".into()])),
-        outbound_notify: watch::channel(0_u64).0,
         shards: Default::default(),
     };
     let server = tokio::spawn(
