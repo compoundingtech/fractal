@@ -27,10 +27,11 @@ Neither read folds claims or replays history. They read state Fractal already ke
   presentations read, which gives each seat's state.
 - For one run, one primary-key read of the run and a range of its own `step_runs` rows. This
   names the steps that are finished or not yet ready. Its cost is the run's own steps.
-- For each open agentless predicate step, one indexed lookup of its pinned definition, with
-  nested paths resolved in that definition, and at most four read-only actual-cache peeks.
-  Each peek checks freshness with a covering seek on `claims_subject_index`, reading no claim
-  body. Cold or stale entries are unavailable; the peek never fills the cache or folds history.
+- For agentless predicate steps, one indexed lookup and parse of the pinned definition per
+  generation in the read/evaluation, reused across all its steps. Nested paths resolve in that
+  definition; each step still has at most four read-only actual-cache peeks. Each peek checks
+  freshness with a covering seek on `claims_subject_index`, reading no claim body. Cold or stale
+  entries are unavailable; the peek never fills the cache or folds history.
   These reads do not run gates, refresh observations, walk launch lineage or write diagnostics.
   Nested work rows omit gate-kind metadata; waiting-on resolves predicate eligibility and gates
   from the pinned definition without changing the work row's client representation.
@@ -83,6 +84,8 @@ gate, a native person ask, a blocker, a retry backoff, or a live holder's declar
 still report unexplained silence; cold or unknown evidence preserves the previous behavior.
 Child-run waits remain conservative: waiting for a child does not prove its work is healthy.
 The existing one-notice-per-silence identity and terminal-event reports are unchanged.
+Human-gate reporting reads use the existing owner-leading `claims_human_gate_episode_index`,
+restricted to requests with a reviewer, and preserve canonical deterministic ordering.
 
 ## A run's verdict
 

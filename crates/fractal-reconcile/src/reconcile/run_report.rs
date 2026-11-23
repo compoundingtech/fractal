@@ -131,13 +131,14 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Unknown/cold predicate evidence and mixed runs retain the existing reporting behavior.
     fn intentionally_waiting(&self, run: &MissionRunView, now: u128) -> Result<bool> {
         let mut any = false;
+        let mut definitions = crate::intentional_wait::PredicateDefinitions::default();
         for step in &run.steps {
             if matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped") {
                 continue;
             }
             any = true;
             let predicate = step.agentless
-                && crate::intentional_wait::predicate_wait(&self.store, step, |_, _, _, _, _, _| ())?.is_some();
+                && crate::intentional_wait::predicate_wait(&self.store, step, &mut definitions, |_, _, _, _, _, _| ())?.is_some();
             let human = if step.agentless && !predicate {
                 if let Some(request) = self.store.gate_request_for_owner(&step.subject)? {
                     smallclaims::touched::note_read(|| request.subject.clone());

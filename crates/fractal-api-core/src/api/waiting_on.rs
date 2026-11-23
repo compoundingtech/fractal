@@ -90,7 +90,7 @@ impl Context<'_> {
 }
 
 /// What one open step waits on.
-fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Result<StepWait> {
+fn classify(row: &WorkRow, context: &Context<'_>, store: &Store, definitions: &mut crate::intentional_wait::PredicateDefinitions) -> anyhow::Result<StepWait> {
     let view = &row.view;
     use crate::intentional_wait::{classify as intentional_wait, IntentionalWait};
     let human_gate = context.gates.iter().find(|gate| gate.step.as_deref() == Some(view.subject.as_str()));
@@ -169,7 +169,7 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
             Some("predicate") | None => {
                 wait.kind = WaitKind::Verifying;
                 wait.detail = row.value["gate_kind"].as_str().map(|_| "st checks its predicate gates".into());
-                if let Some(detail) = predicate_wait(store, view)? {
+                if let Some(detail) = predicate_wait(store, view, definitions)? {
                     wait.kind = WaitKind::Hold;
                     wait.since_unix_ms = view.execution_started_at_unix_ms;
                     wait.detail = Some(detail);
@@ -266,8 +266,8 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
 }
 
 /// Render the same bounded, known-false predicate evidence used by run reporting.
-fn predicate_wait(store: &Store, step: &StepRunView) -> anyhow::Result<Option<String>> {
-    crate::intentional_wait::predicate_wait(store, step, |name, subject, path, operator, value, found| {
+fn predicate_wait(store: &Store, step: &StepRunView, definitions: &mut crate::intentional_wait::PredicateDefinitions) -> anyhow::Result<Option<String>> {
+    crate::intentional_wait::predicate_wait(store, step, definitions, |name, subject, path, operator, value, found| {
         format!(
             "waits for gate {name:?}: {subject} {path} is {}, expects {operator} {}",
             summarize_value(found), summarize_value(value),
@@ -421,12 +421,13 @@ pub fn run_waiting_on(
     quiet_after_ms: u64,
 ) -> anyhow::Result<RunWaitingOn> {
     let context = context(&work.rows, missions, now, quiet_after_ms);
+    let mut definitions = crate::intentional_wait::PredicateDefinitions::default();
     let mut open = Vec::new();
     let mut pending = Vec::new();
     let mut finished = Vec::new();
     for step in &steps.steps {
         if let Some(row) = work.rows.rows.get(&step.subject) {
-            open.push(classify(row, &context, store)?);
+            open.push(classify(row, &context, store, &mut definitions)?);
             continue;
         }
         let settled = StepSettled {
@@ -475,10 +476,11 @@ pub fn blocked_runs(
     quiet_after_ms: u64,
 ) -> anyhow::Result<BlockedRuns> {
     let context = context(&work.rows, missions, now, quiet_after_ms);
+    let mut definitions = crate::intentional_wait::PredicateDefinitions::default();
     let mut runs = HashMap::<&str, (Option<&str>, Vec<StepWait>)>::new();
     for row in work.rows.rows.values() {
         let entry = runs.entry(row.view.run.as_str()).or_insert_with(|| (row.value["mission_id"].as_str(), Vec::new()));
-        entry.1.push(classify(row, &context, store)?);
+        entry.1.push(classify(row, &context, store, &mut definitions)?);
     }
     let runs_read = runs.len();
     let mut groups = WaitKind::CAUSES

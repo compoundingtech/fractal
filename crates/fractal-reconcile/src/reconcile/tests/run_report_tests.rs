@@ -1014,6 +1014,102 @@ fn unknown_predicate_evidence_preserves_stall_reporting() {
 }
 
 #[test]
+fn an_empty_actual_cache_does_not_suppress_a_known_predicate_run() {
+    let (_clock, fixture) = fixture();
+    apply_source(&fixture.store, r#"version 2
+mission "cold-keepalive" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
+  goal "Keep a schedule alive until retirement."
+  step "retire" {
+    agentless
+    gate "retired" { field "state" "mission/cold-keepalive" is "retired" }
+  }
+}"#, "cold-keepalive");
+    // Create without reconciling: gate evaluation must not incidentally warm the observation.
+    let view = fixture.store.create_mission_run(&crate::model::MissionRunRequest {
+        mission: "cold-keepalive".into(),
+        revision: None,
+        workspace: "/tmp".into(),
+        requester: Some("person/requester".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "cold-keepalive-run".into(),
+    }).unwrap();
+    assert_eq!(fixture.store.inspect_cached_actual("mission/cold-keepalive", |_| ()).unwrap(), None);
+    let report = fixture.reconciler.run_report(&view.subject).unwrap().unwrap();
+    let since = crate::reconcile::run_report::run_activity(&view);
+    assert_eq!(fixture.reconciler.report_run(&view, &report, since).unwrap(), Some(since + 10 * MINUTE));
+    fixture.reconciler.report_run(&view, &report, since + 11 * MINUTE).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+    fixture.store.latest_actual_value("mission/cold-keepalive").unwrap();
+    assert_eq!(fixture.reconciler.report_run(&view, &report, since).unwrap(), None,
+        "warming the same false predicate enables intentional-wait classification");
+}
+
+#[test]
+fn an_unclassified_pending_step_prevents_suppression() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("watched", "pending-and-ask");
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    let build = view.steps.iter_mut().find(|step| step.step == "build").unwrap();
+    build.status = "waiting-person".into();
+    assert!(view.steps.iter().any(|step| step.step == "ship" && step.status == "pending"));
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    let late = crate::reconcile::run_report::run_activity(&view) + 11 * MINUTE;
+    fixture.reconciler.report_run(&view, &report, late).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+}
+
+#[test]
+fn default_reporter_suppresses_backoff_but_reports_after_it_expires() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("supervised", "default-backoff");
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    let since = crate::reconcile::run_report::run_activity(&view);
+    for step in &mut view.steps {
+        step.status = "working".into();
+        step.not_before_unix_ms = Some(since + 60 * MINUTE);
+    }
+    assert_eq!(fixture.reconciler.report_stall_by_default(&view, since + 40 * MINUTE).unwrap(), None);
+    assert!(fixture.reports(REPORTER).is_empty());
+    fixture.reconciler.report_stall_by_default(&view, since + 70 * MINUTE).unwrap();
+    fixture.reconciler.report_stall_by_default(&view, since + 80 * MINUTE).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+}
+
+#[test]
+fn an_expired_declared_wait_is_not_intentional() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("watched", "expired-declared-wait");
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    view.steps.retain(|step| step.step == "build");
+    let since = crate::reconcile::run_report::run_activity(&view);
+    view.steps[0].status = "working".into();
+    view.steps[0].execution_paused_until_unix_ms = Some(since + MINUTE);
+    let late = since + 11 * MINUTE;
+    assert_eq!(crate::intentional_wait::classify(&view.steps[0], late, false, false), None);
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    fixture.reconciler.report_run(&view, &report, late).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+}
+
+#[test]
+fn an_intentional_hold_with_linked_child_work_does_not_hide_child_silence() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("loop-parent", "child-linked-hold");
+    fixture.passes(8);
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    assert!(view.steps.iter().any(|step|
+        fixture.store.mission_run_for_parent_step(&step.subject).unwrap().is_some()));
+    for step in &mut view.steps {
+        step.status = "blocked".into();
+    }
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    let late = fixture.reconciler.run_report_activity(&view).unwrap() + 11 * MINUTE;
+    fixture.reconciler.report_run(&view, &report, late).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+}
+
+#[test]
 fn a_stall_is_a_deadline_on_the_run_not_a_scan() {
     let (_clock, fixture) = fixture();
     let run = fixture.start("watched-with-default-limit", "deadline-run");

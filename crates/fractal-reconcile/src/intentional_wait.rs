@@ -1,6 +1,7 @@
 //! Intentional waits shared by diagnostics and stall reporting. Unknown evidence is not a wait.
-use crate::{model::{GateSpec, StepRunView}, MissionsStore, Store};
+use crate::{model::{GateSpec, MissionSpec, StepRunView, StepSpec}, MissionsStore, Store};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntentionalWait {
@@ -41,16 +42,56 @@ pub fn classify(
     }
 }
 
+/// Request/evaluation-local definitions, including known absence: one lookup/parse per generation.
+#[derive(Default)]
+pub struct PredicateDefinitions {
+    generations: BTreeMap<String, Option<MissionSpec>>,
+}
+
+impl PredicateDefinitions {
+    fn gates<'a>(&'a mut self, store: &Store, step: &StepRunView) -> anyhow::Result<&'a [GateSpec]> {
+        if !self.generations.contains_key(step.generation.as_str()) {
+            self.generations.insert(step.generation.clone(), store.waiting_on_definition(step)?);
+        }
+        let definition = &self.generations[step.generation.as_str()];
+        fn find<'a>(mission: &'a MissionSpec, path: &str) -> Option<&'a StepSpec> {
+            for step in mission.steps.values() {
+                if step.path == path {
+                    return Some(step);
+                }
+                if path.strip_prefix(step.path.as_str()).is_some_and(|suffix| suffix.starts_with('/'))
+                    && let Some(nested) = step.nested_mission.as_deref()
+                {
+                    return find(nested, path);
+                }
+            }
+            None
+        }
+        let Some(step) = definition.as_ref().and_then(|definition| find(definition, &step.step)) else {
+            return Ok(&[]);
+        };
+        if step.program.is_some() || step.after_run.is_some()
+            || step.gates.iter().any(|gate| matches!(gate,
+                GateSpec::Mechanical { .. } | GateSpec::Llm { .. } | GateSpec::Human { .. }
+            ))
+        {
+            return Ok(&[]);
+        }
+        Ok(&step.gates[..step.gates.len().min(4)])
+    }
+}
+
 /// Inspect at most four pinned gates using only fresh, already-warm observations.
 /// An unknown earlier gate stops the search. The callback only renders a known false field.
 pub fn predicate_wait<T>(
     store: &Store,
     step: &StepRunView,
+    definitions: &mut PredicateDefinitions,
     render: impl FnOnce(&str, &str, &str, &str, &Value, &Value) -> T,
 ) -> anyhow::Result<Option<T>> {
     let mut render = Some(render);
-    for gate in store.waiting_on_field_gates(step)? {
-        let GateSpec::Field { name, subject, path, operator, value } = &gate else {
+    for gate in definitions.gates(store, step)? {
+        let GateSpec::Field { name, subject, path, operator, value } = gate else {
             return Ok(None);
         };
         if subject.contains("${") || subject.starts_with("exec/") || subject.starts_with("effect/")
