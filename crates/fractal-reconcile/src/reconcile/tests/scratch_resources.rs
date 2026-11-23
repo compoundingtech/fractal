@@ -97,7 +97,7 @@ fn payload_exit_without_exact_native_scope_settlement_is_not_tree_retirement() {
     let reconciler = Reconciler::new(store.clone(), runtime.clone(),
         "node".into(), Arc::new(Notify::new()));
     store.append_claim(&ClaimInput {
-        subject: "scratch-owned-runtime".into(), kind: "runtime.observed".into(), actor: None,
+        subject: "agent/scratch-owned-runtime".into(), kind: "runtime.observed".into(), actor: None,
         fields: BTreeMap::from([
             ("status".into(), Value::String("exited".into())),
             ("runtime_id".into(), Value::String("owned-exec".into())),
@@ -107,10 +107,10 @@ fn payload_exit_without_exact_native_scope_settlement_is_not_tree_retirement() {
         ]),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
-    assert!(!reconciler.scratch_runtime_tree_retired("scratch-owned-runtime").unwrap());
+    assert!(!reconciler.scratch_runtime_tree_retired("agent/scratch-owned-runtime").unwrap());
     assert!(!store.runtime_cleanup_settled("owned-exec", "exact-generation").unwrap());
     runtime.settled_leftovers.lock().unwrap().insert(("owned-exec".into(), "exact-generation".into()));
-    assert!(reconciler.scratch_runtime_tree_retired("scratch-owned-runtime").unwrap());
+    assert!(reconciler.scratch_runtime_tree_retired("agent/scratch-owned-runtime").unwrap());
     assert!(store.runtime_cleanup_settled("owned-exec", "exact-generation").unwrap());
 }
 
