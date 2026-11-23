@@ -2725,7 +2725,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if !recipient.is_empty() {
                     self.incremental.touch(&format!("mailbox:{recipient}"));
                 }
-                self.incremental.touch(&subject);
+                self.incremental.touch_subject(&subject);
             }
             after = next;
             *seen = Some(after);
@@ -3722,13 +3722,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Eval cleanup can delete desired rows without appending a claim. Watch selection must
         // see those removals through the complete roster this pass already reads, not only the
         // claim/local-observation feed or the host/authority-filtered active member list.
-        self.incremental.observe_value(
+        self.incremental.observe_membership(
             "desired-subject-membership",
-            desired
-                .iter()
-                .map(|declaration| declaration.subject.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
+            "desired:",
+            desired.iter().map(|declaration| declaration.subject.clone()).collect(),
         );
         let mut pending_subjects = BTreeSet::new();
         for declaration in &desired {
@@ -13288,7 +13285,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         if run.phase == "normal" {
-            let refreshed = self.store.mission_run_for_reconcile(&run.id)?;
+            let refreshed = self.store.mission_run_state_for_evaluation(&run.id)?;
             let normal = refreshed
                 .steps
                 .iter()
@@ -21674,6 +21671,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if host != self.host {
             return Ok(());
         }
+        // The filesystem is an external input even when its recorded actual state
+        // and cached stamp are unchanged. Watch dispatch uses this input key.
+        smallclaims::touched::note_read(|| subject.to_owned());
         self.ensure_file_watch(subject, Path::new(path))?;
         let before = FileStamp::read(Path::new(path));
         if before.as_ref().is_some_and(|stamp| {
