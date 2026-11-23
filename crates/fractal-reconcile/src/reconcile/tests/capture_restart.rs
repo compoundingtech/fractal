@@ -136,7 +136,7 @@ fn entered_and_legacy_operations_keep_conservative_restart_recovery() {
         let operation = fixture.interrupted_capture();
         if legacy {
             fixture.store.connection.lock().unwrap().execute(
-                /* sqlite-large-value: allow-for-now lv-h948f61fa3045 owner=fractal_reconcile::reconcile::tests::capture_restart TODO=bound-or-reference-values-and-reclamation */
+                /* sqlite-large-value: allow-for-now lv-h5121fed39a10 owner=fractal_reconcile::reconcile::tests::capture_restart TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE local_runtime_starts SET body=json_remove(body,'$.backend_entry') WHERE id=?1",
                 [&operation.id],
             ).unwrap();
@@ -160,7 +160,7 @@ fn backend_entry_write_failure_aborts_before_launch() {
     let _clock = Clock::new();
     let fixture = Fixture::new();
     fixture.store.connection.lock().unwrap().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h54ac3bbe76ab owner=fractal_reconcile::reconcile::tests::capture_restart TODO=prepare-body-and-predecessor-values */
+        /* sqlite-large-value: allow-for-now lv-hc4e2bcbba425 owner=fractal_reconcile::reconcile::tests::capture_restart TODO=bound-or-reference-values-and-reclamation */
         "CREATE TEMP TRIGGER fail_backend_entry BEFORE UPDATE OF body ON local_runtime_starts
          WHEN json_extract(NEW.body,'$.backend_entry.phase')='backend-entering'
          BEGIN SELECT RAISE(FAIL,'injected backend entry write failure'); END;",
