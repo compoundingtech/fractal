@@ -71,7 +71,7 @@ struct SnapshotBuilder {
 enum SnapshotPhase { Merges, Creations, Readies }
 
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h6b101dd45bbc owner=fractal_reconcile::reconcile::github_capture TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS capture_v1_meta(id INTEGER PRIMARY KEY CHECK(id=1),cursor INTEGER NOT NULL);
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h99cc4a195ebd owner=fractal_reconcile::reconcile::github_capture TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS capture_v1_meta(id INTEGER PRIMARY KEY CHECK(id=1),cursor INTEGER NOT NULL);
         INSERT OR IGNORE INTO capture_v1_meta VALUES(1,0);
         CREATE TABLE IF NOT EXISTS capture_v1_claims(id TEXT PRIMARY KEY,kind TEXT NOT NULL,origin TEXT NOT NULL,source TEXT NOT NULL,sequence INTEGER,record TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS capture_v1_source_sequence ON capture_v1_claims(source,kind,sequence,id);
@@ -470,12 +470,11 @@ impl SnapshotBuilder {
             let repository = &self.repositories[self.repository];
             let (after_ms, after_id) = self.after.as_ref().map_or((start_ms, ""), |(at, id)| (*at, id.as_str()));
             let rows = {
-                let sql = match self.phase {
-                    SnapshotPhase::Creations => "SELECT json_extract(record,'$.image.created_at_ms'),entity_id,record FROM capture_v1_entities WHERE source=?1 AND family='pull_request' AND repository_id=?2 AND json_extract(record,'$.image.created_at_ms')>=?3 AND (json_extract(record,'$.image.created_at_ms'),entity_id)>(?3,?4) AND json_extract(record,'$.image.created_at_ms')<?5 ORDER BY json_extract(record,'$.image.created_at_ms'),entity_id LIMIT ?6",
-                    SnapshotPhase::Readies => "SELECT occurred_ms,entity_id,record FROM capture_v1_entities WHERE source=?1 AND family='lifecycle' AND repository_id=?2 AND (occurred_ms,entity_id)>(?3,?4) AND occurred_ms<?5 ORDER BY occurred_ms,entity_id LIMIT ?6",
+                let mut statement = match self.phase {
+                    SnapshotPhase::Creations => connection.prepare_cached("SELECT json_extract(record,'$.image.created_at_ms'),entity_id,record FROM capture_v1_entities WHERE source=?1 AND family='pull_request' AND repository_id=?2 AND json_extract(record,'$.image.created_at_ms')>=?3 AND (json_extract(record,'$.image.created_at_ms'),entity_id)>(?3,?4) AND json_extract(record,'$.image.created_at_ms')<?5 ORDER BY json_extract(record,'$.image.created_at_ms'),entity_id LIMIT ?6")?,
+                    SnapshotPhase::Readies => connection.prepare_cached("SELECT occurred_ms,entity_id,record FROM capture_v1_entities WHERE source=?1 AND family='lifecycle' AND repository_id=?2 AND (occurred_ms,entity_id)>(?3,?4) AND occurred_ms<?5 ORDER BY occurred_ms,entity_id LIMIT ?6")?,
                     SnapshotPhase::Merges => unreachable!(),
                 };
-                let mut statement = connection.prepare_cached(sql)?;
                 statement.query_map(params![source, repository, after_ms, after_id, end_ms, budget],
                     |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
                     .collect::<rusqlite::Result<Vec<_>>>()?
