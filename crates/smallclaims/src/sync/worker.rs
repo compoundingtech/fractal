@@ -396,6 +396,15 @@ impl FleetContext {
         if self.accept(&known.sender).is_err() {
             return "unknown";
         }
+        // Legacy admission may still accept an old shared-secret identity after a
+        // member replacement; that does not transfer its negotiated capabilities.
+        let view = self.view.read().expect("fleet view lock poisoned");
+        if view.members.iter().any(|member| {
+            member.name == peer && member.state == "current"
+                && Some(member.member_key.as_str()) != known.sender.member_key.as_deref()
+        }) {
+            return "unknown";
+        }
         if known.root_first { "root_first" } else { "legacy" }
     }
 
@@ -3036,7 +3045,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                 }
             };
             state.fleet.observe_capabilities(
-                &sender.name,
+                &relay,
                 sender.member_key.as_deref().filter(|_| sender.member_signature_valid),
                 &request,
             );

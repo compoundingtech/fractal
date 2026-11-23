@@ -1404,7 +1404,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
 
 mod root_first_compatibility {
     use super::*;
-    use crate::replication::{RANGE_PROOFS, ROOT_FIRST, ROOT_SUMMARY};
+    use crate::replication::{ROOT_FIRST, ROOT_SUMMARY};
 
     #[derive(Clone)]
     struct Advertisement {
@@ -1555,8 +1555,12 @@ mod root_first_compatibility {
             if root_only {
                 assert!(request.buckets.is_empty(), "negotiated scalar probe omits buckets");
             } else {
-                assert!(request.can(RANGE_PROOFS), "unknown and legacy peers need complete proofs");
                 assert!(!request.buckets.is_empty(), "the shared nonempty store needs bucket proofs");
+                assert_eq!(
+                    request.buckets,
+                    self.source.export_replication_summary(self.auth.fleet_id()).unwrap().inventory.buckets,
+                    "unknown and legacy peers receive every bucket in the complete summary",
+                );
             }
         }
 
@@ -1641,6 +1645,12 @@ mod root_first_compatibility {
 
         fleet.view.write().unwrap().members[0].member_key = "replacement-key".into();
         assert!(fleet.accept(&old_sender).is_err());
+        assert_eq!(fleet.capability_class("modern"), "unknown");
+        // Legacy admission must not let an old member's capability survive a
+        // replacement, even when that old identity remains a configured peer.
+        fleet.legacy = true;
+        fleet.config_peers.insert("modern".into());
+        assert!(fleet.accept(&old_sender).is_ok());
         assert_eq!(fleet.capability_class("modern"), "unknown");
         let new_sender = Sender {
             member_key: Some("replacement-key".into()),
