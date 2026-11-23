@@ -8192,6 +8192,29 @@ agent "import/omp/fixture" {{
         assert!(!FileWatch::relevant(&read, target, directory, None));
     }
 
+    #[test]
+    fn file_gate_watchers_create_only_missing_ancestors() {
+        let directory = Path::new("/watched");
+        let target = Path::new("/watched/missing/nested/gate");
+        for path in ["/", "/watched", "/watched/unrelated"] {
+            let event = notify::Event::new(notify::EventKind::Create(
+                notify::event::CreateKind::Folder)).add_path(path.into());
+            assert!(!FileWatch::relevant(&event, target, directory, None), "{path}");
+        }
+        for path in ["/watched/missing", "/watched/missing/nested", "/watched/missing/nested/gate"] {
+            let event = notify::Event::new(notify::EventKind::Create(
+                notify::event::CreateKind::Any)).add_path(path.into());
+            assert!(FileWatch::relevant(&event, target, directory, None), "{path}");
+        }
+        for kind in [
+            notify::EventKind::Remove(notify::event::RemoveKind::Folder),
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(notify::event::RenameMode::Any)),
+        ] {
+            let event = notify::Event::new(kind).add_path(directory.into());
+            assert!(FileWatch::relevant(&event, target, directory, None));
+        }
+    }
+
     #[tokio::test]
     async fn file_gate_watchers_ignore_reads_and_unrelated_mutations() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -8265,6 +8288,130 @@ agent "import/omp/fixture" {{
             *reconciler.file_changes.runs.lock().unwrap(),
             BTreeSet::from(["mission-run/file-reader".into()]),
         );
+    }
+
+    fn observed_measurement(path: &Path) -> fractal_drivers::harness_admission::IdentityMeasurement {
+        let measurement = std::cell::RefCell::new(None);
+        fractal_drivers::harness_admission::executable_identity_ready_observed(
+            path, &|_| unreachable!(), &|_| Ok(()),
+            &|identity| { *measurement.borrow_mut() = Some(identity.clone()); }).unwrap();
+        measurement.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn identity_completion_selects_only_exact_pending_dependents() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::write(&first, "first identity").unwrap();
+        std::fs::write(&second, "second identity").unwrap();
+        let first = observed_measurement(&first);
+        let second = observed_measurement(&second);
+        assert_ne!(first, second);
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        for (subject, measurement) in [("first", &first), ("shared", &first), ("second", &second)] {
+            reconciler.file_changes.pending_measurements.lock().unwrap().insert(subject.into(),
+                PendingLaunchMeasurements { dependencies: BTreeSet::from([measurement.clone()]), completed: false });
+            reconciler.incremental.evaluated(&format!("launch-inputs:{subject}"),
+                BTreeSet::from([format!("launch-identity/{subject}")]), None);
+        }
+        reconciler.file_changes.measurement_completed(&reconciler.incremental, &first);
+        assert_eq!(*reconciler.file_changes.launches.lock().unwrap(),
+            BTreeSet::from(["first".into(), "shared".into()]));
+        assert!(reconciler.incremental.needs("launch-inputs:first", now_ms()));
+        assert!(reconciler.incremental.needs("launch-inputs:shared", now_ms()));
+        assert!(!reconciler.incremental.needs("launch-inputs:second", now_ms()));
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("identity completion must notify scoped work"),
+        }
+        tokio::select! {
+            biased;
+            _ = reconciler.notify.notified() => panic!("identity completion must not notify a global pass"),
+            _ = std::future::ready(()) => {},
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_completion_before_reader_registration_requeues_after_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("binary");
+        std::fs::write(&binary, "identity").unwrap();
+        let measurement = observed_measurement(&binary);
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        reconciler.file_changes.pending_measurements.lock().unwrap().insert("selected".into(),
+            PendingLaunchMeasurements { dependencies: BTreeSet::from([measurement.clone()]), completed: false });
+        // Finish the background operation before evaluated() has registered any readers.
+        reconciler.file_changes.measurement_completed(&reconciler.incremental, &measurement);
+        reconciler.file_changes.launches.lock().unwrap().clear();
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("early completion must retain a scoped wake"),
+        }
+        reconciler.incremental.evaluated("launch-inputs:selected",
+            BTreeSet::from(["launch-identity/selected".into()]), None);
+        assert!(!reconciler.incremental.needs("launch-inputs:selected", now_ms()));
+        reconciler.file_changes.registered_launch_measurements(&reconciler.incremental, "selected", true, false);
+        assert!(reconciler.incremental.needs("launch-inputs:selected", now_ms()));
+        assert_eq!(*reconciler.file_changes.launches.lock().unwrap(), BTreeSet::from(["selected".into()]));
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("registration must restore the scoped wake"),
+        }
+    }
+
+    #[test]
+    fn overlapping_launch_registration_keeps_ownership_until_read_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let desired = crate::graph::parse_test_intent(&format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}",
+            root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        let first = AtomicBool::new(true);
+        let member = desired.member.clone().unwrap();
+        crate::contract::install(&store, Box::new({
+            let entered = entered.clone();
+            let resume = resume.clone();
+            move |_| {
+                if first.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    entered.wait();
+                    resume.wait();
+                }
+                Ok(member.clone())
+            }
+        }));
+        let scoped_started = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let full_pass = scope.spawn(|| reconciler.watch_launch_inputs(&desired));
+            entered.wait(); // The first evaluation owns a map entry but has not registered reads.
+            let scoped = scope.spawn(|| {
+                scoped_started.wait();
+                reconciler.watch_launch_inputs(&desired)
+            });
+            scoped_started.wait();
+            // Deterministically exercise admission while the first evaluation is in capture.
+            // Without this gate, a scoped evaluation can replace/remove its pending map entry.
+            let protected = matches!(
+                reconciler.file_changes.launch_input_registration.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock),
+            );
+            resume.wait();
+            let _ = full_pass.join().unwrap();
+            let _ = scoped.join().unwrap();
+            assert!(protected, "overlapping capture must not acquire registration ownership");
+        });
+        // Both evaluations have finished; no registration guard is retained by pending work.
+        assert!(reconciler.file_changes.launch_input_registration.try_lock().is_ok());
+        assert!(!reconciler.incremental.reads_of(&format!("launch-inputs:{}", desired.subject)).is_empty());
     }
 
     #[test]
@@ -8375,7 +8522,7 @@ agent "import/omp/fixture" {{
                 Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
             let result = fractal_drivers::harness_admission::executable_identity_ready_observed(
                 &provider, &|_| unreachable!(), &|path| reconciler.ensure_file_watch(
-                    &format!("launch-input/{}", path.display()), path));
+                    &format!("launch-input/{}", path.display()), path), &|_| {});
             assert_eq!(result.is_ok(), retarget);
             if retarget { assert!(reconciler.file_watchers.lock().unwrap().contains_key(
                 &format!("launch-input/{}", target.display()))); }
@@ -8395,10 +8542,12 @@ agent "import/omp/fixture" {{
 
     #[tokio::test]
     async fn launch_input_watchers_follow_recursive_rules_and_missing_inputs() {
+        use futures_util::FutureExt as _;
         let root = tempfile::tempdir().unwrap();
         let notify = Arc::new(Notify::new());
         let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
             Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+        let scoped_notify = &reconciler.file_changes.notify;
         let rules = root.path().join("rules");
         let missing = root.path().join("missing.md");
         for path in [&rules, &missing] {
@@ -8409,11 +8558,16 @@ agent "import/omp/fixture" {{
             "old".into(), "second".into(),
         ]), None);
         std::fs::create_dir_all(rules.join("nested")).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
+        assert!(reconciler.file_changes.launches.lock().unwrap().contains("test"));
+        assert!(notify.notified().now_or_never().is_none(),
+            "launch input creation must not wake the common reconciliation loop");
         reconciler.ensure_file_watch(&format!("launch-input/{}", rules.display()), &rules).unwrap();
         for path in [rules.join("nested/new.md"), missing] {
             std::fs::write(path, "new instruction").unwrap();
-            tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
+            assert!(notify.notified().now_or_never().is_none(),
+                "launch input mutation must not wake the common reconciliation loop");
         }
         reconciler.ensure_file_watch("old", &rules.join("old")).unwrap();
         for key in ["second", "old"] {
@@ -8421,10 +8575,10 @@ agent "import/omp/fixture" {{
             std::fs::create_dir(&rules).unwrap();
             let path = rules.join(key);
             while key == "old" && !reconciler.file_watchers.lock().unwrap()["old"].dirty.load(Ordering::Acquire) {
-                tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
             }
             reconciler.ensure_file_watch(key, &path).unwrap(); // Acquire before releasing the old lease.
-            while tokio::time::timeout(Duration::from_millis(50), notify.notified()).await.is_ok() {}
+            while tokio::time::timeout(Duration::from_millis(50), scoped_notify.notified()).await.is_ok() {}
             reconciler.incremental.evaluated("replacement", BTreeSet::from([key.into()]), None);
             std::fs::write(&path, "new inode").unwrap();
             // An earlier logical callback can wake us before this dependency is touched.
