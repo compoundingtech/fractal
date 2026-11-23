@@ -44,6 +44,7 @@ pub struct FractalRuntime {
     pub(super) card_actuals: Mutex<HashMap<(String, bool), Arc<card_actual::Reduction>>>,
     pub observer_actuals: Arc<observer_actuals::Actuals>,
     pub(super) mail_objective_inputs: Arc<observer_mail_inputs::Inputs>,
+    pub(super) reconcile_inputs: Arc<observer_reconcile_inputs::Inputs>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
     pub placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
     /// Per-subject status reductions and current-view answers, until their claims change.
@@ -281,9 +282,12 @@ impl FractalRuntime {
 
 impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
-        Some(Arc::new(observer_mail_inputs::Observer {
-            actuals: self.observer_actuals.clone(),
-            mail: self.mail_objective_inputs.clone(),
+        Some(Arc::new(observer_reconcile_inputs::Observer {
+            inner: Arc::new(observer_mail_inputs::Observer {
+                actuals: self.observer_actuals.clone(),
+                mail: self.mail_objective_inputs.clone(),
+            }),
+            inputs: self.reconcile_inputs.clone(),
         }))
     }
     fn admit_writer_tx(
@@ -707,7 +711,7 @@ impl Runtime for FractalRuntime {
             self.presented_agents.forget();
         }
         self.forget_reductions(false);
-        self.mail_objective_inputs.invalidate();
+        // Mail owns native source/schema cuts; presentation resets are not mail facts.
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
         self.glass_list.forget();

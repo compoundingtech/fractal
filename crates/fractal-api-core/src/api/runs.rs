@@ -360,6 +360,8 @@ pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
         "prompt_reads": attention.get("card/prompt").copied().unwrap_or(0),
         "fleet_agent_inputs": attention.get("fleet/agent").copied().unwrap_or(0),
     });
+    report["reconcile_inputs"] = state.store.reconcile_input_work();
+    report["fault_families"] = state.store.fault_family_work();
     report["published_list_work"] = json!({
         "work": { "refolded": state.store.published_work_list().refolded() },
         "missions": { "refolded": state.store.published_missions_list().refolded() },

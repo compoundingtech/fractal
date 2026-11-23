@@ -320,8 +320,6 @@ pub trait SeatsStoreCore {
             run: &str,
             generation: &str,
         ) -> Result<BTreeSet<String>>;
-    /// The desired subjects named in `subjects`, by their primary keys.
-    fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>>;
     /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
     /// only typed edges; this resolves them through the ordinary desired resource subjects.
     fn declared_resource_uris<'a>(
@@ -460,21 +458,6 @@ impl SeatsStoreCore for Store {
             .collect())
     }
 
-    fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>> {
-        for subject in subjects {
-            smallclaims::touched::note_read(|| format!("desired:{subject}"));
-        }
-        if subjects.is_empty() {
-            return Ok(Vec::new());
-        }
-        let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
-            "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
-             FROM desired WHERE subject IN (SELECT value FROM json_each(?1)) ORDER BY subject",
-        )?;
-        let rows = statement.query_map([serde_json::to_string(subjects)?], desired_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
 }
 
 
