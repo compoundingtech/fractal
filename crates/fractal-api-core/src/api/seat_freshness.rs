@@ -12,6 +12,8 @@ use crate::peer::{ClientRelay, ReceivedSeatFreshness, SEAT_FRESHNESS_FEATURE, Se
 use crate::peer::{MessageMarksAnswer, MessageMarksAnswers, ReceivedSeatFreshnessRead, RelayedMark, SeatFreshnessRead};
 use crate::store::RelayedFreshness;
 
+mod message_mark_events;
+
 /// After a commit wakes the pusher, how long it gathers further commits before one round.
 pub const SEAT_FRESHNESS_COALESCE: Duration = Duration::from_secs(10);
 /// How long one member may take to accept a push before this round moves on without it.
@@ -64,6 +66,9 @@ pub async fn seat_freshness_read(
         .read
         .validate()
         .map_err(|error| validation(format!("{error:#}")))?;
+    if let SeatFreshnessRead::MessageMarkEvents { cursor, max } = &received.read {
+        return message_mark_events::read(&state.store, cursor.as_deref(), *max).await.map(Json);
+    }
     let store = state.store.clone();
     blocking_store(move || {
         match received.read {
@@ -88,6 +93,7 @@ pub async fn seat_freshness_read(
                     .collect();
                 Ok(serde_json::to_value(MessageMarksAnswers { messages })?)
             }
+            SeatFreshnessRead::MessageMarkEvents { .. } => unreachable!("event reads wait outside the blocking store"),
         }
     })
     .await
