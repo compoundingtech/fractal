@@ -139,7 +139,7 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
     store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
     assert!(
         store
-            .finish_trim_paced(checkpoint, &mut actions, |_| panic!(
+            .finish_trim_paced(true, checkpoint, &mut actions, |_| panic!(
                 "fault must interrupt before resting"
             ))
             .is_err()
@@ -157,7 +157,7 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
     // It must yield progress, rather than declare this unfinished checkpoint exhausted.
     store.set_trim_fault(Some(TrimFault::ExpireChunkBudget));
     store
-        .finish_trim_paced(checkpoint, &mut actions, |pause| {
+        .finish_trim_paced(true, checkpoint, &mut actions, |pause| {
             assert!(pause >= Duration::from_millis(100));
             pauses += 1;
             let foreground_store = store.clone();
@@ -326,7 +326,7 @@ fn a_local_cut_trims_only_its_tombstones_and_goes_on_from_where_it_stopped() {
     store.set_trim_chunk_envelopes(1);
     store.set_trim_fault(Some(TrimFault::AfterChunk(2)));
     let mut actions = Vec::new();
-    assert!(store.finish_trim_paced(cut, &mut actions, |_| {}).is_err());
+    assert!(store.finish_trim_paced(true, cut, &mut actions, |_| {}).is_err());
     // Two chunks deleted two claims; the walk kept its place.
     assert_eq!(claims[1..].iter().filter(|claim| !exists(&claim.id)).count(), 2);
     let walk = store.local_walk(cut).unwrap();
@@ -336,7 +336,7 @@ fn a_local_cut_trims_only_its_tombstones_and_goes_on_from_where_it_stopped() {
         .query_row("SELECT rowid FROM checkpoint_claims WHERE id=?1", [&claims[2].id], |row| row.get(0))
         .unwrap();
     assert_eq!(walk.claim, second);
-    store.finish_trim_paced(cut, &mut actions, |_| {}).unwrap();
+    store.finish_trim_paced(true, cut, &mut actions, |_| {}).unwrap();
     assert!(matches!(actions.last(), Some(CheckpointAction::Trimmed { claims: 2, .. })), "{actions:?}");
     assert!(claims[1..].iter().all(|claim| !exists(&claim.id)));
     assert!(exists(&claims[0].id), "an earlier checkpoint's tombstone is not this cut's to walk");
@@ -348,4 +348,92 @@ fn a_local_cut_trims_only_its_tombstones_and_goes_on_from_where_it_stopped() {
         .optional()
         .unwrap();
     assert_eq!(left, None, "a finished walk leaves nothing behind");
+}
+
+#[test]
+fn daily_allowance_tracks_the_utc_clock_without_overflow_or_restart_credit() {
+    let daily = LOCAL_TRIM_DAILY_CLAIMS;
+    let burst = trim_burst(daily);
+    assert_eq!(burst, 695);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS, 0), burst);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS, burst), 0);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS / 2, 0), daily / 2 + burst);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS - 1, 0), daily);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS - 1, daily), 0);
+    assert_eq!(trim_allowance(1, 0, 0), 1);
+    assert_eq!(trim_allowance(1, TRIM_DAY_MS - 1, 1), 0);
+    assert_eq!(trim_allowance(0, 0, 0), 0);
+    assert_eq!(trim_allowance(u64::MAX, TRIM_DAY_MS - 1, 0), u64::MAX);
+}
+
+#[test]
+fn a_paced_cut_uses_its_full_daily_budget_but_not_at_midnight() {
+    for daily in [1_u64, 144] {
+        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+        store.trim_locally_at_most(daily);
+        store.set_trim_chunk_envelopes(1);
+        let checkpoint = "checkpoint/2026-01-01";
+        store.set_checkpoint_state(checkpoint, 1, "trimming").unwrap();
+        let mut tombstones = Vec::new();
+        for n in 0..2 * daily + 2 {
+            let claim = store.append_claim(&ClaimInput {
+                subject: format!("note/{n}"),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::from([("text".into(), json!(n))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            tombstones.push(ClaimTombstone {
+                id: claim.id,
+                operation_id: claim.operation_id,
+                writer: "alder".into(),
+                sequence: n,
+                envelope_hash: format!("envelope-{n}"),
+                subject: claim.subject,
+                kind: claim.kind,
+                actor: claim.actor,
+                predecessors: claim.predecessors,
+                request_digest: claim.request_digest,
+                accepted_at_unix_ms: claim.accepted_at_unix_ms,
+            });
+        }
+        {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &tombstones).unwrap();
+            tx.commit().unwrap();
+        }
+        let mut actions = Vec::new();
+        // A new UTC day resets the old day's exhausted counter, not the pacing line.
+        store.trim_now_ms.store(TRIM_DAY_MS - 1, Ordering::Relaxed);
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 0).unwrap(), daily);
+        store.trim_day.store(1, Ordering::Relaxed);
+        store.trim_now_ms.store(TRIM_DAY_MS, Ordering::Relaxed);
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), trim_burst(daily));
+        assert!(matches!(actions.last(), Some(CheckpointAction::TrimDeferred { .. })));
+        // Re-entering at the same clock value grants no second burst.
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), trim_burst(daily));
+        for tick in 1..144_u64 {
+            store.trim_now_ms.store(TRIM_DAY_MS + tick * TRIM_DAY_MS / 144, Ordering::Relaxed);
+            store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        }
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), daily);
+        assert_eq!(
+            tombstones.iter().filter(|claim| store.claim_by_id(&claim.id).unwrap().is_none()).count(),
+            2 * daily as usize,
+        );
+        // The daily ceiling holds even at the final millisecond; tomorrow still makes progress.
+        store.trim_now_ms.store(2 * TRIM_DAY_MS - 1, Ordering::Relaxed);
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), daily);
+        store.trim_day.store(2, Ordering::Relaxed);
+        store.trim_now_ms.store(2 * TRIM_DAY_MS, Ordering::Relaxed);
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 2).unwrap(), trim_burst(daily));
+    }
 }
