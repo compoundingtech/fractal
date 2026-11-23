@@ -7,7 +7,6 @@
 use crate::MissionsStore;
 use crate::PublishedViewsStore;
 use crate::WorkListStore;
-use crate::model::GateSpec;
 use super::*;
 use smallclaims::store::now_ms;
 use std::collections::HashMap;
@@ -93,6 +92,9 @@ impl Context<'_> {
 /// What one open step waits on.
 fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Result<StepWait> {
     let view = &row.view;
+    use crate::intentional_wait::{classify as intentional_wait, IntentionalWait};
+    let human_gate = context.gates.iter().find(|gate| gate.step.as_deref() == Some(view.subject.as_str()));
+    let intentional = intentional_wait(view, context.now, human_gate.is_some(), false);
     let mut wait = StepWait {
         step: view.subject.clone(),
         path: view.step.clone(),
@@ -112,20 +114,21 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
         wait.lease_expires_at_unix_ms = view.claim_expires_at_unix_ms;
     }
     // A person must answer: a human gate on the step, the step is an ask, or it waits on one.
-    if let Some(gate) = context.gates.iter().find(|gate| gate.step.as_deref() == Some(view.subject.as_str())) {
+    if let Some(gate) = human_gate {
         wait.kind = WaitKind::Ask;
         wait.who = Some(gate.person.clone());
         wait.detail = Some("a human gate waits for an answer".into());
         return Ok(wait);
     }
-    if let Some(person) = view.assigned_to.as_deref().filter(|actor| actor.starts_with("person/")) {
+    if intentional == Some(IntentionalWait::Person) {
+        let person = view.assigned_to.as_deref().expect("a person wait has an assignee");
         wait.kind = WaitKind::Ask;
         wait.who = Some(person.to_owned());
         wait.since_unix_ms = Some(view.created_at_unix_ms);
         wait.detail = view.title.clone().or_else(|| view.goals.first().cloned());
         return Ok(wait);
     }
-    if view.status == "waiting-person" {
+    if intentional == Some(IntentionalWait::Answer) {
         let ask = view.blocked_reason.as_deref().and_then(|ask| context.rows.rows.get(ask));
         wait.kind = WaitKind::Ask;
         wait.who = ask.and_then(|ask| ask.view.assigned_to.clone());
@@ -142,7 +145,7 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
         }
         return Ok(wait);
     }
-    if view.status == "blocked" {
+    if intentional == Some(IntentionalWait::Blocked) {
         wait.kind = WaitKind::Hold;
         wait.until_unix_ms = view.not_before_unix_ms;
         wait.detail = view.blocked_reason.clone().or_else(|| {
@@ -179,7 +182,8 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
         }
         return Ok(wait);
     }
-    if let Some(until) = view.not_before_unix_ms.filter(|until| *until > context.now) {
+    if intentional == Some(IntentionalWait::Backoff) {
+        let until = view.not_before_unix_ms.expect("a backoff has a deadline");
         wait.kind = WaitKind::Hold;
         wait.until_unix_ms = Some(until);
         wait.detail = Some(format!("retry backoff, attempt {}", view.attempt));
@@ -211,7 +215,8 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
     }
     match view.status.as_str() {
         "claimed" | "working" => {
-            if let Some(until) = view.execution_paused_until_unix_ms.filter(|until| *until > context.now) {
+            if intentional == Some(IntentionalWait::Declared) {
+                let until = view.execution_paused_until_unix_ms.expect("a declared wait has a deadline");
                 wait.kind = WaitKind::Hold;
                 wait.until_unix_ms = Some(until);
                 wait.since_unix_ms = view.progress_at_unix_ms.or(wait.since_unix_ms);
@@ -260,35 +265,14 @@ fn classify(row: &WorkRow, context: &Context<'_>, store: &Store) -> anyhow::Resu
     Ok(wait)
 }
 
-/// Read no more than four field observations; an unknown earlier gate stops the search.
+/// Render the same bounded, known-false predicate evidence used by run reporting.
 fn predicate_wait(store: &Store, step: &StepRunView) -> anyhow::Result<Option<String>> {
-    use crate::reconcile::inspect_field_gate;
-    for gate in store.waiting_on_field_gates(step)? {
-        let GateSpec::Field { name, subject, path, operator, value } = &gate else {
-            return Ok(None);
-        };
-        // Runtime interpolation needs the run's full context, which this bounded read avoids.
-        if subject.contains("${") || subject.starts_with("exec/") || subject.starts_with("effect/")
-            || (subject.starts_with("resource/") && subject.contains('@'))
-            || value.as_str().is_some_and(|text| text.contains("${"))
-        {
-            return Ok(None);
-        }
-        let observation = store.inspect_cached_actual(subject, |actual| {
-            inspect_field_gate(actual, subject, path, operator, value, |found, holds| {
-                (holds, found.filter(|_| !holds).map(|found| format!(
-                    "waits for gate {name:?}: {subject} {path} is {}, expects {operator} {}",
-                    summarize_value(found), summarize_value(value),
-                )))
-            })
-        })?;
-        match observation {
-            Some((true, _)) => {}
-            Some((false, Some(detail))) => return Ok(Some(detail)),
-            _ => return Ok(None),
-        }
-    }
-    Ok(None)
+    crate::intentional_wait::predicate_wait(store, step, |name, subject, path, operator, value, found| {
+        format!(
+            "waits for gate {name:?}: {subject} {path} is {}, expects {operator} {}",
+            summarize_value(found), summarize_value(value),
+        )
+    })
 }
 
 /// Values are hints, not payload exports: containers show only their shape.

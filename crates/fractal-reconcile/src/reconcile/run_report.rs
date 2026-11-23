@@ -127,6 +127,50 @@ fn can_stall(run: &MissionRunView) -> bool {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Suppress silence only when every unfinished step positively declares an intentional wait.
+    /// Unknown/cold predicate evidence and mixed runs retain the existing reporting behavior.
+    fn intentionally_waiting(&self, run: &MissionRunView, now: u128) -> Result<bool> {
+        let mut any = false;
+        for step in &run.steps {
+            if matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped") {
+                continue;
+            }
+            any = true;
+            let predicate = step.agentless
+                && crate::intentional_wait::predicate_wait(&self.store, step, |_, _, _, _, _, _| ())?.is_some();
+            let human = if step.agentless && !predicate {
+                if let Some(request) = self.store.gate_request_for_owner(&step.subject)? {
+                    smallclaims::touched::note_read(|| request.subject.clone());
+                    request.body.pointer("/fields/reviewer").and_then(Value::as_str).is_some()
+                        && request.body.pointer("/fields/mission_revision").and_then(Value::as_str)
+                            == Some(run.revision.as_str())
+                        && request.body.pointer("/fields/attempt").and_then(Value::as_u64)
+                            == Some(u64::from(step.attempt))
+                        && self.store.human_review_answer(&request.id)?.is_none()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let intentional = crate::intentional_wait::classify(step, now, human, predicate);
+            if intentional.is_none() {
+                return Ok(false);
+            }
+            // A parent's hold does not prove that its linked child work is healthy.
+            if !self.store.mission_run_children_for_step(&step.subject)?.is_empty() {
+                return Ok(false);
+            }
+            if intentional == Some(crate::intentional_wait::IntentionalWait::Declared) {
+                let Some(holder) = step.claimant.as_deref() else { return Ok(false) };
+                if !self.store.agent_is_live(holder)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(any)
+    }
+
     /// Linked child runs do the parent's work. Follow their indexed parent-step links and
     /// register every run and step read, including nested work, so progress moves the stall
     /// deadline on the next incremental evaluation rather than waiting for a scan.
@@ -313,6 +357,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if run.parent_step_run.is_some() || !can_stall(run) {
             return Ok(None);
         }
+        if self.intentionally_waiting(run, now)? {
+            return Ok(None);
+        }
         // Work in linked child runs, such as loop rounds and nested work, is the run's work too.
         let mut stuck = stuck_agents(run);
         let mut pending = run.steps.iter().map(|step| step.subject.clone()).collect::<Vec<_>>();
@@ -381,6 +428,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(None);
         }
         if !report.stalls || !can_stall(run) {
+            return Ok(None);
+        }
+        if self.intentionally_waiting(run, now)? {
             return Ok(None);
         }
         let since = self.run_report_activity(run)?;
