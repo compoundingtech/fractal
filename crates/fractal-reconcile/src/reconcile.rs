@@ -3669,11 +3669,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Read-only launch completion evidence and planning share one pass snapshot.
         // A mutation can make it stale: guarded launches and exact native controls
         // still take their own fresh fences before acting on an incarnation.
-        let ptys = pty_snapshot
+        // Keep the immutable snapshot alive for the pass; the lookup index borrows
+        // IDs and observations. Only selected member/stop work needs owned evidence.
+        let pty_observations = pty_snapshot
             .into_inner()
-            .unwrap_or_else(|| self.host_pty_snapshot())
+            .unwrap_or_else(|| self.host_pty_snapshot());
+        let ptys = pty_observations.as_ref()
             .map(|snapshot| snapshot.observations.iter()
-                .map(|item| (item.runtime_id.clone(), item.clone()))
+                .map(|item| (item.runtime_id.as_str(), item))
                 .collect::<HashMap<_, _>>());
         if let Ok(snapshot) = &ptys { pty_span.items(snapshot.len()); }
         drop(pty_span);
@@ -3709,7 +3712,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         "{} {:?} {:?}",
                         item.status, item.incarnation_id, item.exit_code
                     );
-                    (id.clone(), state)
+                    ((*id).to_owned(), state)
                 })
                 .collect()
         }));
@@ -4259,7 +4262,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             let Some(ptys) = ptys.as_ref() else {
                                 return blocked.map_or(Ok(()), Err);
                             };
-                            ptys.get(&member.runtime_id).cloned()
+                            ptys.get(member.runtime_id.as_str()).copied().cloned()
                         } else {
                             smallclaims::touched::note_read(|| {
                                 format!("exec:{}", member.runtime_id)
@@ -7394,7 +7397,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub fn reconcile_stop(
         &self,
         subject: &DesiredSubject,
-        ptys: Option<&HashMap<String, RuntimeObservation>>,
+        ptys: Option<&HashMap<&str, &RuntimeObservation>>,
     ) -> Result<()> {
         self.reconcile_stop_with_origin(subject, ptys, None)
     }
@@ -7462,7 +7465,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &DesiredSubject,
         item: &str,
         skip: bool,
-        ptys: Option<&HashMap<String, RuntimeObservation>>,
+        ptys: Option<&HashMap<&str, &RuntimeObservation>>,
         live_workspaces: &BTreeSet<&str>,
         diagnostic_errors: &mut Vec<String>,
     ) {
@@ -7580,7 +7583,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_stop_with_origin(
         &self,
         subject: &DesiredSubject,
-        ptys: Option<&HashMap<String, RuntimeObservation>>,
+        ptys: Option<&HashMap<&str, &RuntimeObservation>>,
         actual_origin: Option<Option<String>>,
     ) -> Result<()> {
         self.store.owned_desired_guard(subject)?;
@@ -7666,7 +7669,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(ptys) = ptys else {
                 return Ok(());
             };
-            ptys.get(runtime_id).cloned()
+            ptys.get(runtime_id).copied().cloned()
         } else {
             smallclaims::touched::note_read(|| format!("exec:{runtime_id}"));
             self.runtime.observe_exec(runtime_id)?

@@ -1398,7 +1398,7 @@ mission "exit-evidence" state="ready" {
         };
         reconciler.reconcile_stop(
             &stopped,
-            Some(&HashMap::from([(member.runtime_id.clone(), replacement)])),
+            Some(&HashMap::from([(member.runtime_id.as_str(), &replacement)])),
         ).unwrap();
         let replacement = store.latest_actual_value(&subject.subject).unwrap().unwrap();
         assert!(actual_field(&replacement, "exit_evidence").is_none_or(Value::is_null));
