@@ -136,6 +136,18 @@ pub struct RuntimeStartOperation {
     pub receipted: bool,
 }
 
+impl RuntimeStartOperation {
+    /// Only an identity-bound dispatch fence can prove an abandoned worker never
+    /// entered its backend. Missing, legacy and future protocols remain unknown.
+    pub fn before_backend(&self) -> bool {
+        let marker = &self.body["backend_entry"];
+        marker["version"] == 1
+            && marker["operation"].as_str() == Some(self.id.as_str())
+            && marker["owner"].as_str() == Some(self.owner.as_str())
+            && marker["phase"] == "before-backend"
+    }
+}
+
 pub fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeStartOperation> {
     let decode = |column| -> rusqlite::Result<Value> {
         let text: String = row.get(column)?;
