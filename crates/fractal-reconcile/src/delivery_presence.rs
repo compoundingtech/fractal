@@ -649,6 +649,7 @@ pub fn watched(subject: &str) -> bool {
 }
 
 /// Age a recipient's delivery beat, or its title monitor, as if it arrived `by` earlier.
+/// Like a report mutation, wake semantic readers to recompute the evidence and its deadline.
 #[cfg(any(test, feature = "test-support"))]
 pub fn backdate(recipient: &str, monitor: bool, by: Duration) {
     let presence = presence();
@@ -660,6 +661,8 @@ pub fn backdate(recipient: &str, monitor: bool, by: Duration) {
     .unwrap();
     let beat = beats.get_mut(recipient).expect("a recorded beat");
     beat.at -= by;
+    drop(beats);
+    notify_semantic();
 }
 
 #[cfg(any(test, feature = "test-support"))]

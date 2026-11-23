@@ -381,7 +381,7 @@ project_through(store.index().unwrap());
 refresh_and_check(&store);
 assert_eq!(folds(&store), folded + 1);
 assert!(
-    store.attention_list_folds().keys().any(|cause| cause.starts_with("projection ")),
+    store.attention_list_folds().get("step-run.state") == Some(&1),
     "{:?}",
     store.attention_list_folds()
 );
@@ -407,16 +407,17 @@ let (store, _, request) = fixture();
 store.start_attention_list_refresher().unwrap();
 store.ask_person(&request).unwrap();
 let before = refresh_and_check(&store);
+let folded = folds(&store);
 let (generation, _) = store.newest_attention_list();
-let stale = before.evaluated_at_unix_ms - 31_000;
+let stale = before.published_at_unix_ms - 31_000;
 store.publish_attention_list(
     generation,
     AttentionPublication {
         cut: before.cut,
         projection: before.projection.clone(),
-        evaluated_at_unix_ms: stale,
+        evaluated_at_unix_ms: before.evaluated_at_unix_ms,
         due_at_unix_ms: None,
-        published_at_unix_ms: before.published_at_unix_ms,
+        published_at_unix_ms: stale,
         owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
         source_snapshot: before.source_snapshot.clone(),
@@ -427,7 +428,10 @@ store.publish_attention_list(
     false,
 );
 let after = refresh_and_check(&store);
-assert!(after.evaluated_at_unix_ms > stale);
+assert_eq!(after.evaluated_at_unix_ms, before.evaluated_at_unix_ms);
+assert_eq!(after.published_at_unix_ms, stale, "an idle publication is not periodically refreshed");
+assert!(Arc::ptr_eq(&after.rows, &before.rows));
+assert_eq!(folds(&store), folded, "aging a publication does not rebuild its sources");
 assert_eq!(store.attention_list_folds().get("clock"), None);
 assert_eq!(store.attention_list_due_at(), None);
 }
@@ -753,6 +757,7 @@ store
         json!({"status":"running", "incarnation_id":"one"}),
     ))
     .unwrap();
+let opened = now_ms();
 let asked = store
     .append_claim(&input(
         seat,
@@ -760,11 +765,38 @@ let asked = store
         Some(seat),
         json!({"state":"working", "driver":"claude", "incarnation_id":"one",
             "blocked_on":"human", "ask":"permission", "reason":"Bash",
-            "ownership_sequence":1, "transition_sequence":3}),
+            "ownership_sequence":1, "transition_sequence":3, "observed_since_ms":opened}),
     ))
     .unwrap();
 let prompted = refresh_and_check(&store);
 assert_eq!(prompts(&prompted), 1);
+let source = prompted.source_snapshot.as_deref().expect("the source snapshot");
+let expires = source.valid_until.expect("the native answer window closes");
+assert_eq!(expires, opened + crate::store::attention_snapshot::CLAUDE_PROMPT_ANSWER_WAIT_MS);
+let prompt = |snapshot: &crate::store::attention_snapshot::AttentionSourceSnapshot| {
+    snapshot.items.iter().find(|item| item.kind == "harness-prompt").unwrap().clone()
+};
+assert!(!prompt(source).answers.is_empty(), "the current prompt can be answered");
+store.read_snapshot(|_| {
+    let waiting = store.attention_source_snapshot(
+        Some(source), Some(&BTreeSet::new()), &BTreeSet::new(), expires - 1,
+    )?;
+    assert_eq!(waiting.refolded_subjects, 0);
+    assert_eq!(waiting.refolded_groups, 0);
+    assert_eq!(prompt(&waiting), prompt(source));
+    let expired = store.attention_source_snapshot(
+        Some(&waiting), Some(&BTreeSet::new()), &BTreeSet::new(), expires,
+    )?;
+    let (full, due) = store.attention_collection_snapshot(None, expires)?;
+    assert_eq!(expired.items, full, "the exact answer-window boundary matches the full reader");
+    assert_eq!(expired.valid_until, due);
+    assert_eq!(expired.valid_until, None);
+    assert_eq!(expired.refolded_subjects, 1, "only the expiring prompt is reduced");
+    assert_eq!(expired.refolded_groups, 0);
+    assert!(prompt(&expired).answers.is_empty());
+    assert_ne!(prompt(&expired).detail, prompt(source).detail);
+    Ok(())
+}).unwrap();
 let before = folds(&store);
 store
     .answer_native_prompt(seat, &asked.id, "deny", "person/avery")

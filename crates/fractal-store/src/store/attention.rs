@@ -578,12 +578,23 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        Ok(self.attention_snapshot_with_prompt_clock(person, as_of, as_of)?.0)
+    }
+
+    pub(super) fn attention_snapshot_with_prompt_clock(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        prompt_at: u128,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         let mut items = self.mission_run_attention_items(person)?;
         items.extend(self.host_hold_attention_items(person)?);
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
         items.extend(self.model_drift_attention_items(person, as_of)?);
-        items.extend(self.harness_prompt_attention_items(person, as_of)?);
+        let (prompts, valid_until) =
+            self.harness_prompt_attention_items_with_deadline(person, prompt_at, None)?;
+        items.extend(prompts);
         items.extend(self.custom_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
@@ -591,7 +602,7 @@ impl Store {
                 .into_iter()
                 .filter(|item| item.person.starts_with("person/")),
         );
-        self.current_attention(items, as_of)
+        Ok((self.current_attention(items, as_of)?, valid_until))
     }
 
     /// The unique publisher of an item from `attention_snapshot`, resolved at the caller's

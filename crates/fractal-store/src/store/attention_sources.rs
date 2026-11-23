@@ -6,6 +6,7 @@ use super::*;
 struct SourceEntry {
     rows: Vec<(AttentionItemView, u128)>,
     reads: BTreeSet<String>,
+    refresh_at: Option<u128>,
 }
 
 /// Volatile source state at a publication cut. A reset discards it; ordinary commits replace
@@ -66,7 +67,8 @@ impl Store {
         // the same kind. Subject discovery above is needed only for a full reset.
         for (key, entry) in &snapshot.entries {
             if let Some(subject) = key.strip_prefix("subject:")
-                && !entry.reads.is_disjoint(&changed_keys)
+                && (!entry.reads.is_disjoint(&changed_keys)
+                    || entry.refresh_at.is_some_and(|due| now >= due))
             {
                 subjects.insert(subject.to_owned());
             }
@@ -96,15 +98,18 @@ impl Store {
             if !is_agent && !is_step && custom.is_none() && !snapshot.entries.contains_key(&key) {
                 continue;
             }
+            let mut refresh_at = None;
             let (rows, mut reads) = smallclaims::touched::record(|| -> Result<Vec<AttentionItemView>> {
                 let mut rows = Vec::new();
                 if is_step {
                     rows.extend(person_attention_item(&connection, &subject, i64::MAX as u128)?);
                 }
                 if is_agent {
-                    rows.extend(self.harness_prompt_attention_items_for_subjects(
-                        None, i64::MAX as u128, Some(&BTreeSet::from([subject.clone()])),
-                    )?);
+                    let (prompts, due) = self.harness_prompt_attention_items_with_deadline(
+                        None, now, Some(&BTreeSet::from([subject.clone()])),
+                    )?;
+                    rows.extend(prompts);
+                    refresh_at = due;
                 }
                 if let Some((body, at)) = custom
                     && !fractal_schema::notice::is_reserved_subject(&subject)
@@ -115,7 +120,8 @@ impl Store {
             });
             reads.insert(subject.clone());
             let rows = rows?;
-            let entry = source_entry(&connection, rows, reads)?;
+            let mut entry = source_entry(&connection, rows, reads)?;
+            entry.refresh_at = refresh_at;
             snapshot.entries.insert(key, Arc::new(entry));
             snapshot.refolded_subjects += 1;
         }
@@ -190,6 +196,9 @@ impl Store {
         snapshot.items.clear();
         snapshot.valid_until = None;
         for entry in snapshot.entries.values() {
+            if let Some(due) = entry.refresh_at {
+                snapshot.valid_until = Some(snapshot.valid_until.map_or(due, |kept| kept.min(due)));
+            }
             for (item, starts_at) in &entry.rows {
                 if *starts_at <= now {
                     snapshot.items.push(item.clone());
@@ -222,5 +231,5 @@ fn source_entry(
         let starts_at = item.requested_at_unix_ms.max(accepted);
         Ok((item, starts_at))
     }).collect::<Result<Vec<_>>>()?;
-    Ok(SourceEntry { rows, reads })
+    Ok(SourceEntry { rows, reads, refresh_at: None })
 }
