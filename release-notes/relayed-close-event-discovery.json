@@ -7,11 +7,11 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds member-local durable discovery work/candidate/bootstrap tables, indexed declared-member host lookup, and a retained scope-event journal for remote held-message and recipient-ownership changes. These tables stay outside replication and canonical digests."
+    "detail": "Adds member-local durable discovery work/candidate/bootstrap/read-job tables, durable pending terminal-close evidence, indexed declared-member host lookup, and a retained scope-event journal for remote held-message and recipient-ownership changes. These tables stay outside replication and canonical digests."
   },
   "rules": {
     "status": "none",
-    "detail": "No admission, claim or digest rule change. Terminal closes still require the declared recipient host's authenticated held answer and receipt. Discovery remains daemon-owned and independent of GET side effects."
+    "detail": "No admission, claim or digest rule change. Terminal closes still require the declared recipient host's authenticated held answer and receipt. Discovery remains daemon-owned and independent of GET side effects. Read jobs are acknowledged only after successful answers and durable close admission; network failures get explicit retry deadlines. Local writer failures preserve terminal evidence across restart and wait for actual committed writer recovery, without a retry timer."
   },
   "compatibility": {
     "status": "changed",

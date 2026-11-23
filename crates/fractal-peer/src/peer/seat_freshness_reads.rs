@@ -3,11 +3,12 @@
 //! A consumer's delivery, read and close of a message stay on the consumer's host, never
 //! replicated (`local_message_marks`, and a stream item's `stream_lifecycle`). Another member that
 //! needs how far a message got asks that host, which answers for the seats its declarations place
-//! on it. Nothing is pushed or kept: a host that does not answer in time reads as unknown.
+//! on it. A host that does not answer in time reads as unknown. Separately negotiated event
+//! cursors report changed keys without rebuilding those answers during an idle keepalive.
 //!
-//! Each request is one tagged operation, so a later operation joins without a new route. A member
-//! asks only a host whose own newest `daemon.started` advertises [`SEAT_FRESHNESS_READS_FEATURE`]
-//! at the operation's version.
+//! Each request is one tagged operation, so a later operation joins without a new route. Marks
+//! reads require [`SEAT_FRESHNESS_READS_FEATURE`]; event reads require [`MESSAGE_MARK_EVENTS_FEATURE`]
+//! in the host's own newest `daemon.started`.
 
 use super::*;
 
@@ -18,7 +19,7 @@ pub const SEAT_FRESHNESS_READS_INTERNAL_PATH: &str = "/v1/internal/seat-freshnes
 /// The `daemon.started` feature of a member that answers [`SEAT_FRESHNESS_READS_PATH`], and the
 /// version of the operations it answers.
 pub const SEAT_FRESHNESS_READS_FEATURE: &str = "seat_freshness_reads";
-/// Separate capability: old reads peers must never be used as a polling fallback.
+/// Separately negotiated change-feed support; legacy hosts answer marks reads only.
 pub const MESSAGE_MARK_EVENTS_FEATURE: &str = "message_mark_events";
 /// The most messages one read may name.
 pub const MAX_READ_MESSAGES: usize = 512;

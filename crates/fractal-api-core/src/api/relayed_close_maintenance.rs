@@ -44,36 +44,55 @@ pub async fn turn(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn discover(state: &AppState, budget: &ReadBudget) -> anyhow::Result<()> {
-    // The in-memory close writer has bounded admission. Finish the previous page before
-    // consuming another durable discovery page so a terminal answer can never be dropped.
-    relayed_closes::wait_idle(&state.store).await;
+    // Durable terminal evidence must settle (or surface its local error) before another
+    // bounded page is admitted. Failed reads remain durable until their network deadline.
+    relayed_closes::wait_idle(&state.store).await?;
     let store = state.store.clone();
     let selecting = budget.clone();
-    let candidates = tokio::task::spawn_blocking(move || read_budget::with(Some(selecting), || {
+    let reads = tokio::task::spawn_blocking(move || read_budget::with(Some(selecting), || {
         read_budget::check()?;
-        relayed_close_work::discovery_batch(&store, PAGE_LIMIT)
+        relayed_close_work::discovery_batch(&store, PAGE_LIMIT)?;
+        relayed_close_work::read_batch(&store, PAGE_LIMIT, super::client_now_ms())
     })).await??;
-    if candidates.is_empty() { return Ok(()); }
+    if reads.is_empty() { return Ok(()); }
     let work = state.store.extension::<Work>();
     work.discovery_passes.fetch_add(1, Ordering::Relaxed);
-    work.candidate_messages.fetch_add(candidates.len() as u64, Ordering::Relaxed);
+    work.candidate_messages.fetch_add(reads.len() as u64, Ordering::Relaxed);
     let mut asks = BTreeMap::<String, Vec<String>>::new();
-    for (subject, _recipient, host) in candidates {
-        asks.entry(host).or_default().push(subject);
-    }
-    let asks = asks.into_iter().map(|(host, subjects)| {
-        let supported = message_reads::advertises(&state.store, &host, message_reads::MESSAGE_OFFSETS_FEATURE, 1)?
-            && message_reads::advertises(&state.store, &host, crate::peer::SEAT_FRESHNESS_READS_FEATURE, 1)?;
-        Ok(supported.then_some((host, subjects)))
-    }).collect::<anyhow::Result<Vec<_>>>()?.into_iter().flatten().collect::<BTreeMap<_, _>>();
-    // A page can name more than MAX_HOSTS. Partition it instead of losing the tail when
-    // consuming the durable keys; each message is still checked exactly once for this delta.
+    for (subject, host) in reads { asks.entry(host).or_default().push(subject); }
     let mut asks = asks.into_iter();
     loop {
-        let page = asks.by_ref().take(message_reads::MAX_HOSTS).collect::<BTreeMap<_, _>>();
-        if page.is_empty() { break; }
+        let mut page = BTreeMap::new();
+        let mut unsupported = Vec::new();
+        for (host, subjects) in asks.by_ref().take(message_reads::MAX_HOSTS) {
+            if message_reads::advertises(&state.store, &host, message_reads::MESSAGE_OFFSETS_FEATURE, 1)?
+                && message_reads::advertises(&state.store, &host, crate::peer::SEAT_FRESHNESS_READS_FEATURE, 1)?
+            {
+                page.insert(host, subjects);
+            } else {
+                unsupported.extend(subjects);
+            }
+        }
+        if page.is_empty() && unsupported.is_empty() { break; }
+        let requested = page.values().flatten().cloned().collect::<Vec<_>>();
         let answers = message_reads::read_uncached(state, page, message_reads::CHECK_DEADLINE).await;
-        relayed_closes::queue(&state.store, pending_closes(&answers))?;
+        let closes = pending_closes(&answers);
+        let mut succeeded = unsupported;
+        let mut failed = Vec::new();
+        for subject in requested {
+            if matches!(answers.get(&subject), Some(message_reads::Relayed::Answered { .. })) {
+                succeeded.push(subject);
+            } else { failed.push(subject); }
+        }
+        let store = state.store.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            // A successful marks answer is acknowledged only after terminal evidence has
+            // committed to the durable close queue. Cancellation cannot lose either job.
+            relayed_closes::queue(&store, closes)?;
+            relayed_close_work::read_succeeded(&store, &succeeded)?;
+            relayed_close_work::read_failed(&store, &failed, super::client_now_ms())
+        }).await??;
+        relayed_closes::wait_idle(&state.store).await?;
     }
     Ok(())
 }
@@ -95,6 +114,7 @@ struct RemoteChange {
     reset: bool,
     messages: Vec<String>,
     consumers: Vec<String>,
+    admitted: tokio::sync::oneshot::Sender<()>,
 }
 
 async fn follow_host(state: AppState, host: String, changes: mpsc::Sender<RemoteChange>) {
@@ -104,11 +124,15 @@ async fn follow_host(state: AppState, host: String, changes: mpsc::Sender<Remote
     loop {
         match relay.read_message_mark_events(&host, cursor.as_deref(), PAGE_LIMIT, Duration::from_secs(70)).await {
             Ok(Some(page)) => {
-                cursor = Some(page.cursor);
                 retry = Duration::from_secs(1);
-                if (page.reset || !page.messages.is_empty() || !page.consumers.is_empty()) && changes.send(RemoteChange {
-                    host: host.clone(), reset: page.reset, messages: page.messages, consumers: page.consumers,
-                }).await.is_err() { return; }
+                if page.reset || !page.messages.is_empty() || !page.consumers.is_empty() {
+                    let (admitted, acknowledged) = tokio::sync::oneshot::channel();
+                    if changes.send(RemoteChange {
+                        host: host.clone(), reset: page.reset, messages: page.messages, consumers: page.consumers, admitted,
+                    }).await.is_err() || acknowledged.await.is_err() { return; }
+                }
+                // Do not advance remote evidence until its local changed-key admission commits.
+                cursor = Some(page.cursor);
             }
             result => {
                 tracing::warn!(host, error = ?result, "remote message event subscription disconnected");
@@ -154,47 +178,51 @@ fn sync_followers(
     Ok(legacy)
 }
 
+async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+fn read_deadline(store: &crate::store::Store) -> anyhow::Result<Option<tokio::time::Instant>> {
+    Ok(relayed_close_work::next_read_deadline(store)?.map(|at| {
+        tokio::time::Instant::now() + Duration::from_millis(at.saturating_sub(super::client_now_ms()))
+    }))
+}
+
 /// Modern peers are event-driven. Only explicitly capability-limited legacy peers retain
 /// a compatibility schedule, scoped to their already known pending message candidates.
 pub async fn run(state: AppState, mut stopped: watch::Receiver<bool>) {
     let wake = Arc::new(tokio::sync::Notify::new());
     let changed = wake.clone();
-    let _observer = state.store.observe_tables(&["local_relayed_close_work"], move |_| changed.notify_one());
+    let _observer = state.store.observe_tables(&[
+        relayed_close_work::WORK_TABLE, relayed_close_work::READ_TABLE,
+    ], move |_| changed.notify_one());
     let (changes, mut remote) = mpsc::channel::<RemoteChange>(64);
+    let mut pending_remote = None;
     let mut followers = BTreeMap::new();
     let mut initial = true;
     let mut legacy_hosts = Vec::new();
     let mut legacy_deadline = None;
-    wake.notify_one(); // Register before the bootstrap recheck; no lost initial changes.
+    let mut recovery = None;
+    wake.notify_one(); // Register before bootstrap/restart recovery; no lost initial changes.
     loop {
         if *stopped.borrow() { break; }
+        let retry = if recovery.is_some() { None } else {
+            match read_deadline(&state.store) {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "relayed close retry deadline read failed");
+                    None
+                }
+            }
+        };
         tokio::select! {
             biased;
             _ = stopped.changed() => break,
-            Some(change) = remote.recv() => {
-                if followers.contains_key(&change.host) {
-                    let work = state.store.extension::<Work>();
-                    work.remote_event_pages.fetch_add(1, Ordering::Relaxed);
-                    work.remote_changed_messages.fetch_add(change.messages.len() as u64, Ordering::Relaxed);
-                    let result = if change.reset {
-                        relayed_close_work::enqueue_host(&state.store, &change.host)
-                    } else {
-                        relayed_close_work::enqueue_messages(&state.store, &change.messages)
-                            .and_then(|()| change.consumers.iter().try_for_each(|recipient| {
-                                relayed_close_work::enqueue_recipient(&state.store, recipient)
-                            }))
-                    };
-                    if let Err(error) = result {
-                        tracing::warn!(error = %format!("{error:#}"), "remote close key admission failed");
-                    }
-                }
-            }
-            _ = async {
-                match legacy_deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending::<()>().await,
-                }
-            } => {
+            Some(change) = remote.recv(), if pending_remote.is_none() => pending_remote = Some(change),
+            _ = wait_deadline(legacy_deadline), if recovery.is_none() => {
                 for host in &legacy_hosts {
                     match relayed_close_work::enqueue_legacy_host(&state.store, host) {
                         Ok(()) => { state.store.extension::<Work>().legacy_peer_discovery_passes.fetch_add(1, Ordering::Relaxed); }
@@ -203,33 +231,86 @@ pub async fn run(state: AppState, mut stopped: watch::Receiver<bool>) {
                 }
                 legacy_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(30));
             }
+            _ = wait_deadline(retry) => {}
             _ = wake.notified() => {}
         }
         let mut changed = std::mem::take(&mut initial);
-        // Drain continuations immediately, never rescan an unchanged open prefix.
+        let mut force_turn = changed || recovery.is_some();
         loop {
-            match relayed_close_work::has_pending(&state.store) {
-                Ok(false) => break,
-                Err(error) => {
-                    tracing::warn!(error = %format!("{error:#}"), "relayed close pending read failed");
-                    break;
-                }
-                Ok(true) => changed = true,
-            }
-            tokio::select! {
-                biased;
-                _ = stopped.changed() => break,
-                result = turn(&state) => {
-                    if let Err(error) = result {
-                        tracing::warn!(error = %format!("{error:#}"), "relayed close maintenance turn failed");
-                        break;
+            let mut admission_error = None;
+            if let Some(change) = pending_remote.take() {
+                if followers.contains_key(&change.host) {
+                    let store = state.store.clone();
+                    let admitted = tokio::task::spawn_blocking(move || {
+                        let result = if change.reset {
+                            relayed_close_work::enqueue_host(&store, &change.host)
+                        } else {
+                            relayed_close_work::enqueue_messages(&store, &change.messages)
+                                .and_then(|()| change.consumers.iter().try_for_each(|recipient| {
+                                    relayed_close_work::enqueue_recipient(&store, recipient)
+                                }))
+                        };
+                        (result, change)
+                    }).await;
+                    match admitted {
+                        Ok((Ok(()), change)) => {
+                            let work = state.store.extension::<Work>();
+                            work.remote_event_pages.fetch_add(1, Ordering::Relaxed);
+                            work.remote_changed_messages.fetch_add(change.messages.len() as u64, Ordering::Relaxed);
+                            let _ = change.admitted.send(());
+                        }
+                        Ok((Err(error), change)) => {
+                            pending_remote = Some(change);
+                            admission_error = Some(error);
+                        }
+                        Err(error) => admission_error = Some(error.into()),
                     }
+                } else {
+                    let _ = change.admitted.send(()); // No longer owned/relevant here.
+                }
+            }
+            let pending = relayed_close_work::has_pending(&state.store).and_then(|pending| {
+                Ok(pending || relayed_close_work::next_read_deadline(&state.store)?
+                    .is_some_and(|at| at <= super::client_now_ms()))
+            });
+            if admission_error.is_none() && matches!(pending, Ok(false)) && !force_turn { break; }
+            let result = match admission_error {
+                Some(error) => Err(error),
+                None => match pending {
+                    Err(error) => Err(error),
+                    Ok(_) => {
+                        changed = true;
+                        tokio::select! {
+                            biased;
+                            _ = stopped.changed() => break,
+                            result = turn(&state) => result,
+                        }
+                    }
+                },
+            };
+            match result {
+                Ok(()) => {
+                    force_turn = false;
+                    recovery = None;
+                }
+                Err(error) => {
+                    tracing::error!(error = %format!("{error:#}"), "relayed close maintenance blocked on local recovery");
+                    if recovery.is_none() {
+                        let recovered = wake.clone();
+                        recovery = Some(state.store.observe_commits(move |_| recovered.notify_one()));
+                        // Register then recheck once: a repair commit before registration
+                        // cannot strand durable work. Later attempts require actual writer
+                        // activity; there is no local-failure retry timer.
+                        force_turn = true;
+                        continue;
+                    }
+                    break;
                 }
             }
             if *stopped.borrow() { break; }
         }
         if *stopped.borrow() { break; }
-        if changed {
+        if changed && recovery.is_none() {
             match sync_followers(&state, &mut followers, &changes) {
                 Ok(hosts) => {
                     legacy_hosts = hosts;
@@ -243,7 +324,9 @@ pub async fn run(state: AppState, mut stopped: watch::Receiver<bool>) {
         }
     }
     for (_, task) in followers { task.abort(); }
-    relayed_closes::wait_idle(&state.store).await;
+    if let Err(error) = relayed_closes::wait_idle(&state.store).await {
+        tracing::error!(error = %format!("{error:#}"), "relayed close writes remain durable for restart recovery");
+    }
 }
 
 #[cfg(test)]

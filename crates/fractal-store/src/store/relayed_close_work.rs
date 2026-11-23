@@ -3,6 +3,7 @@
 use super::*;
 
 pub const WORK_TABLE: &str = "local_relayed_close_work";
+pub const READ_TABLE: &str = "local_relayed_close_reads";
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(r#"
@@ -11,6 +12,11 @@ CREATE TABLE IF NOT EXISTS local_relayed_close_work(
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS relayed_close_work_order ON local_relayed_close_work(
  CASE kind WHEN 'host' THEN 0 WHEN 'recipient' THEN 1 ELSE 2 END,key);
+CREATE TABLE IF NOT EXISTS local_relayed_close_reads(
+ message TEXT PRIMARY KEY,host TEXT NOT NULL,next_attempt_ms INTEGER NOT NULL DEFAULT 0,
+ attempts INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS relayed_close_reads_deadline ON local_relayed_close_reads(next_attempt_ms,message);
 CREATE TABLE IF NOT EXISTS local_relayed_close_candidates(
  message TEXT PRIMARY KEY,recipient TEXT NOT NULL,host TEXT NOT NULL
 ) WITHOUT ROWID;
@@ -169,12 +175,69 @@ fn discovery_at(connection: &Connection, origin: &str, limit: usize) -> Result<V
             if let Ok(member) = serde_json::from_str::<crate::model::MemberSpec>(&member) {
                 if member.host != origin {
                     connection.execute("INSERT INTO local_relayed_close_candidates(message,recipient,host) VALUES(?1,?2,?3)", params![key,recipient,member.host])?;
+                    connection.execute(
+                        "INSERT INTO local_relayed_close_reads(message,host) VALUES(?1,?2) ON CONFLICT(message) DO UPDATE SET host=excluded.host,next_attempt_ms=0,attempts=0 WHERE ?3!='legacy_host' OR local_relayed_close_reads.host IS NOT excluded.host",
+                        params![key,member.host,kind],
+                    )?;
                     result.push((key,recipient,member.host));
+                    continue;
                 }
             }
         }
+        connection.execute("DELETE FROM local_relayed_close_reads WHERE message=?1", [&key])?;
     }
     Ok(result)
+}
+
+/// Read jobs stay durable until an explicit successful acknowledgement. Merely selecting
+/// a page does not consume it, so cancellation cannot strand a known remote close.
+pub fn read_batch(store: &Store, limit: usize, now_ms: u64) -> Result<Vec<(String,String)>> {
+    let connection = store.readers.get();
+    let mut statement = connection.prepare_cached(
+        "SELECT message,host FROM local_relayed_close_reads WHERE next_attempt_ms<=?1 ORDER BY next_attempt_ms,message LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![now_ms.min(i64::MAX as u64) as i64,limit.min(i64::MAX as usize) as i64],
+        |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+pub fn read_succeeded(store: &Store, messages: &[String]) -> Result<()> {
+    let mut connection = store.connection.write_background();
+    let transaction = connection.transaction()?;
+    for message in messages {
+        transaction.execute("DELETE FROM local_relayed_close_reads WHERE message=?1", [message])?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Only failed network reads acquire retry deadlines. Local database errors propagate
+/// to the maintenance owner, rather than gaining a timer-based rediscovery fallback.
+pub fn read_failed(store: &Store, messages: &[String], now_ms: u64) -> Result<()> {
+    let mut connection = store.connection.write_background();
+    let transaction = connection.transaction()?;
+    for message in messages {
+        let attempts: Option<u32> = transaction.query_row(
+            "SELECT attempts FROM local_relayed_close_reads WHERE message=?1", [message], |row| row.get(0),
+        ).optional()?;
+        if let Some(attempts) = attempts {
+            let delay = (1_000u64 << attempts.min(6)).min(60_000);
+            let deadline = now_ms.saturating_add(delay).min(i64::MAX as u64) as i64;
+            transaction.execute(
+                "UPDATE local_relayed_close_reads SET attempts=?2,next_attempt_ms=?3 WHERE message=?1",
+                params![message,attempts.saturating_add(1).min(6),deadline],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+pub fn next_read_deadline(store: &Store) -> Result<Option<u64>> {
+    Ok(store.readers.get().query_row(
+        "SELECT next_attempt_ms FROM local_relayed_close_reads ORDER BY next_attempt_ms,message LIMIT 1",
+        [], |row| row.get(0),
+    ).optional()?)
 }
 
 #[cfg(test)]
@@ -353,5 +416,51 @@ mod tests {
         assert!(discovery_at(&connection, "local", 10).unwrap().is_empty());
         let retained: usize = connection.query_row("SELECT count(*) FROM local_relayed_close_candidates WHERE host='remote-b'", [], |row| row.get(0)).unwrap();
         assert_eq!(retained, 1);
+    }
+
+    #[test]
+    fn network_failure_retains_read_until_deadline_and_successful_recovery() {
+        let store = Store::open_memory("local").unwrap();
+        store.connection.write_background().execute(
+            "INSERT INTO local_relayed_close_reads(message,host) VALUES('message/a','remote')", [],
+        ).unwrap();
+        let messages = vec!["message/a".to_owned()];
+        let expected = vec![("message/a".to_owned(), "remote".to_owned())];
+        assert_eq!(read_batch(&store, 1, 0).unwrap(), expected);
+        assert_eq!(read_batch(&store, 1, 0).unwrap(), expected, "cancelled selection does not consume");
+        read_failed(&store, &messages, 100).unwrap();
+        assert_eq!(next_read_deadline(&store).unwrap(), Some(1_100));
+        assert!(read_batch(&store, 1, 1_099).unwrap().is_empty());
+        assert_eq!(read_batch(&store, 1, 1_100).unwrap(), expected);
+        read_failed(&store, &messages, 1_100).unwrap();
+        assert_eq!(next_read_deadline(&store).unwrap(), Some(3_100));
+        let mut now = 3_100;
+        for _ in 0..10 {
+            read_failed(&store, &messages, now).unwrap();
+            let next = next_read_deadline(&store).unwrap().unwrap();
+            assert!(next > now && next - now <= 60_000);
+            now = next;
+        }
+        assert_eq!(read_batch(&store, 1, now).unwrap(), expected);
+        read_succeeded(&store, &messages).unwrap();
+        assert_eq!(next_read_deadline(&store).unwrap(), None);
+        assert!(read_batch(&store, 1, u64::MAX).unwrap().is_empty());
+    }
+
+    #[test]
+    fn real_delta_resets_retry_but_legacy_tick_preserves_it() {
+        let connection = database();
+        connection.execute("INSERT INTO desired VALUES('pty/a','pty',?1,'{}')", [member("remote")]).unwrap();
+        connection.execute("INSERT INTO local_client_message_selectors_v1 VALUES('message/a',1,'pty/a',NULL,0)", []).unwrap();
+        assert_eq!(discovery_at(&connection, "local", 10).unwrap().len(), 1);
+        connection.execute("UPDATE local_relayed_close_reads SET attempts=4,next_attempt_ms=10000", []).unwrap();
+        connection.execute("INSERT INTO local_relayed_close_work(kind,key) VALUES('legacy_host','remote')", []).unwrap();
+        assert_eq!(discovery_at(&connection, "local", 10).unwrap().len(), 1);
+        let retry: (u32,u64) = connection.query_row("SELECT attempts,next_attempt_ms FROM local_relayed_close_reads", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(retry, (4,10_000));
+        connection.execute("INSERT INTO local_relayed_close_work(kind,key) VALUES('message','message/a')", []).unwrap();
+        assert_eq!(discovery_at(&connection, "local", 1).unwrap().len(), 1);
+        let retry: (u32,u64) = connection.query_row("SELECT attempts,next_attempt_ms FROM local_relayed_close_reads", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(retry, (0,0));
     }
 }
