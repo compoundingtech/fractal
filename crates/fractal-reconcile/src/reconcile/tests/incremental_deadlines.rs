@@ -1793,6 +1793,7 @@ fn queue_workspace_start(
     repository: &Path,
     workspace: &Path,
     legacy: bool,
+    request: Option<crate::model::ClaimRecord>,
 ) -> String {
     let desired = store.desired_subjects_named(&["agent/node.worker".into()])
         .unwrap().remove(0);
@@ -1806,7 +1807,7 @@ fn queue_workspace_start(
         launch_member: member.clone(),
         member,
         reason: "workspace recovery".into(),
-        request: None,
+        request,
         desired_token: store.selected_desired_token(&desired.subject).unwrap().unwrap(),
         selected_token: store.selected_desired_token(&desired.subject).unwrap(),
         placement_evidence: Vec::new(),
@@ -1854,7 +1855,7 @@ fn recovery_retires_queued_starts_with_missing_or_replaced_workspaces() {
                 "version 2\nagent \"worker\" {{ workspace {:?} create=#true; checkout {:?} base=\"origin/main\" branch=\"worker\"; command \"true\" }}",
                 workspace.to_str().unwrap(), repository.to_str().unwrap(),
             ), "workspace-recovery");
-            let id = queue_workspace_start(&store, &repository, &workspace, false);
+            let id = queue_workspace_start(&store, &repository, &workspace, false, None);
             if replacement == "dispatched" {
                 assert!(store.dispatch_runtime_start(&id, 2).unwrap());
             }
@@ -1906,7 +1907,7 @@ fn old_format_queued_start_is_retired_then_restarted_under_a_fresh_lease() {
             "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
             repository.to_str().unwrap(),
         ), "old-start-recovery");
-        queue_workspace_start(&store, &repository, &repository, true);
+        queue_workspace_start(&store, &repository, &repository, true, None);
     }
     let store = Arc::new(Store::open(&database, "node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
@@ -1923,6 +1924,80 @@ fn old_format_queued_start_is_retired_then_restarted_under_a_fresh_lease() {
         "old records must not leave an operator-only failed agent");
     assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
     assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+}
+
+#[test]
+fn old_format_queued_explicit_restart_is_reissued_and_started_with_a_fresh_lease() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let database = root.path().join("claims.db");
+    let original;
+    {
+        let store = Store::open(&database, "node").unwrap();
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
+            repository.to_str().unwrap(),
+        ), "old-explicit-restart-recovery");
+        original = store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("runtime_id".into(), Value::from("node.worker")),
+            ]),
+            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        queue_workspace_start(&store, &repository, &repository, true, Some(original.clone()));
+        assert!(store.operation_claim(&format!("agent-restart-attempt:{}", original.id)).unwrap().is_some());
+    }
+    let store = Arc::new(Store::open(&database, "node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(store.runtime_start_for("agent/node.worker").unwrap().is_none());
+    let requeued = crate::restart::latest_request(&store, "agent/node.worker").unwrap().unwrap();
+    assert_ne!(requeued.id, original.id);
+    assert_eq!(requeued.actor, original.actor);
+    assert_eq!(requeued.body["fields"], original.body["fields"]);
+    assert_eq!(requeued.body["evidence"][0], original.body["evidence"][0]);
+    assert!(store.operation_claim(&format!("agent-restart-attempt:{}", requeued.id)).unwrap().is_none());
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
+    restarted.reconcile_once().unwrap();
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+    let completion = store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))
+        .unwrap().unwrap();
+    assert_eq!(completion.kind, "runtime.action.succeeded");
+    assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+}
+
+#[test]
+fn a_nested_bare_repository_is_not_normalized_to_its_parent_worktree() {
+    let root = crate::test_support::canonical_tempdir();
+    let parent = crate::checkout::test_support::repository(root.path());
+    let nested = parent.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let workspace = crate::checkout::test_support::store_repository(&nested);
+    let bare = nested.join(".bare");
+    assert_eq!(crate::repositories::workspace_repository(&workspace), Some(bare.clone()));
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"main\" branch=\"main\"; command \"true\" }}",
+        format!("{}/", workspace.display()), workspace.to_str().unwrap(),
+    ), "nested-bare-repository-admission");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+    assert_eq!(crate::checkout::test_support::lease_count(&bare), 1,
+        "the nested bare repository, not the containing worktree, owns admission");
 }
 
 #[test]

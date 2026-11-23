@@ -143,11 +143,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &DesiredSubject,
         member: &MemberSpec,
     ) -> Result<Option<ActivationLease>> {
-        let identity = self.capture_workspace_admission(member)?;
+        let identity = self.capture_workspace_admission(member);
         self.admit_start_workspace(subject, member, &identity)
     }
 
-    fn capture_workspace_admission(&self, member: &MemberSpec) -> Result<WorkspaceAdmission> {
+    fn capture_workspace_admission(&self, member: &MemberSpec) -> WorkspaceAdmission {
         let workspace = Path::new(&member.workspace);
         let observed = self.start_jobs.activation_leases.lock()
             .unwrap_or_else(PoisonError::into_inner).observed.get(workspace).cloned();
@@ -156,14 +156,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let owner = crate::checkout::workspace_worktree(workspace)?;
             Some((owner, repository))
         });
+        // Both discovery and pass observations already return the repository identity.
+        // Resolving a bare root again can instead discover a containing worktree.
         match identity {
-            Some((owner, repository)) => {
-                let expected = std::fs::canonicalize(&repository)
-                    .with_context(|| format!("repository {} is unavailable", repository.display()))?;
-                let repository = crate::repositories::workspace_repository(&expected).unwrap_or(expected);
-                Ok(WorkspaceAdmission::Git { owner, repository })
-            }
-            None => Ok(WorkspaceAdmission::NonGit),
+            Some((owner, repository)) => WorkspaceAdmission::Git { owner, repository },
+            None => WorkspaceAdmission::NonGit,
         }
     }
 
@@ -216,7 +213,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
-        prepared.workspace_admission = Some(self.capture_workspace_admission(&prepared.member)?);
+        prepared.workspace_admission = Some(self.capture_workspace_admission(&prepared.member));
         let identity = prepared.workspace_admission.as_ref().expect("captured workspace admission");
         let activation_lease = self.admit_start_workspace(&prepared.subject, &prepared.member, identity)?;
         if let Some(run) = &prepared.subject.owner_run
@@ -661,12 +658,67 @@ impl<R: RuntimeControl> Reconciler<R> {
         )
     }
 
+    fn requeue_unadmitted_restart(&self, operation: &RuntimeStartOperation) -> Result<()> {
+        if operation.dispatched || !operation.body["workspace_admission"].is_null() {
+            return Ok(());
+        }
+        let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
+        let Some(request) = &prepared.request else { return Ok(()) };
+        let key = format!("workspace-admission-restart:{}", operation.id);
+        let requeued = if let Some(requeued) = self.store.operation_claim(&key)? {
+            requeued
+        } else {
+            // Capture the head before checking authority; a concurrent authored control
+            // must make the append fail rather than resurrect an obsolete restart.
+            let head = self.store.claims_for(&operation.subject, None)?
+                .last().map(|claim| claim.id.clone());
+            if !prepared.requests_retained(&self.store)?
+                || !self.store.runtime_start_request_retained(request)?
+                || crate::restart::latest_request(&self.store, &operation.subject)?
+                    .is_none_or(|latest| latest.id != request.id)
+                || self.store.selected_desired_token(&operation.subject)?.as_deref()
+                    != request.body.pointer("/evidence/0").and_then(Value::as_str)
+                || self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some()
+                || self.store.newest_claim_index(&operation.subject, "agent.retired")?
+                    > request.store_index
+            {
+                return Ok(());
+            }
+            let controls = self.store.observations_for(&operation.subject, "runtime.action.requested")?;
+            if controls.iter().rev().take_while(|claim| claim.id != request.id).any(|claim| {
+                matches!(claim.body["fields"]["action"].as_str(),
+                    Some("stop" | "terminate" | "suspend" | "resume"))
+                    && !(claim.actor.is_none()
+                        && claim.body["fields"]["action"] == "terminate"
+                        && claim.body["fields"]["operation"].as_str() == Some(operation.id.as_str()))
+            }) || crate::suspension::current(&self.store, &operation.subject)?
+                .is_some_and(|suspension| suspension.holds_seat())
+            {
+                return Ok(());
+            }
+            self.store.append_claim(&ClaimInput {
+                subject: operation.subject.clone(),
+                kind: request.kind.clone(),
+                actor: request.actor.clone(),
+                fields: serde_json::from_value(request.body["fields"].clone())?,
+                evidence: request.body["evidence"].as_array().into_iter().flatten()
+                    .filter_map(Value::as_str).map(str::to_owned).chain([request.id.clone()]).collect(),
+                expected_subject: Some(head),
+                idempotency_key: Some(key),
+            })?
+        };
+        self.retire_restart_request(&operation.subject, request,
+            &format!("queued restart reissued as {} with fresh workspace admission", requeued.id))?;
+        Ok(())
+    }
+
     fn refuse_start_workspace(&self, operation: &RuntimeStartOperation, error: &anyhow::Error) -> Result<()> {
         self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
             ("code".into(), Value::from("start-workspace-refused")),
             ("reason".into(), Value::from(format!("{error:#}"))),
             ("operation".into(), Value::from(operation.id.clone())),
         ]))?;
+        self.requeue_unadmitted_restart(operation)?;
         // Queued cancellation proves the producer never ran. Dispatched producers
         // still require their normal operation-fenced closure evidence.
         self.revoke_start(&operation.subject)?;
