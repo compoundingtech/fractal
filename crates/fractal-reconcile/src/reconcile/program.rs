@@ -137,6 +137,8 @@ struct Running {
     generation: u64,
     /// The exact attempt retains journal authority while its root fiber finalizes.
     finalizing: bool,
+    /// Whether each started key belongs to finalization, rather than interrupted normal work.
+    step_keys: HashMap<String, bool>,
     /// By journal key: the child runs and asks the program waits on.
     requests: BTreeMap<String, Request>,
     /// Closed whenever this exact host attempt is forgotten, including cancellation.
@@ -349,7 +351,7 @@ impl ProgramEngine {
         // Keep exactly the environment sent to spawnEffect's host, including this attempt's
         // trace and credential, for native lane commands. Never reconstruct a parallel context.
         dispatch.env = env;
-        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, finalizing: false, requests: BTreeMap::new(), _trace: trace });
+        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(), _trace: trace });
         send(&inner, &message);
         Ok(Dispatched::Started)
     }
@@ -555,16 +557,26 @@ impl ProgramEngine {
     /// before this entry) did not see it: cancel it here.
     pub fn waiting(&self, request: &Request, child: &str) -> Result<()> {
         self.write_journal(&request.step, request.attempt, &request.program, &request.key, "started", &Value::Null, Some(child))?;
-        let running = self
-            .program_of(request, |running| {
-                if let Some(pending) = running.requests.get_mut(&request.key) {
-                    pending.child = Some(child.to_owned());
+        let (waiting, finalizing) = {
+            let mut inner = self.lock();
+            match inner.running.get_mut(&request.step).filter(|running|
+                running.dispatch.attempt == request.attempt && running.generation == request.generation)
+            {
+                Some(running) => {
+                    let waiting = running.requests.get_mut(&request.key).is_some_and(|pending| {
+                        pending.child = Some(child.to_owned());
+                        true
+                    });
+                    (waiting, running.finalizing)
                 }
-            })
-            .is_some();
+                None => (false, false),
+            }
+        };
         // A program removed by its host's exit is resumed and adopts the child; one that ended or
         // left its attempt (each sets the step's state before it cancels) does not.
-        if !running && let Some(reason) = self.left(&request.step, request.attempt)? {
+        if !waiting && let Some(reason) = self.left(&request.step, request.attempt)?
+            .or_else(|| finalizing.then(|| "the program interrupted this wait".to_owned()))
+        {
             self.cancel_waits(&request.step, request.attempt, &reason)?;
         }
         Ok(())
@@ -690,21 +702,19 @@ impl ProgramEngine {
         Ok(())
     }
 
-    /// The bundle hash of the program that made `request`, while this engine still runs that
-    /// attempt, after `update` saw its entry.
-    fn program_of(&self, request: &Request, update: impl FnOnce(&mut Running)) -> Option<String> {
-        let mut inner = self.lock();
-        let running = inner.running.get_mut(&request.step).filter(|running| running.dispatch.attempt == request.attempt)?;
-        update(running);
-        Some(running.dispatch.program.bundle_hash.clone())
-    }
-
     /// Cancel the child runs and asks this attempt journaled as waits and has no result for, once
     /// nothing waits on them: the program ended or its step left the attempt. A run that ends
     /// cancels its children itself, and its asks end with it.
     fn cancel_waits(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
         let reason = format!("its program step {step} (attempt {attempt}) no longer waits on it: {reason}");
         for child in self.open_waits(step, attempt)? {
+            // A late pre-interrupt child must not cancel a newly started finalizer wait.
+            if self.lock().running.get(step).is_some_and(|running|
+                running.dispatch.attempt == attempt && running.finalizing
+                    && running.requests.values().any(|request| request.child.as_deref() == Some(child.as_str())))
+            {
+                continue;
+            }
             if child.starts_with("program-await-pr/") {
                 continue;
             }
@@ -1207,10 +1217,23 @@ impl ProgramEngine {
         }
         let key = message["key"].as_str().unwrap_or_default();
         let status = message["status"].as_str().unwrap_or_default();
+        let admitted = {
+            let mut inner = self.lock();
+            inner.running.get_mut(step).is_some_and(|running| {
+                if status == "started" {
+                    running.step_keys.entry(key.to_owned()).or_insert(running.finalizing);
+                    true
+                } else {
+                    !running.finalizing || running.step_keys.get(key) == Some(&true)
+                }
+            })
+        };
         let written = if key.is_empty() || !["started", "completed", "failed"].contains(&status) {
             Err(format!("a journal entry needs a key and a status, got key `{key}` status `{status}`"))
         } else if key == RESULT_KEY || key == "$finalizers" {
             Err(format!("a program may not journal the reserved key {key}"))
+        } else if !admitted {
+            Err(format!("the interrupted step `{key}` may not publish a late result during finalization"))
         } else {
             self.write_journal(step, attempt, program, key, status, message, None).map(|_| ()).map_err(|error| error.to_string())
         };

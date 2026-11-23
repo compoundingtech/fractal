@@ -767,7 +767,12 @@ mission "program-test" state="ready" {{
     fixture.until("the replacement journals first", || fixture.journal(&step).contains(&("first".into(), "completed".into())));
     fixture.without_passes("old effects are reaped", || old_pids.iter().all(|pid| !alive(*pid)));
     assert_eq!(fixture.store.mission_run(&old.run).unwrap().unwrap().phase, "terminal");
-    assert_eq!(fixture.journal(&old.step), journal, "the retired program wrote no later journal result");
+    let retired = fixture.journal(&old.step);
+    assert_eq!(retired.iter().filter(|(key, _)| key != "$finalizers").cloned().collect::<Vec<_>>(),
+        journal, "the retired program wrote no later normal-work result");
+    assert!(retired.contains(&("$finalizers".into(), "started".into())));
+    assert!(retired.contains(&("$finalizers".into(), "failed".into())),
+        "a bundle ignoring interruption must report incomplete finalization");
     let first = fixture.store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().into_iter()
         .find(|claim| claim.body["fields"]["key"] == "first" && claim.body["fields"]["status"] == "completed").unwrap();
     assert_eq!(first.body["fields"]["value"]["fresh"], true, "the old journal was not replayed");

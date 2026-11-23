@@ -200,6 +200,9 @@ The SDK preserves the finalizer's interruption mask when executing its activitie
 suspension wrapper's explicit interruptible region must not reinstate the pending root interrupt.
 Interruption detaches preexisting child/ask waits; late results cannot become finalizer results.
 Finalizer requests remain admitted under the same live attempt.
+Only keys started during finalization may publish finalizer results; a killed normal command
+cannot journal a late completion merely because cleanup retains the attempt. The scoped body
+fiber's complete exit is preserved before the workflow suspension join can discard release failures.
 
 The `$finalizers` result is tagged `Finalizers`, with `outcome: completed | failed | timed-out |
 interrupted-by-restart | worker-failed` and the effective `grace_ms`. Incomplete finalization is
