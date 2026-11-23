@@ -75,8 +75,7 @@ async fn attention_windows_serve_the_published_list_to_each_session_and_never_fo
         client_attention_compatibility(&mut rows, crate::api::AttentionCompatibility { custom_forms: false, model_drift: false });
         rows
     };
-    let folds = state.store.attention_list_folds();
-    for (session, person, expected) in [
+    let cases = [
         // A person sees their own rows, whatever they ask for nothing else.
         ("person/ada", None, full(Some("person/ada"))),
         ("person/robin", Some("person/robin"), full(Some("person/robin"))),
@@ -84,7 +83,11 @@ async fn attention_windows_serve_the_published_list_to_each_session_and_never_fo
         ("agent/garden/seed", None, full(None)),
         ("agent/garden/seed", Some("person/ada"), full(Some("person/ada"))),
         ("agent/garden/seed", Some("person/visitor"), Vec::new()),
-    ] {
+    ];
+    let all = full(None);
+    // The full-read oracle presents cards too; finish it before measuring window work.
+    let folds = state.store.attention_list_folds();
+    for (session, person, expected) in cases {
         let client = ClientSession::local(Some(session)).unwrap();
         let (snapshot, items, has_more) = window(&state, &client, person, 50).await.unwrap();
         assert_eq!(snapshot.store_index, publication.cut);
@@ -92,7 +95,7 @@ async fn attention_windows_serve_the_published_list_to_each_session_and_never_fo
         assert!(!has_more);
         assert_eq!(items, expected, "{session:?} {person:?}");
     }
-    assert_eq!(full(None).len(), 3);
+    assert_eq!(all.len(), 3);
     // A person cannot select another person's private rows.
     let other = window(&state, &ClientSession::local(Some("person/ada")).unwrap(), Some("person/robin"), 50)
         .await
@@ -103,7 +106,7 @@ async fn attention_windows_serve_the_published_list_to_each_session_and_never_fo
         window(&state, &ClientSession::local(Some("agent/garden/seed")).unwrap(), None, 2)
             .await
             .unwrap();
-    assert_eq!(items, full(None)[..2]);
+    assert_eq!(items, all[..2]);
     assert!(has_more);
     assert_eq!(state.store.attention_list_folds(), folds, "windows never fold");
     // A window behind a newer cut serves the publication's own cut until the refresher runs.
