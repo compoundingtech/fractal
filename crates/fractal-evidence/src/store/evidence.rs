@@ -521,8 +521,9 @@ impl EvidenceStore for Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-hb6ab7e0bb7a5 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-                 FROM claims WHERE kind='gate.requested'
+                /* sqlite-large-value: allow-for-now lv-he3f621d6f307 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+                 FROM claims INDEXED BY claims_human_gate_episode_index WHERE kind='gate.requested'
+                 AND json_extract(body, '$.fields.reviewer') IS NOT NULL
                  AND json_extract(body, '$.fields.owner')=?1
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                 [owner],
