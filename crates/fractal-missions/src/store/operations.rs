@@ -48,7 +48,7 @@ impl OperationsFixtureStore for Store {
             .unwrap();
         let at = now_ms().to_string();
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h58850df68114 owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE seq(n) AS (SELECT 0 WHERE ?4>0 UNION ALL SELECT n+1 FROM seq WHERE n+1<?4)
+            /* sqlite-large-value: allow-for-now lv-hc7343ec2c789 owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE seq(n) AS (SELECT 0 WHERE ?4>0 UNION ALL SELECT n+1 FROM seq WHERE n+1<?4)
              INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
              SELECT 'fixture-heartbeat-' || n,?1,'agent/example/observer','harness.observed',
                     'fixture',?2,'[]',?3 FROM seq",
@@ -68,10 +68,10 @@ impl OperationsFixtureStore for Store {
             } else {
                 "terminal"
             };
-            insert_run.execute(params![id,generation,status,phase,at,run.id]).unwrap();
-            insert_generation.execute(params![generation,id,status,at,run.generation.trim_start_matches("run-generation/")]).unwrap();
+            insert_run.execute(/* sqlite-large-value: allow-for-now lv-h8b42e22b9b7a owner=fractal_missions::store::operations TODO=trace-statement-and-value-representation */ params![id,generation,status,phase,at,run.id]).unwrap();
+            insert_generation.execute(/* sqlite-large-value: allow-for-now lv-hb8092571a874 owner=fractal_missions::store::operations TODO=trace-statement-and-value-representation */ params![generation,id,status,at,run.generation.trim_start_matches("run-generation/")]).unwrap();
             let step = format!("step-run/{generation}/build");
-            insert_step.execute(params![step,id,generation,status,at,run.steps[0].subject]).unwrap();
+            insert_step.execute(/* sqlite-large-value: allow-for-now lv-hb6d2c0d03b2f owner=fractal_missions::store::operations TODO=trace-statement-and-value-representation */ params![step,id,generation,status,at,run.steps[0].subject]).unwrap();
             let reason = if i % 8 == 2 {
                 "the active execution timeout expired"
             } else {
@@ -81,7 +81,7 @@ impl OperationsFixtureStore for Store {
                 (format!("mission-run/{id}"), "mission-run.state"),
                 (step, "step-run.state"),
             ] {
-                insert_claim.execute(params![format!("fixture-{kind}-{i}"),batch,subject,kind,json!({"fields":{"status":status,"phase":phase,"reason":reason}}).to_string(),at]).unwrap();
+                insert_claim.execute(/* sqlite-large-value: allow-for-now lv-h022cc99e697c owner=fractal_missions::store::operations TODO=trace-statement-and-value-representation */ params![format!("fixture-{kind}-{i}"),batch,subject,kind,json!({"fields":{"status":status,"phase":phase,"reason":reason}}).to_string(),at]).unwrap();
             }
         }
         drop((insert_run, insert_generation, insert_step, insert_claim));
