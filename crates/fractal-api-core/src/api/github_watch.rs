@@ -852,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn check_wakes_deduplicate_unchanged_conclusions_after_store_reopen() {
+    fn check_wakes_upgrade_old_keys_and_deduplicate_after_store_reopen() {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("watch.sqlite3");
         let store = Store::open(&database, "watch-test").unwrap();
@@ -884,8 +884,34 @@ mod tests {
         facts["pull_requests"][0]["required_checks"]["state"] = json!("pass");
         facts["pull_requests"][0]["checks"][0] =
             json!({"name":"build", "status":"completed", "conclusion":"success"});
+        let watch = subscriptions.iter().find_map(|(_, subscription)| subscription.watch.as_ref()).unwrap();
+        let watch_subject = thread.watch(agent);
+        let legacy_key = smallclaims::hash::canonical_hash(&(
+            crate::github_watch::WATCH_TAG, &watch_subject, watch.since_unix_ms.to_string(),
+            "checks:legacy-observation",
+        )).unwrap();
+        let legacy_subject = format!("message/watch-{}", &legacy_key[..20]);
+        let mut normalized = facts["pull_requests"][0].clone();
+        normalized["head_sha"] = normalized["head"].clone();
+        let legacy = crate::github_watch::wake(
+            &watch_subject, watch, &thread, &normalized,
+            &crate::github_watch::WatchEvent::Checks(normalized["required_checks"].clone()),
+            "legacy-observation", None,
+        ).unwrap();
+        store.append_claim(&crate::model::ClaimInput {
+            subject: legacy_subject.clone(), kind: "message.sent".into(), actor: None,
+            fields: serde_json::from_value(json!({
+                "from":"daemon/watch-test", "to":agent, "status":"sent",
+                "title":legacy.title, "content":legacy.content, "tags":legacy.tags,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
         let first = record(&store, &facts);
         assert_eq!(first.len(), 1);
+        // An old observation-key message is retained. Upgrade may add one result-key wake,
+        // but must not suppress it or keep redelivering it on subsequent observations/restarts.
+        assert_ne!(first[0], legacy_subject);
+        assert_eq!(store.messages(Some(agent), false).unwrap().len(), 2);
         facts["pull_requests"][0]["required_checks"]["execution"]["workflows"] =
             json!([[15368,77,20,10,1]]);
         facts["pull_requests"][0]["required_checks"]["execution"]["ready_since"] = json!(123);
@@ -899,7 +925,7 @@ mod tests {
         // Even when pending was observed before the restart, the same terminal result
         // resolves to the persisted message subject rather than delivering a second wake.
         assert!(record(&reopened, &completed).is_empty());
-        assert_eq!(reopened.messages(Some(agent), false).unwrap().len(), 1);
+        assert_eq!(reopened.messages(Some(agent), false).unwrap().len(), 2);
         assert_eq!(reopened.claims_for(&first[0], Some("message.sent")).unwrap().len(), 1);
         let mut failed = completed;
         failed["pull_requests"][0]["required_checks"]["state"] = json!("fail");
@@ -907,7 +933,7 @@ mod tests {
         failed["pull_requests"][0]["checks"][0]["conclusion"] = json!("failure");
         failed["pull_requests"][0]["required_checks"]["execution"]["workflows"][0][4] = json!(2);
         assert_eq!(record(&reopened, &failed).len(), 1);
-        assert_eq!(reopened.messages(Some(agent), false).unwrap().len(), 2);
+        assert_eq!(reopened.messages(Some(agent), false).unwrap().len(), 3);
         drop(reopened);
         let restarted = Store::open(&database, "watch-test").unwrap();
         assert!(record(&restarted, &failed).is_empty());
@@ -918,7 +944,7 @@ mod tests {
         recovery["pull_requests"][0]["required_checks"]["execution"]["workflows"][0][4] = json!(3);
         assert_eq!(record(&restarted, &recovery).len(), 1);
         assert!(record(&restarted, &recovery).is_empty());
-        assert_eq!(restarted.messages(Some(agent), false).unwrap().len(), 3);
+        assert_eq!(restarted.messages(Some(agent), false).unwrap().len(), 4);
     }
 
     #[tokio::test]

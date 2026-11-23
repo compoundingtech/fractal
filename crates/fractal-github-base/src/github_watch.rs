@@ -4,8 +4,8 @@
 //! `github.repository` observer of the repository. That observer records every item's newest
 //! comments and reviews, its state, and how the checks its base requires stand, and the write
 //! that records an observation decides each watch's wakes from the item's prior facts: one for
-//! each new comment or review, one for each distinct terminal check conclusion set on the
-//! current head, changes to a PR's head, draft state or queue membership, and a final one when
+//! each new comment or review, one for each distinct terminal counted result or workflow attempt
+//! on the current head, changes to a PR's head, draft state or queue membership, and a final one when
 //! the thread closes or merges, which ends that watch. No
 //! thread has a poller of its own.
 
@@ -263,7 +263,7 @@ pub fn stop_source(subject: &str) -> Option<String> {
 pub enum WatchEvent {
     /// A comment or review it did not know: `{kind, id, author, at}`, and a review's `state`.
     Comment(Value),
-    /// The counted checks changed to a passing, failing or cancelled conclusion set.
+    /// The counted aggregate result, failed names or workflow attempts changed to a terminal result.
     Checks(Value),
     /// A PR changed head, draft state, or merge-queue membership while still open.
     PullRequestChanged(Vec<String>),
@@ -272,8 +272,8 @@ pub enum WatchEvent {
 }
 
 impl WatchEvent {
-    /// Checks are identified by head, conclusions and counted workflow run/attempt identities,
-    /// never by observer IDs or incidental suite/readiness metadata.
+    /// Checks are identified by head, counted aggregate/failed names and workflow run/attempt
+    /// identities, never by raw display checks, observer IDs or incidental suite/readiness metadata.
     fn key(&self, observation: &str, facts: &Value) -> Value {
         match self {
             Self::Comment(entry) => {
@@ -289,17 +289,19 @@ impl WatchEvent {
 
 /// A stable projection using existing facts. Counted workflow tuples are
 /// (app, workflow, suite, run, attempt, event): only run and attempt identify a rerun.
-/// Checks without a numeric workflow run ID (external apps, or Actions runs whose databaseId
-/// is null) fall back to conclusions: an identical recurring result at the same head is suppressed.
+/// No-ID checks include commit statuses, non-workflow third-party apps (possibly Mergemaster,
+/// depending on its reporting), and Actions runs with null databaseId: identical recurrences
+/// at the same head are suppressed. Changes preserving aggregate state, failed names and run
+/// attempts (such as success to skipped) intentionally do not wake.
 fn check_state(facts: &Value, include_runs: bool) -> Value {
     let checks = &facts["required_checks"];
-    let counted = checks["checks"].as_array();
-    let conclusions = facts["checks"]
+    // These are the producer's selected results, after app-pin and superseded-suite filtering.
+    // Raw checks are display facts, not evidence that a counted check changed.
+    let failed = checks["failed"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|check| counted.is_some_and(|names| names.contains(&check["name"])))
-        .map(|check| (check["name"].as_str(), check["conclusion"].as_str()))
+        .filter_map(Value::as_str)
         .collect::<std::collections::BTreeSet<_>>();
     let runs = include_runs.then(|| checks.pointer("/execution/workflows")
         .and_then(Value::as_array)
@@ -307,13 +309,12 @@ fn check_state(facts: &Value, include_runs: bool) -> Value {
         .flatten()
         .filter_map(|execution| Some((execution.get(3)?.as_u64()?, execution.get(4)?.as_u64()?)))
         .collect::<std::collections::BTreeSet<_>>());
-    json!(["checks", facts["head_sha"], checks["state"], checks["checks"],
-        checks["failed"], conclusions, runs])
+    json!(["checks", facts["head_sha"], checks["state"], failed, runs])
 }
 
 /// The events one observation of a watched item holds, oldest first: the comments and reviews
 /// `seen` names that `prior` did not, made no earlier than five minutes before the watch
-/// began; a change to a terminal check conclusion set, or a new head first seen there; and
+/// began; a change to a terminal counted result or attempt, or a new head first seen there; and
 /// changes to an open PR's head, draft state or queue membership; and the thread closing.
 /// With no prior facts the item is new to the observer, so it holds no
 /// check move and no close.
@@ -1519,12 +1520,23 @@ mod tests {
         assert!(watch_events(&watch(), Some(&completed), &json!({}), &metadata).is_empty());
         assert_eq!(make_wake(&completed, "before-restart").subject,
             make_wake(&metadata, "after-restart").subject);
+        let mut rerun = completed.clone();
+        rerun["required_checks"]["execution"]["workflows"][0][4] = json!(2);
+        assert_eq!(watch_events(&watch(), Some(&completed), &json!({}), &rerun).len(), 1);
+        assert_ne!(make_wake(&completed, "one").subject, make_wake(&rerun, "two").subject);
         let mut changed = completed.clone();
         changed["checks"] = json!([{"name":"build", "conclusion":"success"}]);
         let mut failed = changed.clone();
         failed["checks"][0]["conclusion"] = json!("failure");
+        failed["required_checks"]["state"] = json!("fail");
+        failed["required_checks"]["failed"] = json!(["build"]);
         assert_ne!(make_wake(&changed, "one").subject, make_wake(&failed, "two").subject);
         assert_eq!(watch_events(&watch(), Some(&changed), &json!({}), &failed).len(), 1);
+        assert_eq!(watch_events(&watch(), Some(&failed), &json!({}), &changed).len(), 1);
+        let mut skipped = changed.clone();
+        skipped["checks"][0]["conclusion"] = json!("skipped");
+        assert!(watch_events(&watch(), Some(&changed), &json!({}), &skipped).is_empty());
+        assert_eq!(make_wake(&changed, "one").subject, make_wake(&skipped, "two").subject);
         let mut other_head = changed.clone();
         other_head["head_sha"] = json!("another");
         assert_ne!(make_wake(&changed, "one").subject, make_wake(&other_head, "one").subject);

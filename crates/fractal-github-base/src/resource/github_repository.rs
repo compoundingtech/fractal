@@ -4843,6 +4843,43 @@ mod tests {
     }
 
     #[test]
+    fn excluded_same_named_apps_and_superseded_suites_do_not_change_wake_identity() {
+        let rules = [RequiredCheck { context: "build".into(), app: Some(15368) }];
+        let current = workflow_suite(20, "2026-10-13T09:02:00Z");
+        let superseded = workflow_suite(10, "2026-10-13T09:01:00Z");
+        let produce = |foreign_conclusion: Option<&str>, old_conclusion: &str| {
+            let mut pull = open_pull(12, &"a".repeat(40), "SUCCESS");
+            pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] =
+                json!([superseded, current]);
+            let foreign = json!({"__typename":"CheckRun", "name":"build",
+                "status":if foreign_conclusion.is_some() { "COMPLETED" } else { "IN_PROGRESS" },
+                "conclusion":foreign_conclusion, "checkSuite":{"app":{"databaseId":999}}});
+            pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"] =
+                json!([workflow_check("build", Some("SUCCESS"), &current),
+                    workflow_check("build", Some(old_conclusion), &superseded), foreign]);
+            let mut facts = open_pull_request(&pull, Some(&rules));
+            facts.insert("head_sha".into(), facts["head"].clone());
+            Value::Object(facts)
+        };
+        let baseline = produce(None, "FAILURE");
+        let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+        let watch = crate::model::WatchSpec { item: 12, since_unix_ms: 0, until_unix_ms: None };
+        let subject = thread.watch("agent/example/planner");
+        let message = |facts: &Value, observation: &str| crate::github_watch::wake(
+            &subject, &watch, &thread, facts,
+            &crate::github_watch::WatchEvent::Checks(facts["required_checks"].clone()),
+            observation, None,
+        ).unwrap();
+        for changed in [produce(Some("SUCCESS"), "FAILURE"), produce(None, "SUCCESS")] {
+            assert_ne!(baseline["checks"], changed["checks"]);
+            assert_eq!(baseline["required_checks"], changed["required_checks"]);
+            assert_eq!(baseline["required_checks"]["state"], "pass");
+            assert!(crate::github_watch::watch_events(&watch, Some(&baseline), &json!({}), &changed).is_empty());
+            assert_eq!(message(&baseline, "first").subject, message(&changed, "second").subject);
+        }
+    }
+
+    #[test]
     fn cancelled_checks_are_not_failures_and_optional_checks_do_not_count() {
         let run = |name: &str, conclusion: &str| json!({
             "__typename":"CheckRun", "name":name, "status":"COMPLETED",
