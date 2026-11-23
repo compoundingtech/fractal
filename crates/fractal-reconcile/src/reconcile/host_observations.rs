@@ -10,6 +10,9 @@ use super::*;
 #[derive(Default)]
 pub(super) struct HostObservations {
     revision: Arc<std::sync::atomic::AtomicU64>,
+    // Registry identity/coverage changes rearm watches; ordinary metadata changes
+    // invalidate evidence without tearing down otherwise valid native coverage.
+    coverage_revision: Arc<std::sync::atomic::AtomicU64>,
     state: Mutex<ObservationState>,
     mail_revision: Arc<std::sync::atomic::AtomicU64>,
     mail_observer: std::sync::OnceLock<smallclaims::sqlite::CommitObserver>,
@@ -18,7 +21,7 @@ pub(super) struct HostObservations {
 
 #[derive(Default)]
 struct ObservationState {
-    watch: Option<(Arc<file_subscriptions::Pool>, file_subscriptions::Lease)>,
+    watch: Option<(Arc<file_subscriptions::Pool>, file_subscriptions::Lease, u64)>,
     snapshot: Option<(u64, Arc<PtyRegistrySnapshot>)>,
     exec_revision: Option<u64>,
 }
@@ -49,7 +52,10 @@ impl HostObservations {
 
     fn watch(&self, paths: &[PathBuf], notify: &Arc<Notify>) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.watch.is_some() { return Ok(()); }
+        let coverage = self.coverage_revision.load(Ordering::Acquire);
+        if state.watch.as_ref().is_some_and(|(_, _, installed)| *installed == coverage) {
+            return Ok(());
+        }
         let pool = file_subscriptions::Pool::new()?;
         // Watch an existing ancestor: registries can be created or replaced after startup.
         let targets = paths.iter().map(|path| {
@@ -64,14 +70,26 @@ impl HostObservations {
             Ok((ancestor.to_owned(), ancestor != path.as_path()))
         }).collect::<Result<Vec<_>>>()?;
         let revision = self.revision.clone();
+        let coverage_revision = self.coverage_revision.clone();
+        let watched_targets = targets.clone();
         let notify = notify.clone();
         let lease = pool.subscribe_input(roots, Arc::new(move |event| {
             targets.iter().any(|target| registry_event_relevant(event, target))
-        }), Arc::new(move |_| {
+        }), Arc::new(move |notification| {
+            if notification.coverage_changed || notification.event.need_rescan()
+                || notification.event.paths.iter().any(|path| {
+                    watched_targets.iter().any(|root| root.starts_with(path))
+                })
+            {
+                coverage_revision.fetch_add(1, Ordering::AcqRel);
+            }
             revision.fetch_add(1, Ordering::AcqRel);
             notify.notify_one();
         }))?;
-        state.watch = Some((pool, lease));
+        // Retain the pre-subscription epoch: a concurrent replacement must remain
+        // dirty even if it races acquisition. Failed acquisition leaves the old
+        // epoch dirty too, so no later pass can reuse unobserved evidence.
+        state.watch = Some((pool, lease, coverage));
         Ok(())
     }
 
@@ -367,6 +385,37 @@ pub(super) fn observe_exec(runtime: &fractal_runtime::ExecRuntime, runtime_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn a_running_pty_with_a_dead_pid_is_observed_as_vanished() {
+        let observation = fractal_runtime::PtyObservation {
+            name: "stale-worker".into(),
+            status: "running".into(),
+            exit_code: None,
+            pid: Some(i32::MAX as u32),
+            created_at: Some("2026-09-22T12:00:00.000Z".into()),
+            display_name: None,
+            tags: BTreeMap::new(),
+        };
+
+        assert_eq!(observed_pty_status(&observation), "vanished");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_running_pty_with_a_live_pid_remains_running() {
+        let observation = fractal_runtime::PtyObservation {
+            name: "live-worker".into(),
+            status: "running".into(),
+            exit_code: None,
+            pid: Some(std::process::id()),
+            created_at: Some("2026-09-22T12:00:00.000Z".into()),
+            display_name: None,
+            tags: BTreeMap::new(),
+        };
+
+        assert_eq!(observed_pty_status(&observation), "running");
+    }
 
     #[test]
     fn registry_dispatch_ignores_output_activity_and_unrelated_fleet_files() {
@@ -389,5 +438,54 @@ mod tests {
         assert!(registry_event_relevant(
             &notify::Event::new(notify::EventKind::Other)
                 .set_flag(notify::event::Flag::Rescan), root));
+    }
+
+    #[tokio::test]
+    async fn replaced_or_recreated_registry_rearms_native_observation_coverage() {
+        for rename in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let registry = temporary.path().join("registry");
+            std::fs::create_dir(&registry).unwrap();
+            let paths = vec![registry.clone()];
+            let observations = HostObservations::default();
+            let notify = Arc::new(Notify::new());
+            observations.watch(&paths, &notify).unwrap();
+            let original_pool = observations.state.lock().unwrap().watch.as_ref().unwrap().0.clone();
+            observations.watch(&paths, &notify).unwrap();
+            assert!(Arc::ptr_eq(&original_pool,
+                &observations.state.lock().unwrap().watch.as_ref().unwrap().0),
+                "unchanged coverage is retained without reacquisition");
+
+            if rename {
+                std::fs::rename(&registry, temporary.path().join("previous")).unwrap();
+            } else {
+                std::fs::remove_dir(&registry).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while observations.coverage_revision.load(Ordering::Acquire) == 0 {
+                    notify.notified().await;
+                }
+            }).await.expect("native removal/replacement must invalidate coverage");
+
+            // A pass while the root is absent must move coverage to its existing
+            // ancestor, so recreation is observable without polling the filesystem.
+            observations.watch(&paths, &notify).unwrap();
+            drop(original_pool);
+            let before_recreation = observations.coverage_revision.load(Ordering::Acquire);
+            std::fs::create_dir(&registry).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while observations.coverage_revision.load(Ordering::Acquire) == before_recreation {
+                    notify.notified().await;
+                }
+            }).await.expect("ancestor coverage must observe registry recreation");
+            observations.watch(&paths, &notify).unwrap();
+            let before_metadata = observations.revision.load(Ordering::Acquire);
+            std::fs::write(registry.join("example.json"), b"{}").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while observations.revision.load(Ordering::Acquire) == before_metadata {
+                    notify.notified().await;
+                }
+            }).await.expect("new registry metadata must invalidate physical observations");
+        }
     }
 }
