@@ -291,25 +291,33 @@ impl Store {
                     .optional()?
                     .and_then(|value| value.split_once('\n').map(|(a, b)| (a.to_owned(), b.to_owned())))
                     .unwrap_or_default();
-                let page = tx
-                    .prepare_cached(
-                        "SELECT claim_id, writer, sequence, member_key, signature, received_at_unix_ms
-                         FROM claim_member_signature_pending WHERE (claim_id, member_key) > (?2, ?3)
-                         ORDER BY claim_id, member_key LIMIT ?1",
-                    )?
-                    .query_map(params![PROMOTE_PAGE, after.0, after.1], |row| {
-                        Ok((
-                            ClaimMemberSignature {
-                                claim_id: row.get(0)?,
-                                writer: row.get(1)?,
-                                sequence: row.get(2)?,
-                                member_key: row.get(3)?,
-                                signature: row.get(4)?,
-                            },
-                            row.get::<_, i64>(5)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut statement = tx.prepare_cached(
+                    "SELECT claim_id, writer, sequence, member_key, signature, received_at_unix_ms
+                     FROM claim_member_signature_pending WHERE (claim_id, member_key) > (?2, ?3)
+                     ORDER BY claim_id, member_key LIMIT ?1",
+                )?;
+                let mut read_page = |claim: &str, key: &str| {
+                    statement
+                        .query_map(params![PROMOTE_PAGE, claim, key], |row| {
+                            Ok((
+                                ClaimMemberSignature {
+                                    claim_id: row.get(0)?,
+                                    writer: row.get(1)?,
+                                    sequence: row.get(2)?,
+                                    member_key: row.get(3)?,
+                                    signature: row.get(4)?,
+                                },
+                                row.get::<_, i64>(5)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                };
+                let mut page = read_page(&after.0, &after.1)?;
+                if page.is_empty() && !after.0.is_empty() {
+                    // Finish the wrap in this call: a new signature may sort before the
+                    // previous page's cursor. An empty tail is not a settled backlog.
+                    page = read_page("", "")?;
+                }
                 let mut settled = 0;
                 for (signature, received) in &page {
                     let decided = match claim_writer_tx(tx, &signature.claim_id)? {
