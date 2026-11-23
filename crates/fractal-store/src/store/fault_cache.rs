@@ -137,7 +137,22 @@ impl Store {
         for subject in selected {
             let deadline = cache.incremental.due_of(&subject).is_some_and(|due| due <= as_of);
             let ((items, mut reads), due) = smallclaims::touched::record_due(|| {
-                smallclaims::touched::record(|| self.operational_fault_families_for(None, as_of, Some(&subject)))
+                smallclaims::touched::record(|| {
+                    if subject.starts_with("step-run/") {
+                        // A deferred projection may not have materialized the step row yet.
+                        // Resolve its owner from generation claims too: projection completion
+                        // is published on the run, not on every step it materializes.
+                        let connection = self.readers.get();
+                        match run_of_subject_tx(&connection, &subject)? {
+                            Some(run) => smallclaims::touched::note_read(|| format!("mission-run/{run}")),
+                            None => {
+                                smallclaims::touched::note_read(|| "kind:mission-run.created".into());
+                                smallclaims::touched::note_read(|| "kind:work.person-asked".into());
+                            }
+                        }
+                    }
+                    self.operational_fault_families_for(None, as_of, Some(&subject))
+                })
             });
             let items = items?;
             reads.insert(subject.clone());
@@ -412,5 +427,55 @@ mod family_tests {
         assert_eq!(read(&store, second_due).len(), 2);
         assert_eq!(recomputed(&store), before + 2);
         assert_eq!(store.fault_family_work()["deadline_subjects_recomputed"], 2);
+    }
+
+    #[test]
+    fn fault_delivery_revisits_unmaterialized_step_when_owning_run_projection_finishes() {
+        let store = Store::open_memory("node").unwrap();
+        crate::store::tests_shared_missions::publish_carry(&store, r#"version 2
+mission "fault-projection" state="ready" {
+  goal "Keep projection-dependent faults current."
+  step "work" { agentless }
+}"#, "declare-fault-projection");
+        let run = store.create_mission_run_inner(&crate::model::MissionRunRequest {
+            mission: "fault-projection".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/operator".into()),
+            mode: None,
+            inputs: Default::default(),
+            idempotency_key: "fault-projection-run".into(),
+        }, None, None, None).unwrap();
+        let step = run.steps.iter().find(|step| step.step == "work").unwrap();
+        fault(&store, &step.subject, "faulted", 1_000);
+        fault(&store, "daemon/unrelated", "faulted", 2_000);
+        {
+            let writer = store.connection.write();
+            // Hold the exact projected row aside to exercise the admitted-but-not-yet-
+            // materialized state without adding any step claim when it later appears.
+            writer.execute("CREATE TEMP TABLE deferred_fault_steps AS SELECT * FROM step_runs WHERE subject=?1",
+                [&step.subject]).unwrap();
+            writer.execute("DELETE FROM step_runs WHERE subject=?1", [&step.subject]).unwrap();
+        }
+        let at = u128::MAX - 1;
+        let initial = read(&store, at);
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].subject, "daemon/unrelated");
+        assert_eq!(store.fault_delivery_next_due(), None, "the missing-step answer has no timer");
+        let before = store.fault_family_work();
+        {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            tx.execute("INSERT INTO step_runs SELECT * FROM deferred_fault_steps", []).unwrap();
+            note_run_projection_finished_tx(&tx,
+                &BTreeSet::from([run.subject.trim_start_matches("mission-run/").to_owned()])).unwrap();
+            tx.commit().unwrap();
+        }
+        let completed = read(&store, at);
+        assert!(completed.iter().any(|item| item.subject == step.subject));
+        assert_eq!(completed.len(), 2);
+        assert_eq!(store.fault_family_work()["bootstraps"], before["bootstraps"]);
+        assert_eq!(recomputed(&store), before["subjects_recomputed"].as_u64().unwrap() + 2,
+            "only the completed run and its dependent fault source are reevaluated");
     }
 }

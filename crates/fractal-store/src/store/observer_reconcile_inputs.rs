@@ -26,6 +26,7 @@ struct State {
 pub struct DesiredInputs {
     generation: Option<u64>,
     pub desired: Vec<DesiredSubject>,
+    pub changed_subjects: Vec<String>,
     restored_kinds: Vec<(usize, String)>,
     fences: crate::incremental::Incremental,
     pending: BTreeMap<String, bool>,
@@ -46,20 +47,22 @@ impl DesiredInputs {
         let work = store.extension::<Work>();
         let (generation, changed) = store.desired_changes_since(self.generation);
         let updated = changed.as_ref().is_none_or(|subjects| !subjects.is_empty());
+        self.changed_subjects.clear();
         match changed {
             None => {
                 let desired = store.desired_subjects()?;
                 work.full_rebuilds.fetch_add(1, Relaxed);
                 work.subjects_rebuilt.fetch_add(desired.len() as u64, Relaxed);
                 self.desired = desired;
+                self.changed_subjects.extend(self.desired.iter().map(|subject| subject.subject.clone()));
                 self.fences = Default::default();
                 self.pending.clear();
             }
             Some(changed) if !changed.is_empty() => {
                 let replacements = store.desired_subjects_named(&changed)?;
                 work.subjects_rebuilt.fetch_add(changed.len() as u64, Relaxed);
-                for subject in changed {
-                    if let Ok(index) = self.desired.binary_search_by(|entry| entry.subject.cmp(&subject)) {
+                for subject in &changed {
+                    if let Ok(index) = self.desired.binary_search_by(|entry| entry.subject.cmp(subject)) {
                         self.desired.remove(index);
                     }
                 }
@@ -68,6 +71,7 @@ impl DesiredInputs {
                         .unwrap_or_else(|index| index);
                     self.desired.insert(index, declaration);
                 }
+                self.changed_subjects = changed;
             }
             Some(_) => {}
         }

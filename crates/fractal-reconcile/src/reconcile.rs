@@ -3695,6 +3695,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut desired_span = crate::reconcile_telemetry::phase("pass/desired");
         let mut common_inputs = self.common_inputs.lock().unwrap_or_else(PoisonError::into_inner);
         let desired_changed = common_inputs.refresh(&self.store)?;
+        for subject in &common_inputs.changed_subjects {
+            self.incremental.touch_subject(subject);
+        }
         let pending_subjects = common_inputs.pending_subjects(&self.store)?;
         let terminal_owned = self.store.terminal_owned_runtime_subjects()?;
         common_inputs.stop_terminal_members(&terminal_owned, &self.host);

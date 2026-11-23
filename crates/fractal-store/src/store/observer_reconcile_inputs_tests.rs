@@ -28,6 +28,7 @@ fn desired_inputs_rebuild_only_changed_keys_and_track_raw_removals() {
     let first = inputs.desired.as_ptr();
     drop(store.connection.write());
     inputs.refresh(&store).unwrap();
+    assert!(inputs.changed_subjects.is_empty());
     assert_eq!(store.reconcile_input_work(), initial, "no-change loans do no input work");
     assert_eq!(inputs.desired.as_ptr(), first, "unchanged roster is retained in place");
     {
@@ -43,6 +44,7 @@ fn desired_inputs_rebuild_only_changed_keys_and_track_raw_removals() {
         "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/first'", [],
     ).unwrap();
     inputs.refresh(&store).unwrap();
+    assert_eq!(inputs.changed_subjects, ["resource/first"]);
     let changed = store.reconcile_input_work();
     assert_eq!(changed["full_rebuilds"], initial["full_rebuilds"]);
     assert_eq!(changed["subjects_rebuilt"].as_u64(), initial["subjects_rebuilt"].as_u64().map(|count| count + 1));
