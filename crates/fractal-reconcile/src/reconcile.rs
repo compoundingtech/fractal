@@ -1849,22 +1849,38 @@ struct FileWatch {
 #[derive(Default)]
 struct FileChanges {
     runs: Mutex<BTreeSet<String>>,
+    launches: Mutex<BTreeSet<String>>,
+    pending_measurements: Mutex<BTreeSet<String>>,
     notify: Notify,
 }
 impl FileChanges {
     fn invalidate(&self, incremental: &crate::incremental::Incremental, subject: &str,
         rescan: bool, global_notify: &Notify) {
         let readers = incremental.touch_readers(subject);
-        // Launch admission and other global readers still require the common loop.
-        // File-gate readers have an existing, independently driven mission evaluator.
-        if rescan || readers.iter().any(|item| !item.starts_with("mission-run/")) {
+        let mut runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut launches = self.launches.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut global = rescan;
+        let mut scoped = false;
+        for item in readers {
+            if item.starts_with("mission-run/") {
+                runs.insert(item);
+                scoped = true;
+            } else if let Some(subject) = item.strip_prefix("launch-inputs:") {
+                launches.insert(subject.to_owned());
+                crate::incremental::file_watch_work::launch_notification();
+                scoped = true;
+            } else {
+                global = true;
+            }
+        }
+        if scoped {
+            crate::incremental::file_watch_work::notification(false);
+            self.notify.notify_one();
+        }
+        if global {
             crate::incremental::file_watch_work::notification(true);
             crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::FileWatch, None);
             global_notify.notify_one();
-        } else if !readers.is_empty() {
-            self.runs.lock().unwrap_or_else(PoisonError::into_inner).extend(readers);
-            crate::incremental::file_watch_work::notification(false);
-            self.notify.notify_one();
         }
     }
 }
@@ -1887,7 +1903,8 @@ impl FileWatch {
                             || referent.is_some_and(|referent| referent.starts_with(path)))
                             && matches!(
                                 event.kind,
-                                notify::EventKind::Remove(_)
+                                notify::EventKind::Create(_)
+                                    | notify::EventKind::Remove(_)
                                     | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
                             ))
                 })))
@@ -12256,6 +12273,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok((changed_runs.len(), changed))
     }
 
+    /// Re-measure only declarations whose launch inputs changed. This shares the
+    /// dependency follower with mission gates, not the full reconcile scheduler.
+    fn evaluate_changed_launch_inputs(&self) -> Result<usize> {
+        let subjects = std::mem::take(
+            &mut *self.file_changes.launches.lock().unwrap_or_else(PoisonError::into_inner));
+        let mut evaluated = 0;
+        for subject in subjects {
+            let Some((desired, _)) = self.store.desired_subject_with_writer(&subject)? else {
+                continue;
+            };
+            if desired.kind != "agent"
+                || !desired.member.as_ref().is_some_and(|member| member.host == self.host) {
+                continue;
+            }
+            crate::incremental::file_watch_work::launch_evaluation();
+            evaluated += 1;
+            let daemon = format!("daemon/{}", self.host);
+            self.isolate(&format!("stage/launch-inputs/{subject}"), &daemon,
+                || self.watch_launch_inputs(&desired));
+        }
+        Ok(evaluated)
+    }
+
     /// Follow the post-commit feed and evaluate the runs each change touched; see
     /// [`Self::evaluate_changed_mission_runs`]. A run that wrote wakes the pass, which carries
     /// its effects on (seats, wake messages) and tells clients when it ends. An evaluation moves
@@ -12276,6 +12316,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             }
             changes.borrow_and_update();
+            if let Err(error) = self.blocking(|this| this.evaluate_changed_launch_inputs()).await {
+                eprintln!("st3: evaluating changed launch inputs: {error:#}");
+            }
             let changed = self
                 .blocking(|this| {
                     crate::profile::task("task mission-reads", || {
@@ -21769,20 +21812,27 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         self.launch_input_wake.get_or_init(|| {
             let incremental = self.incremental.clone();
+            let file_changes = self.file_changes.clone();
             let notify = self.notify.clone();
             let revision = self.file_watch_revision.clone();
             let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                 revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                incremental.touch("launch-identity");
-                notify.notify_one();
+                let pending = file_changes.pending_measurements.lock()
+                    .unwrap_or_else(PoisonError::into_inner).clone();
+                for subject in pending {
+                    file_changes.invalidate(&incremental, &format!("launch-identity/{subject}"), false, &notify);
+                }
             });
             fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
             wake
         });
         let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
+        let identity_key = format!("launch-identity/{}", subject.subject);
+        self.file_changes.pending_measurements.lock().unwrap_or_else(PoisonError::into_inner)
+            .insert(subject.subject.clone());
         let watch_error = std::cell::RefCell::new(None); // Identity errors and disappearing inputs remain unknown.
         let (result, reads) = smallclaims::touched::record(|| {
-            smallclaims::touched::note_read(|| "launch-identity".into());
+            smallclaims::touched::note_read(|| identity_key.clone());
             smallclaims::touched::note_read(|| "kind:intent.desired".into());
             crate::contract::declared_ready_inputs(&self.store, subject, &|path| {
                 let key = format!("launch-input/{}", path.display());
@@ -21792,7 +21842,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         });
         self.incremental.evaluated(&item, reads, None);
         if watch_error.borrow().is_some() || matches!(&result, Ok(None)) || before != self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire) {
-            self.incremental.touch("launch-identity");
+            self.incremental.touch(&identity_key);
+        }
+        if !matches!(&result, Ok(None)) {
+            self.file_changes.pending_measurements.lock().unwrap_or_else(PoisonError::into_inner)
+                .remove(&subject.subject);
         }
         watch_error.into_inner().map_or(Ok(()), |error| Err(anyhow::anyhow!(error)))
     }
@@ -21815,15 +21869,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             .flat_map(Path::ancestors)
             .find(|candidate| candidate.is_dir())
             .context("file watch has no existing parent directory")?;
-        let next_component = target
-            .strip_prefix(directory)?
-            .components()
-            .next()
-            .context("file watch has no target component")?;
+        let suffix = target.strip_prefix(directory)?;
         // Backends report canonical directories (notably /private/tmp on macOS).
         // Keep the lexical target as identity, but compare events in their namespace.
         let directory = file_subscriptions::canonicalize(directory)?;
-        let relevant = directory.join(next_component);
+        // Retain the entire declared suffix, not just its first missing component.
+        // Watching a missing executable under an existing home must not subscribe
+        // that input to every write anywhere below the same intermediate directory.
+        let relevant = directory.join(suffix);
         // A file symlink can point outside the lexical parent. Observe its referent's
         // parent too, so both writes and inode replacements preserve file-gate behavior.
         let referent = file_subscriptions::canonicalize(&target).ok().filter(|path| *path != relevant);
