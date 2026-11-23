@@ -2,6 +2,10 @@
 use super::*;
 use crate::model::LoopSpec;
 
+#[path = "attention_sources.rs"]
+mod sources;
+pub use sources::AttentionSourceSnapshot;
+
 /// The operational failure episodes as last folded, under the newest index and the count of
 /// their claims.
 #[derive(Default)]
@@ -248,11 +252,27 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        self.harness_prompt_attention_items_for_subjects(person, as_of, None)
+    }
+
+    pub(super) fn harness_prompt_attention_items_for_subjects(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        subjects: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
-        let seats = connection
-            .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let seats = match subjects {
+            Some(subjects) => connection.prepare_cached(
+                "SELECT subject FROM desired WHERE kind='agent'
+                 AND subject IN (SELECT value FROM json_each(?1)) ORDER BY subject",
+            )?.query_map([serde_json::to_string(subjects)?], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            None => connection
+                .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
         let newest = |subject: &str, kind: &str| -> Result<Option<(String, u128, Value)>> {
             let row = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4c401b40b08 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
