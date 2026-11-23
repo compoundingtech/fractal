@@ -9333,6 +9333,19 @@ fn resolve_mission_run_inputs(
                             )
                         })?
                 };
+                if let Some(expected) = &declaration.resource_kind {
+                    let actual: Option<String> = transaction.query_row(
+                        "SELECT CASE kind WHEN 'resource.observed' THEN json_extract(body, '$.fields.kind') WHEN 'vcs.item.state' THEN json_extract(body, '$.fields.item_kind') END FROM claims WHERE id=?1 AND subject=?2",
+                        params![claim_id, subject],
+                        |row| row.get(0),
+                    ).map_err(internal)?;
+                    if actual.as_ref() != Some(expected) {
+                        return Err(FractalError::new(
+                            "resource-input-kind-mismatch",
+                            format!("mission input `{name}` requires resource kind `{expected}`, got `{}` at {subject}@{claim_id}", actual.as_deref().unwrap_or("unknown")),
+                        ));
+                    }
+                }
                 MissionRunInput {
                     kind: MissionInputKind::Resource,
                     value: format!("{subject}@{claim_id}"),

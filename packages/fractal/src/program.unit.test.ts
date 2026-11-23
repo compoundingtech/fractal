@@ -13,6 +13,7 @@ import {
 } from './effect.ts'
 import { fakeHost, journalOf, start } from './program-host.fixture.ts'
 import type { HostContextV1, ResourceRequest } from './program-engine.ts'
+import { programInputs } from './program.ts'
 import {
   ReviewError, ReviewResult, reviewComment, reviewKey, type ReviewOptions,
 } from './review.ts'
@@ -32,6 +33,36 @@ const reportTo: AgentRef = {
 const meta = { url: 'file:///tree/factory/test/mission.ts' }
 const Change = Schema.Struct({ change: Schema.String })
 
+
+describe('program resource inputs', () => {
+  const Source = Fractal.resourceInput('vcs.pull-request')
+  const Input = Schema.Struct({ source: Source, head: Schema.String })
+
+  it('uses the native resource input declaration alongside ordinary text inputs', () => {
+    expect(programInputs(Input)).toEqual([
+      { name: 'source', kind: 'resource', resourceKind: 'vcs.pull-request' },
+      { name: 'head', kind: 'text' },
+    ])
+    expect(() => Fractal.resourceInput(' ')).toThrow('Resource input kind must be nonempty')
+    expect(() => programInputs(Schema.Struct({ source: Schema.optionalKey(Source) }))).toThrow(
+      'Program input source must be required and encode to a string',
+    )
+  })
+
+  it.effect('decodes the pinned observation without changing its immutable reference', () =>
+    Effect.gen(function* () {
+      const source = `resource/github/example/repo/pull-request/7@${'a'.repeat(64)}`
+      const program = Fractal.mission({
+        meta, id: 'factory/test', goal: 'Consume the subscribed resource.', reportTo,
+        input: Input, output: Schema.String,
+      }, (input) => Effect.succeed(input.source))
+      expect(yield* start(program, fakeHost({ payload: { source, head: 'h1' } }))).toEqual({
+        _tag: 'Success', value: source,
+      })
+      expect(Schema.is(Source)('resource/github/example/repo/pull-request/7')).toBe(false)
+    }),
+  )
+})
 describe('pull request waits', () => {
   const request = { id: 'await-outcome', repo: 'owner/repo', pr: 42, head: 'head-sha' }
   const waiting = Fractal.mission(
