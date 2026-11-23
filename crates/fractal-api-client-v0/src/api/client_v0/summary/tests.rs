@@ -810,10 +810,10 @@ fn summary_mission_work_is_keyed_and_ignores_unrelated_commits() {
     read(now);
     assert_eq!(store.summary_work()["mission_subject_rebuilds"], before);
     store.append_claim(&crate::model::ClaimInput {
-        subject: "document/unrelated-summary-fixture".into(),
-        kind: "custom.summary-fixture".into(),
+        subject: "agent/unrelated-summary-fixture".into(),
+        kind: "harness.observed".into(),
         actor: None,
-        fields: serde_json::from_value(json!({})).unwrap(),
+        fields: serde_json::from_value(json!({"state":"idle","driver":"codex"})).unwrap(),
         evidence: vec![],
         expected_subject: None,
         idempotency_key: None,
