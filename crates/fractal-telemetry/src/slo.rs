@@ -212,6 +212,7 @@ fn build(objectives: &[Objective]) -> Result<Targets> {
             | Indicator::GithubReadyToMerged(_)
             | Indicator::Ratio(_)
             | Indicator::Gauge(_)
+            | Indicator::DiskFree { .. }
             | Indicator::Native { .. } => {
                 bail!("objective {name} is a fleet declaration: Fractal ships native measurement definitions, not claim indicators, GitHub indicators or owner bindings")
             }
