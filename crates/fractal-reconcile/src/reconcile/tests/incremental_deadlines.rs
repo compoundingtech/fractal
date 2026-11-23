@@ -1737,6 +1737,489 @@ fn unchanged_running_workspaces_with_retained_render_failures_spawn_no_leases() 
 }
 
 #[test]
+fn unchanged_full_render_passes_spawn_no_leases_but_disk_drift_is_repaired() {
+    let _clock = Clock::at(START);
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+        repository.to_str().unwrap(),
+    ), "unchanged-full-render");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ).skipping_unneeded(true);
+    reconciler.reconcile_once().unwrap();
+    let before = crate::checkout::test_support::lease_count(&repository);
+    let starts = runtime.started_members.lock().unwrap().len();
+    smallclaims::store::set_thread_clock(Some(START + crate::incremental::FULL_PASS_INTERVAL_MS));
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before,
+        "even a full safety render must not lease unchanged output");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+    assert_eq!(std::fs::read_to_string(repository.join("output")).unwrap(), "ready");
+
+    std::fs::write(repository.join("output"), "drift").unwrap();
+    smallclaims::store::set_thread_clock(Some(START + 2 * crate::incremental::FULL_PASS_INTERVAL_MS));
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before + 1,
+        "a full pass repairing changed output must acquire admission");
+    assert_eq!(std::fs::read_to_string(repository.join("output")).unwrap(), "ready");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+}
+
+#[test]
+fn non_git_workspace_creation_still_prepares_before_start() {
+    let root = crate::test_support::canonical_tempdir();
+    let workspace = root.path().join("plain");
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?} create=#true; command \"true\" }}",
+        workspace.to_str().unwrap(),
+    ), "plain-workspace-create");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    reconciler.reconcile_once().unwrap();
+    assert!(workspace.is_dir());
+    assert!(!workspace.join(".git").exists());
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+}
+
+fn queue_workspace_start(
+    store: &Store,
+    repository: &Path,
+    workspace: &Path,
+    legacy: bool,
+    request: Option<crate::model::ClaimRecord>,
+) -> String {
+    let desired = store.desired_subjects_named(&["agent/node.worker".into()])
+        .unwrap().remove(0);
+    let member = desired.member.as_ref().unwrap().clone();
+    let prepared = start_jobs::PreparedStart {
+        workspace_admission: Some(start_jobs::WorkspaceAdmission::Git {
+            owner: workspace.to_path_buf(),
+            repository: repository.to_path_buf(),
+        }),
+        subject: desired.clone(),
+        launch_member: member.clone(),
+        member,
+        reason: "workspace recovery".into(),
+        request,
+        desired_token: store.selected_desired_token(&desired.subject).unwrap().unwrap(),
+        selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+        placement_evidence: Vec::new(),
+        start_request: String::new(),
+        start_request_receipt: None,
+        control_request: None,
+        control_request_receipt: None,
+        expected_incarnation: None,
+        resume_operation: None,
+    };
+    let mut body = serde_json::to_value(prepared).unwrap();
+    if legacy {
+        body.as_object_mut().unwrap().remove("workspace_admission");
+    }
+    let mut operation = crate::store::RuntimeStartOperation {
+        id: uuid::Uuid::now_v7().to_string(),
+        subject: desired.subject,
+        owner: "previous-daemon".into(),
+        body,
+        revoked_by: None,
+        finished: false,
+        result: None,
+        applied: false,
+        cleanup_verified: false,
+        dispatched: false,
+        receipted: false,
+    };
+    store.admit_runtime_start(&mut operation, 2).unwrap();
+    operation.id
+}
+
+#[test]
+fn recovery_retires_queued_starts_with_missing_or_replaced_workspaces() {
+    for replacement in ["missing", "plain", "foreign", "dispatched"] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        let database = root.path().join("claims.db");
+        {
+            let store = Store::open(&database, "node").unwrap();
+            apply_source(&store, &format!(
+                "version 2\nagent \"worker\" {{ workspace {:?} create=#true; checkout {:?} base=\"origin/main\" branch=\"worker\"; command \"true\" }}",
+                workspace.to_str().unwrap(), repository.to_str().unwrap(),
+            ), "workspace-recovery");
+            let id = queue_workspace_start(&store, &repository, &workspace, false, None);
+            if replacement == "dispatched" {
+                assert!(store.dispatch_runtime_start(&id, 2).unwrap());
+            }
+        }
+        std::fs::remove_dir_all(&workspace).unwrap();
+        if matches!(replacement, "plain" | "foreign") {
+            std::fs::create_dir(&workspace).unwrap();
+            if replacement == "foreign" {
+                crate::checkout::test_support::git(&workspace, &["init", "--quiet"]);
+            }
+        }
+        let store = Arc::new(Store::open(&database, "node").unwrap());
+        let runtime = Arc::new(FakeRuntime::default());
+        let restarted = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        restarted.reconcile_start_jobs().unwrap();
+        if replacement == "dispatched" {
+            // Recover the lost producer, apply its result, then close using
+            // the runtime's operation-fenced producer-closure evidence.
+            restarted.reconcile_start_jobs().unwrap();
+            restarted.reconcile_start_jobs().unwrap();
+        }
+        assert!(store.runtime_start_for("agent/node.worker").unwrap().is_none(),
+            "invalid workspace must not prevent durable queued-operation retirement");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert!(crate::checkout::test_support::lease_count(&repository) >= 1,
+            "recovery must use the persisted original repository rather than rediscovery");
+        assert!(store.observations_for("agent/node.worker", "harness.diagnostic").unwrap()
+            .iter().any(|claim| claim.body["fields"]["code"] == "start-workspace-refused"));
+        if replacement == "missing" {
+            restarted.reconcile_once().unwrap();
+            assert!(workspace.join(".git").exists());
+            assert_eq!(runtime.started_members.lock().unwrap().len(), 1,
+                "retirement must allow the next pass to recreate and start with fresh admission");
+            assert_eq!(crate::checkout::test_support::lease_count(&repository), 2);
+        }
+    }
+}
+
+#[test]
+fn old_format_queued_start_is_retired_then_restarted_under_a_fresh_lease() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let database = root.path().join("claims.db");
+    {
+        let store = Store::open(&database, "node").unwrap();
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
+            repository.to_str().unwrap(),
+        ), "old-start-recovery");
+        queue_workspace_start(&store, &repository, &repository, true, None);
+    }
+    let store = Arc::new(Store::open(&database, "node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(store.runtime_start_for("agent/node.worker").unwrap().is_none());
+    assert!(runtime.started_members.lock().unwrap().is_empty());
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 0,
+        "old records must not rediscover and trust the current filesystem");
+    restarted.reconcile_once().unwrap();
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1,
+        "old records must not leave an operator-only failed agent");
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+    assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+}
+
+#[test]
+fn old_format_queued_explicit_restart_is_reissued_and_started_with_a_fresh_lease() {
+    assert_old_format_restart_recovery("restart", false, false, false);
+}
+
+#[test]
+fn old_format_queued_idle_restart_keeps_its_already_reached_quiet_boundary() {
+    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, false, false, false);
+}
+
+#[test]
+fn old_format_queued_restart_does_not_revive_authority_after_a_later_stop() {
+    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true, false, false);
+}
+
+#[test]
+fn interrupted_restart_requeue_does_not_transfer_quiescence_after_a_stop() {
+    assert_old_format_restart_recovery(crate::restart::WHEN_IDLE, true, true, false);
+}
+
+#[test]
+fn old_format_fresh_restart_carries_its_acknowledged_handoff_boundary() {
+    assert_old_format_restart_recovery("restart", false, false, true);
+}
+
+fn assert_old_format_restart_recovery(action: &str, later_stop: bool, interrupted: bool, fresh: bool) {
+    let _clock = Clock::at(START);
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let database = root.path().join("claims.db");
+    let original;
+    {
+        let store = Store::open(&database, "node").unwrap();
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; restart \"never\" }}",
+            repository.to_str().unwrap(),
+        ), "old-explicit-restart-recovery");
+        let desired = store.desired_subjects_named(&["agent/node.worker".into()]).unwrap().remove(0);
+        store.append_claim(&ClaimInput {
+            subject: desired.subject.clone(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: member_fields(desired.member.as_ref().unwrap(), "stopped", Some("incumbent"), false),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        original = store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from(action)),
+                ("runtime_id".into(), Value::from("node.worker")),
+                ("incarnation_id".into(), Value::from("incumbent")),
+                ("fresh_session".into(), Value::from(fresh)),
+            ]),
+            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        if action == crate::restart::WHEN_IDLE {
+            store.append_claim(&ClaimInput {
+                subject: original.subject.clone(),
+                kind: "runtime.action.succeeded".into(),
+                actor: original.actor.clone(),
+                fields: BTreeMap::from([
+                    ("action".into(), Value::from("restart")),
+                    ("operation_status".into(), Value::from("quiesced")),
+                ]),
+                evidence: vec![original.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(crate::restart::release_key(&original)),
+            }).unwrap();
+        }
+        if fresh {
+            store.append_claim(&ClaimInput {
+                subject: original.subject.clone(),
+                kind: "runtime.reconcile-decision".into(),
+                actor: None,
+                fields: BTreeMap::from([("decision".into(), Value::from("prepare"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("restart-prepare:{}:{}", original.subject, original.id)),
+            }).unwrap();
+            smallclaims::store::set_thread_clock(Some(START + 1));
+            let document = crate::handoff::document_name(&original.subject).unwrap();
+            store.put_document(&document, b"Retained handoff", &None, "retained-restart-handoff").unwrap();
+            assert!(crate::handoff::acknowledged_handoff_since(&store, &original.subject, START).unwrap());
+        }
+        let operation = queue_workspace_start(&store, &repository, &repository, true, Some(original.clone()));
+        if interrupted {
+            store.append_claim(&ClaimInput {
+                subject: original.subject.clone(),
+                kind: original.kind.clone(),
+                actor: original.actor.clone(),
+                fields: serde_json::from_value(original.body["fields"].clone()).unwrap(),
+                evidence: original.body["evidence"].as_array().unwrap().iter()
+                    .map(|value| value.as_str().unwrap().to_owned()).chain([original.id.clone()]).collect(),
+                expected_subject: None,
+                idempotency_key: Some(format!("workspace-admission-restart:{operation}")),
+            }).unwrap();
+        }
+        assert!(store.operation_claim(&format!("agent-restart-attempt:{}", original.id)).unwrap().is_some());
+        if later_stop {
+            store.append_claim(&ClaimInput {
+                subject: original.subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: Some("person/operator".into()),
+                fields: BTreeMap::from([("action".into(), Value::from("stop"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
+    }
+    smallclaims::store::set_thread_clock(Some(START + 2));
+    let store = Arc::new(Store::open(&database, "node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(store.runtime_start_for("agent/node.worker").unwrap().is_none());
+    let requeued = crate::restart::latest_request(&store, "agent/node.worker").unwrap().unwrap();
+    if later_stop {
+        if interrupted {
+            assert_ne!(requeued.id, original.id);
+            let retired = store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))
+                .unwrap().unwrap();
+            assert_eq!(retired.body["fields"]["operation_status"], "retired");
+            assert!(store.operation_claim(&crate::restart::release_key(&requeued)).unwrap().is_none(),
+                "a stop after persisted requeue must prevent authority transfer");
+        } else {
+            assert_eq!(requeued.id, original.id, "later stop must suppress authority requeue");
+        }
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
+        restarted.reconcile_once().unwrap();
+        assert!(runtime.started_members.lock().unwrap().is_empty(),
+            "full reconciliation must not start a requeue superseded by a stop");
+        return;
+    }
+    assert_ne!(requeued.id, original.id);
+    assert_eq!(requeued.actor, original.actor);
+    assert_eq!(requeued.body["fields"], original.body["fields"]);
+    assert_eq!(requeued.body["evidence"][0], original.body["evidence"][0]);
+    assert!(store.operation_claim(&format!("agent-restart-attempt:{}", requeued.id)).unwrap().is_none());
+    if fresh {
+        assert!(store.operation_claim(&format!("restart-prepare:{}:{}:handoff",
+            requeued.subject, requeued.id)).unwrap().is_some());
+    }
+    if action == crate::restart::WHEN_IDLE {
+        let release = store.operation_claim(&crate::restart::release_key(&requeued)).unwrap().unwrap();
+        assert_eq!(release.body["fields"]["operation_status"], "quiesced");
+        assert_eq!(release.body["evidence"][0], requeued.id);
+        assert!(runtime.started_members.lock().unwrap().is_empty(),
+            "the incumbent is absent; recovery must use its retained boundary, not a new report");
+    }
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
+    restarted.reconcile_once().unwrap();
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+    let completion = store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))
+        .unwrap().unwrap();
+    assert_eq!(completion.kind, "runtime.action.succeeded");
+    assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+}
+
+#[test]
+fn a_nested_bare_repository_is_not_normalized_to_its_parent_worktree() {
+    let root = crate::test_support::canonical_tempdir();
+    let parent = crate::checkout::test_support::repository(root.path());
+    let nested = parent.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let workspace = crate::checkout::test_support::store_repository(&nested);
+    let bare = nested.join(".bare");
+    assert_eq!(crate::repositories::workspace_repository(&workspace), Some(bare.clone()));
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"main\" branch=\"main\"; command \"true\" }}",
+        format!("{}/", workspace.display()), workspace.to_str().unwrap(),
+    ), "nested-bare-repository-admission");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+    assert_eq!(crate::checkout::test_support::lease_count(&bare), 1,
+        "the nested bare repository, not the containing worktree, owns admission");
+}
+
+#[test]
+fn checkout_repository_aliases_remain_valid_at_start_admission() {
+    for linked in [false, true] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let alias = root.path().join("source");
+        if linked {
+            crate::checkout::test_support::git(&repository, &[
+                "worktree", "add", "-b", "source", alias.to_str().unwrap(),
+            ]);
+        } else {
+            std::os::unix::fs::symlink(&repository, &alias).unwrap();
+        }
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"worker\"; command \"true\" }}",
+            workspace.to_str().unwrap(), alias.to_str().unwrap(),
+        ), "start-repository-alias");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.started_members.lock().unwrap().len(), 1,
+            "linked and symlinked repository declarations must admit the same checkout");
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+    }
+}
+
+#[test]
+fn a_checkout_branch_changed_after_render_is_refused_at_start_admission() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let workspace = root.path().join("worker");
+    crate::checkout::test_support::git(&repository, &[
+        "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+    ]);
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"worker\"; command \"true\" }}",
+        workspace.to_str().unwrap(), repository.to_str().unwrap(),
+    ), "branch-changed-before-start");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ).tolerating_faults();
+    let changed = workspace.clone();
+    *reconciler.after_workspace_render.lock().unwrap() = Some(Box::new(move || {
+        crate::checkout::test_support::git(&changed, &["checkout", "-b", "replacement"]);
+    }));
+    reconciler.reconcile_once().unwrap();
+    assert!(runtime.started_members.lock().unwrap().is_empty(),
+        "the declared branch must be revalidated while holding start admission");
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+}
+
+#[test]
+fn a_worktree_reclaimed_after_unchanged_render_never_starts_as_a_plain_directory() {
+    for declared_checkout in [false, true] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        std::fs::write(workspace.join("output"), "ready").unwrap();
+        let checkout = if declared_checkout {
+            format!("checkout {:?} base=\"origin/main\" branch=\"worker\";",
+                repository.to_str().unwrap())
+        } else {
+            String::new()
+        };
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?} create=#true; {checkout} command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+            workspace.to_str().unwrap(),
+        ), "reclaimed-after-unchanged-render");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        ).tolerating_faults();
+        let removed = workspace.clone();
+        let source_repository = repository.clone();
+        *reconciler.after_workspace_render.lock().unwrap() = Some(Box::new(move || {
+            assert_eq!(crate::checkout::test_support::lease_count(&source_repository), 0,
+                "unchanged rendering must remain unleased");
+            std::fs::remove_dir_all(&removed).unwrap();
+        }));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1,
+            "start must use the observed identity even after Git pointers disappear");
+        assert!(!workspace.exists(), "start must not recreate a checkout as a plain directory");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn an_existing_workspace_renders_and_publishes_with_exactly_one_lease() {
     let root = crate::test_support::canonical_tempdir();
     let repository = crate::checkout::test_support::repository(root.path());

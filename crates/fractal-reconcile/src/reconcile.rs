@@ -1823,6 +1823,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Simulate reclamation after observation, before render admission.
     #[cfg(test)]
     before_workspace_render: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Simulate reclamation after unchanged rendering, before start admission.
+    #[cfg(test)]
+    after_workspace_render: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Where an item's evaluation started: how many writes this thread had recorded and how far the
@@ -2063,6 +2066,8 @@ impl Reconciler<NativeRuntime> {
             after_work_wake_observe: Mutex::new(None),
             #[cfg(test)]
             before_workspace_render: Mutex::new(None),
+            #[cfg(test)]
+            after_workspace_render: Mutex::new(None),
         })
     }
 }
@@ -2303,6 +2308,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             after_work_wake_observe: Mutex::new(None),
             #[cfg(test)]
             before_workspace_render: Mutex::new(None),
+            #[cfg(test)]
+            after_workspace_render: Mutex::new(None),
         }
     }
 
@@ -3950,8 +3957,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     member_errors.insert(subject.subject.clone(), error);
                     continue;
                 }
-                if let Some(repository) = checkout.as_ref().map(|checkout| checkout.repository.clone())
-                    .or_else(|| crate::repositories::workspace_repository(workspace))
+                // Retain the repository identity, not an authored alias or linked
+                // worktree path that may itself disappear before start admission.
+                if let Some(repository) = crate::repositories::workspace_repository(workspace)
                 {
                     let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
                         &crate::checkout::workspace_worktree(workspace)
@@ -4019,7 +4027,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.observe_agent_workspace(&subject.subject, member)?;
             }
         }
-        let mut renderable = active
+        self.observe_start_worktrees(active.iter().filter_map(|subject| {
+            let member = subject.member.as_ref()?;
+            let identity = observed_worktrees.get(&subject.subject)?;
+            Some((PathBuf::from(&member.workspace), identity.clone()))
+        }).collect());
+        let renderable = active
             .iter()
             .copied()
             .filter(|subject| {
@@ -4034,10 +4047,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             .collect::<Vec<_>>();
         // A live member is evaluated again when a claim it read, its runtime, its exec state or
         // its screen changed, when its time came, or when its workspace or render failed.
-        // Render writes every member's files together (members sharing a repository share its
-        // exclude file), so it runs whole or not at all: when what it read last changed, when a
-        // member will be evaluated, or on a full pass. Otherwise its last failures stand; files
-        // changed on disk are put back by the next full pass.
+        // Render plans every member together (shared repository excludes must be unioned),
+        // but admits only filesystem mutations. Full passes also repair disk drift; an
+        // unchanged plan publishes receipts without acquiring a worktree lease.
         let render_needed = !skip_members
             || self.incremental.needs("render", now_ms())
             || renderable.iter().any(|subject| {
@@ -4058,81 +4070,56 @@ impl<R: RuntimeControl> Reconciler<R> {
                     hook();
                 }
             }
-            renderable.retain(|subject| {
-                let member = subject.member.as_ref().expect("renderable member");
-                let workspace = Path::new(&member.workspace);
-                let checkout = (subject.kind == "agent")
-                    .then(|| Checkout::from_desired(&subject.desired))
-                    .flatten();
-                let (owner, repository) = if let Some((owner, repository)) =
-                    observed_worktrees.get(&subject.subject)
-                {
-                    (owner.clone(), Some(repository.clone()))
-                } else {
-                    let owner = match fractal_runtime::store_worktree_lease::canonical_owner(
-                        &crate::checkout::workspace_worktree(workspace)
-                            .unwrap_or_else(|| workspace.to_path_buf()),
-                    ) {
-                        Ok(owner) => owner,
-                        Err(error) => {
-                            member_errors.insert(subject.subject.clone(), error);
-                            return false;
-                        }
-                    };
-                    let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
-                        .or_else(|| crate::repositories::workspace_repository(workspace));
-                    (owner, repository)
-                };
-                if let Some(repository) = &repository
-                    && !activation_leases.contains_key(&owner)
-                {
-                    match self.worktree_activation_lease(&owner, repository) {
-                        Ok(lease) => {
-                            activation_leases.insert(owner, lease);
-                        }
-                        Err(error) => {
-                            member_errors.insert(subject.subject.clone(), error);
-                            return false;
-                        }
-                    }
-                }
-                // Validation before admission cannot authorize rendering: GC may have
-                // removed the observed tree while no acting step held its deletion fence.
-                if !workspace.is_dir() {
-                    member_errors.insert(subject.subject.clone(), anyhow::anyhow!(
-                        "workspace reclaimed before render; recreating on a later pass"
-                    ));
-                    return false;
-                }
-                if checkout.is_none()
-                    && repository.is_some()
-                    && crate::repositories::workspace_repository(workspace) != repository
-                {
-                    member_errors.insert(subject.subject.clone(), anyhow::anyhow!(
-                        "workspace repository changed before render"
-                    ));
-                    return false;
-                }
-                if let Some(checkout) = checkout
-                    && let Err(error) = checkout.validate_workspace(workspace)
-                {
-                    member_errors.insert(subject.subject.clone(), error);
-                    return false;
-                }
-                true
-            });
         }
+        let mut admit_render = |subject: &DesiredSubject| -> Result<()> {
+            let member = subject.member.as_ref().expect("renderable member");
+            let workspace = Path::new(&member.workspace);
+            let checkout = (subject.kind == "agent")
+                .then(|| Checkout::from_desired(&subject.desired))
+                .flatten();
+            let (owner, repository) = if let Some((owner, repository)) =
+                observed_worktrees.get(&subject.subject)
+            {
+                (owner.clone(), Some(repository.clone()))
+            } else {
+                let owner = fractal_runtime::store_worktree_lease::canonical_owner(
+                    &crate::checkout::workspace_worktree(workspace)
+                        .unwrap_or_else(|| workspace.to_path_buf()),
+                )?;
+                let repository = checkout.as_ref().map(|checkout| checkout.repository.clone())
+                    .or_else(|| crate::repositories::workspace_repository(workspace));
+                (owner, repository)
+            };
+            if let Some(repository) = &repository
+                && !activation_leases.contains_key(&owner)
+            {
+                let lease = self.worktree_activation_lease(&owner, repository)?;
+                activation_leases.insert(owner, lease);
+            }
+            // Unleased planning cannot authorize mutation: revalidate while holding
+            // the deletion fence, and retain it through publication and initialization.
+            anyhow::ensure!(workspace.is_dir(),
+                "workspace reclaimed before render; recreating on a later pass");
+            anyhow::ensure!(checkout.is_some() || repository.is_none()
+                || crate::repositories::workspace_repository(workspace) == repository,
+                "workspace repository changed before render");
+            if let Some(checkout) = checkout {
+                checkout.validate_workspace(workspace)?;
+            }
+            Ok(())
+        };
         // A render panic faults this host's members; stops never render, so they still run.
         let mut render_span = crate::reconcile_telemetry::phase("pass/render");
         render_span.items(renderable.len());
         let (rendered, render_reads) = if render_needed {
             smallclaims::touched::record(|| {
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    crate::render::apply_all_checked(
+                    crate::render::apply_all_admitted(
                         &self.store,
                         &renderable,
                         &self.host,
                         &|declaration| self.rollout_render_guard(declaration),
+                        &mut admit_render,
                     )
                 }))
             })
@@ -4175,6 +4162,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })
                 .collect()
         });
+        #[cfg(test)]
+        if let Some(hook) = self.after_workspace_render.lock().unwrap().take() {
+            hook();
+        }
         let agents = renderable
             .iter()
             .filter(|subject| subject.kind == "agent")
@@ -5508,6 +5499,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         require_handoff: bool,
     ) -> Result<bool> {
         let key = format!("restart-prepare:{subject}:{trigger}");
+        if require_handoff
+            && let Some(boundary) = self.store.operation_claim(&format!("{key}:handoff"))?
+        {
+            let since = boundary.body["fields"]["acknowledged_since_unix_ms"]
+                .as_str().context("transferred handoff boundary has no acknowledgement time")?
+                .parse::<u128>().context("invalid transferred handoff acknowledgement time")?;
+            return crate::handoff::acknowledged_handoff_since(&self.store, subject, since);
+        }
         let now = now_ms();
         let Some(prepare) = self.store.operation_claim(&key)? else {
             let deadline = (!require_handoff)
@@ -8779,23 +8778,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             )?;
             self.signal_changed();
         }
-        let _activation_lease = self.member_activation_lease(member)?;
+        let _activation_lease = self.member_activation_lease(subject, member)?;
         let workspace = Path::new(&member.workspace);
-        if workspace.exists() {
-            anyhow::ensure!(
-                workspace.is_dir(),
-                "workspace {} is not a directory",
-                workspace.display()
-            );
-        } else if member.workspace_create {
-            std::fs::create_dir_all(workspace)
-                .with_context(|| format!("create workspace {}", workspace.display()))?;
-        } else {
-            anyhow::bail!(
-                "workspace {} does not exist; add create=#true to its workspace declaration to create it",
-                workspace.display()
-            );
-        }
+        anyhow::ensure!(workspace.is_dir(),
+            "workspace reclaimed before start; preparing on a later pass");
         // The runtime starts in `cwd`, which can lie inside the workspace. A launcher handed a
         // directory that does not exist exits without saying why in its status.
         let cwd = Path::new(&member.cwd);
@@ -8994,6 +8980,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // together, only after its writer validates this captured declaration.
         guard()?;
         self.dispatch_start(start_jobs::PreparedStart {
+            workspace_admission: None,
             subject: subject.clone(),
             member: member.clone(),
             launch_member,

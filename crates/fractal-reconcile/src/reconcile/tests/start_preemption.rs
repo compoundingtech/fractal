@@ -524,6 +524,7 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
     assert_eq!(store.selected_desired_token(subject).unwrap(), token);
     let member = stale.member.as_ref().unwrap().clone();
     let prepared = start_jobs::PreparedStart {
+        workspace_admission: None,
         subject: stale,
         launch_member: member.clone(),
         member,
@@ -1756,6 +1757,7 @@ async fn missing_or_repaired_original_request_prevents_real_native_start() {
             .environment
             .insert(start_jobs::OPERATION_ENV.into(), id.clone());
         let prepared = start_jobs::PreparedStart {
+            workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
             subject: desired.clone(),
             launch_member: member.clone(),
             member,
@@ -1858,6 +1860,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
         let dispatch = |desired: &DesiredSubject| {
             let member = desired.member.as_ref().unwrap().clone();
             reconciler.dispatch_start(start_jobs::PreparedStart {
+                workspace_admission: None,
                 subject: desired.clone(),
                 launch_member: member.clone(),
                 member,
@@ -2015,6 +2018,7 @@ fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
     let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry), &pty));
     let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
     let result = reconciler.dispatch_start(start_jobs::PreparedStart {
+        workspace_admission: None,
         subject: desired.clone(), launch_member: member.clone(), member,
         reason: "foreign PTY prelaunch regression".into(), request: None,
         desired_token: reconciler.launch_token(&desired.subject).unwrap(),
@@ -2339,6 +2343,7 @@ exit 1
             format!("{}:${{PATH}}", self.root.path().join("bin").display()),
         );
         self.reconciler.dispatch_start(start_jobs::PreparedStart {
+            workspace_admission: None,
             subject: self.desired.clone(),
             member,
             launch_member,
@@ -2590,6 +2595,7 @@ fn native_scoped_pidless_start_retires_only_after_its_producer_scope_is_empty() 
         let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
             Arc::new(Notify::new()));
         assert!(reconciler.dispatch_start(start_jobs::PreparedStart {
+            workspace_admission: None,
             subject: desired.clone(), launch_member: member.clone(), member,
             reason: "native pidless scope regression".into(), request: None,
             desired_token: reconciler.launch_token(&desired.subject).unwrap(),
@@ -2653,6 +2659,7 @@ fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
             let runtime_id = member.runtime_id.clone();
             let id = uuid::Uuid::now_v7().to_string();
             let prepared = start_jobs::PreparedStart {
+                workspace_admission: None,
                 subject: desired.clone(),
                 member: member.clone(),
                 launch_member: member,
