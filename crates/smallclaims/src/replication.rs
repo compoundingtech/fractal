@@ -42,9 +42,18 @@ pub struct ReplicationInventory {
 /// [`SignedEnvelope`]s (`store::signed_claims`).
 pub const SIGNED_CLAIMS: &str = "signed-claims-v1";
 
+/// A peer can compare scalar roots before requesting bucket proofs.
+pub const ROOT_FIRST: &str = "root-first-v1";
+/// An additive inventory marker: this message intentionally omits bucket proofs.
+/// Only a peer advertising [`ROOT_FIRST`] may answer it with another root summary.
+pub const ROOT_SUMMARY: &str = "root-summary-v1";
+/// An additive inventory marker: the bucket list is complete, even when empty.
+/// Unlike [`ROOT_FIRST`], this describes this message, not the peer's capabilities.
+pub const RANGE_PROOFS: &str = "range-proofs-v1";
+
 /// What this build lists in its inventories' `capabilities`.
 pub fn replication_capabilities() -> Vec<String> {
-    vec![SIGNED_CLAIMS.to_owned()]
+    vec![SIGNED_CLAIMS.to_owned(), ROOT_FIRST.to_owned()]
 }
 
 impl ReplicationInventory {
@@ -318,13 +327,12 @@ pub struct ReplicationExportRequest {
     pub inventory: ReplicationInventory,
     #[serde(default)]
     pub summary_only: bool,
-    /// Classify a full summary requested only by the local recent-inbound guard.
-    /// Older local daemons ignore this field; it never changes the exported exchange.
+    /// Compatibility for independently supervised older workers' local guard requests.
+    /// Current workers use revision subscriptions; this flag never changes the exchange.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authority_guard: bool,
-    /// Local-daemon only: the scalar guard does not consume inventory buckets. Honored only
-    /// for a summary with `authority_guard`; ordinary/default and peer exchanges stay full.
-    /// Older local daemons ignore this option and return the complete response in one call.
+    /// Older-worker compatibility: omit buckets only for a marked local guard summary.
+    /// This flag never appears in signed peer exchanges.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authority_digest_only: bool,
     /// The other side's signature requests, to answer in the exported exchange.

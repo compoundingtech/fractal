@@ -985,6 +985,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
         )
         .route(
+            "/v1/internal/replication/revision",
+            post(replication::replication_revision),
+        )
+        .route(
             "/v1/internal/replication/receive",
             post(replication::replication_receive).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
         )
@@ -1047,8 +1051,16 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::shard_replication_peers),
         )
         .route(
+            "/v1/internal/replication/shard/{shard}/peers/revision",
+            post(replication::shard_replication_peers_revision),
+        )
+        .route(
             "/v1/internal/replication/shard/{shard}/export",
             post(replication::shard_replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/revision",
+            post(replication::shard_replication_revision),
         )
         .route(
             "/v1/internal/replication/shard/{shard}/receive",
@@ -11099,6 +11111,7 @@ async fn refuse_while_leaving(
             path,
             "/v1/health"
                 | "/v1/internal/replication/export"
+                | "/v1/internal/replication/revision"
                 | "/v1/internal/replication/receive"
                 | "/v1/internal/replication/peer-failure"
                 | "/v1/internal/replication/worker-status"
