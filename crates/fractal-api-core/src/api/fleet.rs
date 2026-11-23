@@ -286,7 +286,12 @@ pub async fn fleet_membership_view(
     State(state): State<AppState>,
 ) -> Result<Json<crate::fleet::FleetView>, ApiError> {
     let store = state.store.clone();
-    blocking_store(move || store.fleet_view_sealed())
+    blocking_store(move || {
+        let started = std::time::Instant::now();
+        let result = store.fleet_view_sealed();
+        crate::performance::record_request("replication/membership-read", None, started.elapsed());
+        result
+    })
         .await
         .map(Json)
 }
