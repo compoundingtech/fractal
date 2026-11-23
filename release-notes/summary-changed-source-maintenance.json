@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "The summary collection contract is unchanged. The performance endpoint exposes summary source rebuild counts. Machine recency, peer reachability and mission eligibility expire at their actual transition deadlines; summary demand gates remain in place."
+    "detail": "The summary collection contract is unchanged. The performance endpoint exposes summary source rebuild counts. Machine recency, peer reachability and mission eligibility expire at their actual transition deadlines; summary demand gates remain in place. A backward clock invalidates future-evaluated counts and restores any eligibility that becomes current again."
   },
   "downtime": {
     "status": "none",

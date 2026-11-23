@@ -226,8 +226,9 @@ pub fn refresh_published(
         };
         if before
             .as_ref()
-            .is_some_and(|(_, held)| waiting_only || *held == inputs
-                && store.summary_valid_until(idle_ms).is_none_or(|until| now < until))
+            .is_some_and(|(shared, held)| now >= shared.evaluated_at_unix_ms
+                && (waiting_only || *held == inputs
+                    && store.summary_valid_until(idle_ms).is_none_or(|until| now < until)))
         {
             return Ok(None);
         }

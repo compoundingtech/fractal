@@ -57,8 +57,7 @@ pub fn start_attention_list(state: &AppState) {
             // again; the next window to read it wakes this task.
             let attention = store.attention_list_read_within(idle) || store.attention_list_starting();
             // A prompt card's conversation changed: present the prompts again.
-            let prompts_changed = watching(&prompts).take_changed();
-            let changed_prompt_seats = prompts_changed.then(|| watching(&prompts).take_changed_seats()).flatten();
+            let (prompts_changed, changed_prompt_seats) = prompt_changes(&prompts, attention);
             let watch = Arc::clone(&prompts);
             // One view at a time: attention, every person's glasses and arrangements, then the
             // summary rows windows read. One view's failure leaves the others refreshing. A
@@ -79,6 +78,9 @@ pub fn start_attention_list(state: &AppState) {
                 waiting(&mut results, false);
                 results.push(("attention", crate::performance::task("attention/refresh", || {
                     if !attention || !(reader.attention_list_read_within(idle) || reader.attention_list_starting()) {
+                        if prompts_changed {
+                            watching(&watch).keep_changed();
+                        }
                         return Ok(());
                     }
                     // A prompt card reads its seat's conversation on this node, following it
@@ -208,6 +210,17 @@ fn watching(
     prompts: &std::sync::Mutex<super::prompt_card::PromptWatch>,
 ) -> std::sync::MutexGuard<'_, super::prompt_card::PromptWatch> {
     prompts.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Idle publication owners must leave prompt evidence pending for the next reader.
+fn prompt_changes(
+    prompts: &std::sync::Mutex<super::prompt_card::PromptWatch>,
+    demanded: bool,
+) -> (bool, Option<BTreeSet<String>>) {
+    let watch = watching(prompts);
+    let changed = demanded && watch.take_changed();
+    let seats = changed.then(|| watch.take_changed_seats()).flatten();
+    (changed, seats)
 }
 
 /// Publish the summary selections windows are waiting for, if any: a window that opens a new
@@ -773,6 +786,16 @@ pub fn published_view_not_ready(collection: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_attention_leaves_prompt_changes_for_returning_demand() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let prompts = std::sync::Mutex::new(super::super::prompt_card::PromptWatch::new(wake));
+        watching(&prompts).keep_changed();
+        assert!(!prompt_changes(&prompts, false).0, "idle demand does not consume changes");
+        assert!(prompt_changes(&prompts, true).0, "the next reader receives the pending change");
+        assert!(!prompt_changes(&prompts, true).0, "a successful observation consumes it once");
+    }
 
     #[test]
     fn one_agent_change_presents_one_card_and_unrelated_commit_presents_none() {

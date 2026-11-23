@@ -51,9 +51,10 @@ pub(super) fn present(
         } else { None };
         let heard_at = harness.as_ref().or_else(|| cache.cards.get(id).map(|old| &old.harness))
             .and_then(Option::as_ref).map(|harness| heard.heard_at(store, id, harness));
+        let state_after_restart = agent_state_after_restart(raw, now);
         let delivery = if raw["host_id"].as_str() == Some(local_host.as_str())
-            && (matches!(raw["state"].as_str(), Some("running" | "waiting"))
-                || matches!(raw["state"].as_str(), Some("desired" | "starting"))
+            && (matches!(state_after_restart, Some("running" | "waiting"))
+                || matches!(state_after_restart, Some("desired" | "starting"))
                     && live_launch_report(raw, heard_at, now))
             && let Some(driver) = raw["driver"].as_str().filter(|driver| matches!(*driver, "claude" | "codex" | "opencode" | "pi" | "omp")) {
             Some(delivery_presence::assess_current_semantic(id, driver, raw["incarnation_id"].as_str()))
@@ -100,7 +101,7 @@ fn earliest(deadline: &mut Option<u128>, at: u128, now: u128) {
 }
 
 fn clock_state(raw: &Value, heard_at: Option<u128>, now: u128) -> [bool; 5] {
-    let launching = matches!(raw["state"].as_str(), Some("desired" | "starting"));
+    let launching = matches!(agent_state_after_restart(raw, now), Some("desired" | "starting"));
     [
         heard_at.is_some_and(|at| now.saturating_sub(at) > HARNESS_OBSERVATION_FRESHNESS.as_millis()),
         launching && heard_at.is_some_and(|at| now.saturating_sub(at) > u128::from(HEARTBEAT_MS)),
@@ -125,11 +126,11 @@ fn presentation_deadline(
     let mut deadline = None;
     if let Some(at) = heard_at {
         earliest(&mut deadline, at.saturating_add(HARNESS_OBSERVATION_FRESHNESS.as_millis()).saturating_add(1), now);
-        if matches!(raw["state"].as_str(), Some("desired" | "starting")) {
+        if matches!(agent_state_after_restart(raw, now), Some("desired" | "starting")) {
             earliest(&mut deadline, at.saturating_add(u128::from(HEARTBEAT_MS)).saturating_add(1), now);
         }
     }
-    if matches!(raw["state"].as_str(), Some("desired" | "starting"))
+    if matches!(agent_state_after_restart(raw, now), Some("desired" | "starting"))
         && !live_launch_report(raw, heard_at, now)
         && let Some(at) = raw["_launch_since_ms"].as_u64() {
         earliest(&mut deadline, u128::from(at).saturating_add(u128::from(LAUNCH_WINDOW_MS)).saturating_add(1), now);

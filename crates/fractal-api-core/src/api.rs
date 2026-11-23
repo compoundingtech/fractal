@@ -3731,13 +3731,26 @@ impl HeardSeats {
 // than only when a new claim invalidates the fold. Expiry changes no durable fact.
 const DECLARATION_RESTART_PRESENTATION_MS: u128 = 120_000;
 
+fn declaration_restart_expired(item: &Value, now: u128) -> bool {
+    item["state"] == "restarting"
+        && item["_restart_until_unix_ms"].as_u64().is_none_or(|deadline| now >= u128::from(deadline))
+}
+
+fn agent_state_after_restart(item: &Value, now: u128) -> Option<&str> {
+    if declaration_restart_expired(item, now)
+        && let Some(previous) = item["_restart_underlying_state"].as_str() {
+        Some(previous)
+    } else {
+        item["state"].as_str()
+    }
+}
+
 fn overlay_declaration_restart(item: &mut Value, now: u128) {
+    let expired = declaration_restart_expired(item, now);
     let fields = item.as_object_mut().expect("agent card");
     let previous = fields.remove("_restart_underlying_state");
-    let deadline = fields.remove("_restart_until_unix_ms").and_then(|value| value.as_u64());
-    if fields.get("state").and_then(Value::as_str) == Some("restarting")
-        && deadline.is_none_or(|deadline| now >= u128::from(deadline))
-        && let Some(previous) = previous
+    fields.remove("_restart_until_unix_ms");
+    if expired && let Some(previous) = previous
     {
         fields.insert("state".into(), previous);
     }

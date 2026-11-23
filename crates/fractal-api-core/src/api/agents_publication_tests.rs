@@ -628,3 +628,36 @@ async fn agents_publication_wait_wakes_at_its_exact_evidence_boundary() {
     tokio::time::advance(Duration::from_millis(1)).await;
     assert!(Future::poll(waiting.as_mut(), &mut context).is_ready());
 }
+
+#[tokio::test(start_paused = true)]
+async fn roster_expired_restart_retains_delivery_dependencies() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let _clock = smallclaims::store::clock_snapshot();
+    let now = client_now_ms();
+    let subject = "agent/roster-expired-restart-delivery";
+    let fence = crate::mailbox::Fence::new(subject, "one", "delivery");
+    delivery_presence::record_fenced(&fence, &json!({
+        "transport":"omp-channel", "ready":true, "pid":std::process::id()
+    }).to_string());
+    let rows = vec![
+        json!({"id":subject, "state":"restarting", "_restart_until_unix_ms":now - 1,
+            "_restart_underlying_state":"running", "driver":"omp", "incarnation_id":"one",
+            "host_id":client_host_id(app.store.origin())}),
+        json!({"id":"agent/roster-expired-restart-unrelated", "state":"running", "driver":"custom"}),
+    ];
+    let (before, deadline) = roster_presentation::present(&app.store, &rows, vec![], now).unwrap();
+    assert_ne!(before[0]["delivery"]["state"], "refused");
+    assert!(deadline.is_some_and(|at| at > now),
+        "a restored running agent retains its delivery expiry");
+    assert_eq!(roster_presentation::work(&app.store)["card_rebuilds"], 2);
+    delivery_presence::bind_refused(&fence, "restart-delivery-changed");
+    let (after, _) = roster_presentation::present(&app.store, &rows, vec![], now).unwrap();
+    assert_eq!(after[0]["delivery"]["state"], "refused");
+    assert_eq!(after[0]["delivery"]["reason"], "delivery refused: restart-delivery-changed");
+    assert_eq!(after[0]["state"], "waiting");
+    assert_eq!(after[1], before[1]);
+    assert_eq!(roster_presentation::work(&app.store)["card_rebuilds"], 3,
+        "changed delivery evidence rebuilds only the restored agent");
+    delivery_presence::bind_recovered(&fence);
+}

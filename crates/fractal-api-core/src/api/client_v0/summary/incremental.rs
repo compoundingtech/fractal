@@ -216,6 +216,15 @@ mod tests {
         assert_eq!(sources.work.machine_subject_rebuilds, before + 2);
         assert_eq!(sources.machine_counts, [0, 0, 2]);
         assert_eq!(sources.valid_until, None);
+        // A backward clock re-enters eligibility even after every deadline was consumed.
+        maintain(&mut sources, &[], &machines, "host/gateway", 301_999, None);
+        assert_eq!(sources.work.machine_subject_rebuilds, before + 3);
+        assert_eq!(sources.machine_counts, [0, 1, 1]);
+        assert_eq!(sources.valid_until, Some(302_000));
+        maintain(&mut sources, &[], &machines, "host/gateway", 300_999, None);
+        assert_eq!(sources.work.machine_subject_rebuilds, before + 4);
+        assert_eq!(sources.machine_counts, [0, 2, 0]);
+        assert_eq!(sources.valid_until, Some(301_000));
     }
 
     #[test]

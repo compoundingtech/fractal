@@ -832,3 +832,28 @@ fn summary_mission_work_is_keyed_and_ignores_unrelated_commits() {
     read(now + 3);
     assert_eq!(store.summary_work()["mission_subject_rebuilds"], before + 1);
 }
+
+#[test]
+fn summary_rejects_future_shared_counts_even_with_unchanged_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    store.start_attention_list_refresher().unwrap();
+    let _ = store.published_summary(None);
+    refresh_published(&state, 60_000, false).unwrap();
+    assert!(store.summary_shared().is_some());
+    // Model a clock rollback without a sleep or a process-wide clock override.
+    for waiting_only in [false, true] {
+        let (shared, inputs) = store.summary_shared().unwrap();
+        let mut future = (*shared).clone();
+        future.evaluated_at_unix_ms = u128::MAX;
+        future.working_agents = 99;
+        let (generation, _) = store.summary_selections(60_000, false);
+        store.publish_summary_shared(generation, Arc::new(future), inputs);
+        refresh_published(&state, 60_000, waiting_only).unwrap();
+        let (recomputed, _) = store.summary_shared().unwrap();
+        assert_ne!(recomputed.evaluated_at_unix_ms, u128::MAX,
+            "unchanged source identities cannot validate counts evaluated in the future");
+        assert_eq!(recomputed.working_agents, 0);
+    }
+}
