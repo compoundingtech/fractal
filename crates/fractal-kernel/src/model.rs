@@ -2524,7 +2524,7 @@ pub struct HumanReviewView {
     pub requested_at_unix_ms: u128,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AttentionActionView {
     pub label: String,
     pub argv: Vec<String>,
@@ -2564,7 +2564,7 @@ pub struct FaultDismissal {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AttentionItemView {
     #[serde(default)]
     pub episode: String,

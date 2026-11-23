@@ -2,6 +2,10 @@
 use super::*;
 use crate::model::LoopSpec;
 
+#[path = "attention_sources.rs"]
+mod sources;
+pub use sources::AttentionSourceSnapshot;
+
 /// The operational failure episodes as last folded, under the newest index and the count of
 /// their claims.
 #[derive(Default)]
@@ -172,12 +176,9 @@ impl Store {
     /// The person-attention collection at `now`, with the first instant after `now` at which
     /// the unchanged collection changes.
     ///
-    /// The collection only admits items as their waiting time arrives; it has no clock-driven
-    /// removals, so one read of its eventual projection serves both: the rows already waiting,
-    /// in the eventual order, and the earliest admission still ahead. This reuses the same
-    /// recipient, generation, run, declaration and resolution filters, including registered
-    /// custom attention. An ask's waiting time can predate its asking claim (for migrated
-    /// asks), so both gates must open before its row is visible.
+    /// Retain future admissions, but evaluate prompt answerability at `now`: the native
+    /// answer window can close without another claim. An ask's waiting time can predate its
+    /// asking claim (for migrated asks), so both gates must open before its row is visible.
     ///
     /// Observer/reconcile grace, final-step fault aging, checkpoint waits and runtime faults
     /// belong to `fault_snapshot`, not this collection. Person attention reads stored step
@@ -190,7 +191,8 @@ impl Store {
     ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         // Ask resolution eligibility uses SQLite's signed millisecond clock. Do not wrap its
         // upper bound to -1 by passing u128::MAX through that reducer.
-        let eventual = self.attention_snapshot(person, i64::MAX as u128)?;
+        let (eventual, mut valid_until) =
+            self.attention_snapshot_with_prompt_clock(person, i64::MAX as u128, now)?;
         let connection = self.readers.get();
         let subjects: BTreeSet<_> = eventual.iter()
             .filter(|item| item.kind == "person-step")
@@ -213,7 +215,6 @@ impl Store {
                 Ok((subject, at.parse()?))
             }).collect::<Result<_>>()?
         };
-        let mut valid_until = None;
         let rows = eventual
             .into_iter()
             .map(|item| {
@@ -248,11 +249,36 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        self.harness_prompt_attention_items_for_subjects(person, as_of, None)
+    }
+
+    pub(super) fn harness_prompt_attention_items_for_subjects(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        subjects: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<AttentionItemView>> {
+        Ok(self.harness_prompt_attention_items_with_deadline(person, as_of, subjects)?.0)
+    }
+
+    pub(super) fn harness_prompt_attention_items_with_deadline(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        subjects: Option<&BTreeSet<String>>,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         let connection = self.readers.get();
-        let seats = connection
-            .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let seats = match subjects {
+            Some(subjects) => connection.prepare_cached(
+                "SELECT subject FROM desired WHERE kind='agent'
+                 AND subject IN (SELECT value FROM json_each(?1)) ORDER BY subject",
+            )?.query_map([serde_json::to_string(subjects)?], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            None => connection
+                .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
         let newest = |subject: &str, kind: &str| -> Result<Option<(String, u128, Value)>> {
             let row = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4c401b40b08 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
@@ -278,6 +304,7 @@ impl Store {
             .transpose()
         };
         let mut items = Vec::new();
+        let mut valid_until: Option<u128> = None;
         for seat in seats {
             if let Some(item) = self.screen_prompt_item(&connection, &seat, person)? {
                 items.push(item);
@@ -337,6 +364,12 @@ impl Store {
                 .filter(|reason| !reason.is_empty())
                 .unwrap_or("its terminal shows a prompt");
             let answerable = !missing_principal && answerable(&harness, as_of);
+            if answerable && harness["driver"] == "claude"
+                && let Some(since) = harness["observed_since_ms"].as_u64()
+            {
+                let due = u128::from(since) + CLAUDE_PROMPT_ANSWER_WAIT_MS;
+                valid_until = Some(valid_until.map_or(due, |previous| previous.min(due)));
+            }
             // The exact call it asks about, as its hook or driver named it for this observation.
             let call = prompt_call(&connection, &seat, &harness)?;
             items.push(AttentionItemView {
@@ -412,7 +445,7 @@ impl Store {
                 )],
             });
         }
-        Ok(items)
+        Ok((items, valid_until))
     }
 
     pub fn person_attention_items(
