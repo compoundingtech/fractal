@@ -529,6 +529,10 @@ fn a_host_restart_during_finalization_records_interrupted_by_restart_without_rep
     fixture.until("the program is waiting", || fixture.journal(&started.step).contains(&("working".into(), "started".into())));
     fixture.store.request_mission_run_cancellation(&started.run, "restart during drain").unwrap();
     fixture.until("the finalizer has started", || fixture.journal(&started.step).contains(&("drain".into(), "started".into())));
+    let run = fixture.store.mission_run(&started.run).unwrap().unwrap();
+    let (quiescent, reads) = smallclaims::touched::record(|| fixture.engine.finalize_cleanup(&run).unwrap());
+    assert!(!quiescent, "the live finalizer still fences cleanup");
+    assert!(reads.contains("program-effects"), "worker exit must invalidate the recorded cleanup read set");
     let host = fixture.engine.host_pid().unwrap();
     // SAFETY: this is the fixture's own supervised host process.
     assert_eq!(unsafe { libc::kill(host as i32, libc::SIGKILL) }, 0);
