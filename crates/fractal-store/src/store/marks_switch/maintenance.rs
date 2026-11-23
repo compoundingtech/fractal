@@ -163,6 +163,7 @@ fn install(connection: &Connection) -> Result<()> {
         // Canonical rank and incarnation sequence can change without appending a claim.
         for (table, selector) in [("batches", "claims.batch_id={row}.id"),
             ("replica_records", "claims.id={row}.claim_id"),
+            ("claim_positions", "claims.id={row}.claim_id"),
             ("projection_digest_repaired_claims", "claims.id={row}.id")] {
             if table == "batches" && event == "INSERT" { continue; }
             let mut body = String::new();
@@ -238,6 +239,69 @@ mod tests {
         assert!(store.staged_switched().unwrap());
         maintenance.refresh(&store, &peers).unwrap();
         assert_eq!(count(&store), 6, "only the newly configured cedar is evaluated");
+        assert!(!store.marks_switched().unwrap());
+    }
+
+    #[test]
+    fn canonical_position_reordering_invalidates_only_its_member() {
+        let store = Store::open_memory("alder").unwrap();
+        let peer = Store::open_memory("birch").unwrap();
+        started(&peer, true, true);
+        started(&peer, false, false);
+        sync(&peer, &store);
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute("UPDATE claims SET batch_id=(SELECT batch_id FROM claims WHERE kind='daemon.started' ORDER BY store_index LIMIT 1),
+                accepted_at_unix_ms=(SELECT accepted_at_unix_ms FROM claims WHERE kind='daemon.started' ORDER BY store_index LIMIT 1)
+                WHERE kind='daemon.started'", [])?;
+            tx.execute("INSERT OR REPLACE INTO claim_positions(claim_id,position)
+                SELECT id, CASE WHEN json_extract(body,'$.fields.features.message_view_reads')=1 THEN 1 ELSE 0 END
+                FROM claims WHERE kind='daemon.started'", [])?;
+            Ok(())
+        }).unwrap().unwrap();
+        let mut maintenance = store.marks_switch_maintenance().unwrap();
+        let peers = ["birch".to_owned(), "cedar".to_owned()];
+        maintenance.refresh(&store, &peers).unwrap();
+        assert_eq!(maintenance.ready["birch"], (true, true));
+        assert_eq!(count(&store), 2);
+        store.connection.batched(|tx| tx.execute("UPDATE claim_positions SET position=1-position", []))
+            .unwrap().unwrap();
+        assert!(maintenance.changes.has_changed().unwrap());
+        maintenance.refresh(&store, &peers).unwrap();
+        assert_eq!(maintenance.ready["birch"], (false, false));
+        assert_eq!(count(&store), 3, "cedar is not reevaluated by birch's position change");
+        assert!(!store.marks_switched().unwrap());
+    }
+
+    #[test]
+    fn failed_publication_keeps_keys_until_a_committed_repair() {
+        let store = Store::open_memory("alder").unwrap();
+        let peer = Store::open_memory("birch").unwrap();
+        started(&peer, true, true);
+        sync(&peer, &store);
+        let mut maintenance = store.marks_switch_maintenance().unwrap();
+        maintenance.refresh(&store, &[]).unwrap();
+        started(&peer, false, false);
+        sync(&peer, &store);
+        store.connection.batched(|tx| tx.execute_batch(
+            "CREATE TRIGGER marks_switch_test_failure BEFORE UPDATE ON meta
+             WHEN NEW.key='marks_switched' BEGIN SELECT RAISE(ABORT,'publication blocked'); END;"
+        )).unwrap().unwrap();
+        assert!(maintenance.refresh(&store, &[]).is_err());
+        assert_eq!(count(&store), 1, "failed transactions do not advance the retained decisions");
+        let (wake, recovery) = tokio::sync::watch::channel(0u64);
+        let _observer = store.observe_commits(move |_| {
+            wake.send_modify(|generation| *generation += 1);
+        });
+        assert!(maintenance.refresh(&store, &[]).is_err(), "register then recheck remains blocked");
+        assert!(!recovery.has_changed().unwrap(), "failed writes cannot busy-loop recovery");
+        assert!(store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_marks_switch_dirty_v1 WHERE member='birch')", [],
+            |row| row.get::<_, bool>(0)).unwrap());
+        store.connection.batched(|tx| tx.execute_batch("DROP TRIGGER marks_switch_test_failure"))
+            .unwrap().unwrap();
+        assert!(recovery.has_changed().unwrap(), "the committed repair wakes recovery");
+        maintenance.refresh(&store, &[]).unwrap();
+        assert_eq!(count(&store), 2);
         assert!(!store.marks_switched().unwrap());
     }
 }

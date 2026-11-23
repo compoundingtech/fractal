@@ -22626,30 +22626,40 @@ async fn import_retired_identities(store: Arc<Store>) {
 /// Converge initially, then only when a member capability, fleet membership or writer roster
 /// changes. Configured peers are fixed for this daemon invocation, as are its sync workers.
 async fn refresh_marks_switch(store: Arc<Store>, mut peers: Vec<String>) {
-    let worker = store.clone();
-    let started = tokio::task::spawn_blocking(move || worker.marks_switch_maintenance()).await
-        .map_err(anyhow::Error::from).and_then(|result| result);
-    let mut maintenance = match started {
-        Ok(maintenance) => maintenance,
-        Err(error) => {
-            stderr_message("fractal", format_args!("message marks switch subscription failed: {error:?}"));
-            return;
-        }
-    };
+    let mut maintenance = None;
+    let mut recovery = None;
+    let (recovered, mut recovery_events) = watch::channel(0u64);
     loop {
+        recovery_events.borrow_and_update();
         let worker = store.clone();
-        let (next, result) = tokio::task::spawn_blocking(move || {
-            let result = fractal_daemon::task_cpu::blocking("maintenance.marks_switch",
-                || maintenance.refresh(&worker, &peers));
-            (maintenance, (peers, result))
+        let (next, next_peers, result) = tokio::task::spawn_blocking(move || {
+            let result = fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || -> Result<()> {
+                if maintenance.is_none() { maintenance = Some(worker.marks_switch_maintenance()?); }
+                maintenance.as_mut().expect("initialized marks switch maintenance").refresh(&worker, &peers)
+            });
+            (maintenance, peers, result)
         }).await.expect("marks switch maintenance task panicked");
         maintenance = next;
-        let (next_peers, result) = result;
         peers = next_peers;
-        if let Err(error) = result {
-            stderr_message("fractal", format_args!("message marks switch check failed: {error:?}"));
+        match result {
+            Ok(()) => {
+                recovery = None;
+                if !maintenance.as_mut().expect("initialized marks switch maintenance").changed().await { return; }
+            }
+            Err(error) => {
+                stderr_message("fractal", format_args!("message marks switch blocked on local recovery: {error:#}"));
+                if recovery.is_none() {
+                    let wake = recovered.clone();
+                    recovery = Some(store.observe_commits(move |_| {
+                        wake.send_modify(|generation| *generation = generation.wrapping_add(1));
+                    }));
+                    // Register then recheck once, covering a repair committed before registration.
+                    // Further attempts require actual committed writer activity, never a timer.
+                    continue;
+                }
+                if recovery_events.changed().await.is_err() { return; }
+            }
         }
-        if !maintenance.changed().await { return; }
     }
 }
 
