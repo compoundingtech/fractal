@@ -102,8 +102,9 @@ async fn changed_keys_do_no_idle_or_unrelated_candidate_work_and_replay_races() 
     peer.pin_fleet_anchor(key.public()).unwrap();
     let sync = || {
         for _ in 0..16 {
-            let exchange = store.export_replication_exchange("reactive-fleet", &peer.replication_inventory().unwrap()).unwrap();
+            let mut exchange = store.export_replication_exchange("reactive-fleet", &peer.replication_inventory().unwrap()).unwrap();
             if exchange.envelopes.is_empty() { break; }
+            exchange.claim_member_signatures.clear();
             peer.receive_replication_exchange("alder", "reactive-fleet", &exchange).unwrap();
             peer.validate_replication_backlog().unwrap();
             peer.project_replication_backlog().unwrap();
@@ -126,6 +127,17 @@ async fn changed_keys_do_no_idle_or_unrelated_candidate_work_and_replay_races() 
     peer_changes.borrow_and_update();
     sync();
     peer_changes.changed().await.unwrap();
+    // Simulate a queued claim arrival racing the retention deadline. Expiry must
+    // preserve its pending signature even if promotion has not reached that page.
+    peer.connection.write().execute(
+        "UPDATE claim_member_signature_pending SET received_at_unix_ms=0 WHERE claim_id=?1", [&id],
+    ).unwrap();
+    peer.expire_claim_signatures().unwrap();
+    let retained: usize = peer.connection.write().query_row(
+        "SELECT COUNT(*) FROM claim_member_signature_pending WHERE claim_id=?1", [&id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(retained, 1, "claim arrival takes precedence over retention expiry");
+    assert!(peer.claim_member_signatures_for(std::slice::from_ref(&id)).unwrap().is_empty());
     let before = work_counts();
     drain(&peer);
     let after = work_counts();

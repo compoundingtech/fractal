@@ -183,9 +183,13 @@ impl Store {
         }
         let cutoff = i64::try_from(now_ms().saturating_sub(PENDING_KEEP_MS))?;
         self.connection.batched(move |tx| -> Result<()> {
+            // A claim can arrive after a promotion page, or wait behind that page.
+            // Check absence in this same transaction: retention never discards an
+            // authenticatable signature merely because its ready page ran later.
             tx.execute("DELETE FROM claim_member_signature_pending WHERE (claim_id,member_key) IN
                 (SELECT claim_id,member_key FROM claim_member_signature_pending
-                 WHERE received_at_unix_ms < ?1 ORDER BY received_at_unix_ms LIMIT ?2)",
+                 WHERE received_at_unix_ms < ?1 ORDER BY received_at_unix_ms LIMIT ?2)
+                AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=claim_member_signature_pending.claim_id)",
                 params![cutoff, PROMOTE_PAGE])?;
             Ok(())
         }).map_err(anyhow::Error::msg)??;

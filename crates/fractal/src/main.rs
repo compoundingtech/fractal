@@ -22799,8 +22799,8 @@ async fn sign_own_claims(store: Arc<Store>) {
         changes.borrow_and_update();
         let page_store = store.clone();
         let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || -> anyhow::Result<_> {
-            page_store.expire_claim_signatures()?;
             page_store.promote_claim_member_signatures()?;
+            page_store.expire_claim_signatures()?;
             let report = page_store.sign_own_claims()?;
             Ok((report.done && !page_store.claim_signatures_ready()?, page_store.claim_signature_expiry()?))
         })).await;
