@@ -24,6 +24,8 @@ struct ActivationLeases {
     owners: BTreeMap<PathBuf, std::sync::Weak<fractal_runtime::store_worktree_lease::StoreWorktreeLease>>,
     // Durable operations keep admission through queueing, worker exit, result adoption and cleanup.
     starts: HashMap<String, ActivationLease>,
+    // Unleased pass observations remain usable after reclamation removes Git pointers.
+    observed: BTreeMap<PathBuf, (PathBuf, PathBuf)>,
 }
 
 pub struct StartJobs {
@@ -53,6 +55,13 @@ impl Default for StartJobs {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WorkspaceAdmission {
+    NonGit,
+    Git { owner: PathBuf, repository: PathBuf },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PreparedStart {
     pub subject: DesiredSubject,
     pub member: MemberSpec,
@@ -71,6 +80,9 @@ pub struct PreparedStart {
     pub control_request_receipt: Option<crate::model::ClaimRecord>,
     pub expected_incarnation: Option<String>,
     pub resume_operation: Option<String>,
+    // Missing on stored operations from older binaries: refuse launch, but still retire.
+    #[serde(default)]
+    pub workspace_admission: Option<WorkspaceAdmission>,
 }
 
 impl PreparedStart {
@@ -118,23 +130,81 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(lease)
     }
 
-    pub(super) fn member_activation_lease(&self, member: &MemberSpec) -> Result<Option<ActivationLease>> {
-        let workspace = Path::new(&member.workspace);
-        let Some(repository) = crate::repositories::workspace_repository(workspace) else {
-            return Ok(None);
-        };
-        let owner = crate::checkout::workspace_worktree(workspace)
-            .context("Git workspace has no worktree owner")?;
-        self.worktree_activation_lease(&owner, &repository).map(Some)
+    pub(super) fn observe_start_worktrees(
+        &self,
+        observed: BTreeMap<PathBuf, (PathBuf, PathBuf)>,
+    ) {
+        self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
+            .observed = observed;
     }
 
-    fn retain_start_activation_lease(&self, id: &str, member: &MemberSpec) -> Result<Option<ActivationLease>> {
-        if let Some(lease) = self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
-            .starts.get(id)
-        {
-            return Ok(Some(lease.clone()));
+    pub(super) fn member_activation_lease(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+    ) -> Result<Option<ActivationLease>> {
+        let identity = self.capture_workspace_admission(member);
+        self.admit_start_workspace(subject, member, &identity)
+    }
+
+    fn capture_workspace_admission(&self, member: &MemberSpec) -> WorkspaceAdmission {
+        let workspace = Path::new(&member.workspace);
+        let observed = self.start_jobs.activation_leases.lock()
+            .unwrap_or_else(PoisonError::into_inner).observed.get(workspace).cloned();
+        let identity = observed.or_else(|| {
+            let repository = crate::repositories::workspace_repository(workspace)?;
+            let owner = crate::checkout::workspace_worktree(workspace)?;
+            Some((owner, repository))
+        });
+        // Both discovery and pass observations already return the repository identity.
+        // Resolving a bare root again can instead discover a containing worktree.
+        match identity {
+            Some((owner, repository)) => WorkspaceAdmission::Git { owner, repository },
+            None => WorkspaceAdmission::NonGit,
         }
-        let lease = self.member_activation_lease(member)?;
+    }
+
+    fn admit_start_workspace(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        identity: &WorkspaceAdmission,
+    ) -> Result<Option<ActivationLease>> {
+        let workspace = Path::new(&member.workspace);
+        let lease = match identity {
+            WorkspaceAdmission::Git { owner, repository } => {
+                let lease = self.worktree_activation_lease(owner, repository)?;
+                anyhow::ensure!(
+                    crate::repositories::workspace_repository(workspace).as_ref() == Some(repository),
+                    "workspace reclaimed or repository changed before start"
+                );
+                Some(lease)
+            }
+            WorkspaceAdmission::NonGit => {
+                anyhow::ensure!(crate::repositories::workspace_repository(workspace).is_none(),
+                    "non-Git workspace replaced by a Git workspace before start");
+                None
+            }
+        };
+        anyhow::ensure!(workspace.is_dir(), "workspace reclaimed before start: {}", workspace.display());
+        if subject.kind == "agent"
+            && let Some(checkout) = Checkout::from_desired(&subject.desired)
+        {
+            checkout.validate_workspace(workspace)?;
+        }
+        Ok(lease)
+    }
+
+    fn retain_start_activation_lease(
+        &self,
+        id: &str,
+        prepared: &PreparedStart,
+    ) -> Result<Option<ActivationLease>> {
+        // Reuse the per-owner holder, but revalidate the declaration even when a
+        // queued operation already retains admission.
+        let identity = prepared.workspace_admission.as_ref()
+            .context("stored start lacks workspace admission; refusing recovery launch")?;
+        let lease = self.admit_start_workspace(&prepared.subject, &prepared.member, identity)?;
         if let Some(lease) = &lease {
             self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
                 .starts.insert(id.to_owned(), lease.clone());
@@ -143,7 +213,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
-        let activation_lease = self.member_activation_lease(&prepared.member)?;
+        prepared.workspace_admission = Some(self.capture_workspace_admission(&prepared.member));
+        let identity = prepared.workspace_admission.as_ref().expect("captured workspace admission");
+        let activation_lease = self.admit_start_workspace(&prepared.subject, &prepared.member, identity)?;
         if let Some(run) = &prepared.subject.owner_run
             && self.store.run_projection_pending(run)?
         {
@@ -276,7 +348,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
         // Recovered queued operations reacquire admission before any launch work.
-        let activation_lease = self.retain_start_activation_lease(&operation.id, &prepared.member)?;
+        let activation_lease = match self.retain_start_activation_lease(&operation.id, &prepared) {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.refuse_start_workspace(operation, &error)?;
+                return Ok(());
+            }
+        };
         let Some(launch_permit) = self.admit_incarnation_launch()? else {
             return Ok(());
         };
@@ -580,13 +658,203 @@ impl<R: RuntimeControl> Reconciler<R> {
         )
     }
 
+    fn workspace_restart_authority_current(
+        &self,
+        operation: &RuntimeStartOperation,
+        request: &crate::model::ClaimRecord,
+    ) -> Result<bool> {
+        if !self.store.runtime_start_request_retained(request)?
+            || crate::restart::latest_request(&self.store, &operation.subject)?
+                .is_none_or(|latest| latest.id != request.id)
+            || self.store.selected_desired_token(&operation.subject)?.as_deref()
+                != request.body.pointer("/evidence/0").and_then(Value::as_str)
+            || self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some()
+            || self.store.newest_claim_index(&operation.subject, "agent.retired")? > request.store_index
+        {
+            return Ok(false);
+        }
+        let controls = self.store.observations_for(&operation.subject, "runtime.action.requested")?;
+        let superseded = controls.iter().rev().take_while(|claim| claim.id != request.id).any(|claim| {
+            matches!(claim.body["fields"]["action"].as_str(),
+                Some("stop" | "terminate" | "suspend" | "resume"))
+                && !(claim.actor.is_none()
+                    && claim.body["fields"]["action"] == "terminate"
+                    && claim.body["fields"]["operation"].as_str() == Some(operation.id.as_str()))
+        });
+        Ok(!superseded && !crate::suspension::current(&self.store, &operation.subject)?
+            .is_some_and(|suspension| suspension.holds_seat()))
+    }
+
+    fn requeue_unadmitted_restart(&self, operation: &RuntimeStartOperation) -> Result<()> {
+        if operation.dispatched || !operation.body["workspace_admission"].is_null() {
+            return Ok(());
+        }
+        let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
+        let Some(request) = &prepared.request else { return Ok(()) };
+        let key = format!("workspace-admission-restart:{}", operation.id);
+        let requeued = if let Some(requeued) = self.store.operation_claim(&key)? {
+            requeued
+        } else {
+            // Capture the head before checking authority; a concurrent authored control
+            // must make the append fail rather than resurrect an obsolete restart.
+            let head = self.store.claims_for(&operation.subject, None)?
+                .last().map(|claim| claim.id.clone());
+            if !prepared.requests_retained(&self.store)?
+                || !self.workspace_restart_authority_current(operation, request)?
+            {
+                if self.store.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_none() {
+                    self.retire_restart_request(&operation.subject, request,
+                        "later lifecycle intent superseded the queued restart during admission upgrade")?;
+                }
+                return Ok(());
+            }
+            self.store.append_claim(&ClaimInput {
+                subject: operation.subject.clone(),
+                kind: request.kind.clone(),
+                actor: request.actor.clone(),
+                fields: serde_json::from_value(request.body["fields"].clone())?,
+                evidence: request.body["evidence"].as_array().into_iter().flatten()
+                    .filter_map(Value::as_str).map(str::to_owned).chain([request.id.clone()]).collect(),
+                expected_subject: Some(head),
+                idempotency_key: Some(key),
+            })?
+        };
+        // Replayed requeues must recheck replacement authority too. Capture its head
+        // before reading controls so a stop racing the proof append defeats the fence.
+        let head = self.store.claims_for(&operation.subject, None)?
+            .last().map(|claim| claim.id.clone());
+        let current = prepared.requests_retained(&self.store)?
+            && self.workspace_restart_authority_current(operation, &requeued)?;
+        if !current {
+            if self.store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))?.is_none() {
+                self.retire_restart_request(&operation.subject, &requeued,
+                    "later lifecycle intent superseded the reissued restart")?;
+            }
+        } else if request.body["fields"]["action"] == crate::restart::WHEN_IDLE
+            && let Some(release) = self.store.operation_claim(&crate::restart::release_key(request))?
+        {
+            self.store.append_claim(&ClaimInput {
+                subject: operation.subject.clone(),
+                kind: release.kind,
+                actor: release.actor,
+                fields: serde_json::from_value(release.body["fields"].clone())?,
+                evidence: vec![requeued.id.clone(), release.id, request.id.clone()],
+                expected_subject: Some(head),
+                idempotency_key: Some(crate::restart::release_key(&requeued)),
+            })?;
+        }
+        if request.body["fields"]["fresh_session"] == true
+            && request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+        {
+            let incarnation = request.body["fields"]["incarnation_id"].as_str();
+            let session = if let (Some(incarnation), Some(control)) =
+                (incarnation, prepared.control_request_receipt.as_ref())
+            {
+                self.store.claims_for(&operation.subject, Some("harness.session-file"))?
+                    .into_iter().rev()
+                    .find(|claim| claim.store_index <= control.store_index
+                        && claim.body["fields"]["incarnation_id"].as_str() == Some(incarnation))
+                    .and_then(|claim| Some((
+                        claim.body["fields"]["harness"].as_str()?.to_owned(),
+                        claim.body["fields"]["session_id"].as_str()?.to_owned(),
+                    )))
+            } else {
+                None
+            };
+            let incumbent = self.runtime.observe_start(&prepared.member)?;
+            // A fresh session may already have stopped its incumbent after handoff.
+            // Preserve the acknowledged boundary, not a new preparation timestamp.
+            let head = self.store.claims_for(&operation.subject, None)?
+                .last().map(|claim| claim.id.clone());
+            if !prepared.requests_retained(&self.store)?
+                || !self.workspace_restart_authority_current(operation, &requeued)?
+            {
+                if self.store.operation_claim(&format!("agent-restart-completed:{}", requeued.id))?.is_none() {
+                    self.retire_restart_request(&operation.subject, &requeued,
+                        "later lifecycle intent superseded the reissued restart")?;
+                }
+            } else if let Some(prepare) = self.store.operation_claim(
+                &format!("restart-prepare:{}:{}", operation.subject, request.id),
+            )? && crate::handoff::acknowledged_handoff_since(
+                &self.store, &operation.subject, prepare.accepted_at_unix_ms,
+            )? && let Some(incarnation) = incarnation
+                && (prepared.member.driver.is_none() || session.is_some())
+                && self.handoff_incumbent_matches(
+                    &operation.subject, incarnation, session.as_ref(), incumbent.as_ref(),
+                )?
+            {
+                self.store.append_claim(&ClaimInput {
+                    subject: operation.subject.clone(),
+                    kind: "runtime.reconcile-decision".into(),
+                    actor: requeued.actor.clone(),
+                    fields: BTreeMap::from([
+                        ("key".into(), Value::from("restart-prepare")),
+                        ("decision".into(), Value::from("ready")),
+                        ("acknowledged_since_unix_ms".into(),
+                            Value::from(prepare.accepted_at_unix_ms.to_string())),
+                        ("incarnation_id".into(), Value::from(incarnation)),
+                        ("native_session".into(), serde_json::to_value(&session)?),
+                    ]),
+                    evidence: vec![requeued.id.clone(), prepare.id, request.id.clone()],
+                    expected_subject: Some(head),
+                    idempotency_key: Some(format!(
+                        "restart-prepare:{}:{}:handoff", operation.subject, requeued.id,
+                    )),
+                })?;
+            }
+        }
+        self.retire_restart_request(&operation.subject, request,
+            &format!("queued restart reissued as {} with fresh workspace admission", requeued.id))?;
+        Ok(())
+    }
+
+    fn refuse_start_workspace(&self, operation: &RuntimeStartOperation, error: &anyhow::Error) -> Result<()> {
+        // Keep refusal diagnostics within each subject's schema: a rejected
+        // diagnostic must not prevent revocation and durable producer closure.
+        let reason = Value::from(format!("{error:#}"));
+        if operation.body["subject"]["kind"] == "agent" {
+            self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
+                ("code".into(), Value::from("start-workspace-refused")),
+                ("reason".into(), reason),
+                ("invocation_id".into(), Value::from(format!("invocation/{}", operation.id))),
+            ]))?;
+        } else {
+            self.record_once(&operation.subject, "runtime.reconcile-decision", BTreeMap::from([
+                ("key".into(), Value::from(format!("start-workspace-refused:{}", operation.id))),
+                ("decision".into(), Value::from("start-workspace-refused")),
+                ("reason".into(), reason),
+            ]))?;
+        }
+        self.requeue_unadmitted_restart(operation)?;
+        // Queued cancellation proves the producer never ran. Dispatched producers
+        // still require their normal operation-fenced closure evidence.
+        self.revoke_start(&operation.subject)?;
+        if operation.revoked_by.is_some() && !operation.dispatched && !operation.finished {
+            self.store.cancel_undispatched_runtime_start(&operation.id)?;
+        }
+        self.start_changed(&operation.subject);
+        Ok(())
+    }
+
     pub(super) fn reconcile_start_operation(
         &self,
         mut operation: RuntimeStartOperation,
         snapshot: &PassPtySnapshot,
     ) -> Result<()> {
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
-        let _activation_lease = self.retain_start_activation_lease(&operation.id, &prepared.member)?;
+        // Retirement is runtime/store work, not workspace activation. A missing or
+        // incompatible workspace revokes the operation rather than blocking cleanup.
+        let _activation_lease = match self.retain_start_activation_lease(&operation.id, &prepared) {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.refuse_start_workspace(&operation, &error)?;
+                let Some(fresh) = self.store.runtime_start_for(&operation.subject)? else {
+                    return Ok(());
+                };
+                operation = fresh;
+                None
+            }
+        };
         if let Some(run) = &prepared.subject.owner_run
             && self.store.run_projection_pending(run)?
         {
