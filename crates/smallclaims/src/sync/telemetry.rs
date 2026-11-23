@@ -65,19 +65,19 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
     }
 });
 
-/// Filesystem events received, or coalesced broadcasts sent to replication followers.
+/// Store-scoped revision notifications consumed by the independent worker.
 #[derive(Clone, Copy)]
 pub enum WakeStage {
-    Raw,
-    Paced,
+    Authority,
+    Membership,
 }
 
 /// Count wake amplification without peer labels or allocation on the disabled path.
 pub fn record_wake(stage: WakeStage) {
     if METRICS_ENABLED.load(Ordering::Relaxed) {
         let stage = match stage {
-            WakeStage::Raw => "raw",
-            WakeStage::Paced => "paced",
+            WakeStage::Authority => "authority",
+            WakeStage::Membership => "membership",
         };
         METRICS.wakes.add(1, &[KeyValue::new("stage", stage)]);
     }
