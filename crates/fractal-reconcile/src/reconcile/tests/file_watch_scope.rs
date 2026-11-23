@@ -81,10 +81,15 @@ fn launch_input_change_evaluates_only_its_declaration() {
     reconciler.file_changes.invalidate(&reconciler.incremental, "launch-input/tool-7", false, &global);
     assert_eq!(*reconciler.file_changes.launches.lock().unwrap(),
         BTreeSet::from(["agent/scoped/7".to_owned()]));
+    assert!(global.notified().now_or_never().is_none(), "file invalidation stays scoped");
+    *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(|| {
+        panic!("scoped launch evaluation must not enter a full pass");
+    }));
     assert_eq!(reconciler.evaluate_changed_launch_inputs().unwrap(), 1);
     assert!((0..64).filter(|index| *index != 7).all(|index|
         !reconciler.incremental.needs(&format!("launch-inputs:agent/scoped/{index}"), 0)));
-    assert!(global.notified().now_or_never().is_none(), "no full reconcile notification");
+    // A selected member's real observation may publish semantic state and use its
+    // normal lifecycle wake. File selection itself above produces no global wake.
 }
 
 #[tokio::test]
@@ -246,7 +251,7 @@ agent "selected" {{
             subject.member.as_mut().unwrap().lifecycle = crate::model::MemberLifecycle::AdoptOnly;
         }
         let stale = intent.subjects.values_mut()
-            .find(|subject| subject.subject.ends_with(".stale")).unwrap();
+            .find(|subject| subject.subject != "agent/node.selected").unwrap();
         let stale_subject = stale.subject.clone();
         if lifecycle == "stopped-root-task" {
             stale.member.as_mut().unwrap().tags.insert("st3.agent".into(), "agent/node.root".into());
