@@ -1003,7 +1003,7 @@ fn source_clock_admission_and_unread_commit_do_no_source_reduction() {
     let ask = store.ask_person(&request).unwrap();
     let admission = now_ms() + 60_000;
     store.connection.lock().expect("fixture writer").execute(
-        "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1 AND kind='work.person-asked'",
+        /* sqlite-large-value: allow-for-now lv-hfad24949cf08 owner=fractal_daemon::store_tests::attention_list TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1 AND kind='work.person-asked'",
         params![ask.subject, admission.to_string()],
     ).unwrap();
     let before = store.read_snapshot(|_| {

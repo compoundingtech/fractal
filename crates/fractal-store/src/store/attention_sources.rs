@@ -91,7 +91,7 @@ impl Store {
             let is_step = subject.starts_with("step-run/");
             let custom: Option<(String, String)> = connection.prepare_cached(
                 "SELECT body, requested_at FROM custom_sources WHERE subject=?1 AND active=1",
-            )?.query_row([&subject], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            )?.query_row(/* sqlite-large-value: allow-for-now lv-h2acf43c6c302 owner=fractal_store::store::attention_sources TODO=trace-statement-and-value-representation */ [&subject], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
             let key = format!("subject:{subject}");
             if !is_agent && !is_step && custom.is_none() && !snapshot.entries.contains_key(&key) {
                 continue;
