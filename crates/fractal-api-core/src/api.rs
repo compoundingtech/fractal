@@ -7390,7 +7390,7 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            wait_for_agent_roster_change(&store, &wake, &mut changed, &mut delivery, &mut relayed).await;
+            wait_for_agent_roster_change(&store, &wake, &mut changed, &mut delivery, &mut relayed, client_now_ms()).await;
         }
     }));
 }
@@ -7402,6 +7402,7 @@ async fn wait_for_agent_roster_change(
     changed: &mut tokio::sync::watch::Receiver<u64>,
     delivery: &mut tokio::sync::watch::Receiver<u64>,
     relayed: &mut tokio::sync::watch::Receiver<u64>,
+    now_ms: u128,
 ) {
     loop {
         let deadline = (store.agents_publication_demand() && !store.agent_roster_refresh_failed())
@@ -7410,7 +7411,7 @@ async fn wait_for_agent_roster_change(
         let clock = async {
             match deadline {
                 Some(at) => tokio::time::sleep(Duration::from_millis(
-                    at.saturating_sub(client_now_ms()).min(u128::from(u64::MAX)) as u64)).await,
+                    at.saturating_sub(now_ms).min(u128::from(u64::MAX)) as u64)).await,
                 None => std::future::pending::<()>().await,
             }
         };

@@ -589,7 +589,7 @@ async fn agents_publication_no_deadline_wait_has_no_periodic_refresh() {
     let mut delivery = delivery_presence::subscribe_semantic();
     let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
     let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
-        store, &wake, &mut changed, &mut delivery, &mut relayed));
+        store, &wake, &mut changed, &mut delivery, &mut relayed, client_now_ms()));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
     tokio::time::advance(Duration::from_secs(3600)).await;
@@ -607,7 +607,8 @@ async fn agents_publication_wait_wakes_at_its_exact_evidence_boundary() {
     let wake = store.start_agent_roster_refresher().unwrap();
     let _subscriber = store.subscribe_agents_publications();
     wake.notified().await;
-    let _clock = smallclaims::store::clock_snapshot();
+    // Pin the wall-clock sample used to arm the paused Tokio timer. Fixture publication
+    // takes real time, which must not shorten this test's exact 250 ms boundary.
     let now = client_now_ms().min(u128::from(u64::MAX)) as u64;
     store.publish_presented_agents(store.agents_publication_build().unwrap(),
         crate::store::evidence::AgentsPublicationSource {
@@ -620,7 +621,7 @@ async fn agents_publication_wait_wakes_at_its_exact_evidence_boundary() {
     let mut delivery = delivery_presence::subscribe_semantic();
     let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
     let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
-        store, &wake, &mut changed, &mut delivery, &mut relayed));
+        store, &wake, &mut changed, &mut delivery, &mut relayed, u128::from(now)));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
     tokio::time::advance(Duration::from_millis(249)).await;
