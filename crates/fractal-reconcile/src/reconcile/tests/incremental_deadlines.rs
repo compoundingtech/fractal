@@ -2070,6 +2070,41 @@ fn refused_legacy_admission_stays_queued_and_retries_without_losing_its_operatio
     assert_eq!(store.observations_for("agent/node.worker", "runtime.reconcile-decision").unwrap()
         .iter().filter(|claim| claim.body["fields"]["key"] == format!("start-workspace-wait:{id}")).count(), 1);
     assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+    // The wait dedup is one keyed operation-registry lookup, never a scan of the
+    // subject's decision history: the SQLite work of a refused pass must not grow
+    // when that history does.
+    let refused_pass_work = {
+        restarted.reconcile_start_jobs().unwrap();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        restarted.reconcile_start_jobs().unwrap();
+        scope.finish()
+    };
+    for index in 0..800 {
+        store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("key".into(), Value::from(format!("refusal-history-{index}"))),
+                ("decision".into(), Value::from("history-noise")),
+                ("reason".into(), Value::from("seeded history the wait dedup must not read")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    let grown_pass_work = {
+        restarted.reconcile_start_jobs().unwrap();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        restarted.reconcile_start_jobs().unwrap();
+        scope.finish()
+    };
+    assert_eq!(grown_pass_work.statements, refused_pass_work.statements,
+        "a refused pass must run the same statements whatever the decision history holds");
+    assert!(grown_pass_work.vm_steps <= refused_pass_work.vm_steps + 64,
+        "a refused pass must not read the subject's decision history: \
+         {refused_pass_work:?} then {grown_pass_work:?}");
     std::fs::rename(&hidden, &repository).unwrap();
     restarted.reconcile_start_jobs().unwrap();
     complete_queued_workspace_start(&restarted, &store, &runtime, &id, true);

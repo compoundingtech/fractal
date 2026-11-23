@@ -358,17 +358,30 @@ impl<R: RuntimeControl> Reconciler<R> {
             Err(error) => {
                 if prepared.workspace_admission.is_none() {
                     if matches!(prepared.subject.kind.as_str(), "agent" | "exec") {
+                        // Exactly one wait record per operation, by design: once admission is
+                        // available this same operation dispatches in this same pass, so any
+                        // later wait belongs to a new operation id. Deduplication is one
+                        // indexed lookup in the operation registry (`Store::operation_claim`,
+                        // operations.id), never a scan of the subject's decision history, and
+                        // a lost race can only replay the keyed append.
                         let key = format!("start-workspace-wait:{}", operation.id);
-                        let previous = self.store.observations_for(
-                            &operation.subject, "runtime.reconcile-decision",
-                        )?.into_iter().rev().find(|claim| claim.body["fields"]["key"] == key);
-                        self.record_once_with_previous(
-                            &operation.subject, "runtime.reconcile-decision", BTreeMap::from([
-                                ("key".into(), Value::from(key)),
-                                ("decision".into(), Value::from("workspace-admission-unavailable")),
-                                ("reason".into(), Value::from("workspace admission is unavailable; queued start will retry")),
-                            ]), Vec::new(), previous.as_ref(),
-                        )?;
+                        if self.store.operation_claim(&key)?.is_none() {
+                            self.store.append_claim(&ClaimInput {
+                                subject: operation.subject.clone(),
+                                kind: "runtime.reconcile-decision".into(),
+                                actor: None,
+                                fields: BTreeMap::from([
+                                    ("key".into(), Value::from(key)),
+                                    ("decision".into(), Value::from("workspace-admission-unavailable")),
+                                    ("reason".into(), Value::from(
+                                        "workspace admission is unavailable; queued start will retry")),
+                                ]),
+                                evidence: Vec::new(),
+                                expected_subject: None,
+                                idempotency_key: Some(key),
+                            })?;
+                            self.signal_changed();
+                        }
                     }
                     return Ok(());
                 }
