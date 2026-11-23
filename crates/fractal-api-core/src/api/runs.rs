@@ -347,6 +347,7 @@ pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
     report["mission_reads"] = state.store.mission_read_work();
     report["mail_objectives"] = json!(crate::mail_delivery_objectives::work_counts(&state.store));
     report["file_watch_work"] = crate::incremental::file_watch_work::snapshot();
+    report["relayed_close_work"] = super::relayed_close_maintenance::work_counts(&state.store);
     report["published_list_work"] = json!({
         "work": { "refolded": state.store.published_work_list().refolded() },
         "missions": { "refolded": state.store.published_missions_list().refolded() },
