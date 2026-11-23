@@ -9444,7 +9444,8 @@ impl Store {
 
     /// Reserve one quiet retry episode; repeated exchanges cannot extend its budget.
     pub fn request_quiet_projection_retry(&self, now: std::time::Instant) -> bool {
-        self.defer_replication_projection();
+        // Coalescing admits no new work: leave a running pass's completion
+        // generation alone. Only a reserved episode also advances its retry signal.
         let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
         if episode.active || episode.ended.is_some_and(|ended|
             now.saturating_duration_since(ended) < std::time::Duration::from_secs(120))
@@ -9454,6 +9455,7 @@ impl Store {
         episode.active = true;
         episode.logged_failure = false;
         drop(episode);
+        self.defer_replication_projection();
         self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
         true
     }

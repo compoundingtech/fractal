@@ -610,3 +610,73 @@ async fn quiet_receive_recovers_deferred_healthy_frontier_after_episode_cooldown
     assert_eq!(state.store.projection_frontier().unwrap(), frontier);
     assert!(!state.store.replication_projection_needs_recovery().unwrap());
 }
+
+#[test]
+fn quiet_receive_during_recovery_preserves_completion_but_new_admission_survives() {
+    for new_data in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let request = deadline_request(&state.store);
+        let gate = state.store.projection.lock();
+        let (seed, _, _) = replication_receive_phases(
+            &state.store, &request,
+            smallclaims::receive_metrics::RequestMetrics::new("completion-seed".into()),
+            None, std::time::Instant::now(), || {},
+        ).unwrap();
+        drop(gate);
+        assert!(seed.receipt.received > 0);
+        assert!(state.store.replication_projection_deferred());
+
+        let source = Store::open_memory("late-source").unwrap();
+        source.append_client_claim(&smallclaims::ClaimInput {
+            subject: "resource/completion-late".into(),
+            kind: "resource.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("kind".into(), json!("custom.test.replication"))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        source.bind_fleet(&request.fleet_id).unwrap();
+        let inventory = state.store.export_replication_summary(&request.fleet_id).unwrap().inventory;
+        let exchange = source.export_replication_exchange(&request.fleet_id, &inventory).unwrap();
+        let late = ReplicationReceiveRequest {
+            peer: exchange.peer.clone(), fleet_id: exchange.fleet_id.clone(), exchange,
+            round_trip_ms: None, carrier: Default::default(), authenticated_member_key: None,
+        };
+        let generation = state.store.projection_contention_generation();
+        let mut coalesced = false;
+        assert!(state.store.project_replication_backlog_before_clear(|| {
+            // This hook runs after the final frontier read and writer release,
+            // but before the generation-checked deferred-state clear.
+            let (received, _, _) = replication_receive_phases(
+                &state.store, if new_data { &late } else { &request },
+                smallclaims::receive_metrics::RequestMetrics::new("completion-race".into()),
+                None, std::time::Instant::now(), || {},
+            ).unwrap();
+            assert_eq!(received.receipt.received > 0, new_data);
+            coalesced = true;
+        }).unwrap());
+        assert!(coalesced);
+        if new_data {
+            assert!(state.store.replication_projection_deferred());
+            assert!(state.store.projection_contention_generation() > generation);
+            assert!(state.store.projection_frontier().unwrap() < state.store.index().unwrap());
+            assert!(state.store.project_replication_backlog().unwrap());
+        } else {
+            assert_eq!(state.store.projection_contention_generation(), generation);
+        }
+        assert!(!state.store.replication_projection_deferred());
+        assert_eq!(state.store.projection_frontier().unwrap(), state.store.index().unwrap());
+        for (subject, expected) in [
+            ("resource/receive-deadline", 1),
+            ("resource/completion-late", i64::from(new_data)),
+        ] {
+            let visible: i64 = state.store.readers.get().query_row(
+                "SELECT COUNT(*) FROM events WHERE subject=?1 AND kind='resource.observed'",
+                [subject], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(visible, expected);
+        }
+    }
+}
