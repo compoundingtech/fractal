@@ -1402,72 +1402,284 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
     server.abort();
 }
 
-#[tokio::test]
-async fn root_probe_falls_back_to_full_summary_for_a_legacy_peer() {
-    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
-    let auth = FleetAuth::test(fleet_id, &[6; 32]);
-    let source = Arc::new(plain_memory("source").unwrap());
-    let target = Arc::new(plain_memory("target").unwrap());
-    for (store, subject) in [(&source, "note/source"), (&target, "note/target")] {
-        store.bind_fleet(fleet_id).unwrap();
-        store.append_claim(&ClaimInput {
-            subject: subject.into(),
-            kind: "example.note".into(),
-            actor: None,
-            fields: BTreeMap::new(),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        }).unwrap();
+mod root_first_compatibility {
+    use super::*;
+    use crate::replication::{RANGE_PROOFS, ROOT_FIRST, ROOT_SUMMARY};
+
+    #[derive(Clone)]
+    struct Advertisement {
+        root_first: bool,
+        build: Option<String>,
     }
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let observed = requests.clone();
-    let remote = target.clone();
-    let signing = auth.clone();
-    let app = Router::new().route(EXCHANGE_PATH, post(move |headers: HeaderMap, body: Bytes| {
-        let observed = observed.clone();
-        let remote = remote.clone();
-        let signing = signing.clone();
-        async move {
-            signing.verify_sender(&headers, "POST", EXCHANGE_PATH, &body, None, None).unwrap();
-            let mut query: ReplicationExchange = serde_json::from_slice(&body).unwrap();
-            observed.lock().unwrap().push(query.inventory.clone());
-            remote.receive_replication_exchange("source", fleet_id, &query).unwrap();
-            // Model an old reader: it ignores every newly introduced capability.
-            query.inventory.capabilities.clear();
-            let mut answer = remote.export_replication_exchange_answering(
-                fleet_id, &query.inventory, &query.signature_requests,
+
+    #[derive(Default)]
+    struct Observed {
+        requests: Vec<ReplicationInventory>,
+        failures: Vec<String>,
+        exchange_failures: usize,
+    }
+
+    struct Fixture {
+        source: Arc<Store>,
+        auth: FleetAuth,
+        fleet: FleetContext,
+        peer: PeerConfig,
+        advertisement: Arc<Mutex<Advertisement>>,
+        observed: Arc<Mutex<Observed>>,
+        server: tokio::task::JoinHandle<std::io::Result<()>>,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl Fixture {
+        async fn new(root_first: bool, build: Option<&str>) -> Self {
+            let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+            let auth = FleetAuth::test(fleet_id, &[6; 32]);
+            let source = Arc::new(plain_memory("source").unwrap());
+            let target = Arc::new(plain_memory("target").unwrap());
+            source.bind_fleet(fleet_id).unwrap();
+            target.bind_fleet(fleet_id).unwrap();
+            source.append_claim(&ClaimInput {
+                subject: "note/shared".into(),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            let initial = source.export_replication_exchange(
+                fleet_id, &ReplicationInventory::default(),
             ).unwrap();
-            answer.inventory.capabilities.clear();
-            let bytes = serde_json::to_vec(&PeerResponse::new("target", 0, answer)).unwrap();
-            let mut response = (StatusCode::OK, bytes.clone()).into_response();
-            response.headers_mut().extend(signing.response_headers_for(
-                EXCHANGE_PATH, "target", &bytes, &FleetAuth::body_digest(&body),
-            ).unwrap());
-            response
+            admit_fixture_exchange(&target, "source", fleet_id, &initial);
+            assert_eq!(
+                source.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
+                target.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
+            );
+
+            let advertisement = Arc::new(Mutex::new(Advertisement {
+                root_first,
+                build: build.map(str::to_owned),
+            }));
+            let observed = Arc::new(Mutex::new(Observed::default()));
+            let advertised = advertisement.clone();
+            let observations = observed.clone();
+            let signing = auth.clone();
+            let app = Router::new().route(EXCHANGE_PATH, post(
+                move |headers: HeaderMap, body: Bytes| {
+                    let remote = target.clone();
+                    let advertised = advertised.clone();
+                    let observations = observations.clone();
+                    let signing = signing.clone();
+                    async move {
+                        signing.verify_sender(
+                            &headers, "POST", EXCHANGE_PATH, &body, None, None,
+                        ).unwrap();
+                        let mut query: ReplicationExchange =
+                            serde_json::from_slice(&body).unwrap();
+                        let advertisement = advertised.lock().unwrap().clone();
+                        observations.lock().unwrap().requests.push(query.inventory.clone());
+                        // A legacy reader needs complete range proofs. It cannot answer a
+                        // bucketless scalar probe and refuses before admitting any envelopes.
+                        let refused = !advertisement.root_first
+                            && (query.inventory.can(ROOT_SUMMARY)
+                                || query.inventory.buckets.is_empty());
+                        let (status, bytes) = if refused {
+                            let code = "replication-exchange-metadata-too-large";
+                            observations.lock().unwrap().failures.push(code.into());
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                serde_json::to_vec(&serde_json::json!({"code": code})).unwrap(),
+                            )
+                        } else {
+                            remote.receive_replication_exchange(
+                                "source", fleet_id, &query,
+                            ).unwrap();
+                            // An old reader ignores additive capabilities, even though this
+                            // fixture uses the real store implementation to construct its answer.
+                            if !advertisement.root_first {
+                                query.inventory.capabilities.clear();
+                            }
+                            let mut answer = remote.export_replication_exchange_answering(
+                                fleet_id, &query.inventory, &query.signature_requests,
+                            ).unwrap();
+                            if !advertisement.root_first {
+                                answer.inventory.capabilities.clear();
+                            }
+                            answer.build = advertisement.build;
+                            (
+                                StatusCode::OK,
+                                serde_json::to_vec(&PeerResponse::new("target", 0, answer)).unwrap(),
+                            )
+                        };
+                        let mut response = (status, bytes.clone()).into_response();
+                        response.headers_mut().extend(signing.response_headers_for(
+                            EXCHANGE_PATH, "target", &bytes, &FleetAuth::body_digest(&body),
+                        ).unwrap());
+                        response
+                    }
+                },
+            ));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(axum::serve(listener, app).into_future());
+            Self {
+                source,
+                auth,
+                fleet: FleetContext::legacy(BTreeSet::from(["target".into()])),
+                peer: PeerConfig { name: "target".into(), url: format!("http://{address}") },
+                advertisement,
+                observed,
+                server,
+            }
         }
-    }));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(axum::serve(listener, app).into_future());
-    let peer = PeerConfig { name: "target".into(), url: format!("http://{address}") };
-    let fleet = FleetContext::legacy(BTreeSet::from(["target".into()]));
-    let http = replication_http_client();
-    for _ in 0..4 {
-        if !exchange(&http, &Local(source.clone()), "source", &peer, &auth, &fleet).await.unwrap() {
-            break;
+
+        async fn equal_round(&self, http: &reqwest::Client, root_only: bool) {
+            let before = self.observed.lock().unwrap().requests.len();
+            let result = exchange(
+                http, &Local(self.source.clone()), "source", &self.peer, &self.auth, &self.fleet,
+            ).await;
+            if result.is_err() {
+                self.observed.lock().unwrap().exchange_failures += 1;
+            }
+            assert!(!result.expect("an equal round must succeed without a compatibility retry"));
+            let observed = self.observed.lock().unwrap();
+            assert_eq!(observed.requests.len(), before + 1, "one HTTP exchange per equal round");
+            let request = &observed.requests[before];
+            assert!(request.envelopes.is_empty(), "never send a full envelope inventory");
+            assert_eq!(request.can(ROOT_SUMMARY), root_only);
+            if root_only {
+                assert!(request.buckets.is_empty(), "negotiated scalar probe omits buckets");
+            } else {
+                assert!(request.can(RANGE_PROOFS), "unknown and legacy peers need complete proofs");
+                assert!(!request.buckets.is_empty(), "the shared nonempty store needs bucket proofs");
+            }
+        }
+
+        fn assert_no_failures(&self, rounds: usize) {
+            let observed = self.observed.lock().unwrap();
+            assert_eq!(observed.requests.len(), rounds);
+            assert_eq!(observed.exchange_failures, 0);
+            assert_eq!(
+                observed.failures.iter().filter(
+                    |code| code.as_str() == "replication-exchange-metadata-too-large",
+                ).count(),
+                0,
+                "legacy metadata refusal must never be triggered",
+            );
+            assert!(observed.failures.is_empty(), "no signed HTTP failures");
         }
     }
-    assert_eq!(
-        source.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
-        target.export_replication_root_summary(fleet_id).unwrap().inventory.digest,
-    );
-    let requests = requests.lock().unwrap();
-    assert!(requests[0].can(crate::replication::ROOT_SUMMARY));
-    assert!(requests[0].buckets.is_empty());
-    assert!(!requests[1].can(crate::replication::ROOT_SUMMARY));
-    assert!(!requests[1].buckets.is_empty(), "legacy fallback sends complete range proofs");
-    server.abort();
+
+    #[tokio::test]
+    async fn legacy_peer_receives_only_complete_summaries_with_one_request_per_equal_round() {
+        let fixture = Fixture::new(false, None).await;
+        let http = replication_http_client();
+        for _ in 0..4 {
+            fixture.equal_round(&http, false).await;
+        }
+        fixture.assert_no_failures(4);
+    }
+
+    #[tokio::test]
+    async fn advertised_root_first_peer_receives_root_only_after_initial_negotiation() {
+        let fixture = Fixture::new(true, Some("root-first-build")).await;
+        let http = replication_http_client();
+        fixture.equal_round(&http, false).await;
+        for _ in 0..3 {
+            fixture.equal_round(&http, true).await;
+        }
+        fixture.assert_no_failures(4);
+    }
+
+    #[tokio::test]
+    async fn upgrading_peer_switches_to_root_only_without_restarting_the_session() {
+        // Capability refresh is not conditional on a build changing: both same-build
+        // advertisements and a legacy build gaining an identity must be learned.
+        for (old_build, new_build) in [
+            (None, Some("upgraded-build")),
+            (Some("legacy-build"), Some("upgraded-build")),
+            (Some("same-build"), Some("same-build")),
+        ] {
+            let fixture = Fixture::new(false, old_build).await;
+            let http = replication_http_client();
+            fixture.equal_round(&http, false).await;
+            fixture.equal_round(&http, false).await;
+            *fixture.advertisement.lock().unwrap() = Advertisement {
+                root_first: true,
+                build: new_build.map(str::to_owned),
+            };
+            // This complete summary receives the first signed ROOT_FIRST advertisement.
+            fixture.equal_round(&http, false).await;
+            fixture.equal_round(&http, true).await;
+            fixture.equal_round(&http, true).await;
+            fixture.assert_no_failures(5);
+        }
+    }
+
+    #[test]
+    fn replacing_a_current_member_invalidates_its_cached_root_first_advertisement() {
+        let mut fleet = FleetContext::legacy(BTreeSet::new());
+        fleet.legacy = false;
+        *fleet.view.write().unwrap() = transport_order_view();
+        let store = plain_memory("source").unwrap();
+        let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+        store.bind_fleet(fleet_id).unwrap();
+        let mut advertisement = store.export_replication_root_summary(fleet_id).unwrap();
+        let old_sender = Sender {
+            name: "modern".into(),
+            member_key: Some("modern-key".into()),
+            member_signature_valid: true,
+        };
+        assert!(fleet.accept(&old_sender).is_ok());
+        fleet.observe_capabilities(&old_sender.name, old_sender.member_key.as_deref(), &advertisement);
+        assert_eq!(fleet.capability_class("modern"), "root_first");
+
+        fleet.view.write().unwrap().members[0].member_key = "replacement-key".into();
+        assert!(fleet.accept(&old_sender).is_err());
+        assert_eq!(fleet.capability_class("modern"), "unknown");
+        let new_sender = Sender {
+            member_key: Some("replacement-key".into()),
+            ..old_sender
+        };
+        assert!(fleet.accept(&new_sender).is_ok());
+        advertisement.inventory.capabilities.clear();
+        fleet.observe_capabilities(&new_sender.name, new_sender.member_key.as_deref(), &advertisement);
+        assert_eq!(fleet.capability_class("modern"), "legacy");
+        advertisement.inventory.capabilities.push(ROOT_FIRST.into());
+        fleet.observe_capabilities(&new_sender.name, new_sender.member_key.as_deref(), &advertisement);
+        assert_eq!(fleet.capability_class("modern"), "root_first");
+    }
+
+    #[test]
+    fn build_and_same_build_advertisements_replace_rather_than_union_capabilities() {
+        let fleet = FleetContext::legacy(BTreeSet::from(["target".into()]));
+        let sender = Sender { name: "target".into(), ..Sender::default() };
+        let store = plain_memory("source").unwrap();
+        let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+        store.bind_fleet(fleet_id).unwrap();
+        let mut advertisement = store.export_replication_root_summary(fleet_id).unwrap();
+        advertisement.build = Some("modern-build".into());
+        fleet.observe_capabilities(&sender.name, None, &advertisement);
+        assert_eq!(fleet.capability_class("target"), "root_first");
+        advertisement.build = Some("legacy-build".into());
+        advertisement.inventory.capabilities.clear();
+        fleet.observe_capabilities(&sender.name, None, &advertisement);
+        assert_eq!(fleet.capability_class("target"), "legacy");
+        advertisement.inventory.capabilities.push(ROOT_FIRST.into());
+        fleet.observe_capabilities(&sender.name, None, &advertisement);
+        assert_eq!(fleet.capability_class("target"), "root_first");
+        advertisement.inventory.capabilities.clear();
+        fleet.observe_capabilities(&sender.name, None, &advertisement);
+        assert_eq!(fleet.capability_class("target"), "legacy");
+        advertisement.build = None;
+        fleet.observe_capabilities(&sender.name, None, &advertisement);
+        assert_eq!(fleet.capability_class("target"), "legacy");
+    }
 }
 
 #[tokio::test]
