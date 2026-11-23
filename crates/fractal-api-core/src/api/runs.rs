@@ -3,6 +3,7 @@ use crate::MissionsStore;
 use crate::MissionListStore;
 use crate::MissionsStoreCore;
 use crate::RevisionSeatsStore;
+use crate::MailboxWakesStore;
 use super::*;
 
 /// Start running each exec gate of a mission file once, the way a run would: `st missions check`.
@@ -346,6 +347,7 @@ pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
     report["writer_observers"] = json!(smallclaims::sqlite::writer_observer_stats());
     report["mission_reads"] = state.store.mission_read_work();
     report["mail_objectives"] = json!(crate::mail_delivery_objectives::work_counts(&state.store));
+    report["mailbox_streams"] = state.store.mailbox_stream_work();
     report["file_watch_work"] = crate::incremental::file_watch_work::snapshot();
     report["reconcile_inputs"] = state.store.reconcile_input_work();
     report["fault_families"] = state.store.fault_family_work();
