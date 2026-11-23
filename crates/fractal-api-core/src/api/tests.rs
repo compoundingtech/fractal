@@ -27,6 +27,12 @@ async fn performance_exports_native_writer_work_counts() {
     ] {
         assert!(report["writer_observers"][counter].as_u64().is_some(), "{counter}: {report}");
     }
+    for counter in [
+        "discovery_passes", "candidate_messages", "remote_event_pages",
+        "remote_changed_messages", "legacy_peer_discovery_passes",
+    ] {
+        assert_eq!(report["relayed_close_work"][counter].as_u64(), Some(0), "{counter}: {report}");
+    }
 }
 
 #[test]
