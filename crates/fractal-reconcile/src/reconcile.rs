@@ -4999,29 +4999,34 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         blocked: Option<&anyhow::Error>,
     ) -> Result<()> {
+        let previous = self
+            .store
+            .observations_for(subject, "harness.diagnostic")?
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body["fields"]["code"] == "render-blocked");
         let (status, reason) = if let Some(error) = blocked {
             ("warning", format!("{error:#}"))
         } else {
-            let pending = self
-                .store
-                .observations_for(subject, "harness.diagnostic")?
-                .into_iter()
-                .rev()
-                .find(|claim| claim.body["fields"]["code"] == "render-blocked")
+            let pending = previous
+                .as_ref()
                 .is_some_and(|claim| claim.body["fields"]["status"] == "warning");
             if !pending {
                 return Ok(());
             }
             ("resolved", "workspace preparation is no longer blocked".into())
         };
-        self.record_once(
+        self.record_once_with_previous(
             subject,
             "harness.diagnostic",
             BTreeMap::from([
                 ("code".into(), Value::String("render-blocked".into())),
+                ("severity".into(), Value::String("warning".into())),
                 ("status".into(), Value::String(status.into())),
                 ("reason".into(), Value::String(reason)),
             ]),
+            Vec::new(),
+            previous.as_ref(),
         )
     }
 

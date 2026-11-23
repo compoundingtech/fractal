@@ -9080,7 +9080,19 @@ mission "task" state="ready" {{
             "node".into(),
             Arc::new(Notify::new()),
         ).skipping_unneeded(true);
-        for _ in 0..3 {
+        let interleave = |pass| {
+            reconciler.record_once(
+                "agent/node.seat",
+                "harness.diagnostic",
+                BTreeMap::from([
+                    ("code".into(), Value::String("provider-fixture".into())),
+                    ("severity".into(), Value::String("warning".into())),
+                    ("reason".into(), Value::String(format!("provider diagnostic {pass}"))),
+                ]),
+            ).unwrap();
+        };
+        for pass in 0..3 {
+            interleave(pass);
             reconciler.reconcile_once().unwrap();
         }
         assert!(store.member_reconcile_fault("agent/node.seat", None).unwrap().is_none());
@@ -9092,6 +9104,10 @@ mission "task" state="ready" {{
             .find(|claim| claim.body["fields"]["code"] == "render-blocked")
             .expect("the render failure is visible as a diagnostic");
         assert_eq!(diagnostic.body["fields"]["status"], "warning");
+        assert_eq!(diagnostic.body["fields"]["severity"], "warning");
+        assert_eq!(store.claims_for("agent/node.seat", Some("harness.diagnostic"))
+            .unwrap().iter().filter(|claim| claim.body["fields"]["code"] == "render-blocked").count(),
+            1, "interleaved diagnostics must not duplicate a steady blocker");
         assert!(diagnostic.body["fields"]["reason"].as_str().unwrap().contains("tracked file"));
         assert!(reconciler.incremental.needs("member:agent/node.seat", now_ms()),
             "a preparation-blocked member must not be marked clean");
@@ -9143,6 +9159,18 @@ mission "task" state="ready" {{
         assert_eq!(resolved.body["fields"]["status"], "resolved");
         assert_eq!(fs::read_to_string(workspace.path().join(".claude/settings.local.json")).unwrap(), "changed");
         assert!(runtime.starts.lock().unwrap().is_empty());
+        for pass in 3..6 {
+            interleave(pass);
+            reconciler.reconcile_once().unwrap();
+        }
+        let diagnostics = store.claims_for("agent/node.seat", Some("harness.diagnostic"))
+            .unwrap().into_iter()
+            .filter(|claim| claim.body["fields"]["code"] == "render-blocked")
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 2, "one blocker and one resolution, regardless of other codes");
+        assert_eq!(diagnostics.iter().filter(|claim| claim.body["fields"]["status"] == "warning").count(), 1);
+        assert_eq!(diagnostics.iter().filter(|claim| claim.body["fields"]["status"] == "resolved").count(), 1);
+        assert!(diagnostics.iter().all(|claim| claim.body["fields"]["severity"] == "warning"));
     }
 
     #[test]
