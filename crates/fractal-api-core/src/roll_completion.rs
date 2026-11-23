@@ -170,13 +170,16 @@ impl KeyAuthority {
     // The caller pins a read snapshot: heads and IDs must describe the same cut.
     // This cache belongs to the Store, so reopening/restoring never reuses it.
     fn ids(&mut self, reader: &Connection) -> Result<&[String]> {
+        /* sqlite-large-value: allow-for-now lv-h8350c67aa905 owner=fractal_api_core::roll_completion TODO=trace-statement-and-value-representation */
         let mut query = reader.prepare_cached(KEY_AUTHORITY_HEADS)?;
+        /* sqlite-large-value: allow-for-now lv-hadb0a84c2fdb owner=fractal_api_core::roll_completion TODO=trace-statement-and-value-representation */
         let heads = query.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         #[cfg(test)]
         {
             self.head_steps = query.reset_status(rusqlite::StatementStatus::VmStep);
         }
         if self.heads != Some(heads) {
+            /* sqlite-large-value: allow-for-now lv-hab7ab063d565 owner=fractal_api_core::roll_completion TODO=trace-statement-and-value-representation */
             let mut keys = reader.prepare_cached(KEY_AUTHORITY_IDS)?;
             let ids = keys.query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
