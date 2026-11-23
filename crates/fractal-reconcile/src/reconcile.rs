@@ -1959,13 +1959,18 @@ impl FileWatch {
                 || event.paths.iter().any(|path| {
                     path.starts_with(target)
                         || referent.is_some_and(|referent| path.starts_with(referent))
+                        // Only missing components below the existing watch root can
+                        // be newly created. FSEvents may report a delayed creation
+                        // of that already-existing root; it does not change this input.
+                        || (matches!(event.kind, notify::EventKind::Create(_))
+                            && path != directory && path.starts_with(directory)
+                            && target.starts_with(path))
                         || ((target.starts_with(path)
                             || directory.starts_with(path)
                             || referent.is_some_and(|referent| referent.starts_with(path)))
                             && matches!(
                                 event.kind,
-                                notify::EventKind::Create(_)
-                                    | notify::EventKind::Remove(_)
+                                notify::EventKind::Remove(_)
                                     | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
                             ))
                 })))

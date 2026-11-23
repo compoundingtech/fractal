@@ -8138,6 +8138,29 @@ agent "import/omp/fixture" {{
         assert!(!FileWatch::relevant(&read, target, directory, None));
     }
 
+    #[test]
+    fn file_gate_watchers_create_only_missing_ancestors() {
+        let directory = Path::new("/watched");
+        let target = Path::new("/watched/missing/nested/gate");
+        for path in ["/", "/watched", "/watched/unrelated"] {
+            let event = notify::Event::new(notify::EventKind::Create(
+                notify::event::CreateKind::Folder)).add_path(path.into());
+            assert!(!FileWatch::relevant(&event, target, directory, None), "{path}");
+        }
+        for path in ["/watched/missing", "/watched/missing/nested", "/watched/missing/nested/gate"] {
+            let event = notify::Event::new(notify::EventKind::Create(
+                notify::event::CreateKind::Any)).add_path(path.into());
+            assert!(FileWatch::relevant(&event, target, directory, None), "{path}");
+        }
+        for kind in [
+            notify::EventKind::Remove(notify::event::RemoveKind::Folder),
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(notify::event::RenameMode::Any)),
+        ] {
+            let event = notify::Event::new(kind).add_path(directory.into());
+            assert!(FileWatch::relevant(&event, target, directory, None));
+        }
+    }
+
     #[tokio::test]
     async fn file_gate_watchers_ignore_reads_and_unrelated_mutations() {
         let store = Arc::new(Store::open_memory("node").unwrap());
