@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep healthy running members out of failed state when workspace preparation is blocked",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "none", "detail": "No storage, index, store version or client schema changes. Diagnostics use existing fields."},
+  "rules": {"status": "none", "detail": "Graph rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "A running member that needs no start, restart or stop continues observation and work delivery when workspace preparation fails, including mr lease admission timeouts. The blocker is recorded on the member as a harness.diagnostic with code render-blocked, status warning and severity warning, then resolved after preparation succeeds. Recording deduplicates against the same diagnostic code, so interleaved provider diagnostics do not amplify a steady blocker. Blocked evaluations remain eligible for the next pass. Absent members and existing start, restart and stop admission fences still fail closed; explicit stops remain independent of rendering."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal daemon restart."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Binary rollback requires no data migration."}
+}
