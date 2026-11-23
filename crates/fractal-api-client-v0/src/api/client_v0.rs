@@ -14277,70 +14277,116 @@ mission "differential" state="ready" {
     #[tokio::test]
     async fn fleet_operational_commands_are_bounded_and_report_slow_queries() {
         use crate::OperationsFixtureStore;
-        let root = tempfile::tempdir().unwrap();
-        let state = test_state(root.path());
-        state.store.seed_operational_fleet();
-        // The old card's complete run array would exceed the negotiated one-megabyte limit.
-        let app = super::super::router(state.clone());
-        let read = |uri: String| {
-            let app = app.clone();
-            async move {
-                let response = app
-                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-                    .await
-                    .unwrap();
-                let status = response.status();
-                let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES)
-                    .await
-                    .unwrap();
-                let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                    panic!("{status}: {error}: {}", String::from_utf8_lossy(&bytes))
-                });
-                assert_eq!(status, StatusCode::OK, "{value}");
-                value
+        use smallclaims::sqlite::work::{self, SqliteWork};
+
+        let mut baseline: Option<Vec<SqliteWork>> = None;
+        for background_claims in [501, 1002] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            state.store.seed_operational_fleet_with_background(background_claims);
+            // The old card's complete run array would exceed the negotiated one-megabyte limit.
+            let app = super::super::router(state.clone());
+            let read = |uri: String| {
+                let app = app.clone();
+                async move {
+                    let response = app
+                        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES)
+                        .await
+                        .unwrap();
+                    let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                        panic!("{status}: {error}: {}", String::from_utf8_lossy(&bytes))
+                    });
+                    assert_eq!(status, StatusCode::OK, "{value}");
+                    value
+                }
+            };
+            let missions = read("/v1/client/missions?history=true&limit=50".into()).await;
+            let item = &missions["value"]["items"][0];
+            assert_eq!(item["total_runs"], 2401);
+            assert_eq!(item["active_runs"], 601);
+            assert_eq!(item["runs"].as_array().unwrap().len(), 3);
+            assert_eq!(item["runs_truncated"], true);
+            let mut large = vec![item.clone(); 200];
+            for card in &mut large {
+                for run in card["run_details"].as_array_mut().unwrap() {
+                    run["requester"] = json!(format!("person/{}", "x".repeat(1990)));
+                }
             }
-        };
-        let missions = read("/v1/client/missions?history=true&limit=50".into()).await;
-        let item = &missions["value"]["items"][0];
-        assert_eq!(item["total_runs"], 2401);
-        assert_eq!(item["active_runs"], 601);
-        assert_eq!(item["runs"].as_array().unwrap().len(), 3);
-        assert_eq!(item["runs_truncated"], true);
-        let mut large = vec![item.clone(); 200];
-        for card in &mut large {
-            for run in card["run_details"].as_array_mut().unwrap() {
-                run["requester"] = json!(format!("person/{}", "x".repeat(1990)));
+            assert!(bound_mission_cards(&mut large).unwrap());
+            assert!(!large.is_empty() && large.len() < 200);
+            assert!(serde_json::to_vec(&large).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES - 120_000);
+            let overview = read("/v1/mission-overview?mission=mission%2Fexample%2Ffleet".into()).await;
+            assert_eq!(overview["value"]["total_runs"], 2401);
+            for collection in ["missions", "work"] {
+                let page = read(format!(
+                    "/v1/outcome-history?collection={collection}&since=0&status=failed&limit=50"
+                ))
+                .await;
+                assert_eq!(page["value"]["items"].as_array().unwrap().len(), 50);
+                assert_eq!(page["value"]["has_more"], true);
             }
+            // Sample a real query, then inject its duration through the existing recorder:
+            // testing the report must not depend on slow hardware or a large background log.
+            // Fixture queries can exhaust the meter's bounded label table and fold a
+            // new label into "(other)". Isolate report sampling from setup, then make
+            // a real request so the request report remains covered after the reset.
+            crate::performance::reset_for_test();
+            let _ = read("/v1/mission-overview?mission=mission%2Fexample%2Ffleet".into()).await;
+            let index = state.store.index().unwrap();
+            let _ = state
+                .store
+                .claims_page(None, None, 0, None, false, 500)
+                .unwrap();
+            let slow_sql = "SELECT store_index FROM claims ORDER BY store_index LIMIT 500";
+            crate::performance::record_query(slow_sql, std::time::Duration::from_secs(60));
+            let report = read("/v1/performance".into()).await;
+            assert_eq!(report["value"]["window_seconds"], 300);
+            assert!(!report["value"]["queries"].as_array().unwrap().is_empty());
+            assert!(!report["value"]["requests"].as_array().unwrap().is_empty());
+            assert!(report["value"]["queries"].as_array().unwrap().iter().any(|query|
+                query["kind"] == crate::performance::normalize_query(slow_sql)
+                    && query["max_ms"].as_f64().unwrap() >= 60_000.0));
+            assert_eq!(
+                state.store.index().unwrap(),
+                index,
+                "operational samples never write graph claims"
+            );
+            assert!(!report.to_string().contains("person/operator"));
+
+            // Nextest runs each test in its own process, so these process-wide counters include
+            // the endpoint's blocking worker without unrelated tests. test_state starts no
+            // reconciler or background tasks, and setup/verification are outside each measurement.
+            let mut measured = Vec::new();
+            for uri in [
+                "/v1/client/missions?history=true&limit=50",
+                "/v1/mission-overview?mission=mission%2Fexample%2Ffleet",
+                "/v1/outcome-history?collection=missions&since=0&status=failed&limit=50",
+                "/v1/outcome-history?collection=work&since=0&status=failed&limit=50",
+                "/v1/performance",
+            ] {
+                // Compare warm reads: cold cache initialization is not endpoint steady-state work.
+                let _ = read(uri.into()).await;
+                let before = work::total();
+                let _ = read(uri.into()).await;
+                let cost = work::total() - before;
+                if uri != "/v1/performance" {
+                    assert!(cost.statements > 0 && cost.vm_steps > 0, "{uri}: missing SQL accounting");
+                }
+                if let Some(baseline) = &baseline {
+                    let previous = baseline[measured.len()];
+                    assert_eq!(cost.fullscan_steps, previous.fullscan_steps,
+                        "{uri}: full scans grew with unrelated claims: {previous:?} -> {cost:?}");
+                    assert!(cost.vm_steps <= previous.vm_steps + 50,
+                        "{uri}: VM work grew with unrelated claims: {previous:?} -> {cost:?}");
+                }
+                measured.push(cost);
+            }
+            baseline = Some(measured);
         }
-        assert!(bound_mission_cards(&mut large).unwrap());
-        assert!(!large.is_empty() && large.len() < 200);
-        assert!(serde_json::to_vec(&large).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES - 120_000);
-        let overview = read("/v1/mission-overview?mission=mission%2Fexample%2Ffleet".into()).await;
-        assert_eq!(overview["value"]["total_runs"], 2401);
-        for collection in ["missions", "work"] {
-            let page = read(format!(
-                "/v1/outcome-history?collection={collection}&since=0&status=failed&limit=50"
-            ))
-            .await;
-            assert_eq!(page["value"]["items"].as_array().unwrap().len(), 50);
-            assert_eq!(page["value"]["has_more"], true);
-        }
-        // The SQL hook sees a real fleet-scale query, without file profiling or diagnostic claims.
-        let index = state.store.index().unwrap();
-        let _ = state
-            .store
-            .claims_page(None, None, 0, None, false, 500)
-            .unwrap();
-        let report = read("/v1/performance".into()).await;
-        assert_eq!(report["value"]["window_seconds"], 300);
-        assert!(!report["value"]["queries"].as_array().unwrap().is_empty());
-        assert!(!report["value"]["requests"].as_array().unwrap().is_empty());
-        assert_eq!(
-            state.store.index().unwrap(),
-            index,
-            "operational samples never write graph claims"
-        );
-        assert!(!report.to_string().contains("person/operator"));
     }
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {

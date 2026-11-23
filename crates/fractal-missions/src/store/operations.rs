@@ -6,14 +6,17 @@ pub use fractal_delivery::store::operations::*;
 /// The generated fleet fixture, a `Store` method before the cut.
 #[cfg(any(test, feature = "test-support"))]
 pub trait OperationsFixtureStore {
-    fn seed_operational_fleet(&self);
+    fn seed_operational_fleet(&self) {
+        self.seed_operational_fleet_with_background(501);
+    }
+    fn seed_operational_fleet_with_background(&self, background_claims: usize);
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl OperationsFixtureStore for Store {
-    /// Generated read fixture: 2,401 runs and steps, 250,000 unrelated claims, and terminal
-    /// transitions. Projection rows are bulk-loaded to keep fleet-scale tests inexpensive.
-    fn seed_operational_fleet(&self) {
+    /// Generated read fixture: 2,401 runs and steps, unrelated claims, and terminal transitions.
+    /// The default background exceeds the 500-claim page; tests vary it to compare SQLite work.
+    fn seed_operational_fleet_with_background(&self, background_claims: usize) {
         let source = "version 2\nmission \"example/fleet\" state=\"ready\" {\n goal \"Build artifacts.\"\n step \"build\" { goal \"Build the example.\" }\n}\n";
         let intent = crate::graph::parse_intent(source, &self.origin).unwrap();
         let planned = self
@@ -45,12 +48,17 @@ impl OperationsFixtureStore for Store {
             .unwrap();
         let at = now_ms().to_string();
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h58850df68114 owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<249999)
+            /* sqlite-large-value: allow-for-now lv-hc7343ec2c789 owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE seq(n) AS (SELECT 0 WHERE ?4>0 UNION ALL SELECT n+1 FROM seq WHERE n+1<?4)
              INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
              SELECT 'fixture-heartbeat-' || n,?1,'agent/example/observer','harness.observed',
                     'fixture',?2,'[]',?3 FROM seq",
-            params![batch,r#"{"fields":{"state":"idle","incarnation_id":"fixture"}}"#,at],
+            params![batch,r#"{"fields":{"state":"idle","incarnation_id":"fixture"}}"#,at,background_claims],
         ).unwrap();
+        let mut insert_run = transaction.prepare(/* sqlite-large-value: allow-for-now lv-hcb67b6580e72 owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs SELECT ?1,mission_id,initial_revision,?2,root_revision,?1,NULL,workspace,requester,inputs,mode,?3,?4,?5,?5 FROM mission_runs WHERE id=?6").unwrap();
+        let mut insert_generation = transaction.prepare(/* sqlite-large-value: allow-for-now lv-h5574f8672a86 owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations SELECT ?1,?2,revision,NULL,?3,actor,reason,?4,?4 FROM run_generations WHERE id=?5").unwrap();
+        let mut insert_step = transaction.prepare(/* sqlite-large-value: allow-for-now lv-h3566d793378e owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms)
+                SELECT ?1,?2,?3,step_path,definition_hash,?4,attempt,'agent/example/builder',available_to,agentless,title,goals,?5,?5 FROM step_runs WHERE subject=?6").unwrap();
+        let mut insert_claim = transaction.prepare(/* sqlite-large-value: allow-for-now lv-hbf4b8385d9a3 owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,?2,?3,?4,'fixture',?5,'[]',?6)").unwrap();
         for i in 0..2400 {
             let id = format!("example/fleet/seed-{i:05}");
             let generation = format!("fixture-generation-{i}");
@@ -60,14 +68,10 @@ impl OperationsFixtureStore for Store {
             } else {
                 "terminal"
             };
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-hcb67b6580e72 owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs SELECT ?1,mission_id,initial_revision,?2,root_revision,?1,NULL,workspace,requester,inputs,mode,?3,?4,?5,?5 FROM mission_runs WHERE id=?6",
-                params![id,generation,status,phase,at,run.id]).unwrap();
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h5574f8672a86 owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations SELECT ?1,?2,revision,NULL,?3,actor,reason,?4,?4 FROM run_generations WHERE id=?5",
-                params![generation,id,status,at,run.generation.trim_start_matches("run-generation/")]).unwrap();
+            insert_run.execute(/* sqlite-large-value: allow-for-now lv-h8b42e22b9b7a owner=fractal_missions::store::operations TODO=trace-statement-and-value-representation */ params![id,generation,status,phase,at,run.id]).unwrap();
+            insert_generation.execute(/* sqlite-large-value: allow-for-now lv-hb8092571a874 owner=fractal_missions::store::operations TODO=trace-statement-and-value-representation */ params![generation,id,status,at,run.generation.trim_start_matches("run-generation/")]).unwrap();
             let step = format!("step-run/{generation}/build");
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h3566d793378e owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms)
-                SELECT ?1,?2,?3,step_path,definition_hash,?4,attempt,'agent/example/builder',available_to,agentless,title,goals,?5,?5 FROM step_runs WHERE subject=?6",
-                params![step,id,generation,status,at,run.steps[0].subject]).unwrap();
+            insert_step.execute(/* sqlite-large-value: allow-for-now lv-hb6d2c0d03b2f owner=fractal_missions::store::operations TODO=trace-statement-and-value-representation */ params![step,id,generation,status,at,run.steps[0].subject]).unwrap();
             let reason = if i % 8 == 2 {
                 "the active execution timeout expired"
             } else {
@@ -77,20 +81,20 @@ impl OperationsFixtureStore for Store {
                 (format!("mission-run/{id}"), "mission-run.state"),
                 (step, "step-run.state"),
             ] {
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-hbf4b8385d9a3 owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,?2,?3,?4,'fixture',?5,'[]',?6)",
-                    params![format!("fixture-{kind}-{i}"),batch,subject,kind,json!({"fields":{"status":status,"phase":phase,"reason":reason}}).to_string(),at]).unwrap();
+                insert_claim.execute(/* sqlite-large-value: allow-for-now lv-h022cc99e697c owner=fractal_missions::store::operations TODO=trace-statement-and-value-representation */ params![format!("fixture-{kind}-{i}"),batch,subject,kind,json!({"fields":{"status":status,"phase":phase,"reason":reason}}).to_string(),at]).unwrap();
             }
         }
-        // Normal admission records each claim's immutable batch position. Bulk loading
-        // must preserve that invariant too: without these rows canonical reads fall back
-        // to counting preceding siblings for every claim in this 250,000-row batch.
-        // Compute positions once over the whole batch, retaining its admitted originals.
+        drop((insert_run, insert_generation, insert_step, insert_claim));
+        // Admission stores canonical positions; these raw fixture inserts bypass it.
+        // Rank the entire batch before filtering so existing siblings keep their offsets.
+        // Otherwise each canonical sort counts all earlier siblings as legacy history.
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h9a3848c4be8f owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claim_positions(claim_id,position)
-             SELECT id,ROW_NUMBER() OVER (ORDER BY store_index)-1 FROM claims
-             WHERE batch_id=?1
-             ON CONFLICT(claim_id) DO NOTHING",
-            [&batch],
+            /* sqlite-large-value: allow-for-now lv-hc076c0cd70cb owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claim_positions(claim_id, position)
+             SELECT id, position FROM (
+                 SELECT id, ROW_NUMBER() OVER (ORDER BY store_index) - 1 AS position
+                 FROM claims WHERE batch_id=?1
+             ) WHERE id GLOB 'fixture-*'",
+            [batch],
         ).unwrap();
         transaction.commit().unwrap();
     }
