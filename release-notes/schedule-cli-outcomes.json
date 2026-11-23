@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Changed: schedules ls shows recent occurrence outcomes and labels the next tick as declared, not proof of admission.",
+  "summary": "Changed: schedules ls shows outcomes for the latest observed occurrence, ignores late results for older occurrences, and labels the next tick as declared, not proof of admission.",
   "replay": { "status": "none", "detail": "CLI rendering reads existing locally stored schedule claims; no replay or scheduler change." },
   "schema": { "status": "none", "detail": "No schema, index, claim field, store version or generated client model change." },
   "rules": { "status": "none", "detail": "No admission, overlap, ownership or catch-up policy change." },

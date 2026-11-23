@@ -116,18 +116,39 @@ fn short_reason(reason: &str) -> String {
     text
 }
 
-fn latest_outcome(claims: &[ClaimRecord]) -> String {
-    // Input is newest first. Ignore future arming and diagnostics; never page or fold
-    // history to recover an occurrence number that has left this small local tail.
-    let Some(claim) = claims.iter().find(|claim| matches!(claim.kind.as_str(),
-        "schedule.occurrence-reached" | "schedule.work-requested" |
-        "schedule.work-started" | "schedule.work-failed" | "schedule.occurrence-cancelled"))
-    else { return "none".into(); };
+fn outcome_occurrence(claim: &ClaimRecord, claims: &[ClaimRecord]) -> Option<u64> {
     let fields = &claim.body["fields"];
-    let request = fields["request"].as_str().and_then(|id| claims.iter().find(|claim| claim.id == id));
-    let occurrence = fields["occurrence"].as_u64()
-        .or_else(|| request.and_then(|claim| claim.body["fields"]["occurrence"].as_u64()));
-    let occurrence = occurrence.map_or_else(|| "occurrence unknown".into(), |n| format!("occurrence {n}"));
+    match claim.kind.as_str() {
+        "schedule.occurrence-reached" | "schedule.work-requested" |
+        "schedule.occurrence-cancelled" => fields["occurrence"].as_u64(),
+        "schedule.work-started" | "schedule.work-failed" => {
+            let request = fields["request"].as_str()?;
+            claims.iter().find(|claim| claim.id == request && claim.kind == "schedule.work-requested")
+                .and_then(|claim| claim.body["fields"]["occurrence"].as_u64())
+        }
+        _ => None,
+    }
+}
+
+fn latest_outcome(claims: &[ClaimRecord]) -> String {
+    // Input is newest first, but late standby refusals can concern older occurrences.
+    // Compare occurrence numbers within this bounded tail, excluding future arming.
+    let is_outcome = |claim: &&ClaimRecord| matches!(claim.kind.as_str(),
+        "schedule.occurrence-reached" | "schedule.work-requested" |
+        "schedule.work-started" | "schedule.work-failed" | "schedule.occurrence-cancelled");
+    if !claims.iter().any(|claim| is_outcome(&claim)) { return "none".into(); }
+    let Some(occurrence) = claims.iter().filter(is_outcome)
+        .filter_map(|claim| outcome_occurrence(claim, claims)).max()
+    else { return "occurrence unknown: outcome unknown".into(); };
+    // An unattributed observation newer than the selected occurrence's outcome might
+    // belong to it. Do not report an older state as current when that link is missing.
+    let Some(claim) = claims.iter().filter(is_outcome).find(|claim|
+        outcome_occurrence(claim, claims).is_none_or(|known| known == occurrence))
+    else { return format!("occurrence {occurrence}: outcome unknown"); };
+    if outcome_occurrence(claim, claims).is_none() {
+        return format!("occurrence {occurrence}: outcome unknown");
+    }
+    let fields = &claim.body["fields"];
     let outcome = match claim.kind.as_str() {
         "schedule.occurrence-reached" => "reached".into(),
         "schedule.work-requested" => "work requested".into(),
@@ -229,7 +250,7 @@ mod tests {
         ];
         assert_eq!(latest_outcome(&claims), "occurrence 34: started mission-run/example/one");
         assert_eq!(latest_outcome(&[]), "none");
-        assert_eq!(latest_outcome(&claims[..1]), "occurrence unknown: started mission-run/example/one");
+        assert_eq!(latest_outcome(&claims[..1]), "occurrence unknown: outcome unknown");
     }
 
     #[test]
@@ -247,6 +268,34 @@ mod tests {
         }
         assert_eq!(recent_claims_path("schedule/example/daily"),
             "/v1/claims?subject=schedule%2Fexample%2Fdaily&order=desc&limit=6");
+    }
+
+    #[test]
+    fn late_refusal_for_an_older_request_does_not_hide_a_newer_occurrence() {
+        let mut claims = [
+            claim("late-failure", "schedule.work-failed", json!({"request":"old-request","code":"standby-occurrence-unavailable","reason":"already reached"})),
+            claim("new-request", "schedule.work-requested", json!({"occurrence":35})),
+            claim("new-reached", "schedule.occurrence-reached", json!({"occurrence":35})),
+            claim("old-request", "schedule.work-requested", json!({"occurrence":34})),
+            claim("old-reached", "schedule.occurrence-reached", json!({"occurrence":34})),
+        ];
+        for (index, claim) in claims.iter_mut().enumerate() {
+            claim.store_index = 104 - index as u64;
+        }
+        assert_eq!(latest_outcome(&claims), "occurrence 35: work requested");
+        claims[0].kind = "schedule.work-started".into();
+        claims[0].body["fields"]["mission_run"] = json!("mission-run/example/old");
+        assert_eq!(latest_outcome(&claims), "occurrence 35: work requested");
+    }
+
+    #[test]
+    fn unresolved_newer_request_link_leaves_the_latest_occurrence_outcome_unknown() {
+        let claims = [
+            claim("failed", "schedule.work-failed", json!({"request":"outside-tail","code":"unsafe-workspace","reason":"not attributable"})),
+            claim("requested", "schedule.work-requested", json!({"occurrence":35})),
+            claim("reached", "schedule.occurrence-reached", json!({"occurrence":35})),
+        ];
+        assert_eq!(latest_outcome(&claims), "occurrence 35: outcome unknown");
     }
 
     #[test]
@@ -313,7 +362,10 @@ mod tests {
                 claim("requested", "schedule.work-requested", json!({"occurrence":34})),
                 claim("reached", "schedule.occurrence-reached", json!({"occurrence":34})),
             ],
-            vec![claim("started", "schedule.work-started", json!({"mission_run":"mission-run/example/one"}))],
+            vec![
+                claim("started", "schedule.work-started", json!({"request":"requested","mission_run":"mission-run/example/one"})),
+                claim("requested", "schedule.work-requested", json!({"occurrence":34})),
+            ],
             vec![],
         ] {
             let expected = latest_outcome(&claims);

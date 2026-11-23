@@ -34,12 +34,14 @@ use the scheduler's existing timezone calculation: the first real minute after a
 first instant of a repeated local minute. An exact tick is included. This read changes no scheduler,
 arming, catch-up, role, heartbeat or occurrence identity behavior.
 
-The human-readable CLI also shows LATEST OUTCOME: the newest reached, work requested, started
-(with run ID), failed (with code and reason), or cancelled observation in a small local tail.
-Failure and cancellation reasons are terminal-safe and capped at 120 characters, including an
-ellipsis when shortened. Future arming does not hide the preceding work outcome. `none` means no
-outcome in that tail, not that the schedule has never run. If a start/failure's request has left
-the tail, its occurrence number is explicitly unknown rather than inferred from older history.
+The human-readable CLI also shows LATEST OUTCOME for the highest observed occurrence number in
+a small local tail: reached, work requested, started (with run ID), failed (with code and reason),
+or cancelled. Late observations for older occurrences do not replace the newer occurrence's
+outcome. Failure and cancellation reasons are terminal-safe and capped at 120 characters,
+including an ellipsis when shortened. Future arming does not hide the preceding work outcome.
+`none` means no outcome in that tail, not that the schedule has never run. Started/failed claims
+are attributed through their linked request within the tail; when a newer observation cannot
+be attributed, the displayed occurrence's outcome is explicitly unknown rather than guessed.
 
 This CLI-only enrichment uses the existing exact-subject `GET /v1/claims` route for at most the
 first 50 displayed schedules, with at most four reads in flight. Each read has a two-second
