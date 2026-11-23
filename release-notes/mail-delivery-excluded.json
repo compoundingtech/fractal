@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Exclude undeclared agent recipients from native mail delivery coverage instead of treating them as unknown",
+  "replay": { "status": "none", "detail": "Existing retained mail facts are reduced with the new recipient exclusion rule." },
+  "schema": { "status": "none", "detail": "No schema or claim kind changes." },
+  "rules": { "status": "changed", "detail": "Agent recipients without a declared host count as excluded, with excluded_undeclared_recipient diagnostics. Owned recipients with missing frontiers and all other uncertain evidence remain unknown." },
+  "compatibility": { "status": "none", "detail": "Reuses the existing excluded lifecycle sample and row accounting." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "No persistent state migration." }
+}
