@@ -181,18 +181,17 @@ fn discovery_at(connection: &Connection, origin: &str, limit: usize) -> Result<V
         connection.execute(/* sqlite-large-value: allow-for-now lv-h31cfb9ea580b owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_candidates WHERE message=?1", [&key])?;
         let candidate: Option<(String,String)> = connection.query_row(
             "SELECT selector.recipient,desired.member FROM local_client_message_selectors_v1 AS selector JOIN desired ON desired.subject=selector.recipient WHERE selector.subject=?1 AND selector.born_index>=0 AND selector.retired_index IS NULL AND selector.closed=0 AND desired.member IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=?1) LIMIT 1", [&key], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-        if let Some((recipient,member)) = candidate {
-            if let Ok(member) = serde_json::from_str::<crate::model::MemberSpec>(&member) {
-                if member.host != origin {
-                    connection.execute(/* sqlite-large-value: allow-for-now lv-h313b145b0c4e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_candidates(message,recipient,host) VALUES(?1,?2,?3)", params![key,recipient,member.host])?;
-                    connection.execute(
-                        /* sqlite-large-value: allow-for-now lv-h4b61be01a35e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_reads(message,host) VALUES(?1,?2) ON CONFLICT(message) DO UPDATE SET host=excluded.host,next_attempt_ms=0,attempts=0 WHERE ?3!='legacy_host' OR local_relayed_close_reads.host IS NOT excluded.host",
-                        params![key,member.host,kind],
-                    )?;
-                    result.push((key,recipient,member.host));
-                    continue;
-                }
-            }
+        if let Some((recipient,member)) = candidate
+            && let Ok(member) = serde_json::from_str::<crate::model::MemberSpec>(&member)
+            && member.host != origin
+        {
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h313b145b0c4e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_candidates(message,recipient,host) VALUES(?1,?2,?3)", params![key,recipient,member.host])?;
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h4b61be01a35e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_reads(message,host) VALUES(?1,?2) ON CONFLICT(message) DO UPDATE SET host=excluded.host,next_attempt_ms=0,attempts=0 WHERE ?3!='legacy_host' OR local_relayed_close_reads.host IS NOT excluded.host",
+                params![key,member.host,kind],
+            )?;
+            result.push((key,recipient,member.host));
+            continue;
         }
         connection.execute(/* sqlite-large-value: allow-for-now lv-h7416c9aa5f89 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_reads WHERE message=?1", [&key])?;
     }

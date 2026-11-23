@@ -126,7 +126,7 @@ pub(super) async fn read(store: &Arc<Store>, cursor: Option<&str>, max: usize) -
             let store = Arc::clone(store);
             let feed = Arc::clone(&feed);
             let cursor = cursor.map(str::to_owned);
-            blocking_store(move || Ok(page(&store, feed.get(&store), cursor.as_deref(), max)?)).await?
+            blocking_store(move || page(&store, feed.get(&store), cursor.as_deref(), max)).await?
         };
         if current.reset || !current.messages.is_empty() || !current.consumers.is_empty() || current.has_more {
             return serde_json::to_value(current).map_err(|error| validation(error.to_string()));

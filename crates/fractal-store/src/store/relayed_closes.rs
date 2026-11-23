@@ -214,13 +214,12 @@ fn drain(store: &Arc<Store>) {
                 let mut statement = connection.prepare_cached(
                     "SELECT message,host,receipt,closed_at_unix_ms FROM local_relayed_message_closes_pending ORDER BY message LIMIT ?1",
                 )?;
-                let rows = statement.query_map([BATCH as i64], |row| Ok(RelayedClose {
+                statement.query_map([BATCH as i64], |row| Ok(RelayedClose {
                     message: row.get(0)?,
                     host: row.get(1)?,
                     receipt: row.get(2)?,
                     closed_at_unix_ms: row.get::<_, i64>(3)? as u64,
-                }))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
+                }))?.collect::<rusqlite::Result<Vec<_>>>()?
             };
             if batch.is_empty() {
                 state.draining = false;
