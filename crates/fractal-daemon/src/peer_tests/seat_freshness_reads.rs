@@ -599,7 +599,7 @@ async fn a_batched_read_asks_each_host_in_bounded_requests() {
             let counted = counted.clone();
             async move {
                 let read: SeatFreshnessRead = serde_json::from_slice(&body).unwrap();
-                let SeatFreshnessRead::MessageMarks { messages } = read;
+                let SeatFreshnessRead::MessageMarks { messages } = read else { panic!("unexpected event subscription") };
                 counted.lock().unwrap().push(messages.len());
                 axum::http::StatusCode::NOT_FOUND
             }
@@ -795,7 +795,7 @@ async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
     // A paging client's current pages, one message each: once maintenance records the
     // host's close, the selector leaves it out, so no page comes back empty and the walk reaches
     // every other message once (#4866).
-    crate::api::relayed_close_maintenance::turn(&state, &mut Default::default()).await.unwrap();
+    crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !crate::store::relayed_closes::closed(&viewer.readers.get(), "message/00000000000000c2").unwrap() {
         assert!(Instant::now() < deadline, "the background writer never recorded the host's close");
@@ -1014,7 +1014,7 @@ async fn a_hosts_close_of_a_reminders_winner_makes_the_next_one_current_on_anoth
     holder.join().unwrap();
 
     assert!(crate::store::relayed_closes::idle(&viewer));
-    crate::api::relayed_close_maintenance::turn(&state, &mut Default::default()).await.unwrap();
+    crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !crate::store::relayed_closes::closed(&viewer.readers.get(), winner).unwrap() {
         assert!(Instant::now() < deadline, "the background writer never recorded the host's close");
@@ -1288,11 +1288,10 @@ async fn relayed_close_maintenance_pages_past_open_mail_without_any_get() {
     viewer.project_replication_backlog().unwrap();
     while viewer.maintain_client_message_selectors().unwrap() {}
     let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
-    let mut cursor = crate::api::relayed_close_maintenance::Cursor::default();
-    crate::api::relayed_close_maintenance::turn(&state, &mut cursor).await.unwrap();
+    crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
     close_writer_idle(&viewer).await;
     assert!(!crate::store::relayed_closes::closed(&viewer.readers.get(), closed).unwrap(), "first turn exceeded its page cap");
-    crate::api::relayed_close_maintenance::turn(&state, &mut cursor).await.unwrap();
+    crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
     close_writer_idle(&viewer).await;
     assert!(crate::store::relayed_closes::closed(&viewer.readers.get(), closed).unwrap(), "open prefix starved a later close");
     let row = || viewer.readers.get().query_row(
@@ -1302,11 +1301,29 @@ async fn relayed_close_maintenance_pages_past_open_mail_without_any_get() {
     let recorded = row();
     assert_eq!(recorded.0, 1);
     assert!(recorded.1.starts_with("offset-receipt/"));
-    for _ in 0..3 {
-        crate::api::relayed_close_maintenance::turn(&state, &mut cursor).await.unwrap();
+    while crate::store::relayed_close_work::has_pending(&viewer).unwrap() {
+        crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
         close_writer_idle(&viewer).await;
     }
-    assert_eq!(row(), recorded, "repeated sweeps must be idempotent");
+    let work_before = crate::api::relayed_close_maintenance::work_counts(&viewer);
+    for _ in 0..3 {
+        crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
+        close_writer_idle(&viewer).await;
+    }
+    assert_eq!(crate::api::relayed_close_maintenance::work_counts(&viewer), work_before,
+        "unchanged input must cause zero discovery passes and zero candidate reads");
+    assert_eq!(row(), recorded, "unchanged input must not repeat settled closes");
+    crate::store::relayed_close_work::enqueue_messages(
+        &viewer, &["message/0000000000001000".to_owned()],
+    ).unwrap();
+    crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
+    close_writer_idle(&viewer).await;
+    let changed = crate::api::relayed_close_maintenance::work_counts(&viewer);
+    assert_eq!(changed["discovery_passes"].as_u64().unwrap(),
+        work_before["discovery_passes"].as_u64().unwrap() + 1);
+    assert_eq!(changed["candidate_messages"].as_u64().unwrap(),
+        work_before["candidate_messages"].as_u64().unwrap() + 1,
+        "one changed message must rebuild only that message");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1327,7 +1344,9 @@ async fn relayed_close_maintenance_cancels_an_in_flight_remote_read() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
-    let before = sqlite_bytes_digest(&database);
+    let before: i64 = viewer.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_relayed_message_closes", [], |row| row.get(0),
+    ).unwrap();
     let (stop, stopped) = watch::channel(false);
     let worker = tokio::spawn(crate::api::relayed_close_maintenance::run(state, stopped));
     let (_connection, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
@@ -1336,5 +1355,54 @@ async fn relayed_close_maintenance_cancels_an_in_flight_remote_read() {
     tokio::time::timeout(Duration::from_secs(1), worker).await
         .expect("shutdown waited for the silent peer").unwrap();
     close_writer_idle(&viewer).await;
-    assert_eq!(sqlite_bytes_digest(&database), before, "cancelled discovery wrote SQLite");
+    let after: i64 = viewer.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_relayed_message_closes", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(after, before, "cancelled discovery persisted a remote close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relayed_close_follows_remote_mark_changes_without_local_writes_or_gets() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _) = owner(root.path()).await;
+    advertise(&owner, json!({
+        "seat_freshness_reads": 1, "message_offsets": 1, "message_mark_events": 1,
+    }));
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer.import_replication(OWNER, &owner.export_replication(0).unwrap()).unwrap();
+    viewer.project_replication_backlog().unwrap();
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let (stop, stopped) = watch::channel(false);
+    let worker = tokio::spawn(crate::api::relayed_close_maintenance::run(state, stopped));
+    let ready = async {
+        loop {
+            let work = crate::api::relayed_close_maintenance::work_counts(&viewer);
+            if work["remote_event_pages"].as_u64().unwrap() >= 1
+                && work["candidate_messages"].as_u64().unwrap() >= 2
+                && !crate::store::relayed_close_work::has_pending(&viewer).unwrap()
+            { break; }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), ready).await
+        .expect("initial discovery and remote subscription did not settle");
+    assert!(!crate::store::relayed_closes::closed(
+        &viewer.readers.get(), "message/00000000000000c1",
+    ).unwrap());
+    // This changes only the owner's host-local mark table: there is no replicated claim,
+    // viewer write, message GET or elapsed discovery interval to wake the viewer.
+    message_marks::record(&owner, "message/00000000000000c1", "message.closed", &cedar).unwrap();
+    let closed = async {
+        loop {
+            if crate::store::relayed_closes::closed(
+                &viewer.readers.get(), "message/00000000000000c1",
+            ).unwrap() { break; }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), closed).await
+        .expect("remote mark event did not autonomously settle the close");
+    stop.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(1), worker).await.unwrap().unwrap();
 }
