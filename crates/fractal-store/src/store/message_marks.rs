@@ -54,7 +54,7 @@ pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The table, before any projection backfill folds it in.
 pub fn create_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h6e77dab743f7 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
+        /* sqlite-large-value: allow-for-now lv-h6ddd39fcffe1 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_message_marks (
     message TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('message.delivered','message.read','message.closed')),
@@ -81,7 +81,9 @@ CREATE TABLE IF NOT EXISTS local_message_mark_events (
     consumer TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS local_message_mark_scope_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Retention always preserves the newest row, so SQLite's next rowid stays monotonic.
+    -- Avoid AUTOINCREMENT's shared sqlite_sequence scan on every other journal's insert.
+    id INTEGER PRIMARY KEY,
     message TEXT,
     consumer TEXT
 );

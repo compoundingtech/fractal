@@ -224,6 +224,39 @@ mod tests {
     }
 
     #[test]
+    fn scope_event_ids_remain_monotonic_after_retention_and_reopen_without_a_sequence_row() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("scope-retention.sqlite3");
+        let newest = {
+            let store = Store::open(&path, "owner").unwrap();
+            store.connection.write().execute_batch(
+                "WITH RECURSIVE events(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM events WHERE id<16390)
+                 INSERT INTO local_message_mark_scope_events(consumer) SELECT 'agent/changed' FROM events"
+            ).unwrap();
+            let reader = store.readers.get();
+            let (count, oldest, newest): (u64, u64, u64) = reader.query_row(
+                "SELECT COUNT(*),MIN(id),MAX(id) FROM local_message_mark_scope_events", [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!((count, oldest, newest), (16384, 7, 16390));
+            let sequences: u64 = reader.query_row(
+                "SELECT COUNT(*) FROM sqlite_sequence WHERE name='local_message_mark_scope_events'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(sequences, 0, "scope events must not add shared sequence-scan work");
+            newest
+        };
+        let store = Store::open(&path, "owner").unwrap();
+        store.connection.write().execute(
+            "INSERT INTO local_message_mark_scope_events(consumer) VALUES('agent/next')", [],
+        ).unwrap();
+        let next: u64 = store.readers.get().query_row(
+            "SELECT MAX(id) FROM local_message_mark_scope_events", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(next, newest + 1);
+    }
+
+    #[test]
     fn unrelated_commits_do_not_wake_and_scope_keys_stay_precise() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("scope.sqlite3"), "owner").unwrap();

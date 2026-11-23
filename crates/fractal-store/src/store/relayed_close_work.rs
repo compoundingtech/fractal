@@ -6,7 +6,7 @@ pub const WORK_TABLE: &str = "local_relayed_close_work";
 pub const READ_TABLE: &str = "local_relayed_close_reads";
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd381702fffe4 owner=fractal_store::store::relayed_close_work TODO=chunk-or-reference-variable-columns */ r#"
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7a6857fb542c owner=fractal_store::store::relayed_close_work TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_relayed_close_work(
  kind TEXT NOT NULL,key TEXT NOT NULL,after_key TEXT NOT NULL DEFAULT '',PRIMARY KEY(kind,key)
 ) WITHOUT ROWID;
@@ -28,16 +28,6 @@ CREATE INDEX IF NOT EXISTS desired_member_host_subject ON desired(
  CASE WHEN json_valid(member) THEN json_extract(member,'$.host') END,subject);
 CREATE INDEX IF NOT EXISTS relayed_close_selector_recipient ON local_client_message_selectors_v1(recipient,subject)
  WHERE born_index>=0 AND retired_index IS NULL AND closed=0;
--- Replace the original conflict-policy-sensitive triggers on existing stores too.
-DROP TRIGGER IF EXISTS relayed_close_desired_insert;
-DROP TRIGGER IF EXISTS relayed_close_desired_delete;
-DROP TRIGGER IF EXISTS relayed_close_desired_update;
-DROP TRIGGER IF EXISTS relayed_close_selector_insert;
-DROP TRIGGER IF EXISTS relayed_close_selector_delete;
-DROP TRIGGER IF EXISTS relayed_close_selector_update;
-DROP TRIGGER IF EXISTS relayed_close_daemon_insert;
-DROP TRIGGER IF EXISTS relayed_close_daemon_delete;
-DROP TRIGGER IF EXISTS relayed_close_daemon_update;
 CREATE TRIGGER IF NOT EXISTS relayed_close_desired_insert AFTER INSERT ON desired WHEN NEW.member IS NOT NULL BEGIN
  INSERT INTO local_relayed_close_work(kind,key) VALUES('recipient',NEW.subject) ON CONFLICT(kind,key) DO UPDATE SET after_key='';
 END;
@@ -281,8 +271,11 @@ mod tests {
         ").unwrap();
         assert_eq!(pending(&connection), 0);
         assert!(discovery_at(&connection, "local", 10).unwrap().is_empty());
+        let schema_before: i64 = connection.query_row("PRAGMA schema_version", [], |row| row.get(0)).unwrap();
         create_schema(&connection).unwrap();
         assert_eq!(pending(&connection), 0);
+        let schema_after: i64 = connection.query_row("PRAGMA schema_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(schema_after, schema_before, "reopening must not replace installed triggers");
     }
 
     #[test]
