@@ -381,7 +381,19 @@ waits, with no armed deadline; completing its synthetic `after-run` step admits 
 the full budget from that completion. The timeout covers the complete run. Retries and
 revisions cannot extend or reset an armed deadline.
 
-The daemon arms an exact wake for the nearest deadline. It does not depend on a client process or periodic polling. At expiry, Fractal terminates descendant runs, skips remaining declarative normal and final work, and enters non-terminal `cleanup-failed`. A live program's Effect root is interrupted first: `ensuring`, `acquireRelease` and `onInterrupt` finalizers retain the same attempt authority and may journal `Fractal.step` / `Fractal.command` work during the engine's configured finalizer grace (30 seconds by default). Only after finalizers complete or exhaust that grace does cleanup end the attempt and remove run-owned runtime state; the timeout remains the failure reason, including for evals. The reserved `$finalizers` journal result records `completed`, `timed-out`, or `interrupted-by-restart`; incomplete finalization raises operator attention. A worker lost during finalization is not replayed (see [program-engine.md](program-engine.md) and [#7079](https://github.com/compoundingtech/fractal/issues/7079)).
+The daemon arms an exact wake for the nearest deadline. It does not depend on a client process
+or periodic polling. At expiry, Fractal terminates descendant runs, skips remaining declarative
+normal and final work, and enters non-terminal `cleanup-failed`. A live program's Effect root
+is interrupted first: `ensuring`, `acquireRelease` and `onInterrupt` finalizers retain the same
+attempt authority and may journal `Fractal.step` / `Fractal.command` work. The program's
+`finalizerGrace` is pinned in its revision (`finalizer-grace` in KDL); omission uses 30 seconds,
+and publication refuses nonpositive durations or values above 15 minutes with
+`invalid-finalizer-grace`. Only after finalizers complete or exhaust that grace does cleanup end
+the attempt and remove run-owned runtime state; the timeout remains the failure reason,
+including for evals. The reserved `$finalizers` journal result records `completed`, `timed-out`,
+`interrupted-by-restart`, or `worker-failed`; incomplete finalization raises operator attention.
+A worker lost during finalization is not replayed (see [program-engine.md](program-engine.md)
+and [#7079](https://github.com/compoundingtech/fractal/issues/7079)).
 
 Every eval entry mission needs a timeout of 20 minutes or less. The store enforces this rule for both the eval API and a directly published eval-mode mission run.
 
