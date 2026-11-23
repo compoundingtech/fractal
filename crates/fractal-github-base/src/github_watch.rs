@@ -289,8 +289,8 @@ impl WatchEvent {
 
 /// A stable projection using existing facts. Counted workflow tuples are
 /// (app, workflow, suite, run, attempt, event): only run and attempt identify a rerun.
-/// External checks have no workflow identity; an identical recurring conclusion at the same
-/// head remains deduplicated because the existing facts cannot distinguish its executions.
+/// Checks without a numeric workflow run ID (external apps, or Actions runs whose databaseId
+/// is null) fall back to conclusions: an identical recurring result at the same head is suppressed.
 fn check_state(facts: &Value, include_runs: bool) -> Value {
     let checks = &facts["required_checks"];
     let counted = checks["checks"].as_array();

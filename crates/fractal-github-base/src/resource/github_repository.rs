@@ -4805,6 +4805,44 @@ mod tests {
     }
 
     #[test]
+    fn null_workflow_run_database_id_produces_no_execution_and_uses_conclusion_identity() {
+        let rules = [RequiredCheck { context: "build".into(), app: Some(15368) }];
+        let produce = |suite_id: u64, conclusion: &str| {
+            let mut suite = workflow_suite(suite_id, "2026-10-13T09:01:00Z");
+            suite["workflowRun"]["databaseId"] = Value::Null;
+            assert!(WorkflowExecution::from_suite(&suite).is_none());
+            let mut pull = open_pull(12, &"a".repeat(40), "SUCCESS");
+            pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] = json!([suite]);
+            pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"] =
+                json!([workflow_check("build", Some(conclusion), &suite)]);
+            let mut facts = open_pull_request(&pull, Some(&rules));
+            // Item normalization uses head_sha; keep the producer's other fields unchanged.
+            facts.insert("head_sha".into(), facts["head"].clone());
+            let facts = Value::Object(facts);
+            assert!(facts["required_checks"].get("execution").is_none());
+            facts
+        };
+        let passed = produce(10, "SUCCESS");
+        let failed = produce(20, "FAILURE");
+        let recovery = produce(30, "SUCCESS");
+        assert_eq!(passed["required_checks"]["state"], "pass");
+        assert_eq!(failed["required_checks"]["state"], "fail");
+        let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+        let watch = crate::model::WatchSpec { item: 12, since_unix_ms: 0, until_unix_ms: None };
+        let subject = thread.watch("agent/example/planner");
+        let message = |facts: &Value, observation: &str| crate::github_watch::wake(
+            &subject, &watch, &thread, facts,
+            &crate::github_watch::WatchEvent::Checks(facts["required_checks"].clone()),
+            observation, None,
+        ).unwrap();
+        let first = message(&passed, "first");
+        assert_ne!(first.subject, message(&failed, "second").subject);
+        // Nullable numeric Actions IDs have the same known limitation as external checks:
+        // a different suite alone cannot distinguish an identical recurring conclusion.
+        assert_eq!(first.subject, message(&recovery, "third").subject);
+    }
+
+    #[test]
     fn cancelled_checks_are_not_failures_and_optional_checks_do_not_count() {
         let run = |name: &str, conclusion: &str| json!({
             "__typename":"CheckRun", "name":name, "status":"COMPLETED",
