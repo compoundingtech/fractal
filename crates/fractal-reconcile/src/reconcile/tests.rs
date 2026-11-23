@@ -8213,6 +8213,81 @@ agent "import/omp/fixture" {{
         );
     }
 
+    fn observed_measurement(path: &Path) -> fractal_drivers::harness_admission::IdentityMeasurement {
+        let measurement = std::cell::RefCell::new(None);
+        fractal_drivers::harness_admission::executable_identity_ready_observed(
+            path, &|_| unreachable!(), &|_| Ok(()),
+            &|identity| { *measurement.borrow_mut() = Some(identity.clone()); }).unwrap();
+        measurement.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn identity_completion_selects_only_exact_pending_dependents() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::write(&first, "first identity").unwrap();
+        std::fs::write(&second, "second identity").unwrap();
+        let first = observed_measurement(&first);
+        let second = observed_measurement(&second);
+        assert_ne!(first, second);
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        for (subject, measurement) in [("first", &first), ("shared", &first), ("second", &second)] {
+            reconciler.file_changes.pending_measurements.lock().unwrap().insert(subject.into(),
+                PendingLaunchMeasurements { dependencies: BTreeSet::from([measurement.clone()]), completed: false });
+            reconciler.incremental.evaluated(&format!("launch-inputs:{subject}"),
+                BTreeSet::from([format!("launch-identity/{subject}")]), None);
+        }
+        reconciler.file_changes.measurement_completed(&reconciler.incremental, &first);
+        assert_eq!(*reconciler.file_changes.launches.lock().unwrap(),
+            BTreeSet::from(["first".into(), "shared".into()]));
+        assert!(reconciler.incremental.needs("launch-inputs:first", now_ms()));
+        assert!(reconciler.incremental.needs("launch-inputs:shared", now_ms()));
+        assert!(!reconciler.incremental.needs("launch-inputs:second", now_ms()));
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("identity completion must notify scoped work"),
+        }
+        tokio::select! {
+            biased;
+            _ = reconciler.notify.notified() => panic!("identity completion must not notify a global pass"),
+            _ = std::future::ready(()) => {},
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_completion_before_reader_registration_requeues_after_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("binary");
+        std::fs::write(&binary, "identity").unwrap();
+        let measurement = observed_measurement(&binary);
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        reconciler.file_changes.pending_measurements.lock().unwrap().insert("selected".into(),
+            PendingLaunchMeasurements { dependencies: BTreeSet::from([measurement.clone()]), completed: false });
+        // Finish the background operation before evaluated() has registered any readers.
+        reconciler.file_changes.measurement_completed(&reconciler.incremental, &measurement);
+        reconciler.file_changes.launches.lock().unwrap().clear();
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("early completion must retain a scoped wake"),
+        }
+        reconciler.incremental.evaluated("launch-inputs:selected",
+            BTreeSet::from(["launch-identity/selected".into()]), None);
+        assert!(!reconciler.incremental.needs("launch-inputs:selected", now_ms()));
+        reconciler.file_changes.registered_launch_measurements(&reconciler.incremental, "selected", true, false);
+        assert!(reconciler.incremental.needs("launch-inputs:selected", now_ms()));
+        assert_eq!(*reconciler.file_changes.launches.lock().unwrap(), BTreeSet::from(["selected".into()]));
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("registration must restore the scoped wake"),
+        }
+    }
+
     #[test]
     fn managed_launch_inputs_remain_watched_when_profile_or_wrapper_is_missing() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -8321,7 +8396,7 @@ agent "import/omp/fixture" {{
                 Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
             let result = fractal_drivers::harness_admission::executable_identity_ready_observed(
                 &provider, &|_| unreachable!(), &|path| reconciler.ensure_file_watch(
-                    &format!("launch-input/{}", path.display()), path));
+                    &format!("launch-input/{}", path.display()), path), &|_| {});
             assert_eq!(result.is_ok(), retarget);
             if retarget { assert!(reconciler.file_watchers.lock().unwrap().contains_key(
                 &format!("launch-input/{}", target.display()))); }
