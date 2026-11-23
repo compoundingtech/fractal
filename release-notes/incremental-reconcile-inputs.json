@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Maintain reconciliation and mail objective inputs by changed subject",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "Changed-key journals and reductions are process-local."},
+  "rules": {"status": "none", "detail": "Desired roster rows, run projection fences and operational fault families retain unchanged reductions. Mail authority and source changes route to affected recipients and messages instead of invalidating the population."},
+  "compatibility": {"status": "none", "detail": "Lifecycle and authority checks remain authoritative. Native coverage loss still requires complete reconstruction. Desired changed-subject retention is bounded; journal eviction forces stale consumers to rebuild from the live roster. Performance reports expose reconcile input and fault-family work counters."},
+  "downtime": {"status": "none", "detail": "No migration is required."},
+  "manual": {"status": "none", "detail": "No configuration change is required."},
+  "recovery": {"status": "none", "detail": "Schema or observer coverage changes fence retained reductions. Real eligibility deadlines continue to select affected subjects."}
+}

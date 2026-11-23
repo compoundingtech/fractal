@@ -67,6 +67,15 @@ impl ObserverCondition {
         }
     }
 
+    /// When a continuing failure first becomes actionable, measured from its first report.
+    pub fn attention_delay_ms(&self) -> Option<u128> {
+        match self {
+            Self::Access(_) | Self::RepositoryNotFound(_) | Self::Rejected(_) => Some(0),
+            Self::Unreachable(_) => Some(OBSERVER_UNREACHABLE_ATTENTION_MS),
+            Self::RateLimited { .. } | Self::LocalBudget(_) => None,
+        }
+    }
+
     pub fn needs_person(&self, failing_for_ms: u128) -> bool {
         match self {
             Self::Access(_) | Self::RepositoryNotFound(_) | Self::Rejected(_) => true,
