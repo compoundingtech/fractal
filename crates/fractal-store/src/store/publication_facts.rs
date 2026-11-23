@@ -195,7 +195,13 @@ pub fn install_cache_observer(graph: &GraphStore, runtime: &Arc<FractalRuntime>)
     let local_cursor = Mutex::new(graph.readers.get().query_row(
         "SELECT COALESCE(MAX(id),0) FROM local_observations", [], |row| row.get::<_, u64>(0),
     ).ok());
-    let observer = graph.connection.observe_commits(move |connection| {
+    let observer = graph.connection.observe_tables(&[
+        "local_publication_launch_epoch",
+        "local_publication_bootstrap",
+        "local_publication_pending",
+        "local_publication_batches",
+        "local_observations",
+    ], move |connection| {
         if let Some(runtime) = weak.upgrade() {
             *runtime
                 .publication_cache_epoch

@@ -126,6 +126,68 @@ mod tests {
     }
 
     #[test]
+    fn shared_windows_invalidate_on_same_index_membership_count_projection() {
+        const CONTAINER: &str = "arrangement/shared-window";
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        state.store.connection.write().execute(
+            "INSERT INTO ordered_membership_counts(container,live_count,changed_index) VALUES(?1,0,0)",
+            [CONTAINER],
+        ).unwrap();
+        let windows = Windows::attach(&state.store).unwrap();
+        let session = ClientSession::local(None).unwrap();
+        let query = request("ordered-memberships");
+        let builds = AtomicUsize::new(0);
+        let read = || {
+            let prepared = windows.prepare(&state, &session, &query);
+            let _admission = prepared.as_ref()
+                .map(|p| p.entry.admission.clone().blocking_lock_owned());
+            let commits = windows.commits();
+            state.store.read_snapshot(|index| {
+                windows.read(&state, &session, &query,
+                    ReadFence { index, now: 0, commits, prepared }, || {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        let membership = state.store.ordered_membership_state(CONTAINER)?;
+                        Ok((Vec::new(), false, None, Some(membership)))
+                    })
+            }).unwrap().2.unwrap()
+        };
+        let first = read();
+        assert_eq!(first.live_count, 0);
+        assert_eq!(read(), first);
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "the initial result is cached");
+        let before = windows.changes(&state.store).unwrap();
+        assert_eq!(windows.current_changes(&state.store), Some(before));
+        let index = state.store.index().unwrap();
+        let commits = windows.commits();
+
+        // Repair only the projection: no claim, metadata or other observed table changes.
+        // Dropping the writer completes the synchronous commit callback, without polling.
+        {
+            let mut connection = state.store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            assert_eq!(transaction.execute(
+                "UPDATE ordered_membership_counts SET live_count=1,changed_index=?2 WHERE container=?1",
+                rusqlite::params![CONTAINER, index],
+            ).unwrap(), 1);
+            transaction.commit().unwrap();
+        }
+        assert_eq!(state.store.index().unwrap(), index, "the claim frontier did not advance");
+        assert_eq!(windows.commits(), commits + 1, "the projection commit reaches the observer");
+        assert_eq!(windows.current_changes(&state.store), None, "same-index commits need weighing");
+        let after = windows.changes(&state.store).unwrap();
+        assert!(Windows::changed("ordered-memberships", &before, &after));
+        assert_eq!(windows.current_changes(&state.store), Some(after));
+        let second = read();
+        assert_eq!(second.live_count, 1, "the cached membership state must be refreshed");
+        assert_eq!(second.changed_index, index);
+        assert_ne!(second, first);
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert_eq!(read(), second);
+        assert_eq!(builds.load(Ordering::SeqCst), 2, "the refreshed result is cached again");
+    }
+
+    #[test]
     fn shared_windows_agents_recompute_at_the_queue_deadline() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
