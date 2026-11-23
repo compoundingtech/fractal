@@ -144,3 +144,24 @@ async fn changed_keys_do_no_idle_or_unrelated_candidate_work_and_replay_races() 
     assert_eq!(after["promotion_candidates"].as_u64().unwrap() - before["promotion_candidates"].as_u64().unwrap(), 1);
     assert_eq!(peer.claim_member_signatures_for(&[id]).unwrap(), signature);
 }
+
+#[test]
+fn signature_queue_triggers_respect_outer_explicit_abort_policy() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);
+        CREATE TABLE claims(id TEXT PRIMARY KEY,origin TEXT,store_index INTEGER);").unwrap();
+    db.execute_batch(smallclaims::store::member_signatures::SCHEMA).unwrap();
+    db.execute("INSERT OR ABORT INTO claim_member_signature_pending
+        VALUES('first','writer',1,'key','signature',0,'peer')", []).unwrap();
+    // The ready key already exists when the claim arrives. The outer statement's
+    // ABORT policy must not turn an idempotent queue enqueue into a constraint error.
+    db.execute("INSERT OR ABORT INTO claims VALUES('first','writer',1)", []).unwrap();
+    db.execute("INSERT OR ABORT INTO claims VALUES('second','writer',2)", []).unwrap();
+    db.execute("INSERT INTO claim_signature_ready VALUES('third','key')", []).unwrap();
+    db.execute("INSERT OR ABORT INTO claim_member_signature_pending
+        VALUES('third','writer',3,'key','signature',0,'peer')", []).unwrap();
+    let ready: usize = db.query_row("SELECT COUNT(*) FROM claim_signature_ready", [], |row| row.get(0)).unwrap();
+    assert_eq!(ready, 2);
+    let frontier: i64 = db.query_row("SELECT through FROM claim_signature_frontiers WHERE origin='writer'", [], |row| row.get(0)).unwrap();
+    assert_eq!(frontier, 2);
+}

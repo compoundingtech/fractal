@@ -61,13 +61,20 @@ CREATE TABLE IF NOT EXISTS claim_signature_ready (
     PRIMARY KEY(claim_id, member_key)
 ) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS claim_signature_claim_insert AFTER INSERT ON claims BEGIN
-    INSERT INTO claim_signature_frontiers(origin,through) VALUES(NEW.origin,NEW.store_index)
-    ON CONFLICT(origin) DO UPDATE SET through=through+1;
-    INSERT OR IGNORE INTO claim_signature_ready
-    SELECT claim_id,member_key FROM claim_member_signature_pending WHERE claim_id=NEW.id;
+    UPDATE claim_signature_frontiers SET through=through+1 WHERE origin=NEW.origin;
+    INSERT INTO claim_signature_frontiers(origin,through)
+    SELECT NEW.origin,NEW.store_index
+    WHERE NOT EXISTS(SELECT 1 FROM claim_signature_frontiers WHERE origin=NEW.origin);
+    INSERT INTO claim_signature_ready
+    SELECT pending.claim_id,pending.member_key FROM claim_member_signature_pending AS pending
+    WHERE pending.claim_id=NEW.id AND NOT EXISTS(
+        SELECT 1 FROM claim_signature_ready AS ready
+        WHERE ready.claim_id=pending.claim_id AND ready.member_key=pending.member_key);
 END;
 CREATE TRIGGER IF NOT EXISTS claim_signature_pending_insert AFTER INSERT ON claim_member_signature_pending BEGIN
-    INSERT OR IGNORE INTO claim_signature_ready VALUES(NEW.claim_id,NEW.member_key);
+    INSERT INTO claim_signature_ready SELECT NEW.claim_id,NEW.member_key
+    WHERE NOT EXISTS(SELECT 1 FROM claim_signature_ready
+        WHERE claim_id=NEW.claim_id AND member_key=NEW.member_key);
 END;
 CREATE TRIGGER IF NOT EXISTS claim_signature_pending_delete AFTER DELETE ON claim_member_signature_pending BEGIN
     DELETE FROM claim_signature_ready WHERE claim_id=OLD.claim_id AND member_key=OLD.member_key;
