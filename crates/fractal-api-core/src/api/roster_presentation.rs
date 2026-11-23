@@ -1,5 +1,6 @@
 //! Changed-agent live presentation; clocks invalidate only the card whose evidence expires.
 use super::*;
+use anyhow::Context as _;
 
 #[derive(Default)]
 struct Cache {

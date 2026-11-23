@@ -74,7 +74,7 @@ impl ClientSummaryStore for Store {
                 [at.to_string()], |r| r.get(0))?;
             let mut deadline = lease.map(|s| s.parse::<u128>()).transpose()?;
             for sql in [FUTURE_ASK_SAME_WIDTH, FUTURE_ASK_LONGER] {
-                let next: Option<String> = c.query_row(sql, [at.to_string()], |r| r.get(0)).optional()?;
+                let next: Option<String> = c.query_row(/* sqlite-large-value: allow-for-now lv-h8df79105754b owner=fractal_attention::store::client_summary TODO=trace-statement-and-value-representation */ sql, [at.to_string()], |r| r.get(0)).optional()?;
                 if let Some(next) = next {
                     let next = next.parse::<u128>()?;
                     deadline = Some(deadline.map_or(next, |held| held.min(next)));
