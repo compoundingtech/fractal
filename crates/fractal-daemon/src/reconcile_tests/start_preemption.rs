@@ -136,6 +136,7 @@ fn dispatch(&self) -> Result<bool> {
         format!("{}:${{PATH}}", self.root.path().join("bin").display()),
     );
     self.reconciler.dispatch_start(fractal_reconcile::reconcile::start_jobs::PreparedStart {
+        workspace_admission: None,
         subject: self.desired.clone(),
         member,
         launch_member,
