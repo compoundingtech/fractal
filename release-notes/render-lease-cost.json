@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Avoid worktree lease processes for unchanged render output",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No SQLite schema, index or client schema changes."},
+  "rules": {"status": "none", "detail": "Graph rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Render passes still plan all members and union shared Git excludes. Only members needing output or legacy cleanup acquire deletion admission; unchanged plans publish receipts without committing. Mutating members revalidate their workspace and reprepare output under the lease; a changed plan is deferred rather than applied with stale graph decisions. Normalized worktree identities survive through start admission and are stored in existing local start-operation JSON bodies, including bare repositories nested inside parent worktrees. New-format recovery validates persisted workspace identity. Older records without admission acquire it lazily at dispatch under the original operation and request; quiet and handoff boundaries remain unchanged. Unavailable legacy admission leaves the operation queued with a stable diagnostic deduplicated per operation, even when other restart decisions interleave. Completion reacquires admission through the same legacy fallback without rewriting stored bodies. Later lifecycle controls still fence dispatch. Missing/replaced new-format workspaces permit durable producer retirement before best-effort diagnostics; gate retirement never appends unsupported decision claims. Declared checkouts are revalidated at every start boundary, including retained leases. No start recreates a checkout as a plain directory. Legacy-cleanup inspection failures fail closed."},
+  "downtime": {"status": "none", "detail": "Normal binary restart only."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "No data migration; binary rollback remains available."}
+}
