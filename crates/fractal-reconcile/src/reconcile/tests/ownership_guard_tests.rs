@@ -262,7 +262,7 @@ fn evaluated_member_results_survive_a_clean_wake_and_remain_fenced() {
                 fs::create_dir(&workspace).unwrap();
             }
             reconciler.incremental.observe(&store).unwrap();
-            reconciler.incremental.touch(&declaration.subject);
+            reconciler.incremental.touch_subject(&declaration.subject);
             assert!(reconciler.incremental.needs(&member_item, now_ms()));
             let cached_wake = wake.clone();
             let changed = store.clone();
