@@ -3205,7 +3205,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                              successfully with a current peer again.",
                             self.host,
                             health,
-                            health.message(),
+                            self.store.replication_health_message(health)?,
                         ),
                         severity: "error".into(),
                         targets: vec![daemon],
