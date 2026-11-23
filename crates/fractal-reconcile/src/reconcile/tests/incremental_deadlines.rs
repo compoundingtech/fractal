@@ -1797,7 +1797,10 @@ fn queue_workspace_start(
 ) -> String {
     let desired = store.desired_subjects_named(&["agent/node.worker".into()])
         .unwrap().remove(0);
-    let member = desired.member.as_ref().unwrap().clone();
+    let mut member = desired.member.as_ref().unwrap().clone();
+    if request.as_ref().is_some_and(|request| request.body["fields"]["fresh_session"] == true) {
+        member.tags.insert(start_jobs::OPERATION_TAG.into(), "fixture-incumbent".into());
+    }
     let prepared = start_jobs::PreparedStart {
         workspace_admission: Some(start_jobs::WorkspaceAdmission::Git {
             owner: workspace.to_path_buf(),
@@ -2069,10 +2072,14 @@ fn assert_old_format_restart_recovery(
     let store = Arc::new(Store::open(&database, "node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
     if changed_incumbent {
-        let member = store.desired_subjects_named(&[original.subject.clone()])
+        let mut member = store.desired_subjects_named(&[original.subject.clone()])
             .unwrap().remove(0).member.unwrap();
+        member.tags.insert(start_jobs::OPERATION_TAG.into(), "fixture-incumbent".into());
+        runtime.started_members.lock().unwrap().push(member.clone());
         let observation = running_observation(&member, "replacement");
         runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), observation);
+        assert_eq!(runtime.observe_start(&member).unwrap().unwrap().incarnation_id.as_deref(),
+            Some("replacement"), "recovery must observe the replacement, not an absent incumbent");
         store.append_claim(&ClaimInput {
             subject: original.subject.clone(), kind: "harness.session-file".into(), actor: None,
             fields: BTreeMap::from([
@@ -2116,7 +2123,15 @@ fn assert_old_format_restart_recovery(
         assert!(store.operation_claim(&format!("restart-prepare:{}:{}:handoff",
             requeued.subject, requeued.id)).unwrap().is_none(),
             "a different running incarnation/session must prepare its own handoff");
-        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+        restarted.reconcile_once().unwrap();
+        let preparation = store.operation_claim(&format!("restart-prepare:{}:{}",
+            requeued.subject, requeued.id)).unwrap().unwrap();
+        assert_eq!(preparation.body["fields"]["decision"], "prepare");
+        assert_eq!(preparation.accepted_at_unix_ms, START + 2,
+            "the replacement must receive a new handoff request, not reuse the original acknowledgement");
+        assert_eq!(runtime.started_members.lock().unwrap().len(), 1,
+            "the member pass must wait for the replacement's handoff without starting another runtime");
         return;
     }
     if fresh {
