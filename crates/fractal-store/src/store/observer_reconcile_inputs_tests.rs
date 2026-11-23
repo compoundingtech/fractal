@@ -63,6 +63,10 @@ fn desired_inputs_rebuild_only_changed_keys_and_track_raw_removals() {
     assert_eq!(inputs.desired.len(), 1);
     assert_eq!(inputs.desired[0].subject, "resource/second");
     assert_eq!(store.reconcile_input_work()["full_rebuilds"], initial["full_rebuilds"]);
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h61d6335d5dfb owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision='revision/changed' WHERE subject='resource/second'", []).unwrap();
+    inputs.refresh(&store).unwrap();
+    assert_eq!(inputs.changed_subjects, ["resource/second"],
+        "revision-only changes invalidate authoritative family consumers of this journal");
 }
 
 #[test]

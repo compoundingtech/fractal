@@ -25,7 +25,7 @@ struct State {
 // Final-state equality suppresses same-value writes and transaction rollbacks.
 fn row_identity(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<(String, [u8; 32])> {
     let mut digest = Sha256::new();
-    for column in start..start + 7 {
+    for column in start..start + 9 {
         match row.get_ref(column)? {
             rusqlite::types::ValueRef::Null => digest.update([0]),
             rusqlite::types::ValueRef::Text(bytes) => {
@@ -250,7 +250,7 @@ impl WriterObserver for Observer {
         let result = (|| -> Result<()> {
             if !state.initialized || state.invalid {
                 let mut statement = connection.prepare_cached(
-                    "SELECT rowid, subject, kind, body, member, owner_run, owner_generation, owner_step FROM desired")?;
+                    "SELECT rowid, subject, kind, body, member, owner_run, owner_generation, owner_step, revision, claim_id FROM desired")?;
                 state.rows = statement.query_map([], |row| Ok((row.get(0)?, row_identity(row, 1)?)))?
                     .collect::<rusqlite::Result<_>>()?;
                 state.generation = state.generation.saturating_add(1);
@@ -265,7 +265,7 @@ impl WriterObserver for Observer {
             if pending.is_empty() { return Ok(()); }
             let mut changed = BTreeSet::new();
             let mut statement = connection.prepare_cached(
-                "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step FROM desired WHERE rowid=?1")?;
+                "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step, revision, claim_id FROM desired WHERE rowid=?1")?;
             for rowid in pending {
                 let previous = state.rows.remove(&rowid);
                 let current = statement.query_row(/* sqlite-large-value: allow-for-now lv-hd10d6847d3fd owner=fractal_store::store::observer_reconcile_inputs TODO=trace-statement-and-value-representation */ [rowid], |row| row_identity(row, 0)).optional()?;
