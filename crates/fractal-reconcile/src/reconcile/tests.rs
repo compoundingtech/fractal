@@ -2714,6 +2714,37 @@ mission "cancel-driver" state="ready" {
             .expect("a long gate still gets a pass every minute");
     }
 
+    #[test]
+    fn a_missing_field_observation_does_not_read_the_declaration_or_arm_a_poll() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nexec \"node/probe\" { workspace \"/tmp\"; command \"true\"; restart never }",
+            "missing-observation-definition",
+        );
+        let reconciler = Reconciler::new(
+            store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        let stage = GateContext {
+            subject: "step-run/garden/wait".into(), name: "wait".into(),
+            started_at_unix_ms: 0, attempt: 1, run: "mission-run/garden".into(),
+            generation: "run-generation/garden".into(), eval: false,
+        };
+        let gate = GateSpec::Field {
+            name: "exited".into(), path: "exit_code".into(),
+            subject: "exec/node/probe".into(), operator: "is".into(), value: serde_json::json!(0),
+        };
+        let ((outcome, due), reads) = smallclaims::touched::record(|| {
+            smallclaims::touched::record_due(|| reconciler.evaluate_gate(&stage, &gate))
+        });
+        assert!(matches!(outcome.unwrap(), GateOutcome::Pending));
+        assert!(reads.contains("actual:exec/node/probe"));
+        assert!(!reads.contains("exec/node/probe"), "{reads:?}");
+        assert_eq!(due, None);
+        assert!(reconciler.gate_poll_runtimes.lock().unwrap().is_empty());
+        assert!(!reconciler.gate_poll_armed.load(Ordering::Acquire));
+    }
+
     /// A field gate on a GitHub item reads `state` and `facts.state` alike, whether its subject
     /// is pinned to a full observation, pinned to a compact item state, or not pinned (#4557).
     #[test]
