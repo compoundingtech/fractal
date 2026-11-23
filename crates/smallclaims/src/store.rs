@@ -894,6 +894,8 @@ pub struct Store {
     /// The day, in days since the epoch, that a local trim's deletions count against: each
     /// checkpoint step sets it from its own clock.
     pub(crate) trim_day: AtomicU64,
+    /// The checkpoint context's injectable clock, used to accrue local trim allowance.
+    pub(crate) trim_now_ms: AtomicU64,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -1464,6 +1466,7 @@ impl Store {
             trim_local: AtomicBool::new(false),
             trim_daily_claims: AtomicU64::new(checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS),
             trim_day: AtomicU64::new(0),
+            trim_now_ms: AtomicU64::new(0),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
@@ -10567,9 +10570,9 @@ impl Store {
         self.trim_local.load(Ordering::Relaxed)
     }
 
-    /// The most claims a member deletes in one day, `[trim] daily_claims`. A
-    /// cut that drops more stays `trimming` and goes on where it stopped the next day, before the
-    /// next cut begins, so a large backlog drains over several days rather than in one long trim.
+    /// The most claims a member deletes per UTC day, `[trim] daily_claims`. Allowance advances
+    /// evenly from midnight plus a ten-minute burst; an unfinished cut resumes in later steps
+    /// and days before the next cut begins.
     pub fn trim_locally_at_most(&self, claims: u64) {
         self.trim_daily_claims.store(claims, Ordering::Relaxed);
     }
