@@ -221,6 +221,9 @@ const hostEngine = (
     Effect.promise(() =>
       host.record(entry).catch((cause: unknown) => {
         refuse(entry.key, cause)
+        // Finalizers are uninterruptible: fail this write rather than wait for
+        // another interrupt that cannot release the refused acknowledgement.
+        if (host.signal.aborted) throw cause
         return new Promise<never>(() => {})
       }),
     )
