@@ -460,6 +460,7 @@ impl ProgramEngine {
                 self.write_journal(step, *attempt, &running.dispatch.program.bundle_hash, "$finalizers", "started",
                     &json!({"value": {"_tag": "Finalizers", "grace_ms": self.finalizer_grace(&running.dispatch.program).as_millis(), "reason": reason}}), None)?;
                 running.finalizing = true;
+                running.requests.clear();
                 eprintln!("fractal: program {step} attempt {attempt} cancelled: {reason}");
                 send_cancel(&mut inner, *generation, step, *attempt, reason);
             }
@@ -472,11 +473,11 @@ impl ProgramEngine {
     }
 
     /// Do not replay arbitrary Effect finalizers after losing their worker.
-    pub fn finalize_cleanup(&self, run: &MissionRunView) -> Result<()> {
+    pub fn finalize_cleanup(&self, run: &MissionRunView) -> Result<bool> {
         self.release_left(run)?;
         let Some(mission) = self.store.mission_spec(
             run.mission.strip_prefix("mission/").unwrap_or(&run.mission), Some(&run.revision),
-        )? else { return Ok(()) };
+        )? else { return Ok(true) };
         for (path, program) in mission.programs() {
             let Some(step) = run.steps.iter().find(|step| step.step == path
                 && RUNNING_STATES.contains(&step.status.as_str())) else { continue };
@@ -492,7 +493,7 @@ impl ProgramEngine {
                 })?;
             }
         }
-        Ok(())
+        Ok(!self.lock().running.values().any(|running| running.dispatch.run == run.subject && running.finalizing))
     }
 
     fn finalizer_grace(&self, program: &ProgramSpec) -> Duration {
@@ -573,7 +574,14 @@ impl ProgramEngine {
     /// `{_tag, error}`): journal it under the key, then hand it to the program (`resolved`). A key
     /// that already holds a result keeps it, and the program gets that one.
     pub fn resolve(&self, request: &Request, child: &str, exit: Value) -> Result<()> {
-        let Some(program) = self.program_of(request, |_| {}) else { return Ok(()) };
+        let program = {
+            let inner = self.lock();
+            let Some(running) = inner.running.get(&request.step).filter(|running|
+                running.dispatch.attempt == request.attempt && running.generation == request.generation
+                    && running.requests.contains_key(&request.key))
+            else { return Ok(()) };
+            running.dispatch.program.bundle_hash.clone()
+        };
         let (status, mut result) = match exit["_tag"].as_str() {
             Some("Success") => ("completed", json!({"value": exit["value"]})),
             _ => ("failed", json!({"error": exit["error"]})),
@@ -1137,6 +1145,7 @@ impl ProgramEngine {
             self.write_journal(step, attempt, &running.dispatch.program.bundle_hash, "$finalizers", "started",
                 &json!({"value": {"_tag": "Finalizers", "grace_ms": self.finalizer_grace(&running.dispatch.program).as_millis(), "reason": reason}}), None)?;
             running.finalizing = true;
+            running.requests.clear();
             send_cancel(&mut inner, generation, step, attempt, &reason);
         }
         Ok(false)

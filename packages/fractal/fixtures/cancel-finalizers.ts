@@ -1,6 +1,6 @@
 import { Effect, Schema } from 'effect'
 
-import { Fractal } from '../../../src/effect.ts'
+import { Fractal } from '../src/effect.ts'
 
 export default Fractal.mission(
   {

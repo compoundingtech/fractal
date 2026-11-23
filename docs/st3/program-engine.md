@@ -196,6 +196,10 @@ which the SDK passes to Effect, rather than immediately terminating its worker. 
 `acquireRelease` and `onInterrupt` can therefore run `Fractal.step` and `Fractal.command`;
 their normal started/result journal acknowledgements remain authoritative during cleanup.
 Existing command groups are stopped at interruption; finalizer commands get their own groups.
+The SDK preserves the finalizer's interruption mask when executing its activities: the workflow
+suspension wrapper's explicit interruptible region must not reinstate the pending root interrupt.
+Interruption detaches preexisting child/ask waits; late results cannot become finalizer results.
+Finalizer requests remain admitted under the same live attempt.
 
 The `$finalizers` result is tagged `Finalizers`, with `outcome: completed | failed | timed-out |
 interrupted-by-restart | worker-failed` and the effective `grace_ms`. Incomplete finalization is

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import { expect, it } from '@effect/vitest'
 
-const fixture = fileURLToPath(new URL('../fixtures/programs/cancel-finalizers/mission.ts', import.meta.url))
+const fixture = fileURLToPath(new URL('../fixtures/cancel-finalizers.ts', import.meta.url))
 const host = fileURLToPath(new URL('../../../crates/fractal-reconcile/src/reconcile/program_host.mjs', import.meta.url))
 
 for (const hang of ['no', 'yes', 'fail']) {

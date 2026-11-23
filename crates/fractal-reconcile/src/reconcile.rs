@@ -13404,8 +13404,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // finalizers finish or exhaust the configured grace.
         {
             let engine = self.program_engine();
-            engine.finalize_cleanup(run)?;
-            if !engine.fence_left_effects(run)? {
+            if !engine.finalize_cleanup(run)? {
                 return Ok(false);
             }
         }

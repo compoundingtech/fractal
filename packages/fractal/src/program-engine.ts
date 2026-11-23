@@ -276,8 +276,14 @@ const hostEngine = (
         const instance = yield* WorkflowEngine.WorkflowInstance
         host.started(key)
         const started = Date.now()
-        const result: Workflow.Result<unknown, unknown> = yield* activity.executeEncoded.pipe(
-          Workflow.intoResult,
+        const result: Workflow.Result<unknown, unknown> = yield* Effect.suspend(() =>
+          // Workflow.intoResult explicitly restores interruptibility for suspension.
+          // A finalizer activity must instead inherit its caller's interrupt mask;
+          // otherwise the pending root interrupt skips the command and its journal.
+          host.signal.aborted
+            ? Effect.map(Effect.exit(Effect.scoped(activity.executeEncoded)), (exit) => new Workflow.Complete({ exit }))
+            : Workflow.intoResult(activity.executeEncoded),
+        ).pipe(
           Effect.provideService(
             WorkflowEngine.WorkflowInstance,
             WorkflowEngine.WorkflowInstance.initial(instance.workflow, instance.executionId),

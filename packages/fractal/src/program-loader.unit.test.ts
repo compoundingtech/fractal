@@ -58,7 +58,7 @@ describe('program declarations as data', () => {
         '    write "resource/z"',
         '  }',
         '  step "program" timeout="1h" {',
-        `    program "/bundles/land.mjs" sha256="${sha256}" stalled-after="5m" finalizer-grace="2m"`,
+        `    program "/bundles/land.mjs" finalizer-grace="2m" sha256="${sha256}" stalled-after="5m"`,
         '  }',
         '}',
         '',
