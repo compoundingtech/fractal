@@ -463,3 +463,48 @@ async fn nonempty_receive_admits_without_waiting_for_projection_gate() {
     ).unwrap();
     assert_eq!(visible, 0);
 }
+
+#[tokio::test]
+async fn routed_receive_defers_behind_held_gate_and_duplicate_does_not_retry_projection() {
+    use tower::ServiceExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let request = deadline_request(&state.store);
+    let app = axum::Router::new()
+        .route("/v1/internal/replication/receive", axum::routing::post(replication_receive))
+        .with_state(state.clone());
+    let frontier = state.store.projection_frontier().unwrap();
+    let gate = state.store.projection.lock();
+    let mut generation = state.store.projection_contention_generation();
+    for duplicate in [false, true] {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/internal/replication/receive")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&request).unwrap()))
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), app.clone().oneshot(request)).await;
+        // Release before reporting a timeout so a broken blocking handler cannot
+        // leave its blocking worker hung during runtime teardown.
+        if result.is_err() {
+            drop(gate);
+            panic!("routed receive waited for the projection gate");
+        }
+        let response = result.unwrap().unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(state.store.replication_projection_deferred());
+        assert_eq!(state.store.projection_frontier().unwrap(), frontier);
+        let current = state.store.projection_contention_generation();
+        if duplicate {
+            assert_eq!(current, generation, "duplicate receive must not enter projection");
+        } else {
+            assert!(current > generation, "new admission must arm background retry");
+            generation = current;
+        }
+    }
+    drop(gate);
+    state.store.project_replication_backlog().unwrap();
+    assert!(!state.store.replication_projection_deferred());
+    assert_eq!(state.store.claims_for("resource/receive-deadline", Some("resource.observed")).unwrap().len(), 1);
+}
