@@ -731,6 +731,28 @@ describe('cancellation', () => {
       expect(host.recorded).toEqual([])
     }),
   )
+  it.effect('journals an ensuring finalizer step wrapping a command after root interruption', () =>
+    Effect.gen(function* () {
+      const host = fakeHost()
+      const waiting = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Drain on cancel.', reportTo, input: Change },
+        () => Fractal.step({ id: 'merge' },
+          Effect.sync(() => host.cancel()).pipe(Effect.andThen(Effect.never)),
+        ).pipe(Effect.ensuring(
+          Fractal.step({ id: 'drain', success: Schema.String },
+            Fractal.command(['sh', '-c', 'drain']).pipe(Effect.map((result) => result.stdout), Effect.orDie),
+          ).pipe(Effect.orDie),
+        )),
+      )
+      expect(yield* start(waiting, host)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'Interrupted' },
+      })
+      expect(host.started).toEqual(['merge', 'drain'])
+      expect(host.recorded).toMatchObject([
+        { key: 'drain', status: 'completed', value: 'sh -c drain' },
+      ])
+    }),
+  )
 })
 
 describe('commands', () => {

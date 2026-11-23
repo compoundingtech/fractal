@@ -32,7 +32,7 @@ use crate::model::{
     ClaimInput, ClaimRecord, FractalError, MissionRunView, PROGRAM_ASKER, PersonAskRequest, PersonStepResponse, ProgramSpec,
 };
 use crate::store::Store;
-use crate::{MissionsStore, PersonWorkStore};
+use crate::{AttentionSnapshotStore, MissionsStore, PersonWorkStore};
 
 pub(super) mod await_pr;
 
@@ -49,12 +49,23 @@ const HOST_SOURCE: &str = /* sqlite-large-value: allow-for-now lv-h344eb4debbcf 
 const HOST_RESTART_DELAY: Duration = Duration::from_millis(500);
 const JOURNAL_PAGE: usize = 500;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum FinalizerOutcome {
+    Completed,
+    TimedOut,
+    InterruptedByRestart,
+    WorkerFailed,
+}
+
 /// The liveness deadlines of DQ8.
 #[derive(Clone, Copy, Debug)]
 pub struct Liveness {
     /// A program worker that does not answer the host's ping within this is terminated and its
     /// step fails.
     pub worker_deadline: Duration,
+    /// Maximum time reserved for Effect finalizers after cancellation or deadline expiry.
+    pub finalizer_grace: Duration,
     /// How often the engine pings the host.
     pub host_ping_every: Duration,
     /// A host that does not answer a ping within this is replaced.
@@ -65,6 +76,7 @@ impl Default for Liveness {
     fn default() -> Self {
         Self {
             worker_deadline: Duration::from_secs(30),
+            finalizer_grace: Duration::from_secs(30),
             host_ping_every: Duration::from_secs(5),
             host_deadline: Duration::from_secs(30),
         }
@@ -113,6 +125,8 @@ struct Running {
     dispatch: Dispatch,
     /// The host generation running it; a host that exits takes exactly its own programs with it.
     generation: u64,
+    /// The exact attempt retains journal authority while its root fiber finalizes.
+    finalizing: bool,
     /// By journal key: the child runs and asks the program waits on.
     requests: BTreeMap<String, Request>,
     /// Closed whenever this exact host attempt is forgotten, including cancellation.
@@ -315,6 +329,7 @@ impl ProgramEngine {
             "run": dispatch.run,
             "module": module,
             "sha256": dispatch.program.bundle_hash,
+            "finalizerGraceMs": self.finalizer_grace(&dispatch.program).as_millis(),
             "payload": dispatch.payload,
             "env": env,
             "cwd": dispatch.cwd,
@@ -324,7 +339,7 @@ impl ProgramEngine {
         // Keep exactly the environment sent to spawnEffect's host, including this attempt's
         // trace and credential, for native lane commands. Never reconstruct a parallel context.
         dispatch.env = env;
-        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, requests: BTreeMap::new(), _trace: trace });
+        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, finalizing: false, requests: BTreeMap::new(), _trace: trace });
         send(&inner, &message);
         Ok(Dispatched::Started)
     }
@@ -415,11 +430,14 @@ impl ProgramEngine {
                 .running
                 .iter()
                 .filter(|(_, running)| running.dispatch.run == run.subject)
+                .filter(|(_, running)| !running.finalizing)
                 .filter_map(|(step, running)| {
                     let attempt = running.dispatch.attempt;
                     let reason = match run.steps.iter().find(|view| view.subject == *step) {
                         None => Some("the run moved to another generation".to_owned()),
                         Some(_) if terminal => Some(format!("the run is {}", run.status)),
+                        Some(_) if run.phase.starts_with("cleanup-") || run.phase == "final-cancelled" =>
+                            Some(format!("the run is finalizing: {}", run.phase)),
                         Some(view) if view.attempt != attempt => Some(format!("the step moved to attempt {}", view.attempt)),
                         Some(view) if !RUNNING_STATES.contains(&view.status.as_str()) => Some(format!("the step is {}", view.status)),
                         Some(_) => None,
@@ -428,7 +446,10 @@ impl ProgramEngine {
                 })
                 .collect::<Vec<_>>();
             for (step, attempt, generation, reason) in &left {
-                inner.running.remove(step);
+                let running = inner.running.get_mut(step).expect("selected running attempt");
+                self.write_journal(step, *attempt, &running.dispatch.program.bundle_hash, "$finalizers", "started",
+                    &json!({"value": {"_tag": "Finalizers", "grace_ms": self.finalizer_grace(&running.dispatch.program).as_millis(), "reason": reason}}), None)?;
+                running.finalizing = true;
                 eprintln!("fractal: program {step} attempt {attempt} cancelled: {reason}");
                 send_cancel(&mut inner, *generation, step, *attempt, reason);
             }
@@ -437,6 +458,72 @@ impl ProgramEngine {
         for (step, attempt, _, reason) in left {
             self.cancel_waits(&step, attempt, &reason)?;
         }
+        Ok(())
+    }
+
+    /// Do not replay arbitrary Effect finalizers after losing their worker.
+    pub fn finalize_cleanup(&self, run: &MissionRunView) -> Result<()> {
+        self.release_left(run)?;
+        let Some(mission) = self.store.mission_spec(
+            run.mission.strip_prefix("mission/").unwrap_or(&run.mission), Some(&run.revision),
+        )? else { return Ok(()) };
+        for (path, program) in mission.programs() {
+            let Some(step) = run.steps.iter().find(|step| step.step == path
+                && RUNNING_STATES.contains(&step.status.as_str())) else { continue };
+            let live = {
+                let inner = self.lock();
+                inner.running.get(&step.subject).is_some_and(|running| running.dispatch.attempt == step.attempt)
+                    || inner.terminating.iter().any(|(_, subject, attempt)| subject == &step.subject && *attempt == step.attempt)
+            };
+            if !live {
+                self.finish_finalizers(&step.subject, step.attempt, &program.bundle_hash, self.finalizer_grace(program), FinalizerOutcome::InterruptedByRestart)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finalizer_grace(&self, program: &ProgramSpec) -> Duration {
+        program.finalizer_grace_ms.map(Duration::from_millis).unwrap_or(self.liveness.finalizer_grace)
+    }
+
+    fn finish_finalizers(&self, step: &str, attempt: u32, program: &str, grace: Duration, outcome: FinalizerOutcome) -> Result<()> {
+        // A crash between the durable result and ending the step must adopt that
+        // result, not replace it with an interrupted-by-restart outcome.
+        let existing = self.journal(step, attempt)?.into_iter().find(|entry| entry["key"] == "$finalizers");
+        let (outcome, grace) = match &existing {
+            Some(entry) => {
+                let result = if entry["_tag"] == "Success" { &entry["value"] } else { &entry["error"] };
+                (serde_json::from_value::<FinalizerOutcome>(result["outcome"].clone())?,
+                    Duration::from_millis(result["grace_ms"].as_u64().context("finalizer result without a grace")?))
+            }
+            None => (outcome, grace),
+        };
+        let completed = outcome == FinalizerOutcome::Completed;
+        if existing.is_none() {
+            let result = json!({"_tag": "Finalizers", "outcome": outcome, "grace_ms": grace.as_millis()});
+            self.write_journal(step, attempt, program, "$finalizers", if completed { "completed" } else { "failed" },
+                &if completed { json!({"value": result}) } else { json!({"error": result}) }, None)?;
+        }
+        let run = match self.store.step_run(step)? {
+            Some(step) if step.attempt == attempt => self.store.mission_run(&step.run)?,
+            _ => return Ok(()),
+        };
+        let cancelled = run.as_ref().is_some_and(|run| run.phase.ends_with("cancelled"));
+        if !completed {
+            let episode = format!("program-finalizers:{step}:{attempt}");
+            self.store.record_runtime_failure(&episode, &crate::model::AttentionRequest {
+                reviewer: "person/operator".into(),
+                title: "A program's finalizers did not complete".into(),
+                reason: format!("{step} attempt {attempt}: finalizers {outcome:?}; inspect the run journal and reconcile any unreleased resources before restarting work."),
+                severity: "error".into(),
+                targets: run.iter().map(|run| run.subject.clone()).chain(std::iter::once(step.to_owned())).collect(),
+                actor: super::RECONCILER_ACTOR.into(),
+                idempotency_key: episode.clone(),
+            }, "program-finalizers")?;
+        }
+        self.store.set_step_state_unless_terminal(step, if cancelled { "cancelled" } else { "failed" },
+            Some(if cancelled { "the program was cancelled after finalization" } else { "the program deadline expired after finalization" }))?;
+        (self.wake)(step);
         Ok(())
     }
 
@@ -763,6 +850,7 @@ impl ProgramEngine {
             .env("FRACTAL_PROGRAM_GROUPS", self.groups_dir())
             .env("FRACTAL_PROGRAM_BOOT_ID", boot_id()?)
             .env("FRACTAL_PROGRAM_WORKER_DEADLINE_MS", self.liveness.worker_deadline.as_millis().to_string())
+            .env("FRACTAL_PROGRAM_FINALIZER_GRACE_MS", self.liveness.finalizer_grace.as_millis().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -922,21 +1010,37 @@ impl ProgramEngine {
             return Ok(());
         }
         if message["t"] == "cancelled" {
-            let removed = self.lock().terminating.remove(&(generation, step.to_owned(), attempt));
-            if removed { (self.wake)("program-effects"); }
+            let mut inner = self.lock();
+            let removed = inner.terminating.remove(&(generation, step.to_owned(), attempt));
+            if inner.running.get(step).is_some_and(|running| running.finalizing
+                && running.dispatch.attempt == attempt && running.generation == generation)
+            {
+                inner.running.remove(step);
+            }
+            drop(inner);
+            if removed {
+                (self.wake)(step);
+                (self.wake)("program-effects");
+            }
             return Ok(());
         }
-        let program = {
+        let (program, grace) = {
             let inner = self.lock();
             match inner.running.get(step) {
                 // A message from an attempt or host this engine no longer runs changes nothing.
                 Some(running) if running.dispatch.attempt == attempt && running.generation == generation => {
-                    running.dispatch.program.bundle_hash.clone()
+                    (running.dispatch.program.bundle_hash.clone(), self.finalizer_grace(&running.dispatch.program))
                 }
                 _ => return Ok(()),
             }
         };
         match message["t"].as_str() {
+            Some("finalizers") => {
+                let outcome = serde_json::from_value::<FinalizerOutcome>(message["outcome"].clone())
+                    .context("invalid finalizer outcome")?;
+                self.finish_finalizers(step, attempt, &program, grace, outcome)?;
+                Ok(())
+            }
             Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
             Some("run" | "ask" | "await-pr" | "resource" | "resource-cancel") => self.request(step, attempt, generation, &program, message),
             Some("done") => self.done(step, attempt, generation, &program, message),
@@ -1009,18 +1113,21 @@ impl ProgramEngine {
         })
     }
 
-    /// The backstop to [`Self::release_left`]: stop the program if its step left this attempt.
-    /// True when it was stopped.
+    /// Admit finalizer work for this exact attempt after it has left its normal state.
+    /// The host bounds this authority by the configured grace and confirms worker exit.
     fn stop_if_left(&self, step: &str, attempt: u32, generation: u64) -> Result<bool> {
         let Some(reason) = self.left(step, attempt)? else { return Ok(false) };
-        {
-            let mut inner = self.lock();
-            if forget(&mut inner, step, attempt, generation) {
-                send_cancel(&mut inner, generation, step, attempt, &reason);
-            }
+        let mut inner = self.lock();
+        let Some(running) = inner.running.get_mut(step)
+            .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)
+        else { return Ok(true) };
+        if !running.finalizing {
+            self.write_journal(step, attempt, &running.dispatch.program.bundle_hash, "$finalizers", "started",
+                &json!({"value": {"_tag": "Finalizers", "grace_ms": self.finalizer_grace(&running.dispatch.program).as_millis(), "reason": reason}}), None)?;
+            running.finalizing = true;
+            send_cancel(&mut inner, generation, step, attempt, &reason);
         }
-        self.cancel_waits(step, attempt, &reason)?;
-        Ok(true)
+        Ok(false)
     }
 
     /// Append one journal entry. A completed or failed entry is fenced by its key: one result per
@@ -1081,8 +1188,8 @@ impl ProgramEngine {
         let status = message["status"].as_str().unwrap_or_default();
         let written = if key.is_empty() || !["started", "completed", "failed"].contains(&status) {
             Err(format!("a journal entry needs a key and a status, got key `{key}` status `{status}`"))
-        } else if key == RESULT_KEY {
-            Err(format!("a program may not journal the reserved key {RESULT_KEY}"))
+        } else if key == RESULT_KEY || key == "$finalizers" {
+            Err(format!("a program may not journal the reserved key {key}"))
         } else {
             self.write_journal(step, attempt, program, key, status, message, None).map(|_| ()).map_err(|error| error.to_string())
         };
@@ -1257,6 +1364,14 @@ impl ProgramEngine {
         std::thread::sleep(HOST_RESTART_DELAY);
         for dispatch in resume {
             let (step, attempt) = (dispatch.step.clone(), dispatch.attempt);
+            if let Ok(Some(run)) = self.store.mission_run(&dispatch.run)
+                && (run.phase.starts_with("cleanup-") || run.phase == "final-cancelled")
+            {
+                if let Err(error) = self.finish_finalizers(&step, attempt, &dispatch.program.bundle_hash, self.finalizer_grace(&dispatch.program), FinalizerOutcome::InterruptedByRestart) {
+                    eprintln!("fractal: cannot record interrupted finalizers for {step}: {error:#}");
+                }
+                continue;
+            }
             if !matches!(self.left(&step, attempt), Ok(None)) {
                 continue;
             }

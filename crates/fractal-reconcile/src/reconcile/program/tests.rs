@@ -86,7 +86,7 @@ fn a_revision_runs_the_stored_blob_it_pins() {
     let engine = engine(dir.path());
     let hash = engine.store.put_blob(b"export default 1").unwrap();
     // The author's path is provenance only: the member runs the store's bytes.
-    let program = ProgramSpec { bundle: "/nowhere/land.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None };
+    let program = ProgramSpec { bundle: "/nowhere/land.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None, finalizer_grace_ms: None };
     let pinned = engine.pinned_module(&program).unwrap();
     assert_eq!(std::fs::read(&pinned).unwrap(), b"export default 1");
     // A damaged pinned copy is replaced from the blob, never run.
@@ -130,7 +130,7 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         step: step.into(),
         attempt: 2,
         run: "mission-run/run".into(),
-        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
+        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None, finalizer_grace_ms: None },
         payload: BTreeMap::new(),
         env: BTreeMap::new(),
         cwd: "/".into(),
@@ -172,7 +172,7 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         step: step.subject.clone(),
         attempt,
         run: step.run.clone(),
-        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None },
+        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None, finalizer_grace_ms: None },
         payload: BTreeMap::new(),
         env: BTreeMap::new(),
         cwd: "/".into(),
@@ -295,10 +295,10 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
     engine.lock().running.insert(step.clone(), Running {
         dispatch: Dispatch {
             step: step.clone(), attempt, run: run.subject.clone(),
-            program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
+            program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None, finalizer_grace_ms: None },
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
-        generation, requests: BTreeMap::new(),
+        generation, finalizing: false, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]),
     });
 }

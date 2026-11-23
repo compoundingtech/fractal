@@ -42,6 +42,7 @@ const main = () => {
   const groupsDir = process.env.FRACTAL_PROGRAM_GROUPS
   const bootId = process.env.FRACTAL_PROGRAM_BOOT_ID
   const deadline = Number(process.env.FRACTAL_PROGRAM_WORKER_DEADLINE_MS)
+  const finalizerGrace = Number(process.env.FRACTAL_PROGRAM_FINALIZER_GRACE_MS)
   const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`)
   /** By step-run subject: the attempt this host runs. */
   const runs = new Map()
@@ -67,6 +68,7 @@ const main = () => {
   const end = (run) => {
     if (run.termination !== undefined) return run.termination
     run.ended = true
+    clearTimeout(run.finalizerTimer)
     clearInterval(run.ping)
     const key = attemptKey(run.step, run.attempt)
     ending.set(key, run)
@@ -81,6 +83,21 @@ const main = () => {
     for (const pid of run.groups) killGroup(pid)
     run.groups.clear()
     return run.termination
+  }
+
+  // Interrupt the Effect root, not the worker. Keep its journal and spawn channels
+  // open until finalizers finish; only the explicit grace deadline permits termination.
+  const interrupt = (run) => {
+    if (run.ended || run.interrupted) return
+    run.interrupted = true
+    clearInterval(run.ping)
+    for (const pid of run.groups) killGroup(pid)
+    run.groups.clear()
+    run.finalizerTimer = setTimeout(() => {
+      send({ t: 'finalizers', step: run.step, attempt: run.attempt, outcome: 'timed-out' })
+      end(run)
+    }, run.finalizerGrace)
+    run.worker.postMessage({ t: 'cancel' })
   }
 
   const spawnEffect = (run, { id, argv: requested, options = {} }) => {
@@ -140,6 +157,7 @@ const main = () => {
       env: message.env,
       resourceMembership: message.resourceMembership,
       worker,
+      finalizerGrace: message.finalizerGraceMs ?? finalizerGrace,
       groups: new Set(),
       ended: false,
       answered: Date.now(),
@@ -156,6 +174,10 @@ const main = () => {
         case 'spawn':
           return spawnEffect(run, message)
         case 'done':
+          if (run.interrupted) {
+            send({ t: 'finalizers', ...ids, outcome: 'completed' })
+            return end(run)
+          }
           end(run)
           return send({ t: 'done', ...ids, exit: message.exit })
         case 'journal':
@@ -172,11 +194,19 @@ const main = () => {
     })
     worker.on('error', (error) => {
       if (run.ended) return
+      if (run.interrupted) {
+        send({ t: 'finalizers', ...ids, outcome: 'worker-failed' })
+        return end(run)
+      }
       end(run)
       send({ t: 'done', ...ids, exit: defect(error) })
     })
     worker.on('exit', () => {
       if (run.ended) return
+      if (run.interrupted) {
+        send({ t: 'finalizers', ...ids, outcome: 'worker-failed' })
+        return end(run)
+      }
       end(run)
       send({ t: 'done', ...ids, exit: defect('the program worker exited without a result') })
     })
@@ -200,7 +230,7 @@ const main = () => {
     if (message.t === 'cancel') {
       const attempt = ending.get(attemptKey(message.step, message.attempt))
         ?? (run?.attempt === message.attempt ? run : undefined)
-      if (attempt !== undefined) return end(attempt)
+      if (attempt !== undefined) return interrupt(attempt)
       return send({ t: 'cancelled', step: message.step, attempt: message.attempt })
     }
     if (run === undefined || run.attempt !== message.attempt || run.ended) return // another or ended attempt
@@ -223,6 +253,7 @@ const worker = async () => {
   const controller = new AbortController()
   parentPort.on('message', (message) => {
     if (message.t === 'ping') return parentPort.postMessage({ t: 'pong' })
+    if (message.t === 'cancel') return controller.abort()
     if (message.t === 'spawned') {
       const pending = spawns.get(message.id)
       spawns.delete(message.id)
