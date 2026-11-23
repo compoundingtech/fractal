@@ -64,7 +64,7 @@ struct FamilyCache {
 
 impl Store {
     pub(super) fn cached_operational_fault_families(&self, as_of: u128, desired_generation: u64) -> Result<Vec<AttentionItemView>> {
-        use crate::incremental::{ChangeSource, change_keys};
+        use crate::incremental::change_keys;
         debug_assert!(self.readers.has_pinned_reader());
         let kept = self.extension::<OperationalFamilyCache>();
         let mut cache = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
