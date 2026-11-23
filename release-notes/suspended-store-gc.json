@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "commits": ["4075bbd2d59ea96358cf640c633010ee43c4ef56"],
   "summary": "Release host-local suspension snapshots after durable native-session resume verification, and sweep unreferenced snapshot entries before reconciliation starts after a restart. Preserve manual holds, in-flight operations and failed resumes.",
   "replay": {"status": "none", "detail": "Uses existing suspension projections and operation receipts."},
   "schema": {"status": "none", "detail": "No persistent schema changes."},
