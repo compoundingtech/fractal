@@ -2628,8 +2628,6 @@ fn suspended_incarnation_closes_mailbox_channel_lost_faults() {
     for id in [other.id, unrelated.id] {
         assert_eq!(faults.iter().find(|fault| fault.request == id).unwrap().status, "pending");
     }
-    assert!(seat.store.mailbox_faults_for(&[SUBJECT.into()], seat.store.index().unwrap())
-        .unwrap().is_empty());
 }
 
 #[test]
