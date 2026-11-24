@@ -40,6 +40,7 @@ fn unrelated_fleet_writes_do_not_evaluate_physical_executor() {
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
         reconciler.reconcile_once().unwrap();
+        reconciler.evaluate_mission_runs().unwrap();
     }
     assert_eq!(evaluations.load(Ordering::Relaxed), 1,
         "counts real backend snapshots, not calls to the retained observation adapter");

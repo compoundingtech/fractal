@@ -137,6 +137,12 @@ fn sample_ptys<R: RuntimeControl>(runtime: &R) -> Result<Arc<PtyRegistrySnapshot
 
 
 impl<R: RuntimeControl> Reconciler<R> {
+    pub(super) fn observe_host_execs(&self) {
+        let safety = !self.skip_unneeded
+            || self.incremental.take_full_pass("host-process-observations", now_ms());
+        self.host_observations.observe_execs(self.runtime.as_ref(), &self.incremental, safety);
+    }
+
     pub(super) fn host_pty_snapshot(&self) -> Result<Arc<PtyRegistrySnapshot>> {
         let safety = !self.skip_unneeded
             || self.incremental.take_full_pass("host-observations", now_ms());
