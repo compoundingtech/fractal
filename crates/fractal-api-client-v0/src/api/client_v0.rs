@@ -25218,6 +25218,85 @@ mission "example/zero-run" state="ready" {
         }
     }
 
+    #[tokio::test]
+    async fn managed_native_stop_releases_local_routing_before_migration_to_a_remote_owner() {
+        use crate::store::local_sessions::{LocalSession, SessionCustody};
+        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        let Ok(binary) = fractal_runtime::resolve_executable("pty", &environment) else {
+            assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "hosted managed-stop fixtures require pty");
+            return;
+        };
+        let owner_root = tempfile::tempdir().unwrap();
+        let follower_root = tempfile::tempdir().unwrap();
+        let owner = test_state_named(owner_root.path(), "owner-node");
+        let mut follower = test_state_named(follower_root.path(), "follower-node");
+        follower.pty_binary = binary.clone();
+        let pty = fractal_runtime::PtyRuntime::new(follower.pty_root.clone()).with_binary(binary.to_string_lossy());
+        let runtime_id = "managed-migration";
+        pty.spawn(runtime_id, &fractal_runtime::Launch::Shell("sleep 600 & wait".into()),
+            follower_root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
+        struct Cleanup(fractal_runtime::PtyRuntime);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.stop("managed-migration"); } }
+        let _cleanup = Cleanup(pty.clone());
+        let native = pty.snapshot().unwrap().into_iter().find(|item| item.name == runtime_id).unwrap();
+        let incarnation = format!("{}:{}", native.pid.unwrap(), native.created_at.unwrap());
+        let subject = "agent/fleet-terminal";
+        follower.store.bind_local_session(&LocalSession {
+            subject: subject.into(), runtime_id: runtime_id.into(), incarnation: incarnation.clone(),
+            native_incarnation: incarnation.clone(), terminal: true, driver: None,
+            lifecycle: crate::model::MemberLifecycle::Service, custody: SessionCustody::Owned,
+            start_operation: None, invocation: None,
+        }).unwrap();
+        follower.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({"runtime_id":runtime_id,
+                "incarnation_id":incarnation, "status":"running", "terminal":true,
+                "host":"follower-node"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("local-before-stop".into()),
+        }).unwrap();
+        let stop = crate::graph::parse_internal_intent(
+            "version 2\nstop \"agent/fleet-terminal\"\n", "follower-node").unwrap();
+        follower.store.apply_internal(&stop, "managed-migration-stop").unwrap();
+        let runtime = Arc::new(crate::reconcile::NativeRuntime::new(
+            &follower.state_dir, Some(&follower.pty_root), &binary));
+        let reconciler = crate::reconcile::Reconciler::new(follower.store.clone(), runtime,
+            "follower-node".into(), follower.notify.clone());
+        // Exercise the actual desired-stop planner, native stop and receipt writer.
+        // No test calls the custody-settlement helper.
+        reconciler.reconcile_once().unwrap();
+        assert!(!follower.store.has_current_local_session(subject).unwrap());
+        assert!(follower.store.local_session_at(subject, &incarnation).unwrap().is_some());
+        assert!(follower.store.observations_for(subject, "runtime.action.succeeded").unwrap().iter()
+            .any(|claim| claim.body["fields"]["action"] == "terminate"
+                && claim.body["fields"]["incarnation_id"] == incarnation));
+        let secret = follower_root.path().join("fleet-secret");
+        std::fs::write(&secret, [7_u8; 32]).unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        follower.client_relay = crate::peer::ClientRelay::from_config(&crate::config::Config {
+            node: "follower-node".into(), fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            peers: vec![crate::config::PeerConfig {
+                name: "owner-node".into(), url: "http://127.0.0.1:9".into(),
+            }], ..Default::default()
+        }).unwrap();
+        let moved = crate::graph::parse_internal_intent(
+            "version 2\nagent \"fleet-terminal\" { host \"owner-node\"; command \"sleep 600\" }\n",
+            "owner-node").unwrap();
+        owner.store.apply_internal(&moved, "moved-to-owner").unwrap();
+        owner.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({"runtime_id":"remote-runtime",
+                "incarnation_id":"remote-current", "status":"running", "terminal":true,
+                "host":"owner-node"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("remote-after-managed-stop".into()),
+        }).unwrap();
+        follower.store.import_replication("owner-node", &owner.store.export_replication(0).unwrap()).unwrap();
+        let live = remote_terminal_live_session(&follower, subject, "remote-current")
+            .unwrap_or_else(|error| panic!("{}: {}", error.code, error.message));
+        assert_eq!(live.owner_host_id, "host/owner-node");
+        assert_eq!(live.runtime_id, "remote-runtime");
+    }
+
     #[test]
     fn terminal_capabilities_and_pty_reads_are_bound_to_the_selected_owner_host() {
         let owner_root = tempfile::tempdir().unwrap();
