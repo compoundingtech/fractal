@@ -59,8 +59,9 @@ pub fn assemble(
     if captured.store_index != snapshot.store_index || captured.state.changed_index > captured.store_index
         || captured.items.len() > limit + 1 || captured.items.len() as u64 > captured.state.live_count
     { return Err(error(INCONSISTENT)); }
-    let has_more = captured.items.len() > limit;
-    captured.items.truncate(limit);
+    let end = super::arrangements::window_end(&captured.items, 0, captured.items.len().min(limit))?;
+    let has_more = captured.items.len() > end;
+    captured.items.truncate(end);
     let next_cursor = if has_more {
         let row = captured.items.last().ok_or_else(|| error(INCONSISTENT))?;
         let after = After {
