@@ -5812,13 +5812,15 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     ));
     let server = tokio::spawn(axum::serve(listener, app).into_future());
     let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
-    let (answer, _, authenticated_member_key) = post_signed(
+    // Resume the identical raw request admitted above, rather than starting a
+    // new challenge-bound exchange with post_signed.
+    let (answer, _, authenticated_member_key) = post_signed_to(
         &replication_http_client(),
-        &Local(left.clone()),
         &peer,
         "birch",
         &auth,
         &fleet,
+        EXCHANGE_PATH,
         &query,
         false,
     )
