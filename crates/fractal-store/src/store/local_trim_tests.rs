@@ -29,6 +29,14 @@ fn context(scratch: &Path, days_later: u128) -> CheckpointContext {
     }
 }
 
+/// Preserve the chronology that wall-clock writes used to provide, including after a day jump.
+fn advance_clock(store: &Store) {
+    let now = smallclaims::store::checkpoint_agreement::write_time(
+        &store.connection.write(), store.origin(),
+    ).unwrap();
+    store.set_write_clock_at(now + 1).unwrap();
+}
+
 /// Release judges envelope age on a reader as well as writing through the store clock.
 fn release_envelopes_at(store: &Store, now: u128) {
     struct ResetClock;
@@ -136,6 +144,7 @@ fn resource_fields(shape: u8, observer: &str) -> serde_json::Map<String, Value> 
 }
 
 fn apply(store: &Store, write: &Write, n: usize) {
+    advance_clock(store);
     if let Write::Poll { observer, status, resource, shape } = write {
         let observer = format!("observer/watch-{observer}");
         let status = ["ok", "changed", "failed"][usize::from(*status)];
@@ -2432,6 +2441,7 @@ fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
     let mut n = 0;
     let mut append = |kind: &str, fields: Value| -> String {
         n += 1;
+        advance_clock(&store);
         store
             .append_claim(&ClaimInput {
                 subject: seat.into(),
