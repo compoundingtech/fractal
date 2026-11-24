@@ -4064,14 +4064,16 @@ mission "counted" state="ready" {
 
     #[tokio::test]
     async fn the_mission_follower_pins_its_cursor_before_dispatching_launch_work() {
-        let (_, reconciler, _) =
-            run_paused_on_its_allocation(Arc::new(Store::open_memory("node").unwrap()));
+        let store = smallclaims::sqlite::with_write_limit_for_test(1, ||
+            Arc::new(Store::open_memory("node").unwrap()));
+        let (store, reconciler, _) = run_paused_on_its_allocation(store);
         let starting_at = reconciler.incremental.watermark();
         assert!(starting_at.is_some());
         assert!(reconciler.mission_reads_cursor.lock().unwrap().is_none());
+        let _held = store.connection.admit_write().await;
         let mut follower = Box::pin(reconciler.clone().follow_mission_reads());
-        // The first blocking dispatch yields. The mission cursor must already be
-        // independent before launch work can observe and advance the pass feed.
+        // Holding the only admission permit makes the first dispatch yield
+        // deterministically, before launch work can advance the pass feed.
         assert!(futures_util::poll!(&mut follower).is_pending());
         assert_eq!(*reconciler.mission_reads_cursor.lock().unwrap(), starting_at);
     }
