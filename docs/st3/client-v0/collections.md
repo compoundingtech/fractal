@@ -16,6 +16,15 @@ pings with the same payload. These frames do not read collection windows. A send
 that cannot complete within eight seconds closes the socket; reconnect and apply
 the new authoritative snapshot.
 
+Each physical collection-window snapshot has a fresh cooperative read budget of
+1.5 seconds, matching the existing collection reread cadence rather than the
+ordinary HTTP read's 15 seconds. A shorter inherited deadline or cancellation
+still wins. The budget is installed before borrowing the admitted SQLite reader,
+so SQL progress handlers and Rust folds observe it; expiry returns the existing
+`read-deadline` error rather than a partial snapshot. Queueing without a physical
+reader does not retain a snapshot. As with other cooperative reads, an individual
+uninterruptible filesystem call or JSON parse is not preempted.
+
 Send one JSON command per subscription:
 
 ```json
