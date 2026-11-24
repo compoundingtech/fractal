@@ -52,7 +52,7 @@ pub async fn logs_session(
         live_session(&state, &subject, None)
     })?;
     let subject = if subject.starts_with("agent/")
-        && !state.store.local_session_known(&subject).map_err(ApiError::internal)? {
+        && !state.store.has_current_local_session(&subject).map_err(ApiError::internal)? {
         public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.canonical_id
     } else {
         subject
@@ -159,7 +159,7 @@ pub async fn screen_session(
         .and_then(|runtime| runtime.screen(&session.runtime_id))
         .map_err(ApiError::internal)?;
     let subject = if subject.starts_with("agent/")
-        && !state.store.local_session_known(&subject).map_err(ApiError::internal)? {
+        && !state.store.has_current_local_session(&subject).map_err(ApiError::internal)? {
         public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.canonical_id
     } else {
         subject
@@ -274,7 +274,7 @@ pub async fn attach_session(
     Json(_request): Json<AttachRequest>,
 ) -> Result<Json<Attachment>, ApiError> {
     let subject = session_storage_subject(&state, &subject)?;
-    if !state.store.local_session_known(&subject).map_err(ApiError::internal)? {
+    if !state.store.has_current_local_session(&subject).map_err(ApiError::internal)? {
         let (store, seat) = (state.store.clone(), subject.clone());
         blocking_store(move || store.record_idle_unrouted(&seat,
             crate::store::idle_residency::UnroutedKind::Attach)).await?;
@@ -322,7 +322,7 @@ pub async fn local_terminal(
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<LocalTerminal>, ApiError> {
     let subject = session_storage_subject(&state, &subject)?;
-    if !state.store.local_session_known(&subject).map_err(ApiError::internal)? {
+    if !state.store.has_current_local_session(&subject).map_err(ApiError::internal)? {
         let (store, seat) = (state.store.clone(), subject.clone());
         blocking_store(move || store.record_idle_unrouted(&seat,
             crate::store::idle_residency::UnroutedKind::Attach)).await?;
@@ -467,5 +467,58 @@ mod wire_tests {
                 .map(|value| value.to_str().unwrap()), expected);
         }
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod custody_tests {
+    use super::*;
+    use crate::store::local_sessions::{LocalSession, SessionCustody};
+
+    #[test]
+    fn signal_uses_the_resolved_binding_custody_after_owned_to_borrowed_transition() {
+        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        let Ok(binary) = fractal_runtime::resolve_executable("pty", &environment) else {
+            assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "hosted custody fixtures require pty");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.pty_binary = binary;
+        let pty = daemon_pty(&state).unwrap();
+        pty.spawn("custody-transition", &fractal_runtime::Launch::Shell("sleep 600 & wait".into()),
+            root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
+        struct Cleanup(fractal_runtime::PtyRuntime);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.stop("custody-transition"); } }
+        let _cleanup = Cleanup(pty.clone());
+        let native = pty.snapshot().unwrap().into_iter().find(|item| item.name == "custody-transition").unwrap();
+        let native_incarnation = format!("{}:{}", native.pid.unwrap(), native.created_at.unwrap());
+        let subject = "agent/example/custody-transition";
+        let mut binding = LocalSession {
+            subject: subject.into(), runtime_id: "custody-transition".into(),
+            incarnation: native_incarnation.clone(), native_incarnation: native_incarnation.clone(),
+            terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
+            custody: SessionCustody::Owned, start_operation: None, invocation: None,
+        };
+        state.store.bind_local_session(&binding).unwrap();
+        // Deterministically place the adoption between the old preliminary custody read
+        // and live-session resolution. Only the resolved binding may authorize the effect.
+        let preliminary = state.store.local_session(subject).unwrap().unwrap();
+        assert_eq!(preliminary.custody, SessionCustody::Owned);
+        binding.incarnation = format!("{native_incarnation}:bound:019a0000-0000-7000-8000-000000000001");
+        binding.invocation = Some(binding.incarnation.clone());
+        binding.lifecycle = crate::model::MemberLifecycle::TerminalBound;
+        binding.custody = SessionCustody::Borrowed;
+        state.store.bind_local_session(&binding).unwrap();
+        let resolved = live_session(&state, subject, Some(&binding.incarnation)).unwrap();
+        assert_eq!(resolved.custody, SessionCustody::Borrowed);
+        assert_eq!(resolved.native_incarnation_id, native_incarnation);
+        assert!(apply_session_signal(&state, subject, &resolved, libc::SIGINT, "reject-interrupt").is_err());
+        assert!(state.store.pending_local_session_detaches().unwrap().is_empty());
+        apply_session_signal(&state, subject, &resolved, libc::SIGTERM, "detach-transition").unwrap();
+        assert!(state.store.local_session_detached(subject, &binding.incarnation).unwrap());
+        let shell = pty.snapshot().unwrap().into_iter().find(|item| item.name == "custody-transition").unwrap();
+        assert_eq!(shell.status, "running");
+        assert_eq!(format!("{}:{}", shell.pid.unwrap(), shell.created_at.unwrap()), native_incarnation);
     }
 }

@@ -13460,13 +13460,14 @@ pub struct LiveSession {
     pub runtime_id: String,
     pub incarnation_id: String,
     pub native_incarnation_id: String,
+    pub custody: crate::store::local_sessions::SessionCustody,
     pub owner_host_id: String,
     pub terminal: bool,
     pub driver: Option<String>,
 }
 
 pub fn session_storage_subject(state: &AppState, subject: &str) -> Result<String, ApiError> {
-    if state.store.local_session_known(subject).map_err(ApiError::internal)? {
+    if state.store.has_current_local_session(subject).map_err(ApiError::internal)? {
         return Ok(subject.into());
     }
     crate::store::identities::resolve_reference_conn(&state.store.readers.get(), subject)
@@ -13480,7 +13481,7 @@ pub fn live_session(
 ) -> Result<LiveSession, ApiError> {
     let identity = session_storage_subject(state, subject)?;
     let subject = identity.as_str();
-    if state.store.local_session_known(subject).map_err(ApiError::internal)? {
+    if state.store.has_current_local_session(subject).map_err(ApiError::internal)? {
         let runtime = crate::reconcile::NativeRuntime::new(
             &state.state_dir, Some(&state.pty_root), &state.pty_binary);
         let binding = crate::reconcile::local_session(&state.store, &runtime, subject, expected_incarnation)
@@ -13492,6 +13493,7 @@ pub fn live_session(
         return Ok(LiveSession {
             runtime_id: binding.runtime_id, incarnation_id: binding.incarnation,
             native_incarnation_id: binding.native_incarnation,
+            custody: binding.custody,
             owner_host_id: client_host_id(state.store.origin()), terminal: binding.terminal, driver: binding.driver,
         });
     }
@@ -13552,10 +13554,14 @@ pub fn live_session(
         .map(|member| member.terminal)
         .or_else(|| fields.get("terminal").and_then(Value::as_bool))
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no runtime kind")))?;
+    let custody = if member.as_ref().is_some_and(|member| member.lifecycle == crate::model::MemberLifecycle::TerminalBound) {
+        return Err(ApiError::not_found("bound invocation has no current local custody"));
+    } else { crate::store::local_sessions::SessionCustody::Owned };
     Ok(LiveSession {
         runtime_id: runtime_id.into(),
         incarnation_id: incarnation_id.into(),
         native_incarnation_id: incarnation_id.into(),
+        custody,
         owner_host_id: client_host_id(origin),
         terminal,
         driver: member.and_then(|member| member.driver),
@@ -13691,12 +13697,6 @@ pub async fn signal_session_as(
     actor: &str,
 ) -> Result<Json<SessionControlResponse>, ApiError> {
     let subject = session_storage_subject(&state, &subject)?;
-    let borrowed = state.store.local_session(&subject).map_err(ApiError::internal)?
-        .is_some_and(|binding| binding.custody == crate::store::local_sessions::SessionCustody::Borrowed);
-    if borrowed && request.signal != "terminate" {
-        return Err(ApiError::bad(FractalError::new("unsupported-capability",
-            "a borrowed invocation may be detached, never signalled")));
-    }
     let signal = match request.signal.as_str() {
         "interrupt" => libc::SIGINT,
         "terminate" => libc::SIGTERM,
@@ -13722,6 +13722,10 @@ pub async fn signal_session_as(
         return Ok(Json(session_control_response(&subject, &result)));
     }
     let session = live_session(&state, &subject, Some(&request.expected_incarnation))?;
+    if session.custody == crate::store::local_sessions::SessionCustody::Borrowed && request.signal != "terminate" {
+        return Err(ApiError::bad(FractalError::new("unsupported-capability",
+            "a borrowed invocation may be detached, never signalled")));
+    }
     let request_key = format!(
         "session-control-request:signal:{subject}:{}",
         request.idempotency_key
@@ -13771,16 +13775,9 @@ pub async fn signal_session_as(
     let effect_session = session.clone();
     let detach_subject = subject.clone();
     let detach_operation = result_key.clone();
-    let effect = blocking_external(move || if borrowed {
-        effect_state.store.detach_local_session(&detach_subject, &effect_session.incarnation_id, &detach_operation)
-    } else if effect_session.terminal {
-        daemon_pty(&effect_state).and_then(|runtime| {
-            runtime.signal_if(&effect_session.runtime_id, Some(&effect_session.native_incarnation_id), signal)
-        })
-    } else {
-        fractal_runtime::ExecRuntime::new(effect_state.state_dir.join("exec"), effect_state.state_dir.join("logs"))
-            .signal_if(&effect_session.runtime_id, Some(&effect_session.native_incarnation_id), signal)
-    }).await?;
+    let effect = blocking_external(move ||
+        apply_session_signal(&effect_state, &detach_subject, &effect_session, signal, &detach_operation)
+    ).await?;
     finish_session_control(
         &state,
         &subject,
@@ -13790,6 +13787,21 @@ pub async fn signal_session_as(
         &session,
         effect,
     )
+}
+
+/// Native identity and custody travel together from one resolved durable binding.
+fn apply_session_signal(
+    state: &AppState, subject: &str, session: &LiveSession, signal: i32, operation: &str,
+) -> anyhow::Result<()> {
+    if session.custody == crate::store::local_sessions::SessionCustody::Borrowed {
+        anyhow::ensure!(signal == libc::SIGTERM, "a borrowed invocation may be detached, never signalled");
+        state.store.detach_local_session(subject, &session.incarnation_id, operation)
+    } else if session.terminal {
+        daemon_pty(state)?.signal_if(&session.runtime_id, Some(&session.native_incarnation_id), signal)
+    } else {
+        fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"))
+            .signal_if(&session.runtime_id, Some(&session.native_incarnation_id), signal)
+    }
 }
 
 fn finish_session_control(
