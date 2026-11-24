@@ -1218,6 +1218,80 @@ reclamation work therefore remains necessary; this review neither removes the
 exception nor grants a wider exemption. No statement, column catalog or other
 flow record changes are accepted by this refresh.
 
+### Light-node observe/stop session custody (#7107)
+
+Inventory review: [authenticated session custody](https://github.com/compoundingtech/fractal/pull/7107).
+The owning maintainers are the producer modules listed below. These 58
+transitional site registrations cover Phase 2 peer/session custody and its
+native/binary fixtures only, not the separate local-authority/ProgramEngine
+inventory. The proposal helper supplied fingerprints and declaration metadata;
+acceptance preserves the inventory's existing `reviewed_base` and manual flows.
+All ten added declaration records retain `value_size_proven: false`.
+
+`fractal_peer::light_node::journal` owns schema `lv-hdeb9b3a5a824` and the
+following statement/sink identities:
+
+- `lv-h102052ca35fc`, `lv-h113edb40022a`, `lv-h191641c4d241`, `lv-h23bfa73b5860`,
+  `lv-h286b9d1c1c8b`, `lv-h3d6e4209c6eb`, `lv-h4a870d7bef9c`, `lv-h555cdce14fe8`,
+  `lv-h577b713b5a24`, `lv-h58e17ebf7853`, `lv-h682a40a9a666`, `lv-h72a762bf7354`,
+  `lv-h7726667ff8cd`, `lv-h77b56b17f8fc`, `lv-h7bc5ac937863`, `lv-h7f51b642f523`,
+  `lv-h806adaaf48a4`, `lv-h8764bd131643`, `lv-h8bd3c4b8c8b9`, `lv-h8eee3a85f96b`,
+  `lv-h920263c26897`, `lv-h92381651afd4`, `lv-h938942f23651`, `lv-h93c3cc2b150d`,
+  `lv-h9799d5cfd34a`, `lv-h9bef278ec2f7`, `lv-hbc80366c1c2b`, `lv-hbc8ed50798f2`,
+  `lv-hc5522da5d7ea`, `lv-hc5db8e607bbb`, `lv-hc882d2a1ceca`, `lv-hcdd54fc3ac96`,
+  `lv-hd2a6d3bd9e80`, `lv-hdd339b4e6193`, `lv-he362e06c6cb9`, `lv-he796ea71134f`,
+  `lv-hea174ad4467c`, `lv-hea697bc2d549`, `lv-hebcba1c5d265`.
+
+The journal retains selection/grant and endpoint strings, command/receipt JSON,
+native retirement proofs, cancellation reasons, forwarded request/result JSON,
+execution bindings and immutable identity/digest keys inline. These values and
+their variable primary/unique keys preserve admission, duplicate detection,
+terminal-result custody and joint retirement floors across crashes. Keeping them
+in the authoritative SQLite transaction currently provides the atomic boundary;
+it does not qualify their physical representation. Payload and row admission
+limits are producer-specific logical limits, not a proof of encoded index-key,
+statement-duration or reclamation cost.
+
+The schema's `chunk-or-reference-variable-columns` work must choose physical
+units/references for the complete column and key catalog. The statement sites'
+`bound-or-reference-values-and-reclamation` work must stage those exact bytes and
+certified cleanup keys without acknowledging a receipt, releasing a native
+finalization obligation or forgetting an immutable identity too early.
+`lv-h938942f23651` traces the schema variable; `lv-h191641c4d241` and
+`lv-h8eee3a85f96b` trace dynamic floor reads whose column selector is restricted
+to the home/seat floor. Their unresolved-sink registration is conservative and
+does not constitute size approval.
+
+`fractal_peer::light_node::session` owns `lv-h2784ce849550`, and
+`fractal_peer::light_node::session_tests` owns `lv-h40707d5ec849`. These are
+lexically ambiguous `RunEffects::execute` calls, not direct SQLite statements.
+Their `trace-statement-and-value-representation` obligation follows the signed
+request and exact result through the real graph claim writer, preserving pinned
+authority, immutable request identity and retained-result replay. Registering
+the delegation here does not accept another producer's storage representation.
+
+`fractal_peer::light_node::journal_tests` owns `lv-h694feccb0766`,
+`lv-h8c2f07f2635e`, `lv-ha8f636967dd7`, `lv-hb1e17066eaea`,
+`lv-hb88d5c28fd9b`, `lv-hb9686663e41e`, `lv-hbe5466693d21`,
+`lv-hcd66212e35cf`, `lv-he07cde45bf1f` and `lv-hf320d659814b`.
+These fixtures create a future-schema table and exercise committed entry
+fences, receipt ACKs and failing finalization-marker/release transactions.
+`fractal_reconcile::reconcile::home_session_tests` owns `lv-h40e04f0e7f4e`,
+`lv-h49ca84a271f1`, `lv-h9089b8a75c90`, `lv-hd36c1be68e80` and
+`lv-he41d028a3d0c`: renamed graph tables fence accidental graph access, while
+SQLite triggers expose failure between real native closure and Store custody
+finalization. The owning maintainers must retain those exact failure boundaries
+when updating schema/value representation and cleanup; short fixture literals
+are not a permanent test exemption or a physical size proof.
+
+`fractal::light_node_tests` owns unresolved sink `lv-h76fffc4c4dab`.
+Its parameterized `VACUUM INTO` copies the fixture's complete graph into the
+home database, retaining physical/historical claim and index values rather than
+constructing a fake graph effect. The tracing obligation must account for the
+backup destination key and full copied representation while preserving exact
+history. This registration introduces no new size proof or general exemption
+for backup/import producers.
+
 ### Model-return admission ledger (#6803)
 
 The `fractal_store::store` schema identity is `lv-h25bdee44f9bb` after combining
