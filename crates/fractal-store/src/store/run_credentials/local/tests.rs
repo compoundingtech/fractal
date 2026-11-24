@@ -136,9 +136,9 @@ fn unexpired_credential_hashes_are_bounded_and_actual_expiry_reclaims_them() {
     let execution = binding(1, 1);
     admit(&mut local, &execution);
     local.execute(
-        "WITH RECURSIVE numbers(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM numbers WHERE value<?1)
-         INSERT INTO local_execution_credentials_v1(secret_hash, host, revision, expires_at_unix_ms)
-         SELECT printf('%064x',value), ?2, ?3, 10000 FROM numbers",
+        /* sqlite-large-value: allow-for-now lv-h1c35b12b5b69 owner=fractal_store::store::run_credentials::local::tests TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE numbers(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM numbers WHERE value<?1)
+                 INSERT INTO local_execution_credentials_v1(secret_hash, host, revision, expires_at_unix_ms)
+                 SELECT printf('%064x',value), ?2, ?3, 10000 FROM numbers",
         params![MAX_CREDENTIALS - 1, execution.host, execution.authorization_revision],
     ).unwrap();
     let tx = local.transaction().unwrap();

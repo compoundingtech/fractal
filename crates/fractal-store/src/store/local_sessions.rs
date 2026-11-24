@@ -21,13 +21,13 @@ pub struct LocalSession {
 }
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS local_session_custody (
-        subject TEXT NOT NULL, incarnation TEXT NOT NULL, body TEXT NOT NULL,
-        active INTEGER NOT NULL DEFAULT 1, custody_settled INTEGER NOT NULL DEFAULT 0,
-        detached_by TEXT, detach_receipted INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY(subject,incarnation)
-    ) WITHOUT ROWID;
-    CREATE UNIQUE INDEX IF NOT EXISTS local_session_current ON local_session_custody(subject) WHERE active=1;")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h75e60616e14f owner=fractal_store::store::local_sessions TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_session_custody (
+            subject TEXT NOT NULL, incarnation TEXT NOT NULL, body TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1, custody_settled INTEGER NOT NULL DEFAULT 0,
+            detached_by TEXT, detach_receipted INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(subject,incarnation)
+        ) WITHOUT ROWID;
+        CREATE UNIQUE INDEX IF NOT EXISTS local_session_current ON local_session_custody(subject) WHERE active=1;")?;
     Ok(())
 }
 
@@ -36,10 +36,10 @@ pub fn forget_subject(connection: &Connection, subject: &str) -> Result<()> {
     let installed: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='local_session_custody')", [], |row| row.get(0))?;
     if installed {
-        connection.execute("DELETE FROM local_session_custody WHERE subject=?1 AND custody_settled=1
-            AND (detached_by IS NULL OR detach_receipted=1)
-            AND NOT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND
-                (finished=0 OR applied=0 OR receipted=0 OR (revoked_by IS NOT NULL AND cleanup_verified=0)))",
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h0de5666a03e4 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_session_custody WHERE subject=?1 AND custody_settled=1
+                    AND (detached_by IS NULL OR detach_receipted=1)
+                    AND NOT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND
+                        (finished=0 OR applied=0 OR receipted=0 OR (revoked_by IS NOT NULL AND cleanup_verified=0)))",
             [subject])?;
     }
     Ok(())
@@ -75,12 +75,12 @@ impl Store {
             let count: u64 = tx.query_row("SELECT count(*) FROM local_session_custody", [], |row| row.get(0))?;
             anyhow::ensure!(count < 4096, "executor session custody capacity reached");
         }
-        tx.execute("UPDATE local_session_custody SET active=0 WHERE subject=?1 AND incarnation<>?2 AND active=1",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hdce8a783bfb6 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET active=0 WHERE subject=?1 AND incarnation<>?2 AND active=1",
             params![binding.subject, binding.incarnation])?;
-        tx.execute("INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)
-            ON CONFLICT(subject,incarnation) DO UPDATE SET body=excluded.body,active=1
-            WHERE local_session_custody.detached_by IS NULL
-              AND (local_session_custody.body<>excluded.body OR local_session_custody.active<>1)",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h8252aefb7494 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)
+                    ON CONFLICT(subject,incarnation) DO UPDATE SET body=excluded.body,active=1
+                    WHERE local_session_custody.detached_by IS NULL
+                      AND (local_session_custody.body<>excluded.body OR local_session_custody.active<>1)",
             params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
         tx.commit()?;
         Ok(())
@@ -117,9 +117,9 @@ impl Store {
     /// Durable logical detach only: never signal a person's shell or synthesize process exit.
     pub fn detach_local_session(&self, subject: &str, incarnation: &str, operation: &str) -> Result<()> {
         anyhow::ensure!(!operation.is_empty() && operation.len() <= 1024, "invalid detach operation");
-        let changed = self.connection.write().execute("UPDATE local_session_custody
-            SET detached_by=COALESCE(detached_by,?3),custody_settled=1 WHERE subject=?1 AND incarnation=?2
-            AND json_extract(body,'$.custody')='Borrowed'",
+        let changed = self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hbaa88b024680 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody
+                    SET detached_by=COALESCE(detached_by,?3),custody_settled=1 WHERE subject=?1 AND incarnation=?2
+                    AND json_extract(body,'$.custody')='Borrowed'",
             params![subject, incarnation, operation])?;
         anyhow::ensure!(changed == 1, "stale or non-borrowed session detach");
         Ok(())
@@ -135,15 +135,15 @@ impl Store {
     }
 
     pub fn ack_local_session_detach(&self, subject: &str, incarnation: &str, operation: &str) -> Result<()> {
-        self.connection.write().execute("UPDATE local_session_custody SET detach_receipted=1
-            WHERE subject=?1 AND incarnation=?2 AND detached_by=?3", params![subject, incarnation, operation])?;
+        self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-he5f5cd557854 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET detach_receipted=1
+                    WHERE subject=?1 AND incarnation=?2 AND detached_by=?3", params![subject, incarnation, operation])?;
         Ok(())
     }
 
     /// Call only after exact native closure and the corresponding observation receipt.
     pub fn settle_local_session_custody(&self, subject: &str, native_incarnation: &str) -> Result<()> {
-        self.connection.write().execute("UPDATE local_session_custody SET custody_settled=1
-            WHERE subject=?1 AND json_extract(body,'$.native_incarnation')=?2",
+        self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h237b1d3d6060 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET custody_settled=1
+                    WHERE subject=?1 AND json_extract(body,'$.native_incarnation')=?2",
             params![subject, native_incarnation])?;
         Ok(())
     }

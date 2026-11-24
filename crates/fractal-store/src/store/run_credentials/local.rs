@@ -20,39 +20,39 @@ pub struct AuthorityChange {
 
 pub fn initialize_local_authority(connection: &Connection) -> Result<(), FractalError> {
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS local_execution_authority_v1 (
-             host TEXT NOT NULL, revision TEXT NOT NULL, binding_json TEXT NOT NULL,
-             subject TEXT NOT NULL, runtime TEXT NOT NULL, epoch INTEGER NOT NULL,
-             revoked INTEGER NOT NULL DEFAULT 0, admission_sequence INTEGER NOT NULL DEFAULT 0,
-             PRIMARY KEY(host, revision)
-         );
-         CREATE INDEX IF NOT EXISTS local_execution_authority_subject_v1
-             ON local_execution_authority_v1(host, subject) WHERE revoked=0;
-         CREATE INDEX IF NOT EXISTS local_execution_authority_runtime_v1
-             ON local_execution_authority_v1(host, runtime) WHERE revoked=0;
-         CREATE TABLE IF NOT EXISTS local_execution_credentials_v1 (
-             secret_hash TEXT PRIMARY KEY, host TEXT NOT NULL, revision TEXT NOT NULL,
-             expires_at_unix_ms TEXT NOT NULL CHECK(
-                 expires_at_unix_ms<>'' AND expires_at_unix_ms NOT GLOB '*[^0-9]*'
-                 AND (expires_at_unix_ms='0' OR substr(expires_at_unix_ms,1,1)<>'0')),
-             FOREIGN KEY(host, revision) REFERENCES local_execution_authority_v1(host, revision)
-         );
-         CREATE TABLE IF NOT EXISTS local_authority_epochs_v1 (
-             epoch INTEGER PRIMARY KEY, last_sequence INTEGER NOT NULL DEFAULT 0,
-             ack_through INTEGER NOT NULL DEFAULT 0
-         );
-         CREATE TABLE IF NOT EXISTS local_authority_changes_v1 (
-             epoch INTEGER NOT NULL, sequence INTEGER NOT NULL, binding_json TEXT NOT NULL,
-             host TEXT NOT NULL, subject TEXT NOT NULL, runtime TEXT NOT NULL,
-             revoked INTEGER NOT NULL, PRIMARY KEY(epoch, sequence)
-         );
-         CREATE INDEX IF NOT EXISTS local_authority_changes_conflict_v1
-             ON local_authority_changes_v1(host, subject, runtime) WHERE revoked=1;
-         CREATE TABLE IF NOT EXISTS local_authority_proposals_v1 (
-             host TEXT NOT NULL, revision TEXT NOT NULL, binding_json TEXT NOT NULL,
-             subject TEXT NOT NULL, runtime TEXT NOT NULL, epoch INTEGER NOT NULL,
-             PRIMARY KEY(host, revision)
-         );"
+        /* sqlite-large-value: allow-for-now lv-hfca990733a00 owner=fractal_store::store::run_credentials::local TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_execution_authority_v1 (
+                     host TEXT NOT NULL, revision TEXT NOT NULL, binding_json TEXT NOT NULL,
+                     subject TEXT NOT NULL, runtime TEXT NOT NULL, epoch INTEGER NOT NULL,
+                     revoked INTEGER NOT NULL DEFAULT 0, admission_sequence INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY(host, revision)
+                 );
+                 CREATE INDEX IF NOT EXISTS local_execution_authority_subject_v1
+                     ON local_execution_authority_v1(host, subject) WHERE revoked=0;
+                 CREATE INDEX IF NOT EXISTS local_execution_authority_runtime_v1
+                     ON local_execution_authority_v1(host, runtime) WHERE revoked=0;
+                 CREATE TABLE IF NOT EXISTS local_execution_credentials_v1 (
+                     secret_hash TEXT PRIMARY KEY, host TEXT NOT NULL, revision TEXT NOT NULL,
+                     expires_at_unix_ms TEXT NOT NULL CHECK(
+                         expires_at_unix_ms<>'' AND expires_at_unix_ms NOT GLOB '*[^0-9]*'
+                         AND (expires_at_unix_ms='0' OR substr(expires_at_unix_ms,1,1)<>'0')),
+                     FOREIGN KEY(host, revision) REFERENCES local_execution_authority_v1(host, revision)
+                 );
+                 CREATE TABLE IF NOT EXISTS local_authority_epochs_v1 (
+                     epoch INTEGER PRIMARY KEY, last_sequence INTEGER NOT NULL DEFAULT 0,
+                     ack_through INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE IF NOT EXISTS local_authority_changes_v1 (
+                     epoch INTEGER NOT NULL, sequence INTEGER NOT NULL, binding_json TEXT NOT NULL,
+                     host TEXT NOT NULL, subject TEXT NOT NULL, runtime TEXT NOT NULL,
+                     revoked INTEGER NOT NULL, PRIMARY KEY(epoch, sequence)
+                 );
+                 CREATE INDEX IF NOT EXISTS local_authority_changes_conflict_v1
+                     ON local_authority_changes_v1(host, subject, runtime) WHERE revoked=1;
+                 CREATE TABLE IF NOT EXISTS local_authority_proposals_v1 (
+                     host TEXT NOT NULL, revision TEXT NOT NULL, binding_json TEXT NOT NULL,
+                     subject TEXT NOT NULL, runtime TEXT NOT NULL, epoch INTEGER NOT NULL,
+                     PRIMARY KEY(host, revision)
+                 );"
     ).map_err(internal)
 }
 
@@ -89,16 +89,16 @@ fn awaiting_revocation(connection: &Connection, binding: &ExecutionBinding) -> R
 fn append_change(tx: &Transaction<'_>, binding: &ExecutionBinding, revoked: bool) -> Result<u64, FractalError> {
     let pending: usize = tx.query_row("SELECT COUNT(*) FROM local_authority_changes_v1", [], |row| row.get(0)).map_err(internal)?;
     if pending >= MAX_PENDING_CHANGES { return Err(backpressure("the authority change outbox is full")); }
-    tx.execute("INSERT OR IGNORE INTO local_authority_epochs_v1(epoch) VALUES (?1)", [binding.epoch]).map_err(internal)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h846afd822e7f owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_authority_epochs_v1(epoch) VALUES (?1)", [binding.epoch]).map_err(internal)?;
     let previous: u64 = tx.query_row("SELECT last_sequence FROM local_authority_epochs_v1 WHERE epoch=?1", [binding.epoch], |row| row.get(0)).map_err(internal)?;
     let sequence = previous.checked_add(1).filter(|next| *next <= i64::MAX as u64)
         .ok_or_else(|| backpressure("the authority sequence space is exhausted"))?;
     tx.execute(
-        "INSERT INTO local_authority_changes_v1(epoch, sequence, binding_json, host, subject, runtime, revoked)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        /* sqlite-large-value: allow-for-now lv-h23bb01dbd333 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_authority_changes_v1(epoch, sequence, binding_json, host, subject, runtime, revoked)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![binding.epoch, sequence, serde_json::to_string(binding).map_err(internal)?, binding.host, binding.subject, binding.runtime, revoked],
     ).map_err(internal)?;
-    tx.execute("UPDATE local_authority_epochs_v1 SET last_sequence=?2 WHERE epoch=?1", params![binding.epoch, sequence]).map_err(internal)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h7be9a2b9416c owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_authority_epochs_v1 SET last_sequence=?2 WHERE epoch=?1", params![binding.epoch, sequence]).map_err(internal)?;
     Ok(sequence)
 }
 
@@ -135,14 +135,14 @@ pub fn admit_execution_tx(tx: &Transaction<'_>, binding: &ExecutionBinding) -> R
         return Err(backpressure("the retained authority fence journal is full"));
     }
     tx.execute(
-        "INSERT INTO local_execution_authority_v1(host, revision, binding_json, subject, runtime, epoch)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        /* sqlite-large-value: allow-for-now lv-h7ef13aff7482 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_execution_authority_v1(host, revision, binding_json, subject, runtime, epoch)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![binding.host, binding.authorization_revision, encoded, binding.subject, binding.runtime, binding.epoch],
     ).map_err(internal)?;
-    tx.execute("DELETE FROM local_authority_proposals_v1 WHERE host=?1 AND revision=?2", params![binding.host, binding.authorization_revision]).map_err(internal)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hd29ab23563f2 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_authority_proposals_v1 WHERE host=?1 AND revision=?2", params![binding.host, binding.authorization_revision]).map_err(internal)?;
     let sequence = append_change(tx, binding, false)?;
     tx.execute(
-        "UPDATE local_execution_authority_v1 SET admission_sequence=?3 WHERE host=?1 AND revision=?2",
+        /* sqlite-large-value: allow-for-now lv-h6c25c994f66a owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_execution_authority_v1 SET admission_sequence=?3 WHERE host=?1 AND revision=?2",
         params![binding.host, binding.authorization_revision, sequence],
     ).map_err(internal)?;
     Ok(())
@@ -194,7 +194,7 @@ pub fn offer_execution_tx(tx: &Transaction<'_>, binding: &ExecutionBinding) -> R
     }
     if proposal.is_none() {
         tx.execute(
-            "INSERT INTO local_authority_proposals_v1(host, revision, binding_json, subject, runtime, epoch) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            /* sqlite-large-value: allow-for-now lv-h84750ef1c986 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_authority_proposals_v1(host, revision, binding_json, subject, runtime, epoch) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![binding.host, binding.authorization_revision, encoded, binding.subject, binding.runtime, binding.epoch],
         ).map_err(internal)?;
     }
@@ -205,10 +205,10 @@ pub fn offer_execution_tx(tx: &Transaction<'_>, binding: &ExecutionBinding) -> R
 
 fn tombstone_proposal(tx: &Transaction<'_>, binding: &ExecutionBinding) -> Result<(), FractalError> {
     tx.execute(
-        "INSERT INTO local_execution_authority_v1(host, revision, binding_json, subject, runtime, epoch, revoked) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+        /* sqlite-large-value: allow-for-now lv-hb63a6f1d5a4d owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_execution_authority_v1(host, revision, binding_json, subject, runtime, epoch, revoked) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
         params![binding.host, binding.authorization_revision, serde_json::to_string(binding).map_err(internal)?, binding.subject, binding.runtime, binding.epoch],
     ).map_err(internal)?;
-    tx.execute("DELETE FROM local_authority_proposals_v1 WHERE host=?1 AND revision=?2", params![binding.host, binding.authorization_revision]).map_err(internal)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hdaa80fa55663 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_authority_proposals_v1 WHERE host=?1 AND revision=?2", params![binding.host, binding.authorization_revision]).map_err(internal)?;
     Ok(())
 }
 
@@ -220,7 +220,7 @@ pub fn revoke_execution_tx(tx: &Transaction<'_>, host: &str, revision: &str) -> 
     if let Some(prior) = prior {
         let binding = decode(&prior)?;
         append_change(tx, &binding, true)?;
-        tx.execute("UPDATE local_execution_authority_v1 SET revoked=1 WHERE host=?1 AND revision=?2", params![host, revision]).map_err(internal)?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h3ae46b6e28a0 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_execution_authority_v1 SET revoked=1 WHERE host=?1 AND revision=?2", params![host, revision]).map_err(internal)?;
     }
     let proposal: Option<String> = tx.query_row(
         "SELECT binding_json FROM local_authority_proposals_v1 WHERE host=?1 AND revision=?2",
@@ -272,8 +272,8 @@ pub fn acknowledge_changes_tx(tx: &Transaction<'_>, epoch: u64, through: u64) ->
     if through > last { return Err(refused("the authority ACK is beyond the issued sequence")); }
     let count: u64 = tx.query_row("SELECT COUNT(*) FROM local_authority_changes_v1 WHERE epoch=?1 AND sequence<=?2", params![epoch, through], |row| row.get(0)).map_err(internal)?;
     if count != through - floor { return Err(refused("the authority ACK crosses a missing change")); }
-    tx.execute("DELETE FROM local_authority_changes_v1 WHERE epoch=?1 AND sequence<=?2", params![epoch, through]).map_err(internal)?;
-    tx.execute("UPDATE local_authority_epochs_v1 SET ack_through=?2 WHERE epoch=?1", params![epoch, through]).map_err(internal)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h541d7b3c8525 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_authority_changes_v1 WHERE epoch=?1 AND sequence<=?2", params![epoch, through]).map_err(internal)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h7e8bdf58715c owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_authority_epochs_v1 SET ack_through=?2 WHERE epoch=?1", params![epoch, through]).map_err(internal)?;
     Ok(())
 }
 
@@ -309,8 +309,8 @@ pub fn issue_local_credential_tx(tx: &Transaction<'_>, binding: &ExecutionBindin
     let now = now_ms.to_string();
     let expires = ((now_ms as u128) + (lifetime_ms as u128)).to_string();
     tx.execute(
-        "DELETE FROM local_execution_credentials_v1 WHERE length(expires_at_unix_ms)<length(?1)
-         OR (length(expires_at_unix_ms)=length(?1) AND expires_at_unix_ms<=?1)",
+        /* sqlite-large-value: allow-for-now lv-h7082b3f480c9 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_execution_credentials_v1 WHERE length(expires_at_unix_ms)<length(?1)
+                 OR (length(expires_at_unix_ms)=length(?1) AND expires_at_unix_ms<=?1)",
         [&now],
     ).map_err(internal)?;
     let count: usize = tx.query_row("SELECT COUNT(*) FROM local_execution_credentials_v1", [], |row| row.get(0)).map_err(internal)?;
@@ -319,7 +319,7 @@ pub fn issue_local_credential_tx(tx: &Transaction<'_>, binding: &ExecutionBindin
     getrandom::fill(&mut bytes).map_err(|error| refused(&error.to_string()))?;
     let secret = hex::encode(bytes);
     tx.execute(
-        "INSERT INTO local_execution_credentials_v1(secret_hash, host, revision, expires_at_unix_ms) VALUES (?1, ?2, ?3, ?4)",
+        /* sqlite-large-value: allow-for-now lv-hda5c0f67ec00 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_execution_credentials_v1(secret_hash, host, revision, expires_at_unix_ms) VALUES (?1, ?2, ?3, ?4)",
         params![hex::encode(Sha256::digest(secret.as_bytes())), binding.host, binding.authorization_revision, expires],
     ).map_err(internal)?;
     Ok(secret)

@@ -4,8 +4,8 @@ use crate::store::local_sessions::{LocalSession, SessionCustody};
 
 fn without_graph(store: &Store) {
     store.connection.write().execute_batch(
-        "ALTER TABLE claims RENAME TO unavailable_claims;
-         ALTER TABLE desired RENAME TO unavailable_desired;"
+        /* sqlite-large-value: allow-for-now lv-h506fc9135132 owner=fractal_reconcile::reconcile::local_session_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE claims RENAME TO unavailable_claims;
+                 ALTER TABLE desired RENAME TO unavailable_desired;"
     ).unwrap();
 }
 
@@ -140,8 +140,8 @@ fn borrowed_terminal_detaches_offline_survives_restart_and_receipt_is_consumed_o
         assert!(local_session(&store, runtime.as_ref(), &binding.subject, None).is_err());
         assert_eq!(store.pending_local_session_detaches().unwrap(), vec![(binding.clone(), "detach-once".into())]);
         // Return the graph schema before reopening: the detach itself needed neither table.
-        store.connection.write().execute_batch("ALTER TABLE unavailable_claims RENAME TO claims;
-            ALTER TABLE unavailable_desired RENAME TO desired;").unwrap();
+        store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hd58a35e0479d owner=fractal_reconcile::reconcile::local_session_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE unavailable_claims RENAME TO claims;
+                    ALTER TABLE unavailable_desired RENAME TO desired;").unwrap();
     }
     let store = Arc::new(Store::open(&database, "executor").unwrap());
     assert!(store.local_session_detached(&binding.subject, &incarnation).unwrap());
