@@ -1,4 +1,4 @@
-//! Declaration-only schedule listing. A timer, run history, or a remote read is never consulted.
+//! Schedule declarations with current owner lifetime metadata; no remote reads or history reduction.
 use super::*;
 use base64::Engine as _;
 use hmac::{Hmac, Mac as _};
@@ -163,7 +163,8 @@ fn next_fire(declaration: &Value, origin: Option<&str>, now: u128) -> (Option<St
 
 fn row_value(row: &ScheduleDeclarationRow, now: u128) -> Value {
     let raw = row.body.as_deref().and_then(|body| serde_json::from_str::<Value>(body).ok());
-    let owner_state = if row.owner_run.is_some() { "recorded" }
+    let owner_state = if row.terminal_owner.is_some() { "owner-terminal" }
+        else if row.owner_run.is_some() { "recorded" }
         else if row.owner_generation.is_some() || row.owner_step.is_some() { "unknown" } else { "not-recorded" };
     let (standby_state, standby_node) = raw.as_ref().map(standby).unwrap_or(("unknown", None));
     let (next, next_state) = raw.as_ref().map(|body| next_fire(body, row.origin.as_deref(), now)).unwrap_or((None, "unknown"));
@@ -174,7 +175,10 @@ fn row_value(row: &ScheduleDeclarationRow, now: u128) -> Value {
     json!({
         "id":row.subject,"revision":row.revision,"declaration_claim_id":row.claim,
         "declaration_origin_host_id":row.origin.as_ref().map(|name| format!("host/{name}")),
-        "owner":{"run_id":row.owner_run,"generation_id":row.owner_generation,"step_id":row.owner_step,"state":owner_state},
+        "owner":{"run_id":row.owner_run,"generation_id":row.owner_generation,"step_id":row.owner_step,"state":owner_state,
+            "legacy_leftover":row.terminal_owner.as_ref().is_some_and(|owner| owner.legacy),
+            "terminal_code":row.terminal_owner.as_ref().map(|owner| owner.code),
+            "terminal_owner_id":row.terminal_owner.as_ref().map(|owner| &owner.owner)},
         "primary_host_id":host,"standby_state":standby_state,"standby_node":standby_node,
         "state":if raw.as_ref().is_some_and(stopped) {"stopped"} else if raw.as_ref().is_some_and(Value::is_object) && next_state != "unknown" {"declared"} else {"unknown"},
         "declaration":raw,"declaration_bytes":row.body_bytes,"read_problem":problem,

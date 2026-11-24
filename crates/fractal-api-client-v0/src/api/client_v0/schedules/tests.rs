@@ -51,6 +51,81 @@ fn declarations_show_recorded_owner_local_origin_and_future_fields_without_stand
     assert_eq!(row["next_declared_fire_at"],"2026-10-21T08:00:00.000Z");
 }
 
+fn terminal_owner_fixture(state: &AppState, workspace: &std::path::Path, step_terminal: bool, legacy: bool) -> crate::model::MissionRunView {
+    let source = r#"version 2
+mission "schedule-owner" state="ready" {
+  goal "Own a schedule."
+  step "hold" {
+    agentless
+    gate "hold" { field "state" "resource/never" is "ready" }
+  }
+}"#;
+    let intent = crate::graph::parse_internal_intent(source, "node").unwrap();
+    state.store.apply_internal(&intent, "declare-schedule-owner").unwrap();
+    let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
+        mission:"schedule-owner".into(),revision:None,workspace:workspace.to_string_lossy().into_owned(),
+        requester:None,mode:None,inputs:BTreeMap::new(),idempotency_key:"schedule-owner-run".into(),
+    }).unwrap();
+    declare(state,"owned","every \"1h\"; anchor \"2026-01-01T00:00:00Z\"");
+    state.store.connection.write().execute(
+        "UPDATE desired SET owner_run=?1,owner_generation=?2,owner_step=?3 WHERE subject='schedule/owned'",
+        rusqlite::params![run.subject,run.generation,run.steps[0].subject],
+    ).unwrap();
+    if !legacy { state.store.enable_schedule_owner_guard().unwrap(); }
+    if step_terminal {
+        state.store.set_step_state(&run.steps[0].subject, "completed", None).unwrap();
+    } else {
+        state.store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+    }
+    // Activating the guard after an old terminal must not reclassify or stop its schedule.
+    if legacy { state.store.enable_schedule_owner_guard().unwrap(); }
+    run
+}
+
+#[tokio::test]
+async fn terminal_owners_are_visible_in_list_and_show_without_rewriting_active_declarations() {
+    for step_terminal in [false,true] {
+        for legacy in [true,false] {
+            let root = tempfile::tempdir().unwrap();
+            let state = fixture(root.path());
+            let run = terminal_owner_fixture(&state, root.path(), step_terminal, legacy);
+            let before = state.store.schedule_declaration_rows("",1).unwrap().remove(0);
+            let out = page(&state,"",50,stamp("2026-10-21T08:00:00Z"));
+            let row = &out["items"][0];
+            assert_eq!(row["owner"]["state"],"owner-terminal");
+            assert_eq!(row["owner"]["legacy_leftover"],legacy);
+            assert_eq!(row["owner"]["run_id"],run.subject);
+            assert_eq!(row["owner"]["generation_id"],run.generation);
+            assert_eq!(row["owner"]["step_id"],run.steps[0].subject);
+            assert_eq!(row["owner"]["terminal_code"],if step_terminal {"schedule-owner-step-terminal"} else {"schedule-owner-run-terminal"});
+            assert_eq!(row["owner"]["terminal_owner_id"].as_str(),Some(if step_terminal {run.steps[0].subject.as_str()} else {run.subject.as_str()}));
+            assert_eq!(row["state"],"declared");
+            assert_eq!(row["next_declared_fire_at"],"2026-10-21T08:00:00.000Z");
+            assert_eq!(row["primary_host_id"],"host/node");
+            let query = serde_json::from_value(json!({"subject":"schedule/owned"})).unwrap();
+            let response = crate::api::operations::status(State(state.clone()),Query(query)).await.unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+            let shown: Value = serde_json::from_slice(&bytes).unwrap();
+            let owner = &shown["subjects"][0]["actual"]["schedule_owner"];
+            assert_eq!(owner["state"],"owner-terminal");
+            assert_eq!(owner["legacy_leftover"],legacy);
+            assert_eq!(owner["run_id"],run.subject);
+            assert_eq!(owner["step_id"],run.steps[0].subject);
+            assert_eq!(owner["terminal_code"],row["owner"]["terminal_code"]);
+            assert_eq!(owner["warning"].as_str().is_some(),legacy);
+            assert_eq!(owner["generation_id"],run.generation);
+            let after = state.store.schedule_declaration_rows("",1).unwrap().remove(0);
+            assert_eq!(after.revision,before.revision);
+            assert_eq!(after.body,before.body);
+            let historical = serde_json::from_value(json!({"subject":"schedule/owned","at_index":state.store.index().unwrap()})).unwrap();
+            let response = crate::api::operations::status(State(state.clone()),Query(historical)).await.unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+            let shown: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(shown["subjects"][0]["actual"].get("schedule_owner").is_none());
+        }
+    }
+}
+
 #[test]
 fn scheduler_rejected_standby_keeps_raw_node_and_reports_unknown_tick() {
     let root = tempfile::tempdir().unwrap();

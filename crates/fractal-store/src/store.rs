@@ -68,6 +68,7 @@ mod desired_progress;
 #[cfg(test)]
 mod desired_batch_index_tests;
 pub mod schedule_declarations;
+pub mod schedule_owner_lifetime;
 pub mod retirements;
 pub mod identities;
 // Prepared internally; no accepted gate kind or production caller dispatches here.
@@ -12523,6 +12524,8 @@ fn replicated_work_validation_fields<'a>(
         &claim_spec.cardinality,
     )
     .map_err(anyhow::Error::new)?;
+    let stamped = schedule_owner_lifetime::stamp_terminal_claim(transaction, subject, kind, body)?;
+    let body = stamped.as_ref();
     let record = append_claim_record_tx(
         transaction,
         origin,

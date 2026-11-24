@@ -218,31 +218,16 @@ fn owned_schedule_spec(
     Ok(crate::graph::schedule_spec(&schedule.desired, &origin))
 }
 
-/// Ownership is a lifetime bound, independent of whether cleanup has published a stop.
+/// Enforce source-stamped ownership lifetimes without stopping historical fleet duties.
 fn schedule_owner_terminal(
     store: &Store,
     schedule: &DesiredSubject,
 ) -> Result<Option<crate::model::FractalError>> {
-    if let Some(owner) = schedule.owner_run.as_deref()
-        && let Some(run) = store.mission_run(owner)?
-        && (run.phase == "terminal"
-            || matches!(run.status.as_str(), "completed" | "failed" | "cancelled"))
-    {
-        return Ok(Some(crate::model::FractalError::new(
-            "schedule-owner-run-terminal",
-            format!("schedule owner {owner} is terminal"),
-        )));
-    }
-    if let Some(owner) = schedule.owner_step.as_deref()
-        && let Some(step) = store.step_run(owner)?
-        && matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped")
-    {
-        return Ok(Some(crate::model::FractalError::new(
-            "schedule-owner-step-terminal",
-            format!("schedule owner {owner} is terminal"),
-        )));
-    }
-    Ok(None)
+    Ok(store.schedule_terminal_owner(
+        schedule.owner_run.as_deref(), schedule.owner_step.as_deref(),
+    )?.filter(|owner| !owner.legacy).map(|owner| crate::model::FractalError::new(
+        owner.code, format!("schedule owner {} is terminal", owner.owner),
+    )))
 }
 
 /// The largest occurrence reached by this schedule's stable identity: whole history, which
@@ -2026,6 +2011,7 @@ impl Reconciler<NativeRuntime> {
         recorder: Option<PathBuf>,
         unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
     ) -> Result<Self> {
+        store.enable_schedule_owner_guard()?;
         let selected_pty_root = pty_root
             .map(Path::to_path_buf)
             .unwrap_or_else(|| state_dir.join("pty"));
@@ -2290,6 +2276,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// The daemon builds its reconciler with [`Reconciler::native`], which opens the database in
     /// the state directory.
     pub fn new(store: Arc<Store>, runtime: Arc<R>, host: String, notify: Arc<Notify>) -> Self {
+        store.enable_schedule_owner_guard().expect("enable schedule owner lifetime guard");
         Self {
             store,
             runtime,
@@ -17163,6 +17150,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind.as_str(),
                 "lane" | "observer" | "subscription" | "schedule"
             ) || intake_is_stopped(subject, &self.host)
+            {
+                continue;
+            }
+            // Upgrading must not retire existing duties merely because their historical
+            // owner is terminal. They remain visible as legacy leftovers for manual migration.
+            if subject.kind == "schedule"
+                && self.store.schedule_terminal_owner(
+                    subject.owner_run.as_deref(), subject.owner_step.as_deref(),
+                )?.is_some_and(|owner| owner.legacy)
             {
                 continue;
             }

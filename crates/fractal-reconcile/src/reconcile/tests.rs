@@ -15106,8 +15106,8 @@ schedule "daily" {{
         );
     }
 
-    fn owned_schedule_fixture() -> (
-        tempfile::TempDir, Arc<Store>, Reconciler<FakeRuntime>, MissionRunView, DesiredSubject,
+    fn owned_schedule_store_fixture() -> (
+        tempfile::TempDir, Arc<Store>, MissionRunView, DesiredSubject,
     ) {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
@@ -15139,6 +15139,13 @@ schedule "owned" {{
         store.apply_internal(&intent, "owned-schedule").unwrap();
         let schedule = store.desired_subjects_for_owner_run(&run.subject).unwrap()
             .into_iter().find(|desired| desired.kind == "schedule").unwrap();
+        (root, store, run, schedule)
+    }
+
+    fn owned_schedule_fixture() -> (
+        tempfile::TempDir, Arc<Store>, Reconciler<FakeRuntime>, MissionRunView, DesiredSubject,
+    ) {
+        let (root, store, run, schedule) = owned_schedule_store_fixture();
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
             "node".into(), Arc::new(Notify::new()));
         (root, store, reconciler, run, schedule)
@@ -15247,6 +15254,77 @@ schedule "owned-exact" {{
         reconciler.reconcile_schedule(&schedule).unwrap();
         assert!(store.claims_for(&schedule.subject, Some("schedule.occurrence-scheduled"))
             .unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_terminal_owner_keeps_firing_across_upgrade_reopen_and_late_replication() {
+        let (root, store, run, schedule) = owned_schedule_store_fixture();
+        // This transition was authored before the daemon enabled the new lifetime epoch.
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", None).unwrap();
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let epoch = store.enable_schedule_owner_guard().unwrap();
+        let owner = store.schedule_terminal_owner(
+            schedule.owner_run.as_deref(), schedule.owner_step.as_deref(),
+        ).unwrap().unwrap();
+        assert!(owner.legacy);
+        assert_eq!(owner.code, "schedule-owner-run-terminal");
+        assert!(schedule_owner_terminal(&store, &schedule).unwrap().is_none());
+        assert!(!reconciler.stop_owned_intake(&[&schedule], None, "legacy-cleanup").unwrap());
+        reconciler.reconcile_schedule(&schedule).unwrap();
+        finish_armed_schedules(&reconciler).await;
+        assert_eq!(store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))
+            .unwrap().len(), 1);
+        assert_eq!(store.claims_for(&schedule.subject, Some("schedule.work-requested"))
+            .unwrap().len(), 1);
+        // An ordinary reassertion must not silently migrate the old lifecycle.
+        store.append_claim(&ClaimInput {
+            subject: run.subject.clone(), kind: "mission-run.state".into(), actor: None,
+            fields: BTreeMap::from([("status".into(), Value::String("cancelled".into())),
+                ("phase".into(), Value::String("terminal".into()))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(store.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        let replica = Store::open_memory("replica").unwrap();
+        replica.enable_schedule_owner_guard().unwrap();
+        // Import after activation: arrival time must not turn old source history into new policy.
+        replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        assert!(replica.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        drop(reconciler);
+        drop(store);
+        let reopened = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let _restarted = Reconciler::new(reopened.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        assert_eq!(reopened.enable_schedule_owner_guard().unwrap(), epoch);
+        assert!(reopened.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        let desired = reopened.desired_subjects_named(&[schedule.subject])
+            .unwrap().pop().unwrap();
+        assert!(!owned_schedule_spec(&reopened, &desired).unwrap().unwrap().stopped);
+    }
+
+    #[test]
+    fn new_terminal_source_epoch_survives_replication_and_daemon_restart() {
+        let (root, store, reconciler, run, schedule) = owned_schedule_fixture();
+        let epoch = store.enable_schedule_owner_guard().unwrap();
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", None).unwrap();
+        let terminal = store.latest_claim(&run.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(terminal.body["schedule_owner_guard_epoch"], epoch);
+        assert!(!store.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        let replica = Store::open_memory("replica").unwrap();
+        assert_ne!(replica.enable_schedule_owner_guard().unwrap(), epoch);
+        replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        assert!(!replica.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        drop(reconciler);
+        drop(store);
+        let reopened = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let restarted = Reconciler::new(reopened.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        assert_eq!(reopened.enable_schedule_owner_guard().unwrap(), epoch);
+        assert_eq!(schedule_owner_terminal(&reopened, &schedule).unwrap().unwrap().code,
+            "schedule-owner-run-terminal");
+        restarted.reconcile_schedule(&schedule).unwrap();
+        let stopped = reopened.desired_subjects_named(&[schedule.subject]).unwrap().pop().unwrap();
+        assert!(owned_schedule_spec(&reopened, &stopped).unwrap().unwrap().stopped);
     }
 
     #[test]
