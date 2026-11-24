@@ -51,7 +51,8 @@ pub async fn logs_session(
     let session = read_deadline::query(&state.store, "/v1/sessions/logs/{*subject}", || {
         live_session(&state, &subject, None)
     })?;
-    let subject = if subject.starts_with("agent/") {
+    let subject = if subject.starts_with("agent/")
+        && !state.store.local_session_known(&subject).map_err(ApiError::internal)? {
         public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.canonical_id
     } else {
         subject
@@ -89,7 +90,7 @@ pub async fn logs_session(
                 if query.previous { "previous " } else { "" }
             ))
         })?;
-        if !query.previous && generation.generation_id != session.incarnation_id {
+        if !query.previous && generation.generation_id != session.native_incarnation_id {
             return Err(ApiError::bad(FractalError::new(
                 "stale-incarnation",
                 format!("subject `{subject}` changed exec generation"),
@@ -157,7 +158,8 @@ pub async fn screen_session(
     let screen = daemon_pty(&state)
         .and_then(|runtime| runtime.screen(&session.runtime_id))
         .map_err(ApiError::internal)?;
-    let subject = if subject.starts_with("agent/") {
+    let subject = if subject.starts_with("agent/")
+        && !state.store.local_session_known(&subject).map_err(ApiError::internal)? {
         public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.canonical_id
     } else {
         subject
@@ -245,7 +247,7 @@ pub async fn clear_context(
     let effect_state = state.clone();
     let effect_session = session.clone();
     let effect = blocking_external(move || daemon_pty(&effect_state).and_then(|runtime| {
-        runtime.send_line_if(&effect_session.runtime_id, "/clear", Some(&effect_session.incarnation_id))
+        runtime.send_line_if(&effect_session.runtime_id, "/clear", Some(&effect_session.native_incarnation_id))
     })).await?;
     finish_session_control(
         &state,
@@ -272,9 +274,11 @@ pub async fn attach_session(
     Json(_request): Json<AttachRequest>,
 ) -> Result<Json<Attachment>, ApiError> {
     let subject = session_storage_subject(&state, &subject)?;
-    let (store, seat) = (state.store.clone(), subject.clone());
-    blocking_store(move || store.record_idle_unrouted(&seat,
-        crate::store::idle_residency::UnroutedKind::Attach)).await?;
+    if !state.store.local_session_known(&subject).map_err(ApiError::internal)? {
+        let (store, seat) = (state.store.clone(), subject.clone());
+        blocking_store(move || store.record_idle_unrouted(&seat,
+            crate::store::idle_residency::UnroutedKind::Attach)).await?;
+    }
     let session = live_session(&state, &subject, None)?;
     if !session.terminal {
         return Err(ApiError::bad(FractalError::new(
@@ -318,9 +322,11 @@ pub async fn local_terminal(
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<LocalTerminal>, ApiError> {
     let subject = session_storage_subject(&state, &subject)?;
-    let (store, seat) = (state.store.clone(), subject.clone());
-    blocking_store(move || store.record_idle_unrouted(&seat,
-        crate::store::idle_residency::UnroutedKind::Attach)).await?;
+    if !state.store.local_session_known(&subject).map_err(ApiError::internal)? {
+        let (store, seat) = (state.store.clone(), subject.clone());
+        blocking_store(move || store.record_idle_unrouted(&seat,
+            crate::store::idle_residency::UnroutedKind::Attach)).await?;
+    }
     // A read can still wait on a saturated disk; it must not hold a runtime worker meanwhile.
     let (lookup, lookup_subject) = (state.clone(), subject.clone());
     let session = crate::api::read_deadline::spawn_blocking(move || live_session(&lookup, &lookup_subject, None))
@@ -337,7 +343,7 @@ pub async fn local_terminal(
     Ok(Json(LocalTerminal {
         subject,
         runtime_id: session.runtime_id,
-        incarnation_id: session.incarnation_id,
+        incarnation_id: session.native_incarnation_id,
         pty_root,
     }))
 }
@@ -369,31 +375,11 @@ pub async fn terminal_session(
             "the terminal capability is used or names another subject",
         )));
     }
-    let status = state
-        .store
-        .status(Some(&subject))
-        .map_err(ApiError::internal)?;
-    let actual = status
-        .subjects
-        .first()
-        .and_then(|item| item.actual.as_ref())
-        .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
-    let fields = actual.get("fields").unwrap_or(actual);
-    let runtime_id = fields
-        .get("runtime_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no runtime")))?
-        .to_owned();
-    let current_incarnation = fields
-        .get("incarnation_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if capability.incarnation_id != current_incarnation {
-        return Err(ApiError::bad(FractalError::new(
-            "stale-incarnation",
-            "the terminal incarnation changed before attachment",
-        )));
+    let session = live_session(&state, &subject, capability.incarnation_id.as_deref())?;
+    if !session.terminal {
+        return Err(ApiError::bad(FractalError::new("unsupported-capability", "session is not a terminal")));
     }
+    let runtime_id = session.runtime_id;
     Ok(websocket
         .protocols(TERMINAL_SUBPROTOCOLS)
         .on_upgrade(move |socket| terminal_proxy(socket, state.pty_root, runtime_id)))
