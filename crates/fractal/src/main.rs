@@ -77,6 +77,7 @@ use completion::{Complete, Entity, WorkFilter};
 mod cli_help;
 mod demo;
 mod setup;
+mod light_node;
 mod onboarding;
 mod change_cli;
 mod availability;
@@ -7987,6 +7988,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"owned_set_native_policy":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission-escalation-v1": 1,
+                    "message_mark_events": 1,
                     "mission_resource_lane": 2,
                     "resource_profile_keys": 1,
                     "resource_recovery_observations": 1,
@@ -8115,6 +8117,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.unlaned_seat.clone(),
     )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_finite_resources(config.finite_resources.clone()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.install_launch_contract_reader();
+    let light_node_service = light_node::Service::prepare(&config, reconciler.clone()).await?;
+    let local_run_authority = light_node_service.as_ref().and_then(light_node::Service::authority);
+    let light_node_controls = light_node_service.as_ref()
+        .map(light_node::Service::control_router).unwrap_or_default();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     reconciler.set_idle_residency(config.reconcile.idle_residency()?);
@@ -8136,6 +8142,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Five seconds finds gaps between short readers without polling on every write.
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store), Duration::from_secs(5));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
+    let _shard_contention_retry = retry_projection_contention_for_store(
+        Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone(), true, |_| {},
+    );
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone(), config.store.valid_record_delete_after_ms()?)));
@@ -8183,11 +8192,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
     {
         let store = store.clone();
         let state_dir = config.state_dir.clone();
+        let inputs = Arc::new(std::sync::Mutex::new(
+            fractal_daemon::store::declared_objectives::DeclaredObjectiveInputs::default(),
+        ));
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let domain = fractal_daemon::declared_objectives::github_rows(&store, &state_dir, now_ms() as u64)?;
-                let mut rows = fractal_daemon::api::slo_rows(&store, domain)?;
+                let mut inputs = inputs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                inputs.refresh(&store)?;
+                let domain = fractal_daemon::declared_objectives::github_rows_from_declarations(
+                    &store, &state_dir, now_ms() as u64, inputs.declarations(),
+                )?;
+                let mut rows = fractal_daemon::api::slo_rows_from_declarations(
+                    &store, domain, inputs.declarations(),
+                )?;
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
@@ -8445,17 +8463,19 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let mut relayed_closes_worker = tokio::spawn(
         fractal_daemon::api::relayed_close_maintenance::run(state.clone(), relayed_closes_stopped),
     );
+    let (light_node_stop, light_node_stopped) = tokio::sync::watch::channel(false);
     let serving = async {
         let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
-                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
+                fractal_daemon::api::worker_authenticated(router(state.clone()).merge(light_node_controls), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
                 Some(state.store.clone()),
                 Some(worker_observer),
+                local_run_authority,
                 ready
             ),
             fractal_daemon::api::serve_reserved_unix_with_ready(
-                gateway_reserved, fabric_router(state).layer(web_status), None, None, ready,
+                gateway_reserved, fabric_router(state).layer(web_status), None, None, None, ready,
             ),
             async {
                 let result = web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()).await;
@@ -8471,14 +8491,22 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     None => std::future::pending().await,
                 }
             },
+            async {
+                match light_node_service {
+                    Some(service) => service.run(light_node_stopped).await,
+                    None => std::future::pending().await,
+                }
+            },
         );
         Err(served)
     };
     let shutdown = async {
-        tokio::select! {
-            _ = terminate.recv() => Ok(libc::SIGTERM),
-            _ = interrupt.recv() => Ok(libc::SIGINT),
-        }
+        let signal = tokio::select! {
+            _ = terminate.recv() => libc::SIGTERM,
+            _ = interrupt.recv() => libc::SIGINT,
+        };
+        light_node_stop.send_replace(true);
+        Ok(signal)
     };
     let stopped = fractal_daemon::api::stop_before_listener_drop(
         serving, shutdown, stop_agents_request_slo,
@@ -13291,17 +13319,25 @@ fn render_performance(view: &Value) -> String {
         "PERFORMANCE  last {} seconds · sorted by total wall time\n",
         view["window_seconds"]
     );
+    if let Some(note) = view["sqlite_cache_miss_bytes_note"].as_str() {
+        let _ = writeln!(out, "SQLite cache-miss bytes: {note}");
+    }
+    if let Some(note) = view["mmap_major_faults_note"].as_str() {
+        let _ = writeln!(out, "mmap major faults: {note}");
+    }
     for (key, title) in [("requests", "REQUESTS AND TASKS"), ("queries", "QUERIES")] {
-        let _ = writeln!(out, "{title}  count · total ms · max ms · CPU ms · kind");
+        let _ = writeln!(out, "{title}  count · total ms · max ms · CPU ms · SQLite cache-miss bytes · mmap major faults · kind");
         if let Some(rows) = view[key].as_array() {
             for row in rows {
                 let _ = writeln!(
                     out,
-                    "  {}  {:.1}  {:.1}  {:.1}  {}",
+                    "  {}  {:.1}  {:.1}  {:.1}  {}  {}  {}",
                     row["count"],
                     row["total_ms"].as_f64().unwrap_or(0.0),
                     row["max_ms"].as_f64().unwrap_or(0.0),
                     row["cpu_ms"].as_f64().unwrap_or(0.0),
+                    row["sqlite_cache_miss_bytes"].as_u64().unwrap_or(0),
+                    row["mmap_major_faults"],
                     row["kind"].as_str().unwrap_or("?")
                 );
             }
@@ -13316,10 +13352,10 @@ fn render_performance(view: &Value) -> String {
         );
     }
     for (key, title) in [
-        ("clients", "CLIENTS  count · total ms · CPU ms · client"),
+        ("clients", "CLIENTS  count · total ms · CPU ms · SQLite cache-miss bytes · mmap major faults · client"),
         (
             "client_requests",
-            "CLIENT REQUESTS  count · total ms · CPU ms · client · kind",
+            "CLIENT REQUESTS  count · total ms · CPU ms · SQLite cache-miss bytes · mmap major faults · client · kind",
         ),
     ] {
         let Some(rows) = view[key].as_array() else {
@@ -13329,10 +13365,12 @@ fn render_performance(view: &Value) -> String {
         for row in rows {
             let _ = write!(
                 out,
-                "  {}  {:.1}  {:.1}  {}",
+                "  {}  {:.1}  {:.1}  {}  {}  {}",
                 row["count"],
                 row["total_ms"].as_f64().unwrap_or(0.0),
                 row["cpu_ms"].as_f64().unwrap_or(0.0),
+                row["sqlite_cache_miss_bytes"].as_u64().unwrap_or(0),
+                row["mmap_major_faults"],
                 row["client"].as_str().unwrap_or("?")
             );
             if let Some(kind) = row["kind"].as_str() {
@@ -22035,13 +22073,31 @@ fn retry_projection_contention_observed(
     notify: Arc<Notify>,
     event_notify: watch::Sender<u64>,
     state_dir: PathBuf,
+    on_poll: impl FnMut(bool) + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    retry_projection_contention_for_store(weak_store, notify, event_notify, state_dir, false, on_poll)
+}
+
+fn retry_projection_contention_for_store(
+    weak_store: std::sync::Weak<Store>,
+    notify: Arc<Notify>,
+    event_notify: watch::Sender<u64>,
+    state_dir: PathBuf,
+    messages_shard: bool,
     mut on_poll: impl FnMut(bool) + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("replication.retry_projection", async move {
         let mut schedule = ProjectionContentionRetry::default();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let Some(store) = weak_store.upgrade() else { break };
+            let Some(graph) = weak_store.upgrade() else { break };
+            let shard = if messages_shard {
+                let Some(shard) = fractal_store::store::messages_shard::shard(&graph) else { break };
+                Some(shard)
+            } else {
+                None
+            };
+            let store = shard.as_deref().unwrap_or(&graph.graph);
             if !store.replication_projection_deferred() {
                 store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
             }
@@ -22055,6 +22111,7 @@ fn retry_projection_contention_observed(
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
             let result = store.connection.write_workers().spawn_blocking(move || {
                 fractal_daemon::task_cpu::profiled_blocking("replication.retry_projection", || {
+                let store = shard.as_deref().unwrap_or(&graph.graph);
                 let result = store.project_replication_backlog_unless_catching_up();
                 (result, store.projection_contention_generation(), store.replication_projection_deferred())
                 })
@@ -22096,10 +22153,13 @@ fn retry_projection_contention_observed(
             if schedule.due.is_none()
                 && let Some(store) = weak_store.upgrade()
             {
+                let shard = messages_shard.then(|| fractal_store::store::messages_shard::shard(&store)).flatten();
+                let store = shard.as_deref().unwrap_or(&store.graph);
                 store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
             }
             stderr_message("fractal", format_args!("projection contention retry {}", json!({
                 "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
+                "shard": if messages_shard { "messages" } else { "graph" },
                 "projection_deferred_after_attempt": still_deferred,
                 "stop_reason": if schedule.due.is_some() { None } else if recovered {
                     Some("recovered")
@@ -22597,18 +22657,43 @@ async fn import_retired_identities(store: Arc<Store>) {
     }
 }
 
-/// Decide, at startup and every minute after, whether this member records its seats' lifecycle
-/// as local marks: once every other member, and every configured peer, reads marks and asks hosts
-/// for them (store/marks_switch.rs). A member that joins without that turns it off again within a
-/// minute.
-async fn refresh_marks_switch(store: Arc<Store>, peers: Vec<String>) {
+/// Converge initially, then only when a member capability, fleet membership or writer roster
+/// changes. Configured peers are fixed for this daemon invocation, as are its sync workers.
+async fn refresh_marks_switch(store: Arc<Store>, mut peers: Vec<String>) {
+    let mut maintenance = None;
+    let mut recovery = None;
+    let (recovered, mut recovery_events) = watch::channel(0u64);
     loop {
-        let (worker, peers_now) = (store.clone(), peers.clone());
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || worker.refresh_marks_switch(&peers_now))).await;
-        if !matches!(result, Ok(Ok(_))) {
-            stderr_message("fractal", format_args!("message marks switch check failed: {result:?}"));
+        recovery_events.borrow_and_update();
+        let worker = store.clone();
+        let (next, next_peers, result) = tokio::task::spawn_blocking(move || {
+            let result = fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || -> Result<()> {
+                if maintenance.is_none() { maintenance = Some(worker.marks_switch_maintenance()?); }
+                maintenance.as_mut().expect("initialized marks switch maintenance").refresh(&worker, &peers)
+            });
+            (maintenance, peers, result)
+        }).await.expect("marks switch maintenance task panicked");
+        maintenance = next;
+        peers = next_peers;
+        match result {
+            Ok(()) => {
+                recovery = None;
+                if !maintenance.as_mut().expect("initialized marks switch maintenance").changed().await { return; }
+            }
+            Err(error) => {
+                stderr_message("fractal", format_args!("message marks switch blocked on local recovery: {error:#}"));
+                if recovery.is_none() {
+                    let wake = recovered.clone();
+                    recovery = Some(store.observe_commits(move |_| {
+                        wake.send_modify(|generation| *generation = generation.wrapping_add(1));
+                    }));
+                    // Register then recheck once, covering a repair committed before registration.
+                    // Further attempts require actual committed writer activity, never a timer.
+                    continue;
+                }
+                if recovery_events.changed().await.is_err() { return; }
+            }
         }
-        tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
 
@@ -22765,27 +22850,37 @@ async fn release_old_envelopes(store: Arc<Store>) {
     }
 }
 
-/// Sign this member's own claims with its member key (`member_signatures`): the claims it held
-/// before this build a page at a time, then each new one within seconds of its append. Signing
-/// happens outside the writer; each page stores in one short write.
+/// Replay durable signing/ready cursors after subscribing, then wait for changed keys.
+/// The only idle deadline is an actual pending signature's retention expiry.
 async fn sign_own_claims(store: Arc<Store>) {
+    let (_observer, mut changes) = store.subscribe_claim_signatures();
     loop {
+        changes.borrow_and_update();
         let page_store = store.clone();
-        // Signatures that wait for their claims are settled first: a page of them, then a page
-        // of this member's own claims to sign.
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || {
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || -> anyhow::Result<_> {
             page_store.promote_claim_member_signatures()?;
-            page_store.sign_own_claims()
+            page_store.expire_claim_signatures()?;
+            let report = page_store.sign_own_claims()?;
+            Ok((report.done && !page_store.claim_signatures_ready()?, page_store.claim_signature_expiry()?))
         })).await;
-        let pause = match result {
-            Ok(Ok(report)) if report.done => Duration::from_secs(5),
-            Ok(Ok(_)) => Duration::from_millis(50),
+        match result {
+            Ok(Ok((false, _))) => tokio::task::yield_now().await,
+            Ok(Ok((true, expiry))) => {
+                if let Some(expiry) = expiry {
+                    let wait = Duration::from_millis(u64::try_from(expiry.saturating_sub(now_ms())).unwrap_or(u64::MAX));
+                    tokio::select! {
+                        result = changes.changed() => if result.is_err() { return; },
+                        _ = tokio::time::sleep(wait) => {},
+                    }
+                } else if changes.changed().await.is_err() {
+                    return;
+                }
+            }
             error => {
                 stderr_message("fractal", format_args!("signing own claims failed: {error:?}"));
-                Duration::from_secs(60)
+                tokio::time::sleep(Duration::from_secs(60)).await;
             }
-        };
-        tokio::time::sleep(pause).await;
+        }
     }
 }
 

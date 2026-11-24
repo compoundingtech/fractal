@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add an optional, interim usage-history relay to the web publisher and Vite development gateway, off unless a loopback usage hub is configured.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of persisted state." },
+  "schema": { "status": "none", "detail": "No database, wire or client-v0 schema changes. The relay holds bounded in-memory caches only." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Without WF_USAGE_HISTORY_URL nothing changes: GET /v1/client/usage/history still reaches the client gateway. With it set, the web server answers that route itself for accounts the hub's quota answer publishes, and requires the request's gateway credential to grant read.projections. GET /v1/client/usage/quota and every other client route still go to the gateway." },
+  "downtime": { "status": "none", "detail": "No startup work. Each history request makes at most one capabilities check and two bounded producer reads with a five-second deadline." },
+  "manual": { "status": "changed", "detail": "Optional: set WF_USAGE_HISTORY_URL to a loopback usage-hub base URL such as http://127.0.0.1:PORT on the publisher or Vite development gateway to show account history. Any other URL fails startup. The relay is interim and will be removed once the gateway serves history (issue 7115)." },
+  "recovery": { "status": "none", "detail": "Unset WF_USAGE_HISTORY_URL and restart to return to gateway-only routing. No persistent state changes." }
+}

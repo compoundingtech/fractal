@@ -1543,6 +1543,39 @@ fn a_write_another_thread_makes_while_an_item_is_evaluated_is_no_correction() {
     });
 }
 
+#[test]
+fn native_turn_external_request_wakes_are_not_corrections_or_lost_during_evaluation() {
+    let (store, _runtime, reconciler, _) = stopping();
+    let item = "mission-run/native-parent";
+    let reads = BTreeSet::from(["step-run/program".to_owned()]);
+    reconciler.incremental.observe(&store).unwrap();
+    reconciler.incremental.evaluated(item, reads.clone(), None);
+    for before_mark in [false, true] {
+        assert!(!reconciler.incremental.needs(item, START));
+        // A resource request has no journal claim yet. Its host invalidates the parent
+        // through the program step, either just after needs_item or during evaluation.
+        if before_mark {
+            reconciler.incremental.touch("step-run/program");
+        }
+        smallclaims::touched::record_wrote(|| {
+            let mark = reconciler.evaluation_mark();
+            store.append_claim(&observed("resource/native-child")).unwrap();
+            assert_eq!(reconciler.missed_by_skipping(item, mark, &reads, None).is_empty(), before_mark);
+            if !before_mark {
+                std::thread::scope(|scope| {
+                    scope.spawn(|| reconciler.incremental.touch("step-run/program")).join().unwrap();
+                });
+            }
+            assert!(reconciler.missed_by_skipping(item, mark, &reads, None).is_empty());
+            reconciler.incremental.evaluated_after(item, reads.clone(), None, mark.touch_revision);
+            assert_eq!(reconciler.incremental.needs(item, START), !before_mark);
+        });
+        // The next evaluation acknowledges any touch that raced the previous one.
+        let mark = reconciler.evaluation_mark();
+        reconciler.incremental.evaluated_after(item, reads.clone(), None, mark.touch_revision);
+    }
+}
+
 /// A settle whose write the passes read before the run's evaluation started, yet which marked
 /// nothing, is a missed wake: what the evaluation writes on it still fails the strict check.
 #[test]

@@ -217,6 +217,10 @@ not merely a queued `Worker.terminate()`. Finalization never changes cancellatio
 failure: the terminal outcome remains cancelled, or the original mission-timeout failure.
 `missions show` retains the journal outcome; incomplete finalization also raises operator
 attention. The run cannot become terminal and revoke its attempt credential ahead of finalization.
+Light-node execution authority follows the same boundary: cancellation retains the exact
+execution binding during finalization, revokes it before recording the finalizer outcome,
+and still waits for the exact host/attempt termination acknowledgement before forgetting
+the worker. A subscription-started resource-input program follows this same cleanup path.
 
 Known limit: losing the daemon or host during cleanup cannot reconstruct an arbitrary Effect
 finalizer. Recovery records `interrupted-by-restart`, ends the attempt without replaying normal
@@ -299,7 +303,7 @@ kill or unprovable identity remains visible as `supersession-effect-fence`; it c
 converted into success by a cleanup deadline. Owned runtimes of all predecessor generations
 and descendants must likewise be confirmed quiescent. Acknowledgements and runtime observations
 wake reconciliation; no polling or replacement execution timeout is introduced. New program
-credentials are minted inside the run writer fence only for the current live attempt and
+credentials on unconfigured full nodes are minted inside the run writer fence for the current live attempt
 after checking that it does not await automatic publication cutover.
 
 The host does not acknowledge a merely requested `Worker.terminate()`: it awaits that
@@ -380,18 +384,40 @@ authority in free mode, and the rules that restrict it (`rule.set` in enforce mo
 the run's writes as well. With exact-or-namespace patterns the intersection is exact: for each
 pair with one verb, the narrower pattern if one covers the other, nothing otherwise.
 
-**Credential.** For each start or resume of an attempt the engine mints a store capability of kind
-`program-run` whose subject is the step run and whose incarnation is the attempt (the secret is
-hashed at rest and never journaled), and passes it as `ST_RUN_CREDENTIAL` in the `start`
-message's `env`. The host spreads the run env last, so an effect cannot replace it.
+**Credential.** On an unconfigured full node, each start or resume mints a `program-run` store
+capability whose subject is the step run and whose incarnation is the attempt. The opt-in
+light-node issuer instead uses the session journal's exact execution binding: engine instance,
+actual host generation, fresh dispatch identity, runtime, run, step, attempt and admitted
+authorization revision. An admission-ACK wait retains that dispatch identity while the graph
+attempt and actual host generation match. Once issuance is revoked, retrying the same graph
+attempt on the same live host uses a new dispatch identity; a persistence failure cannot
+resurrect a tombstoned authorization revision. The issuer waits for its own home admission ACK
+before minting and for predecessor revocation ACK before replacing; an ACK targets waiting run
+evaluations, not a timer poll. Already acknowledged live authority can mint offline. Both paths
+hash secrets at rest, never journal them as graph claims, and pass only
+the local secret as `ST_RUN_CREDENTIAL` in the start message's `env`. The host spreads run env last,
+so an effect cannot replace it. See [light-node authorization](light-node.md#authorization-withdrawal-and-host-admission).
+The shared host is launched without inherited `ST_AGENT`, `FRACTAL_AGENT` or
+`ST_RUN_CREDENTIAL` markers from the process that started the daemon. Each effect
+receives only its own dispatch's authoritative run credential; an invoking
+harness's identity must not conflict with that run at the Unix ancestry guard.
+The guard still rejects an effect that explicitly supplies both identity kinds.
 
 **Binding.** The ancestry walk reads `ST_RUN_CREDENTIAL` from each ancestor's exec-time environment
 beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon
-binds a request to `mission-run/RUN` only while the credential's attempt is its step run's current,
-live attempt, so the credential dies with its attempt and needs no revocation; one that no longer
-binds leaves the caller unverifiable. A run-bound request follows the bound-agent rules: no internal
-routes, no person headers other than its own run, and `actor`/`requester` must be the run. Handlers
-that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
+binds a request to `mission-run/RUN` only while its authority is live. Full nodes retain the
+current graph-attempt check and recheck authenticated run scope in the actual claim transaction.
+That scope travels with the queued SQLite writer action, not just the submitting blocking thread.
+Both the batched writer and the direct writer after projection drain recheck it before the effect;
+the shared writer's previous identity is restored on success, refusal or unwinding.
+Light nodes resolve durable local admission without a graph lookup and explicitly revoke it before
+forgetting an ended or replaced engine attempt. One that no longer binds leaves the caller
+unverifiable. A run-bound request follows bound-agent attribution: no general internal routes,
+no person headers other than its own run, and `actor`/`requester` must be the run. The narrow native
+run-claim bridge signs and durably forwards graph effects to their home, where signature, current
+graph authority, revocation and the effect receipt share one writer transaction. It does not
+enable cross-shard messages or local-observation effects.
+Handlers that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
 alike, so a run writes no seat's `doc/agents/…` document and is the writer its document writes
 name. The CLI defaults its actor to the run when the credential is present and names it on the
 trusted Unix client, which the daemon accepts only from a request its credential binds to that
@@ -640,6 +666,12 @@ the waiting step with reason `ask cancelled by ACTOR`, using ordinary retries an
 handling rather than resuming the step as ready.
 
 An ask that ends with its run is never resolved: the program ended with it.
+
+The host publishes an external invalidation of the owning program step before exposing a
+new request to run evaluation. Resource requests need this wake even before they have a
+journal claim. Mission evaluation acknowledges only invalidations present when it started;
+one arriving while it evaluates remains pending for the next pass. The incremental
+correction checker recognizes these external wakes as well as durable feed changes.
 
 **Pull requests.** `Fractal.awaitPr({ id, repo, pr, head })` waits for the outcome of one
 pull request at an exact head. `repo` is `owner/name`, `pr` is its number, and `head` is the
@@ -910,6 +942,24 @@ value. The success value is encoded with `intent.output` and journaled under the
 `$result`; a typed failure is encoded with its `_tag` and fields, journaled under the same key as
 a failed result, and fails the step with it. Retry classification reads this attempt's durable
 failure rather than an inner effect's possibly caught error.
+
+Required string-encoded fields normally lower to `input "name" kind="text"`. For a native
+subscription resource binding, use `Schema.Struct({ source: Fractal.resourceInput('vcs.pull-request') })`.
+This field lowers to `input "source" kind="resource" resource-kind="vcs.pull-request"`, the same
+resource input convention used by native missions. Use the helper directly as the Struct field;
+it carries declaration metadata in addition to the pinned-reference string schema. Optional fields
+are not admitted. The existing subscription `delivery "mission" { ...; resource "source" }` starts
+the program without a dispatch mission or a separate program delivery protocol.
+
+Run admission resolves and pins the observation before the worker starts. Both explicit
+`resource/NAME@CLAIM` and unpinned `resource/NAME` starts check the resolved claim's resource kind,
+not the subject's latest kind; `vcs.item.state` pins use their `item_kind`. A mismatch returns the
+typed native error code `resource-input-kind-mismatch` and creates no run. The program receives
+the unchanged `resource/NAME@CLAIM` string, preserving native observation identity and replay.
+Constraints are optional for existing native declarations; declarations without one retain their
+previous behavior and serialized revision identity. Deploy supporting daemons to every member
+that can admit runs before publishing constrained inputs; older binaries do not enforce the new
+constraint in replicated structured revisions.
 
 A program waiting on an ask, a child run or a pull-request outcome stays loaded in the host.
 A replaced host replays the program to the same wait.

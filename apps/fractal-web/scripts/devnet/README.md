@@ -11,14 +11,16 @@ devnet up <purpose> --ready-path / -- scripts/devnet/launch.sh <purpose> <build-
 ```
 
 - Both require `DEV_EDGE_URL`, `PORT`, and `WF_ST_CREDENTIAL_FILE`. The credential
-  file holds the paired gateway's raw bearer token, not an authorization header.
-  Keep it readable only by the deployment user. Use an absolute credential path.
+  file holds the paired gateway's raw bearer token or `Bearer ` header.
+  Keep it owned by and readable only by the deployment user (chmod 600).
+  Use an absolute credential path.
 - Both export `WF_EDGE_HOST` from the edge URL's hostname. Both also require
   `WF_ST_GATEWAY`, the deployment-owned paired gateway Unix socket address
   (for example `unix:/runtime/fractal/fractal-client.sock`). No host path is assumed.
-- Preview exports `WF_ALLOWED_HOSTS=127.0.0.1,localhost,<edge-host>` and reads the
-  credential into `WF_ST_AUTHORIZATION` with a `Bearer ` prefix, as required by the
-  public Vite gateway plugin. Preview requires `WF_VITE_CONFIG`: a deployment-owned
+- Preview exports `WF_ALLOWED_HOSTS=127.0.0.1,localhost,<edge-host>` and passes only
+  `WF_ST_CREDENTIAL_FILE`. The public Vite gateway plugin reads and normalizes the
+  protected file in-process; no bearer is exported into the preview environment.
+  Preview requires `WF_VITE_CONFIG`: a deployment-owned
   composition config that admits the Devnet edge Host and Origin. The public
   `vite.config.ts` is loopback-only and cannot serve edge traffic; setting allowed
   hosts alone does not change its gateway admission policy. Config paths and the

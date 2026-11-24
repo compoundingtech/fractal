@@ -72,16 +72,7 @@ impl Mailbox {
     /// One stream update, its statement cost, and whether it would send a frame.
     fn update(&mut self) -> (SqliteWork, bool) {
         let scope = SqliteWorkScope::start();
-        let (mark, view, updated, _) = update_snapshot(
-            &self.store,
-            &self.fence,
-            raw_snapshot,
-            self.previous.take(),
-            self.floor,
-            &mut self.admitted,
-            &mut self.policies,
-            &mut self.order,
-        )
+        let (mark, view, updated, _) = update_snapshot(&self.store, &self.fence, raw_snapshot, self.previous.take(), self.floor, &mut self.admitted, &mut self.policies, &mut self.order, None)
         .unwrap();
         let cost = scope.finish();
         self.previous = Some((mark, view));

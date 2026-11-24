@@ -1298,6 +1298,8 @@ pub enum MissionInputKind {
 pub struct MissionInputSpec {
     pub name: String,
     pub kind: MissionInputKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2527,7 +2529,7 @@ pub struct HumanReviewView {
     pub requested_at_unix_ms: u128,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AttentionActionView {
     pub label: String,
     pub argv: Vec<String>,
@@ -2567,7 +2569,7 @@ pub struct FaultDismissal {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AttentionItemView {
     #[serde(default)]
     pub episode: String,

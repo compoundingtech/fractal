@@ -513,7 +513,11 @@ fn a_plain_client_finds_a_daemon_started_with_socket_elsewhere_past_a_dead_defau
     // published after that (#5004): this client reaches the daemon and reads that it is not ready.
     let plain = |args: &[&str]| command(root).env_remove("ST3_ENDPOINT").env("ST3_DAEMON_WAIT", "0").args(args).output().unwrap();
     let roster = plain(&["agents", "ls"]);
-    assert!(!roster.status.success());
+    assert!(
+        !roster.status.success(),
+        "a serving daemon with its first roster held must not answer an agents page; client: {roster:?}; daemon: {}",
+        std::fs::read_to_string(&log_path).unwrap()
+    );
     assert!(String::from_utf8_lossy(&roster.stderr).contains("agent-roster-not-ready"), "{roster:?}");
     let documents = plain(&["documents", "ls"]);
     assert!(

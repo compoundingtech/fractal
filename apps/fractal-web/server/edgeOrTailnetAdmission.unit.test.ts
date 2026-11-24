@@ -1,6 +1,7 @@
 import type { IncomingMessage } from 'node:http'
 import { describe, expect, it, vi } from 'vitest'
 import { edgeOrTailnetAdmission } from './host.mts'
+import { devAdmission } from './devAdmission.mts'
 
 const origin = 'https://atlas.example.ts.net'
 const host = 'atlas.example.ts.net'
@@ -9,7 +10,7 @@ const login = 'robin@example.com'
 const listener = '127.0.0.1:7411'
 const request = (headers: IncomingMessage['headers'], method = 'GET') => ({ headers, method }) as IncomingMessage
 const edgeHeaders = { host: listener, 'x-forwarded-host': edgeHost, 'x-forwarded-proto': 'https' }
-// The deployment owns edgeAdmission. This spy models its authority shape, not a replacement policy.
+// The spy verifies dispatch independently of the concrete edge policy tested below.
 const setup = () => {
   const edge = vi.fn((req: IncomingMessage) => req.headers.host === listener &&
     req.headers['x-forwarded-host'] === edgeHost && req.headers['x-forwarded-proto'] === 'https')
@@ -79,5 +80,25 @@ describe('edgeOrTailnetAdmission', () => {
     const admit = edgeOrTailnetAdmission({ origin: undefined, logins: [], edge })
     expect(admit).toBe(edge)
     expect(admit(request({ host: 'anything.example' }))).toBe(true)
+  })
+
+  it('keeps the public edge admission and tailnet admission disjoint', () => {
+    const edge = devAdmission({ edgeHost, edgeAliases: ['alias.example.net'], port: () => 7411 })
+    const admit = edgeOrTailnetAdmission({ origin, logins: ['reader'], edge })
+    const incoming = (headers: IncomingMessage['headers']) =>
+      ({ headers, rawHeaders: [], method: 'GET', url: '/', socket: { remoteAddress: '127.0.0.1' } }) as IncomingMessage
+    expect(admit(incoming(edgeHeaders))).toBe(true)
+    expect(admit(incoming({ ...edgeHeaders, origin: `http://${listener}`, upgrade: 'websocket' }))).toBe(true)
+    expect(admit(incoming({ ...edgeHeaders, 'x-forwarded-host': 'alias.example.net' }))).toBe(true)
+    expect(admit(incoming({ host, origin, 'tailscale-user-login': 'reader' }))).toBe(true)
+    for (const headers of [
+      { ...edgeHeaders, host },
+      { ...edgeHeaders, host: 'unknown.example' },
+      { ...edgeHeaders, 'x-forwarded-host': host },
+      { ...edgeHeaders, 'tailscale-user-login': 'reader' },
+      { ...edgeHeaders, 'tailscale-node-tags': 'tag:worker' },
+      { ...edgeHeaders, 'x-forwarded-host': listener },
+      { host, origin, 'tailscale-user-login': 'unknown' },
+    ]) expect(admit(incoming(headers))).toBe(false)
   })
 })

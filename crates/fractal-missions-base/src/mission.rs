@@ -1051,6 +1051,9 @@ fn parse_embedded_mission(
                 MissionInputKind::Resource => "resource",
             },
         ));
+        if let Some(kind) = &input.resource_kind {
+            input_node.entries_mut().push(kdl::KdlEntry::new_prop("resource-kind", kind.as_str()));
+        }
         body.nodes_mut().push(input_node);
     }
     for name in [
@@ -1980,7 +1983,7 @@ fn build_work_selector(
 
 fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, FractalError> {
     reject_type(node)?;
-    ensure_only_properties(node, &["kind"])?;
+    ensure_only_properties(node, &["kind", "resource-kind"])?;
     ensure_no_children(node)?;
     let name = first_string(node)?;
     if name.contains('/') {
@@ -2006,7 +2009,16 @@ fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, FractalError>
             ));
         }
     };
-    Ok(MissionInputSpec { name, kind })
+    let resource_kind = property_string(node, "resource-kind")?;
+    if let Some(resource_kind) = &resource_kind
+        && (kind != MissionInputKind::Resource || resource_kind.trim().is_empty())
+    {
+        return Err(FractalError::new(
+            "invalid-mission-input-resource-kind",
+            format!("mission input `{name}` needs a nonempty resource-kind on kind=resource"),
+        ));
+    }
+    Ok(MissionInputSpec { name, kind, resource_kind })
 }
 
 fn parse_concurrent_runs(node: &KdlNode) -> Result<Option<u32>, FractalError> {

@@ -510,6 +510,7 @@ fn incremental_mail_work_is_changed_message_only_and_frontiers_reuse_source_fact
     }
     at += 1;
     frontier(&store, at);
+    store.seal_local_batches().unwrap();
     let mut objective = Incremental::default();
     let initial = objective.capture(&store, at).unwrap();
     assert_eq!(initial.samples.len(), 64);
@@ -523,8 +524,19 @@ fn incremental_mail_work_is_changed_message_only_and_frontiers_reuse_source_fact
         actor: None, fields: serde_json::from_value(json!({"status":"running","incarnation_id":"unrelated"})).unwrap(),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
+    store.seal_local_batches().unwrap();
+    for sql in [
+        /* sqlite-large-value: allow-for-now lv-h264ac1d5dbbf owner=fractal_api_core::mail_delivery_objectives_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('resource/mail-unrelated','resource','revision/test',(SELECT id FROM claims LIMIT 1),'{}')",
+        /* sqlite-large-value: allow-for-now lv-h16edf8e42749 owner=fractal_api_core::mail_delivery_objectives_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/mail-unrelated'",
+        /* sqlite-large-value: allow-for-now lv-h08e8cdfb5399 owner=fractal_api_core::mail_delivery_objectives_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/mail-unrelated'",
+    ] {
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h574ba13a3a53 owner=fractal_api_core::mail_delivery_objectives_tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
+        objective.capture(&store, at).unwrap();
+    }
+    store.forget_current_views();
     objective.capture(&store, at).unwrap();
     let unrelated = work_counts(&store);
+    assert_eq!(unrelated.full_rebuilds, baseline.full_rebuilds);
     assert_eq!(unrelated.messages_evaluated, baseline.messages_evaluated);
     assert_eq!(unrelated.source_rows, baseline.source_rows);
     assert_eq!(unrelated.owner_lookups, baseline.owner_lookups);
@@ -618,4 +630,27 @@ fn incremental_shard_coverage_fences_without_rebuilding_the_population() {
     assert_eq!(after.source_rows - before.source_rows, 1);
     assert_eq!(mirrored.samples.len(), 1);
     assert_eq!(mirrored.unknown, 0);
+}
+
+#[test]
+fn incremental_mail_known_deletions_only_recheck_the_affected_message() {
+    let store = Store::open_memory("example-host").unwrap();
+    declared(&store);
+    let first = send(&store, "message/example-delete-first", json!([]));
+    let second = send(&store, "message/example-delete-second", json!([]));
+    let closed = step(&store, "message/example-delete-first", "message.closed");
+    let at = first.max(second).max(closed) + 1;
+    frontier(&store, at);
+    let mut objective = Incremental::default();
+    assert_eq!(objective.capture(&store, at).unwrap().samples.len(), 2);
+    let before = work_counts(&store);
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hd7f010cccc43 owner=fractal_api_core::mail_delivery_objectives_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mail_delivery_steps_v1 WHERE message='message/example-delete-first'", [],
+    ).unwrap();
+    let after = objective.capture(&store, at).unwrap();
+    let work = work_counts(&store);
+    assert_eq!(work.full_rebuilds, before.full_rebuilds);
+    assert_eq!(work.messages_evaluated - before.messages_evaluated, 1);
+    assert_eq!(after.samples.len(), 2);
+    assert!(after.samples.iter().all(|sample| matches!(sample.terminal, LifecycleTerminal::Open)));
 }

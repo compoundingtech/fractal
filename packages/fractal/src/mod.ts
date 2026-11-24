@@ -2763,7 +2763,10 @@ export const mission = <const TMission extends string>(input: MissionInput<TMiss
         ? []
         : [node({ name: 'concurrent-runs', props: { max: m.concurrentRuns } })]),
       ...(m.inputs ?? []).map((value) =>
-        node({ name: 'input', args: [value.name], props: { kind: value.kind } }),
+        node({ name: 'input', args: [value.name], props: {
+          kind: value.kind,
+          ...(value.resourceKind === undefined ? {} : { 'resource-kind': value.resourceKind }),
+        } }),
       ),
       ...(m.assignedTo === undefined
         ? []

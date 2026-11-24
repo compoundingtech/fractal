@@ -19,6 +19,7 @@ fn removed_legacy_handlers_are_absent_from_api_and_its_route_families() {
         ("records", /* sqlite-large-value: allow-for-now lv-h2416cabf721b owner=fractal_api_core::api::legacy_handler_guard_tests TODO=trace-statement-and-value-representation */ include_str!("records.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-hfeca42bbeb2a owner=fractal_api_core::api::legacy_handler_guard_tests TODO=trace-statement-and-value-representation */ include_str!("replication.rs")),
         ("replication_replay", /* sqlite-large-value: allow-for-now lv-h338b7a875215 owner=fractal_api_core::api::legacy_handler_guard_tests TODO=trace-statement-and-value-representation */ include_str!("replication_replay.rs")),
+        ("run_requests", /* sqlite-large-value: allow-for-now lv-h014939c178e4 owner=fractal_api_core::api::legacy_handler_guard_tests TODO=trace-statement-and-value-representation */ include_str!("run_requests.rs")),
         ("runs", /* sqlite-large-value: allow-for-now lv-h610d826d833a owner=fractal_api_core::api::legacy_handler_guard_tests TODO=trace-statement-and-value-representation */ include_str!("runs.rs")),
         ("sessions", /* sqlite-large-value: allow-for-now lv-hfdaa0b44a23e owner=fractal_api_core::api::legacy_handler_guard_tests TODO=trace-statement-and-value-representation */ include_str!("sessions.rs")),
         ("work", /* sqlite-large-value: allow-for-now lv-h17a0db59ee8b owner=fractal_api_core::api::legacy_handler_guard_tests TODO=trace-statement-and-value-representation */ include_str!("work.rs")),

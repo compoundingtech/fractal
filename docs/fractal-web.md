@@ -308,6 +308,23 @@ The settings:
 - `WF_HOST` must be a loopback address.
 - `WF_PORT` is required; use `7411` to keep it separate from the daemon's local browser port.
 - `WF_DEPLOYMENT_ID` defaults to the published host.
+- `WF_USAGE_HISTORY_URL` is optional and interim: a loopback usage-hub base URL such as
+  `http://127.0.0.1:PORT`. When set, the publisher (and the Vite development gateway) answers
+  `GET /v1/client/usage/history?account=<ledgerAccountId>` itself, because the client gateway
+  serves quota but not history yet. It reads only the hub's `/api/v1/quota` and one account's
+  `usage_over_time` day series, refuses accounts that quota answer does not publish, and requires
+  the request's gateway credential to hold `read.projections`. Quota stays on the gateway. Unset
+  registers no route. Removal is tracked in
+  [#7115](https://github.com/compoundingtech/fractal/issues/7115).
+- `WF_ROOT_DETAIL_URL` is optional: a loopback base URL, such as `http://127.0.0.1:PORT`, of a
+  producer serving `/api/v1/lens/root_detail`. When set, the publisher (and the Vite development
+  gateway) answers `GET /v1/client/usage/root-detail?agent=<id>&window=1d|7d` with the
+  descendant-inclusive spend of an `omp` agent's current native root over that window.
+  The browser names only the agent. The server derives the root from the gateway with the
+  request's own gateway credential, which must hold `read.projections`, and requires the agent's
+  native usage over the last 7 days to pair it with that root. It returns the root total,
+  descendant count, at most 20 descendants, attribution share and reported durations, nothing
+  else. Unset registers no route.
 
 Before relying on a published endpoint, prove that the ingress strips a forged
 login and forged tag header: an unknown user or unknown tagged node must still
@@ -613,7 +630,7 @@ node apps/fractal-web/scripts/composer-send-proof.mjs --without-binding
 ```
 
 The live proof requires a send-granted gateway through the existing `WF_ST_GATEWAY` and
-`WF_ST_AUTHORIZATION` environment variables and a disposable seat in `WF_E2E_SCRATCH_SEAT`. It
+`WF_ST_CREDENTIAL_FILE` environment variables and a disposable seat in `WF_E2E_SCRATCH_SEAT`. It
 starts its own loopback server on an ephemeral port and permits message actions only to that seat.
 It gates real HTTP/echo delivery to observe Pending→Sent→echo, injects one explicit refusal,
 checks Retry reuses the key, and prints build revision, seat and timings. The negative control

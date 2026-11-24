@@ -119,6 +119,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
                 crate::mission::LOOP_ITEM_INPUT, crate::mission::CANDIDATE_INDEX_INPUT].contains(&input.name.as_str())) { continue; }
         let mut input_node = text("input", &input.name);
         property(&mut input_node, "kind", match input.kind { MissionInputKind::Text => "text", MissionInputKind::Resource => "resource" });
+        if let Some(kind) = &input.resource_kind { property(&mut input_node, "resource-kind", kind.as_str()); }
         children.push(input_node);
     }
     if parent.is_none() {

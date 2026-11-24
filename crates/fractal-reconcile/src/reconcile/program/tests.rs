@@ -135,7 +135,10 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
+    let execution = engine.execution(crate::store::run_credentials::RunBinding {
+        run: dispatch.run.clone(), step_run: dispatch.step.clone(), attempt: dispatch.attempt,
+    }, 1, None);
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, execution, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
@@ -177,7 +180,10 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
+    let execution = engine.execution(crate::store::run_credentials::RunBinding {
+        run: step.run.clone(), step_run: step.subject.clone(), attempt: 1,
+    }, 1, None);
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, execution, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
@@ -298,6 +304,9 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
             program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None, finalizer_grace_ms: None },
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
+        execution: engine.execution(crate::store::run_credentials::RunBinding {
+            run: run.subject.clone(), step_run: step.clone(), attempt,
+        }, generation, None),
         generation, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]),
     });
@@ -340,7 +349,7 @@ fn host_ending_survives_outcome_and_requires_each_exact_termination_acknowledgem
     for (attempt, generation) in [(2, 1), (2, 2)] {
         running_attempt(&engine, &run, attempt, generation);
         engine.handle(&message("ending", attempt), generation).unwrap();
-        assert!(engine.end(step, attempt, generation, None, false).is_some());
+        assert!(engine.end(step, attempt, generation, None, false).unwrap().is_some());
     }
     engine.handle(&message("cancelled", 1), 2).unwrap();
     assert_eq!(engine.lock().terminating.len(), 3);
@@ -437,7 +446,7 @@ fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
     let step = &unrelated.steps[0].subject;
     running_attempt(&engine, &unrelated, 1, 1);
     engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
-    assert!(engine.end(step, 1, 1, None, false).is_some());
+    assert!(engine.end(step, 1, 1, None, false).unwrap().is_some());
     assert!(engine.fence_left_effects(&replacement).unwrap());
     assert!(!engine.fence_left_effects(&unrelated).unwrap());
     engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();
@@ -1019,4 +1028,265 @@ fn a_new_wait_does_not_treat_an_older_observed_head_as_head_movement() {
     assert!(await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "requested").unwrap());
     assert_eq!(engine.journal(&request.step, 1).unwrap()[0]["value"],
         json!({"outcome":"dequeued","reason":"head-changed"}));
+}
+
+// A real source SQLite issuer and home admission, with ACK delivery controlled by the test.
+// No issuer responses are scripted: tombstones, admission backpressure and credentials all
+// come from the durable authority implementation.
+struct JournalRunAuthority {
+    local: Mutex<rusqlite::Connection>,
+    home: Arc<Store>,
+    host_key: smallclaims::fleet::MemberKey,
+    revoked: mpsc::Sender<()>,
+}
+
+impl JournalRunAuthority {
+    fn binding(&self, execution: &ProgramExecution) -> crate::store::run_credentials::ExecutionBinding {
+        use sha2::Digest;
+        let revision = serde_json::to_vec(&json!({
+            "home": "node", "host": "execution-host", "epoch": 1,
+            "run": execution.run, "runtime": execution.runtime, "incarnation": execution.incarnation,
+        })).unwrap();
+        crate::store::run_credentials::ExecutionBinding {
+            version: 1, home: "node".into(), host: "execution-host".into(), epoch: 1,
+            subject: execution.run.step_run.clone(), runtime: execution.runtime.clone(),
+            incarnation: execution.incarnation.clone(),
+            authorization_revision: format!("{:x}", sha2::Sha256::digest(revision)),
+            run: Some(execution.run.clone()),
+        }
+    }
+
+    fn acknowledge(&self) {
+        use crate::store::run_credentials::local;
+        let mut connection = self.local.lock().unwrap();
+        let changes = local::pending_changes(&connection, 1).unwrap();
+        for change in &changes {
+            if change.revoked {
+                self.home.revoke_run_execution(&change.binding).unwrap();
+            } else {
+                self.home.admit_run_execution(&change.binding, self.host_key.public()).unwrap();
+            }
+        }
+        if let Some(last) = changes.last() {
+            let tx = connection.transaction().unwrap();
+            local::acknowledge_changes_tx(&tx, 1, last.sequence).unwrap();
+            tx.commit().unwrap();
+        }
+    }
+}
+
+impl RunAuthority for JournalRunAuthority {
+    fn issue(&self, execution: &ProgramExecution, lifetime_ms: u64) -> Result<String> {
+        use crate::store::run_credentials::local;
+        anyhow::ensure!(self.home.admit_program_attempt(&execution.run.step_run, execution.run.attempt)? == execution.run);
+        let binding = self.binding(execution);
+        let mut connection = self.local.lock().unwrap();
+        let tx = connection.transaction()?;
+        let issued = if local::offer_execution_tx(&tx, &binding)? {
+            local::issue_local_credential_tx(&tx, &binding, lifetime_ms, 1_000)
+        } else {
+            Err(crate::model::FractalError::new("local-authority-backpressure", "awaiting prior revocation ACK"))
+        };
+        // A backpressure response must still commit its proposal/admission for home delivery.
+        tx.commit()?;
+        Ok(issued?)
+    }
+
+    fn revoke(&self, execution: &ProgramExecution) -> Result<()> {
+        let binding = self.binding(execution);
+        let mut connection = self.local.lock().unwrap();
+        let tx = connection.transaction()?;
+        crate::store::run_credentials::local::revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision)?;
+        tx.commit()?;
+        let _ = self.revoked.send(());
+        Ok(())
+    }
+}
+
+struct AuthorityFixture {
+    engine: Arc<ProgramEngine>,
+    authority: Arc<JournalRunAuthority>,
+    dispatch: Dispatch,
+    _dir: tempfile::TempDir,
+    revoked: mpsc::Receiver<()>,
+}
+
+impl AuthorityFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        let step = engine.store.start_program_step_for_tests();
+        let hash = engine.store.put_blob(br#"
+export default {
+  [Symbol.for('fractal.program.v1')]: async (ctx) => {
+    if (!ctx.payload.finishGate) await new Promise(() => {})
+    const fs = await import('node:fs/promises')
+    for (;;) {
+      try { await fs.access(ctx.payload.finishGate); break }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+    }
+    return { _tag: 'Success', value: true }
+  },
+}
+"#).unwrap();
+        let local = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::run_credentials::local::initialize_local_authority(&local).unwrap();
+        engine.store.install_run_epoch("execution-host", 1).unwrap();
+        let (revoked, receiver) = mpsc::channel();
+        let authority = Arc::new(JournalRunAuthority {
+            local: Mutex::new(local), home: engine.store.clone(),
+            host_key: smallclaims::fleet::MemberKey::generate().unwrap().0,
+            revoked,
+        });
+        engine.install_run_authority(authority.clone()).unwrap();
+        let dispatch = Dispatch {
+            step: step.subject, attempt: 1, run: step.run,
+            program: ProgramSpec { bundle: "/fixture.mjs".into(), bundle_hash: hash, stalled_after_ms: None, finalizer_grace_ms: None },
+            payload: BTreeMap::new(), env: BTreeMap::new(), cwd: dir.path().to_string_lossy().into_owned(),
+        };
+        Self { engine, authority, dispatch, _dir: dir, revoked: receiver }
+    }
+
+    fn waiting(&self) -> ProgramExecution {
+        self.engine.lock().authority_waits[&self.dispatch.step].execution.clone()
+    }
+
+    fn dispatch(&self) -> Result<Dispatched> {
+        self.engine.dispatch(self.dispatch.clone())
+    }
+
+    fn reject_claim(&self, kind: &str) {
+        assert!(["program.attempt.trace", "step-run.state"].contains(&kind));
+        self.engine.store.connection.write().execute_batch(&format!(
+            /* sqlite-large-value: allow-for-now lv-ha7ab904670ea owner=fractal_reconcile::reconcile::program::tests TODO=prepare-body-and-predecessor-values */ "CREATE TEMP TRIGGER reject_program_persistence BEFORE INSERT ON claims
+             WHEN NEW.kind='{kind}' BEGIN SELECT RAISE(ABORT, 'program persistence refused'); END;"
+        )).unwrap();
+    }
+
+    fn allow_claims(&self) {
+        self.engine.store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hb943a6b8edb9 owner=fractal_reconcile::reconcile::program::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_program_persistence").unwrap();
+    }
+}
+
+impl Drop for AuthorityFixture {
+    fn drop(&mut self) {
+        let host = {
+            let mut inner = self.engine.lock();
+            inner.running.clear();
+            inner.authority_waits.clear();
+            inner.host.take()
+        };
+        if let Some(mut host) = host {
+            let _ = host.child.kill();
+            let _ = host.child.wait();
+        }
+    }
+}
+
+#[test]
+fn an_authority_ack_retry_keeps_its_identity_but_a_failed_trace_issuance_does_not() {
+    use crate::store::run_credentials::local;
+    let fixture = AuthorityFixture::new();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    let first = fixture.waiting();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    assert_eq!(fixture.waiting(), first);
+    assert_eq!(local::pending_changes(&fixture.authority.local.lock().unwrap(), 1).unwrap().len(), 1);
+    fixture.authority.acknowledge();
+    fixture.reject_claim("program.attempt.trace");
+    assert!(fixture.dispatch().is_err(), "the real trace INSERT must fail after issuance");
+    assert!(fixture.engine.lock().authority_waits.is_empty());
+    assert!(fixture.engine.lock().running.is_empty());
+    assert!(local::require_execution(&fixture.authority.local.lock().unwrap(), &fixture.authority.binding(&first)).is_err());
+    fixture.allow_claims();
+
+    // The graph attempt and Bun host are unchanged; the revoked revision must not be reused.
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    let resumed = fixture.waiting();
+    assert_eq!(resumed.run, first.run);
+    assert_ne!(resumed.incarnation, first.incarnation);
+    fixture.authority.acknowledge(); // the failed issuance's revocation
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    assert_eq!(fixture.waiting(), resumed);
+    fixture.authority.acknowledge(); // the fresh issuance's admission
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::Started);
+    let inner = fixture.engine.lock();
+    let running = &inner.running[&fixture.dispatch.step];
+    assert_eq!(running.execution, resumed);
+    assert_eq!(running.generation, 1);
+}
+
+#[test]
+fn a_failed_terminal_write_resumes_with_new_authority_on_the_same_host_and_attempt() {
+    use crate::store::run_credentials::local;
+    let mut fixture = AuthorityFixture::new();
+    let gate = fixture._dir.path().join("finish-gate");
+    fixture.dispatch.payload.insert("finishGate".into(), gate.to_string_lossy().into_owned());
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    let first = fixture.waiting();
+    fixture.authority.acknowledge();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::Started);
+    let credential = fixture.engine.lock().running[&fixture.dispatch.step].dispatch.env[
+        crate::store::run_credentials::RUN_CREDENTIAL_ENV
+    ].clone();
+    fixture.reject_claim("step-run.state");
+    std::fs::write(&gate, b"finish").unwrap();
+    fixture.revoked.recv().unwrap();
+    // Revocation commits in end(), before settle() attempts its real terminal INSERT.
+    while !fixture.engine.lock().ended.is_empty() {
+        std::thread::yield_now();
+    }
+    assert_eq!(completed_result(&fixture.engine.store, &fixture.dispatch.step, 1,
+        &fixture.dispatch.program.bundle_hash).unwrap(), Some(json!(true)));
+    assert_eq!(fixture.engine.store.step_run(&fixture.dispatch.step).unwrap().unwrap().status, "working");
+    assert!(local::local_binding(&fixture.authority.local.lock().unwrap(), &credential, 1_000).is_err());
+    fixture.allow_claims();
+    std::fs::remove_file(gate).unwrap();
+
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    let resumed = fixture.waiting();
+    assert_eq!(resumed.run, first.run);
+    assert_ne!(resumed.incarnation, first.incarnation);
+    fixture.authority.acknowledge();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    assert_eq!(fixture.waiting(), resumed);
+    fixture.authority.acknowledge();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::Started);
+    let inner = fixture.engine.lock();
+    let running = &inner.running[&fixture.dispatch.step];
+    assert_eq!(running.generation, 1);
+    assert_eq!(running.execution, resumed);
+    let credential = &running.dispatch.env[crate::store::run_credentials::RUN_CREDENTIAL_ENV];
+    assert_eq!(local::local_binding(&fixture.authority.local.lock().unwrap(), credential, 1_000).unwrap(),
+        fixture.authority.binding(&resumed));
+}
+
+#[test]
+fn finalization_retains_execution_authority_until_its_outcome_and_then_revokes_it() {
+    use crate::store::run_credentials::local;
+    let fixture = AuthorityFixture::new();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    fixture.authority.acknowledge();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::Started);
+    let step = &fixture.dispatch.step;
+    let credential = fixture.engine.lock().running[step].dispatch.env[
+        crate::store::run_credentials::RUN_CREDENTIAL_ENV
+    ].clone();
+    let mut run = fixture.engine.store.mission_run(&fixture.dispatch.run).unwrap().unwrap();
+    run.status = "cancelled".into();
+    fixture.engine.release_left(&run).unwrap();
+    assert!(fixture.engine.lock().running[step].finalizing);
+    assert!(local::local_binding(&fixture.authority.local.lock().unwrap(), &credential, 1_000).is_ok());
+    fixture.engine.handle(&json!({
+        "t": "finalizers", "step": step, "attempt": 1, "outcome": "completed",
+    }), 1).unwrap();
+    assert!(local::local_binding(&fixture.authority.local.lock().unwrap(), &credential, 1_000).is_err());
+    assert!(fixture.engine.lock().running.contains_key(step), "termination still needs its exact ACK");
+    fixture.engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 2).unwrap();
+    assert!(fixture.engine.lock().running.contains_key(step));
+    fixture.engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();
+    assert!(!fixture.engine.lock().running.contains_key(step));
 }

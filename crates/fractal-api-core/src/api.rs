@@ -31,6 +31,7 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 mod roster_assembly;
+mod roster_presentation;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -198,6 +199,7 @@ pub mod messages;
 pub mod operations;
 pub mod records;
 mod write_principal;
+pub mod run_requests;
 mod native_delivery;
 pub mod replication;
 mod replication_replay;
@@ -655,6 +657,16 @@ async fn test_retire_closed_mail(
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
     let (threads, claims) = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, usize)> {
+        // The signed-claim forget backstop reads the store clock, not the planner's argument.
+        // Advance this worker's simulation clock too, without changing concurrent daemon writes.
+        struct RetirementClock;
+        impl Drop for RetirementClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = RetirementClock;
+        smallclaims::store::set_thread_clock(Some(u128::from(request.now_ms)));
         let (mut threads, mut claims) = (0, 0);
         loop {
             let step = store.retire_closed_mail_step(request.now_ms)?;
@@ -735,6 +747,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/resources/{id}/member-scope", get(resources::member_scope))
         .route("/v1/internal/resources/by-request/{request_id}", get(resources::show_request))
         .route("/v1/internal/resources/by-request/{request_id}/cancel", post(resources::cancel_request))
+        .route("/v1/internal/native/run-request/claim", post(run_requests::claim))
+        .route(run_requests::ACKNOWLEDGE_PATH, post(run_requests::acknowledge))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -3742,13 +3756,26 @@ impl HeardSeats {
 // than only when a new claim invalidates the fold. Expiry changes no durable fact.
 const DECLARATION_RESTART_PRESENTATION_MS: u128 = 120_000;
 
+fn declaration_restart_expired(item: &Value, now: u128) -> bool {
+    item["state"] == "restarting"
+        && item["_restart_until_unix_ms"].as_u64().is_none_or(|deadline| now >= u128::from(deadline))
+}
+
+fn agent_state_after_restart(item: &Value, now: u128) -> Option<&str> {
+    if declaration_restart_expired(item, now)
+        && let Some(previous) = item["_restart_underlying_state"].as_str() {
+        Some(previous)
+    } else {
+        item["state"].as_str()
+    }
+}
+
 fn overlay_declaration_restart(item: &mut Value, now: u128) {
+    let expired = declaration_restart_expired(item, now);
     let fields = item.as_object_mut().expect("agent card");
     let previous = fields.remove("_restart_underlying_state");
-    let deadline = fields.remove("_restart_until_unix_ms").and_then(|value| value.as_u64());
-    if fields.get("state").and_then(Value::as_str) == Some("restarting")
-        && deadline.is_none_or(|deadline| now >= u128::from(deadline))
-        && let Some(previous) = previous
+    fields.remove("_restart_until_unix_ms");
+    if expired && let Some(previous) = previous
     {
         fields.insert("state".into(), previous);
     }
@@ -4518,6 +4545,7 @@ fn client_agent_cards_presented(
             Ok((name, value))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    store.count_agent_roster_enrichment(agents.len());
     agents.sort_by(|(left_name, left), (right_name, right)| {
         left_name
             .cmp(right_name)
@@ -6646,12 +6674,11 @@ pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> 
     let generation = store.agents_publication_build()?;
     let Some(CapturedPresentedAgents { source, subagents, now }) =
         refresh_agent_roster_source(store, history)? else { return Ok(()); };
-    let valid_until = source.valid_until_ms.map_or(now.saturating_add(1000),
-        |deadline| deadline.min(now.saturating_add(1000)));
-    let mut rows = (*source.rows).clone();
-    overlay_agent_resources_at(store, &mut rows, &client_timestamp(u128::from(now)),
-        u128::from(now), Some(subagents))?;
-    store.publish_presented_agents(generation, source, now, Some(valid_until), rows)
+    let (rows, presentation_deadline) =
+        roster_presentation::present(store, &source.rows, subagents, u128::from(now))?;
+    let valid_until = source.valid_until_ms.into_iter()
+        .chain(presentation_deadline.map(|at| at.min(u128::from(u64::MAX)) as u64)).min();
+    store.publish_presented_agents(generation, source, now, valid_until, rows)
 }
 
 struct CapturedPresentedAgents {
@@ -7336,27 +7363,7 @@ pub fn start_native_session_discovery(state: &AppState) {
     crate::external_sessions::start_history_inventory(state.native_session_home.as_deref());
 }
 
-/// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
-/// so refreshing never takes more than about half a core however often readers ask. Reads
-/// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
-/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
-const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
-
-/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
-/// a very cheap fold cannot turn fresh reads into many refreshes a second.
-const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
-
-/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
-/// twice the refresh's own length, though never past the full pause. A host whose seats write a
-/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
-/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
-/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
-/// its half-core bound, as a pause no local claim cuts.
-const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
-
-/// How long a legacy fresh or named-cut read waits for publication: long enough
-/// for the refresher to finish a fold, pause as long, and fold again.
+/// How long a legacy fresh or named-cut read waits for an event-driven publication.
 const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 
 /// Keep the complete agents roster published off the request path. As the daemon starts it
@@ -7372,17 +7379,20 @@ pub fn start_agent_roster(state: &AppState) {
         return;
     };
     let store = state.store.clone();
+    let mut changed = state.event_notify.subscribe();
+    let mut delivery = delivery_presence::subscribe_semantic();
+    let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
+    let inputs = {
+        let wake = Arc::clone(&wake);
+        store.connection.observe_tables(&["claims", "local_observations", "meta"], move |_| wake.notify_one())
+    };
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
-        // Whether a commit holds a claim this node wrote about a subject a card reads is read off
-        // the writer, once for every refresher that pauses on it.
-        let mut local = agent_roster_local_commits(&store);
+        // Subscribe before the first fold so writes during materialization remain pending.
+        let _inputs = inputs;
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
         loop {
-            let started = tokio::time::Instant::now();
-            // Every claim at or before this index is in the fold below or an earlier one.
-            let folded_through = store.index().unwrap_or(u64::MAX);
             let first = std::mem::take(&mut head);
             let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
@@ -7393,56 +7403,40 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            agent_roster_pause(&store, &mut local, started.elapsed(), folded_through).await;
-            // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
-            // paced by the existing refresh pause, never a timer per subscriber.
-            if store.agent_roster_refresh_failed() {
-                wake.notified().await;
-            }
-            wait_for_agent_roster_demand(&store, &wake).await;
+            wait_for_agent_roster_change(&store, &wake, &mut changed, &mut delivery, &mut relayed, client_now_ms()).await;
         }
     }));
 }
 
-/// Why the refresher's pause between two refreshes ended.
-type AgentRosterPauseEnd = local_commits::PauseEnd;
-
-/// The roster's hold on the store's local-commit scanner: a claim this node wrote cuts the
-/// refresher's pause only when a card reads it (`local_agent_card_input_after`, the subjects the
-/// roster's incremental fold reads).
-fn agent_roster_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
-    let reader = Arc::clone(store);
-    store.local_commits(AGENT_ROSTER_LOCAL_CHECK, Arc::new(move |after, through| reader.local_agent_card_input_after(after, through)))
-}
-
-/// The name the roster's check has on the scanner.
-const AGENT_ROSTER_LOCAL_CHECK: &str = "agents";
-
-/// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
-/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
-/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
-/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
-/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
-/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
-/// fold, so a person waiting to see their own write is not left waiting up to a second for the
-/// next timed fold, while a stream of local writes folds no more than about twice a second and
-/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
-/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
-/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
-/// stream or a node's other writes do not fold the roster any more often. See
-/// [`local_commits::pause_after_fold`].
-async fn agent_roster_pause(
-    store: &Arc<Store>,
-    local: &mut local_commits::LocalCommits,
-    folded: Duration,
-    through: u64,
-) -> AgentRosterPauseEnd {
-    let pace = local_commits::Pace {
-        floor: AGENT_ROSTER_FRESH_PAUSE,
-        local: AGENT_ROSTER_LOCAL_PAUSE,
-        full: AGENT_ROSTER_REFRESH_PAUSE,
-    };
-    local_commits::pause_after_fold(Some(local), store.fresh_agent_roster_wanted(), pace, folded, through).await
+/// Wait for semantic inputs, explicit demand, or the earliest actual evidence boundary.
+async fn wait_for_agent_roster_change(
+    store: &Store,
+    wake: &tokio::sync::Notify,
+    changed: &mut tokio::sync::watch::Receiver<u64>,
+    delivery: &mut tokio::sync::watch::Receiver<u64>,
+    relayed: &mut tokio::sync::watch::Receiver<u64>,
+    now_ms: u128,
+) {
+    loop {
+        let deadline = (store.agents_publication_demand() && !store.agent_roster_refresh_failed())
+            .then(|| store.agents_publication()
+                .and_then(|publication| publication.valid_until_unix_ms)).flatten();
+        let clock = async {
+            match deadline {
+                Some(at) => tokio::time::sleep(Duration::from_millis(
+                    at.saturating_sub(now_ms).min(u128::from(u64::MAX)) as u64)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = wake.notified() => {},
+            _ = changed.changed() => {},
+            _ = delivery.changed() => {},
+            _ = relayed.changed() => {},
+            _ = clock => {},
+        }
+        if store.agents_publication_demand() { return; }
+    }
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no
@@ -7471,6 +7465,9 @@ async fn refresh_agent_roster_admitted(
     store: Arc<Store>,
     first: bool,
 ) -> Result<anyhow::Result<()>, tokio::task::JoinError> {
+    if !first && !store.agents_publication_demand() {
+        return Ok(Ok(()));
+    }
     let mut admission = store.admit_agent_resources("refresher").await;
     if !first {
         if !store.agents_publication_demand() {
@@ -7545,14 +7542,6 @@ async fn refresh_agent_roster_admitted(
     }).await
 }
 
-async fn wait_for_agent_roster_demand(store: &Store, wake: &tokio::sync::Notify) {
-    // Notifications may have been queued while readers were present. Recheck demand
-    // after consuming them rather than doing one last presentation fold on an idle node.
-    while !store.agents_publication_demand() {
-        wake.notified().await;
-    }
-}
-
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
 /// its parents. `state_socket` gives clients without the daemon's runtime environment a stable
 /// address for the same listener. Test servers and the paired gateway use the unbound listener.
@@ -7576,7 +7565,7 @@ pub async fn serve_unix_bound_with_ready(
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, Some(state_socket)).await?;
-    serve_reserved_unix_with_ready(reserved, app, Some(store), None, ready).await
+    serve_reserved_unix_with_ready(reserved, app, Some(store), None, None, ready).await
 }
 
 /// Serve with injected ancestry lookup. `Some(store)` enables both binding and mandatory actor
@@ -7601,7 +7590,7 @@ async fn serve_unix_with_ancestor_ready(
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
     // Generic/injected-ancestry servers have no daemon supervisor authority.
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, None, ancestor, ready).await
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, None, None, ancestor, ready).await
 }
 
 /// An address reservation, not a listener. Connect attempts remain refused until
@@ -7687,9 +7676,10 @@ pub async fn serve_reserved_unix_with_ready(
     app: Router,
     bound_store: Option<Arc<Store>>,
     worker: Option<WorkerAuthority>,
+    local_run_authority: Option<Arc<dyn run_requests::LocalRunAuthority>>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, observed_harness_ancestor, ready).await
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, local_run_authority, observed_harness_ancestor, ready).await
 }
 
 async fn serve_reserved_unix_with_ancestor_ready(
@@ -7697,10 +7687,11 @@ async fn serve_reserved_unix_with_ancestor_ready(
     app: Router,
     bound_store: Option<Arc<Store>>,
     worker: Option<WorkerAuthority>,
+    local_run_authority: Option<Arc<dyn run_requests::LocalRunAuthority>>,
     ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker,
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, local_run_authority,
         move |pid, peer| Ok(ancestor(pid, peer)), ready).await
 }
 
@@ -7709,6 +7700,7 @@ async fn serve_reserved_unix_with_lookup_ready(
     app: Router,
     bound_store: Option<Arc<Store>>,
     worker: Option<WorkerAuthority>,
+    local_run_authority: Option<Arc<dyn run_requests::LocalRunAuthority>>,
     ancestor: impl Fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
         -> Result<HarnessAncestry, AncestryUnavailableCause> + Copy + Send + Sync + 'static,
     ready: impl FnOnce(),
@@ -7722,6 +7714,12 @@ async fn serve_reserved_unix_with_lookup_ready(
     let bind_harness = bound_store.is_some();
     let app = match bound_store {
         Some(store) => app.layer(from_fn_with_state((store, worker), guard_bound_actor)),
+        None => app,
+    };
+    // This extension must be outside the mandatory serving guard: offline credential binding
+    // consults this journal-backed service before any inner router middleware runs.
+    let app = match local_run_authority {
+        Some(authority) => app.layer(Extension(authority)),
         None => app,
     };
     let listener = socket.listen(1024)?;
@@ -8483,21 +8481,35 @@ async fn guard_bound_actor(
 ) -> Response {
     request.extensions_mut().remove::<ancestry_diagnostics::VerifiedWorkerFallback>();
     let ancestry_diagnostic = ancestry_diagnostics::RequestDiagnostic::capture(&request);
-    let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
+    // A carried run capability takes precedence over inherited agent ancestry.
     // A run credential binds only while its attempt runs; one that no longer binds leaves the
     // caller unverifiable, so it writes nothing.
     request.extensions_mut().remove::<BoundRun>();
+    if request.extensions().get::<RunCredential>().is_some() {
+        request.extensions_mut().remove::<BoundAgent>();
+    }
     if let Some(credential) = request.extensions().get::<RunCredential>().cloned() {
         let lookup = store.clone();
-        match tokio::task::spawn_blocking(move || lookup.run_binding(credential.secret())).await {
+        let local = request.extensions().get::<Arc<dyn run_requests::LocalRunAuthority>>().cloned();
+        match tokio::task::spawn_blocking(move || {
+            if let Some(local) = local {
+                local.resolve(credential.secret())?.run.ok_or_else(|| FractalError::new(
+                    "run-request-refused", "this execution has no admitted run authority",
+                ))
+            } else {
+                lookup.run_binding(credential.secret())
+            }
+        }).await {
             Ok(Ok(binding)) => { request.extensions_mut().insert(BoundRun(binding)); }
             _ => { request.extensions_mut().insert(HarnessAncestry::Unavailable); }
         }
     }
+    let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
     let client_request = request.uri().path().starts_with("/v1/client/");
     // This guard is outside all router layers. Authenticate here, before ancestry admission,
     // independently of the ingress observe/enforce rollout.
     if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
+        && request.extensions().get::<RunCredential>().is_none()
         && let Some(worker) = worker
     {
         let peer = request.extensions().get::<LocalPeer>().cloned();
@@ -8520,7 +8532,14 @@ async fn guard_bound_actor(
         diagnostic.record(result.as_ref().err().map(|error| error.status), verified_worker);
     }
     match result {
-        Ok(request) => next.run(request).await,
+        Ok(request) => {
+            let binding = request.extensions().get::<BoundRun>().map(|bound| bound.0.clone());
+            if let Some(binding) = binding {
+                crate::store::run_credentials::request_context::scope(binding, next.run(request)).await
+            } else {
+                next.run(request).await
+            }
+        }
         Err(error) if client_request => {
             let status = error.status;
             let raw = json!({"code":error.code,"message":error.message,"details":error.details});
@@ -8577,7 +8596,9 @@ pub async fn guard_bound_request(
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
         // Resource handlers bind submission to native ownership and scope inspection/control
         // to that same owner. No other internal route (or method) admits bound callers.
-        if resources::allows_bound_request(request.method(), request.uri().path()) {
+        if resources::allows_bound_request(request.method(), request.uri().path())
+            || (bound_run.is_some() && run_requests::allows_bound_request(request.method(), request.uri().path()))
+        {
             return Ok(request);
         }
         return Err(ApiError::bad(FractalError::new(
@@ -12003,6 +12024,15 @@ async fn finish_claim_publication(
 /// Every native, source-backed and declared objective and budget as one list.
 /// Domain rows precede declaration evaluation so native bindings see their real source rows.
 pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow::Result<Vec<Value>> {
+    slo_rows_from_declarations(store, domain_rows, store.declared_objectives()?.iter())
+}
+
+/// Render a history cut from the recorder's changed-key declaration inputs. Native windows
+/// still advance at their real period boundaries; unchanged declaration bodies are not reparsed.
+pub fn slo_rows_from_declarations<'a>(
+    store: &crate::store::Store, domain_rows: Vec<Value>,
+    declarations: impl Iterator<Item = &'a crate::store::declared_objectives::DeclaredObjective> + Clone,
+) -> anyhow::Result<Vec<Value>> {
     let limits = store.account_limits()?;
     let fresh_ms = crate::config::reload_daemon_limits()
         .and_then(|reloaded| reloaded.ok())
@@ -12034,7 +12064,7 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, mail));
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
-    let declared = crate::declared_objectives::rows(store, now, &rows)?;
+    let declared = crate::declared_objectives::rows_from_declarations(store, now, &rows, declarations)?;
     drop(rows.splice(budgets..budgets, declared));
     Ok(rows)
 }
@@ -13430,12 +13460,17 @@ async fn work_action_response_viewing(
 pub struct LiveSession {
     pub runtime_id: String,
     pub incarnation_id: String,
+    pub native_incarnation_id: String,
+    pub custody: crate::store::local_sessions::SessionCustody,
     pub owner_host_id: String,
     pub terminal: bool,
     pub driver: Option<String>,
 }
 
 pub fn session_storage_subject(state: &AppState, subject: &str) -> Result<String, ApiError> {
+    if state.store.has_current_local_session(subject).map_err(ApiError::internal)? {
+        return Ok(subject.into());
+    }
     crate::store::identities::resolve_reference_conn(&state.store.readers.get(), subject)
         .map_err(ApiError::bad)
 }
@@ -13447,6 +13482,22 @@ pub fn live_session(
 ) -> Result<LiveSession, ApiError> {
     let identity = session_storage_subject(state, subject)?;
     let subject = identity.as_str();
+    if state.store.has_current_local_session(subject).map_err(ApiError::internal)? {
+        let runtime = crate::reconcile::NativeRuntime::new(
+            &state.state_dir, Some(&state.pty_root), &state.pty_binary);
+        let binding = crate::reconcile::local_session(&state.store, &runtime, subject, expected_incarnation)
+            .map_err(|error| match error.downcast_ref::<crate::reconcile::LocalSessionUnavailable>() {
+                Some(crate::reconcile::LocalSessionUnavailable::Missing) => ApiError::not_found(error.to_string()),
+                Some(_) => ApiError::bad(FractalError::new("stale-incarnation", error.to_string())),
+                None => ApiError::internal(error),
+            })?;
+        return Ok(LiveSession {
+            runtime_id: binding.runtime_id, incarnation_id: binding.incarnation,
+            native_incarnation_id: binding.native_incarnation,
+            custody: binding.custody,
+            owner_host_id: client_host_id(state.store.origin()), terminal: binding.terminal, driver: binding.driver,
+        });
+    }
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
@@ -13504,9 +13555,14 @@ pub fn live_session(
         .map(|member| member.terminal)
         .or_else(|| fields.get("terminal").and_then(Value::as_bool))
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no runtime kind")))?;
+    let custody = if member.as_ref().is_some_and(|member| member.lifecycle == crate::model::MemberLifecycle::TerminalBound) {
+        return Err(ApiError::not_found("bound invocation has no current local custody"));
+    } else { crate::store::local_sessions::SessionCustody::Owned };
     Ok(LiveSession {
         runtime_id: runtime_id.into(),
         incarnation_id: incarnation_id.into(),
+        native_incarnation_id: incarnation_id.into(),
+        custody,
         owner_host_id: client_host_id(origin),
         terminal,
         driver: member.and_then(|member| member.driver),
@@ -13613,15 +13669,15 @@ pub async fn input_session_as(
         SessionInputMode::Line => runtime.send_line_if(
             &effect_session.runtime_id,
             &request.value,
-            Some(&effect_session.incarnation_id),
+            Some(&effect_session.native_incarnation_id),
         ),
         SessionInputMode::Raw => {
-            runtime.send_raw_if(&effect_session.runtime_id, &bytes, Some(&effect_session.incarnation_id))
+            runtime.send_raw_if(&effect_session.runtime_id, &bytes, Some(&effect_session.native_incarnation_id))
         }
         SessionInputMode::Key => runtime.send_key_if(
             &effect_session.runtime_id,
             &request.value,
-            Some(&effect_session.incarnation_id),
+            Some(&effect_session.native_incarnation_id),
         ),
     })).await?;
     finish_session_control(
@@ -13667,6 +13723,10 @@ pub async fn signal_session_as(
         return Ok(Json(session_control_response(&subject, &result)));
     }
     let session = live_session(&state, &subject, Some(&request.expected_incarnation))?;
+    if session.custody == crate::store::local_sessions::SessionCustody::Borrowed && request.signal != "terminate" {
+        return Err(ApiError::bad(FractalError::new("unsupported-capability",
+            "a borrowed invocation may be detached, never signalled")));
+    }
     let request_key = format!(
         "session-control-request:signal:{subject}:{}",
         request.idempotency_key
@@ -13714,14 +13774,11 @@ pub async fn signal_session_as(
         .map_err(ApiError::bad)?;
     let effect_state = state.clone();
     let effect_session = session.clone();
-    let effect = blocking_external(move || if effect_session.terminal {
-        daemon_pty(&effect_state).and_then(|runtime| {
-            runtime.signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
-        })
-    } else {
-        fractal_runtime::ExecRuntime::new(effect_state.state_dir.join("exec"), effect_state.state_dir.join("logs"))
-            .signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
-    }).await?;
+    let detach_subject = subject.clone();
+    let detach_operation = result_key.clone();
+    let effect = blocking_external(move ||
+        apply_session_signal(&effect_state, &detach_subject, &effect_session, signal, &detach_operation)
+    ).await?;
     finish_session_control(
         &state,
         &subject,
@@ -13731,6 +13788,21 @@ pub async fn signal_session_as(
         &session,
         effect,
     )
+}
+
+/// Native identity and custody travel together from one resolved durable binding.
+fn apply_session_signal(
+    state: &AppState, subject: &str, session: &LiveSession, signal: i32, operation: &str,
+) -> anyhow::Result<()> {
+    if session.custody == crate::store::local_sessions::SessionCustody::Borrowed {
+        anyhow::ensure!(signal == libc::SIGTERM, "a borrowed invocation may be detached, never signalled");
+        state.store.detach_local_session(subject, &session.incarnation_id, operation)
+    } else if session.terminal {
+        daemon_pty(state)?.signal_if(&session.runtime_id, Some(&session.native_incarnation_id), signal)
+    } else {
+        fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"))
+            .signal_if(&session.runtime_id, Some(&session.native_incarnation_id), signal)
+    }
 }
 
 fn finish_session_control(
