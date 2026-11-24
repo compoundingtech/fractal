@@ -21,9 +21,9 @@ export const checkTagCapabilities = (body: string, label = 'Tag'): void => {
     throw new TypeError(`${label} credential must grant read.* scopes only (no write, control, pairing or terminal scopes)`)
 }
 
-/** Validate before creating the listener; authentication, wire and transport failures are fatal. */
-const checkAuthorization = (gateway: GatewayOptions, authorization: string | undefined, label: string): Promise<void> => new Promise((resolve, reject) => {
-  if (!authorization) { reject(new TypeError(`${label} authorization is required`)); return }
+/** GET /v1/client/capabilities with one credential over the gateway socket: its status and bounded body. */
+export const readCapabilities = (gateway: GatewayOptions, authorization: string, label: string): Promise<{ readonly status: number; readonly body: string }> => {
+  const { promise, resolve, reject } = Promise.withResolvers<{ readonly status: number; readonly body: string }>()
   const upstream = request({ socketPath: gateway.socketPath, path: '/v1/client/capabilities', method: 'GET',
     headers: { host: gateway.host, authorization }, agent: false }, response => {
     const chunks: Buffer[] = []
@@ -35,18 +35,25 @@ const checkAuthorization = (gateway: GatewayOptions, authorization: string | und
       if (size > 262144) { response.destroy(new TypeError(`${label} capabilities response too large`)); return }
       chunks.push(chunk)
     })
-    response.on('end', () => {
-      try {
-        if (response.statusCode !== 200) throw new TypeError(`${label} credential capabilities check failed`)
-        checkTagCapabilities(Buffer.concat(chunks).toString('utf8'), label)
-        resolve()
-      } catch (error) { reject(error) }
-    })
+    response.on('end', () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }))
   })
   upstream.on('error', reject)
   upstream.setTimeout(gateway.timeoutMs, () => upstream.destroy(new TypeError(`${label} credential capabilities check timed out`)))
   upstream.end()
-})
+  return promise
+}
+
+/** Whether a capabilities body grants scope `id`; throws when the body is not a capabilities answer. */
+export const scopeGranted = (body: string, id: string): boolean =>
+  Schema.decodeUnknownSync(Capabilities)(body).value.capabilities.some(capability => capability.id === id && capability.state === 'granted')
+
+/** Validate before creating the listener; authentication, wire and transport failures are fatal. */
+const checkAuthorization = async (gateway: GatewayOptions, authorization: string | undefined, label: string): Promise<void> => {
+  if (!authorization) throw new TypeError(`${label} authorization is required`)
+  const { status, body } = await readCapabilities(gateway, authorization, label)
+  if (status !== 200) throw new TypeError(`${label} credential capabilities check failed`)
+  checkTagCapabilities(body, label)
+}
 
 export const checkTagAuthorization = (gateway: GatewayOptions): Promise<void> =>
   checkAuthorization(gateway, gateway.tagAuthorization, 'Tag')
