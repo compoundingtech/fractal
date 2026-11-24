@@ -44,6 +44,7 @@ import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
+import { relayRootDetailSource } from './rootDetail.ts'
 import { readAuthorization } from './source.ts'
 import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
 import { browserPtySocket, browserSocket } from './sdk-browser/trace.ts'
@@ -1342,6 +1343,7 @@ export const liveSource = ({
         ),
       ),
       usage: { _tag: 'declared', source: relayUsageSource({ label: 'Gateway usage', prefix: `${origin}${RELAY_PREFIX}`, fetchImpl: fetch }) },
+      rootDetail: relayRootDetailSource({ origin, fetchImpl: fetch }),
       sync: {
         gateway: gatewaySync,
         agents: agentsRetained.sync,
