@@ -83,6 +83,11 @@ binding before graph routing; remote subjects retain graph routing. A detached
 invocation cannot be adopted again, and its `runtime.action.succeeded` detach receipt uses a
 stable idempotency key before acknowledgement. No process exit is inferred.
 Checkpoint removal requires custody settlement and all required local receipts.
+An ended observation is not a request to repeat native control: managed PTY
+custody recovery requires this executor's durable exact-generation retirement
+receipt. A stopped projection alone retains custody, including when the runtime
+ID has already been reused. Unchanged ordinary observations reuse their existing
+deduplication reads rather than rewriting the custody binding.
 The real-process/PTY fixtures in `reconcile/local_session_tests.rs` reopen the
 store, make graph tables unavailable, exercise native reads/attachment and fenced
 stop/detach, and retain the borrowed shell. These fixtures require execution in

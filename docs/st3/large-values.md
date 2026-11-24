@@ -1322,9 +1322,13 @@ declaration fencing and replay-safe admission identity.
 
 ### Local session custody and run authority (#7104)
 
-The reviewed inventory adds 35 SQL sites and 13 table/index catalog records for
+The reviewed inventory adds 36 SQL/source sites and 13 table/index catalog records for
 the Phase 1 local custody and run-authority producers. These remain explicit
 transitional exceptions, not value-size or statement-cost proof.
+The additional `legacy_handler_guard_tests` included-source site scans the new
+`run_requests` route family for removed legacy handlers. It is source inspection,
+not a production SQLite producer or a value-size proof; its owner and unresolved
+representation review follow the existing route-family inventory convention.
 
 `fractal_store::store::local_sessions` owns the native subject/incarnation keys,
 serialized custody/invocation metadata and detach/retirement receipt updates.
