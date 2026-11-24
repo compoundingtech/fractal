@@ -208,15 +208,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             .flat_map(Path::ancestors)
             .find(|candidate| candidate.is_dir())
             .context("file watch has no existing parent directory")?;
-        let next_component = target
-            .strip_prefix(directory)?
-            .components()
-            .next()
-            .context("file watch has no target component")?;
+        let suffix = target.strip_prefix(directory)?;
         // Backends report canonical directories (notably /private/tmp on macOS).
         // Keep the lexical target as identity, but compare events in their namespace.
         let directory = file_subscriptions::canonicalize(directory)?;
-        let relevant = directory.join(next_component);
+        // Retain the entire declared suffix, not just its first missing component.
+        // Watching a missing executable under an existing home must not subscribe
+        // that input to every write anywhere below the same intermediate directory.
+        let relevant = directory.join(suffix);
         // A file symlink can point outside the lexical parent. Observe its referent's
         // parent too, so both writes and inode replacements preserve file-gate behavior.
         let referent = file_subscriptions::canonicalize(&target).ok().filter(|path| *path != relevant);

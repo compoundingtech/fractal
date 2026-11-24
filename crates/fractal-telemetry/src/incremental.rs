@@ -23,6 +23,8 @@ pub mod file_watch_work {
     static COVERAGE: AtomicU64 = AtomicU64::new(0);
     static SCOPED: AtomicU64 = AtomicU64::new(0);
     static GLOBAL: AtomicU64 = AtomicU64::new(0);
+    static LAUNCH_NOTIFICATIONS: AtomicU64 = AtomicU64::new(0);
+    static LAUNCH_EVALUATIONS: AtomicU64 = AtomicU64::new(0);
     static COVERAGE_GAUGES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
     pub fn coverage(previous: [usize; 3], current: [usize; 3]) {
         let values = |counts: [usize; 3]| [counts[0], counts[1], counts[2],
@@ -41,6 +43,8 @@ pub mod file_watch_work {
         let counter = if global { &GLOBAL } else { &SCOPED };
         counter.fetch_add(1, Ordering::Relaxed);
     }
+    pub fn launch_notification() { LAUNCH_NOTIFICATIONS.fetch_add(1, Ordering::Relaxed); }
+    pub fn launch_evaluation() { LAUNCH_EVALUATIONS.fetch_add(1, Ordering::Relaxed); }
     pub fn snapshot() -> serde_json::Value {
         serde_json::json!({
             "events": EVENTS.load(Ordering::Relaxed),
@@ -48,6 +52,8 @@ pub mod file_watch_work {
             "coverage_deliveries": COVERAGE.load(Ordering::Relaxed),
             "scoped_notifications": SCOPED.load(Ordering::Relaxed),
             "global_notifications": GLOBAL.load(Ordering::Relaxed),
+            "scoped_launch_notifications": LAUNCH_NOTIFICATIONS.load(Ordering::Relaxed),
+            "scoped_launch_evaluations": LAUNCH_EVALUATIONS.load(Ordering::Relaxed),
             "physical_roots": COVERAGE_GAUGES[0].load(Ordering::Relaxed),
             "coverage_generations": COVERAGE_GAUGES[1].load(Ordering::Relaxed),
             "logical_leases": COVERAGE_GAUGES[2].load(Ordering::Relaxed),

@@ -1,10 +1,37 @@
 use super::*;
 
 impl Store {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn count_refolded_cards_for_test(&self, cards: usize) {
+    /// Record actual card folds in every build, independently of telemetry export.
+    pub fn count_agent_roster_cards(&self, cards: usize) {
         self.fractal.agent_resources_refolded_cards.fetch_add(cards, std::sync::atomic::Ordering::Relaxed);
         self.fractal.agent_resources_largest_fold.fetch_max(cards, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn count_refolded_cards_for_test(&self, cards: usize) {
+        self.count_agent_roster_cards(cards);
+    }
+
+    /// Cumulative daemon-local work, suitable for `/performance` interval deltas.
+    /// Counts are cards, not refresh attempts; unchanged cuts increment nothing.
+    pub fn agent_roster_work(&self) -> Value {
+        use std::sync::atomic::Ordering::Relaxed;
+        json!({
+            "builds": self.fractal.agent_resources_builds.load(Relaxed),
+            "card_rebuilds": self.fractal.agent_resources_refolded_cards.load(Relaxed),
+            "largest_fold": self.fractal.agent_resources_largest_fold.load(Relaxed),
+            "presentations": self.fractal.agent_roster_presentations.load(Relaxed),
+            "fault_enrichments": self.fractal.agent_roster_fault_enrichments.load(Relaxed),
+            "ref_enrichments": self.fractal.agent_roster_ref_enrichments.load(Relaxed),
+        })
+    }
+
+    /// Count only the cards selected for the underlying fold's enrichment.
+    pub fn count_agent_roster_enrichment(&self, cards: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.fractal.agent_roster_presentations.fetch_add(cards, Relaxed);
+        self.fractal.agent_roster_fault_enrichments.fetch_add(cards, Relaxed);
+        self.fractal.agent_roster_ref_enrichments.fetch_add(cards, Relaxed);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -551,21 +578,31 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        Ok(self.attention_snapshot_with_prompt_clock(person, as_of, as_of)?.0)
+    }
+
+    pub(super) fn attention_snapshot_with_prompt_clock(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        prompt_at: u128,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         let mut items = self.mission_run_attention_items(person)?;
         items.extend(self.host_hold_attention_items(person)?);
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
         items.extend(self.model_drift_attention_items(person, as_of)?);
-        items.extend(self.harness_prompt_attention_items(person, as_of)?);
+        let (prompts, valid_until) =
+            self.harness_prompt_attention_items_with_deadline(person, prompt_at, None)?;
+        items.extend(prompts);
         items.extend(self.custom_attention_items(person)?);
-        items.extend(self.host_hold_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
             self.broken_gate_items(person, as_of)?
                 .into_iter()
                 .filter(|item| item.person.starts_with("person/")),
         );
-        self.current_attention(items, as_of)
+        Ok((self.current_attention(items, as_of)?, valid_until))
     }
 
     /// The unique publisher of an item from `attention_snapshot`, resolved at the caller's
@@ -728,23 +765,8 @@ impl Store {
             }
             live.push(item);
         }
-        let priority = |item: &AttentionItemView| match item.priority.as_str() {
-            "critical" => 0,
-            "high" => 1,
-            "normal" => 2,
-            _ => 3,
-        };
-        // Most urgent first, and within that the newest first (Nathan, 2026-10-04).
-        live.sort_by(|left, right| {
-            priority(left)
-                .cmp(&priority(right))
-                .then_with(|| right.requested_at_unix_ms.cmp(&left.requested_at_unix_ms))
-                .then_with(|| left.subject.cmp(&right.subject))
-                .then_with(|| left.person.cmp(&right.person))
-                .then_with(|| left.episode.cmp(&right.episode))
-        });
-        let items = live;
-        Ok(items)
+        sort_attention_items(&mut live);
+        Ok(live)
     }
 
     /// Aggregate durable provider usage without mixing context-window occupancy
@@ -1885,4 +1907,21 @@ mod population_attention_ownership_tests {
             assert!(store.attention_source_origin(&row).is_err());
         }
     }
+}
+
+/// Shared ordering for direct reads and retained source publications.
+pub(super) fn sort_attention_items(items: &mut [AttentionItemView]) {
+    let priority = |item: &AttentionItemView| match item.priority.as_str() {
+        "critical" => 0,
+        "high" => 1,
+        "normal" => 2,
+        _ => 3,
+    };
+    items.sort_by(|left, right| {
+        priority(left).cmp(&priority(right))
+            .then_with(|| right.requested_at_unix_ms.cmp(&left.requested_at_unix_ms))
+            .then_with(|| left.subject.cmp(&right.subject))
+            .then_with(|| left.person.cmp(&right.person))
+            .then_with(|| left.episode.cmp(&right.episode))
+    });
 }
