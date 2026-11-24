@@ -7869,6 +7869,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<()> {
         self.store.owned_desired_guard(subject)?;
         let pending = self.store.runtime_start_for(&subject.subject)?;
+        if let Some(operation) = pending.as_ref().filter(|operation| operation.body.get("remote_start").is_some()) {
+            return self.stop_remote_start(operation);
+        }
         let pending_member = pending.as_ref().map(|operation|
             serde_json::from_value::<MemberSpec>(operation.body["member"].clone())).transpose()?;
         let actual = self.store.latest_actual_value(&subject.subject)?.or_else(|| pending_member.as_ref()
@@ -8408,6 +8411,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
         let operation = self.store.runtime_start_for(subject)?;
+        if let Some(operation) = operation.as_ref().filter(|operation| operation.body.get("remote_start").is_some()) {
+            self.stop_remote_start(operation)?;
+            // Only retained native recovery may settle this operation and its receipt.
+            return Ok(false);
+        }
         let retirement = if let (Some(operation), Some(incarnation)) = (&operation, incarnation) {
             let member = &operation.body["member"];
             operation.finished
@@ -10228,6 +10236,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(pending) = self.store.runtime_start_for(&subject.subject)? else {
             return Ok(false);
         };
+        if pending.body.get("remote_start").is_some() {
+            return Ok(false);
+        }
         if !pending.finished || pending.cleanup_verified
             || !pending.result.as_ref().is_some_and(|result| result["error"].is_string())
         {
@@ -10306,6 +10317,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         pending: &RuntimeStartOperation,
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
+        if pending.body.get("remote_start").is_some() {
+            // Native custody is retired through its session journal, never replaced
+            // by the graph-backed failed-start admission transaction.
+            return Ok(false);
+        }
         let stale_after = u128::from(STALE_FAILED_START_MS.load(Ordering::Relaxed));
         let failed = pending.finished
             && !pending.cleanup_verified

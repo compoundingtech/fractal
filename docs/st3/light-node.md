@@ -239,14 +239,20 @@ returns its positively verified actual native incarnation.
 
 The host preserves workspace creation/checkout activation leases and validation,
 launch freeze, native resource lane/root fit, kernel/capacity and producer custody.
+Producer and physical fit admission precede workspace/render effects. An inherited
+finite execution owns only its exact execution root, not its parent's unchanged
+membership request: its Stop, withdrawal or preparation refusal cannot cancel the
+parent or sibling roots. Whole-membership retirement requires the immutable owner
+invocation; inherited-root closure retains exact native-generation proof.
 Only graph preflight is replaced. Native launch decoration, login-directory
 expansion and secrets stay on the host. Graph document copies carry admitted
 immutable bytes; filesystem copies, JSON merges, ensure-line and Git exclusions
 still prepare and commit against the host's own filesystem through the existing
 render transaction. No mutable graph-name lookup or alternate graph connection
 is available to the executor.
-The home's selected launch geometry is sealed at admission; later pane-size
-preferences do not revoke a running producer or cause a restart.
+The home's selected launch geometry and continuation are sealed at admission;
+later pane-size preferences or the producer's own harness-session publication
+do not revoke a running producer or cause a restart.
 
 Graph commits and reopened custody trigger bounded home authorization
 reconciliation without timer polling. A changed declaration, publication, helper

@@ -14,7 +14,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         start_request: &str, workspace: StartWorkspaceAdmission) -> Result<StartAuthorization> {
         let expected = self.store.latest_actual_value(&binding.subject)?.and_then(|actual|
             actual_field(&actual, "incarnation_id").and_then(Value::as_str).map(str::to_owned));
-        let mut authorization = self.home_start_snapshot(binding, revision, start_request, workspace, expected, true)?;
+        let mut authorization = self.home_start_snapshot(binding, revision, start_request, workspace, expected, true, None)?;
         authorization.seal()?;
         Ok(authorization)
     }
@@ -25,16 +25,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             anyhow::ensure!(authorization.launch_member.terminal_size == self.launch_geometry()?,
                 invalid_start("home launch geometry changed before remote start admission"));
         }
-        self.validate_retained_home_start(binding, authorization)
+        self.validate_home_start_snapshot(binding, authorization, false)
     }
 
     /// Recheck ongoing authority, not launch-only preferences such as the current pane size.
     /// Hold the exclusive graph writer through any resulting durable withdrawal.
     pub fn validate_retained_home_start(&self, binding: &ExecutionBinding, authorization: &StartAuthorization) -> Result<()> {
+        self.validate_home_start_snapshot(binding, authorization, true)
+    }
+
+    fn validate_home_start_snapshot(&self, binding: &ExecutionBinding, authorization: &StartAuthorization,
+        retained: bool) -> Result<()> {
         authorization.verify()?;
         let mut current = self.home_start_snapshot(binding, authorization.revision,
             &authorization.start_request, authorization.workspace_admission.clone(),
-            authorization.expected_incarnation.clone(), false)?;
+            authorization.expected_incarnation.clone(), false, retained.then_some(&authorization.continuation))?;
         if current.member.terminal {
             current.launch_member.terminal_size = authorization.launch_member.terminal_size;
         }
@@ -46,7 +51,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn home_start_snapshot(&self, binding: &ExecutionBinding, revision: u64, start_request: &str,
         workspace_admission: StartWorkspaceAdmission, expected_incarnation: Option<String>,
-        retain_account: bool) -> Result<StartAuthorization> {
+        retain_account: bool, retained_continuation: Option<&Option<StartContinuation>>) -> Result<StartAuthorization> {
         anyhow::ensure!(binding.run.is_none() && binding.authorization_revision == revision.to_string(),
             invalid_start("remote Start requires its exact non-program authorization revision"));
         binding.validate()?;
@@ -101,7 +106,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 now_ms(), retain_account).map_err(|reason| invalid_start(format!("remote Start account refused: {reason}")))?;
             Some(StartCredentials { driver: account.driver, account: Some(selected.account.name), login: selected.login })
         } else { None };
-        let continuation = if desired.kind == "agent" && !member.environment.contains_key(crate::suspension::RESUME_ENV)
+        let continuation = if let Some(retained) = retained_continuation { retained.clone() }
+        else if desired.kind == "agent" && !member.environment.contains_key(crate::suspension::RESUME_ENV)
             && let Some(driver) = member.driver.as_deref() {
             let account = credentials.as_ref().and_then(|selected| selected.account.as_deref());
             crate::suspension::continue_session(&self.store, &desired.subject, driver, account,

@@ -212,4 +212,35 @@ mod tests {
         assert!(controls.journals["example-seat"].pending_cancellations().unwrap().is_empty(),
             "changing a launch-only preference must not retire an admitted producer");
     }
+
+    #[tokio::test]
+    async fn a_running_harness_session_publication_does_not_revoke_its_original_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let (controls, mut binding) = fixture(root.path());
+        let store = &controls.reconciler.store;
+        let source = format!("version 2\nagent \"worker\" {{ host \"example-seat\"; workspace {:?}; harness \"codex\" {{}} }}\n",
+            root.path().display().to_string());
+        let intent = parse_intent(&source, "example-home").unwrap();
+        let plan = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+        store.apply(&intent, &plan.subject_tokens, "harness-declaration").unwrap();
+        let desired = store.desired_subjects_named(std::slice::from_ref(&binding.subject)).unwrap().remove(0);
+        binding.runtime = desired.member.unwrap().runtime_id;
+        let command = queue(&controls, &binding).await;
+        let Operation::Start { authorization } = &command.operation else { panic!("expected Start"); };
+        assert!(authorization.continuation.is_none());
+        store.append_client_claim(&fractal_daemon::model::ClaimInput {
+            subject: binding.subject.clone(), kind: "harness.session-file".into(),
+            actor: Some(binding.subject.clone()),
+            fields: BTreeMap::from([("harness".into(), Value::from("codex")),
+                ("session_id".into(), Value::from("actual-session")),
+                ("path".into(), Value::from("sessions/actual-session.jsonl"))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(controls.reconciler.validate_home_start(&binding, authorization).is_err(),
+            "new admission must still recheck its selected continuation");
+        controls.reconciler.validate_retained_home_start(&binding, authorization).unwrap();
+        reconcile_home_starts(&controls).unwrap();
+        assert!(controls.journals["example-seat"].pending_cancellations().unwrap().is_empty(),
+            "a producer's own session publication must not retire its admitted launch");
+    }
 }

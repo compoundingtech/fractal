@@ -230,14 +230,25 @@ impl NativePair {
                 let changed = self.home.changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                if self.home.command_receipt(&command.execution_id).unwrap()
-                    .is_some_and(|receipt| matches!(receipt.state, ReceiptState::Settled { .. })) { break; }
+                match self.home.command_receipt(&command.execution_id) {
+                    Ok(Some(receipt)) if matches!(receipt.state, ReceiptState::Settled { .. }) => break,
+                    Err(error) if error.to_string().contains("result-expired") => {
+                        assert!(self.home.settled_prefix("home", command.binding.epoch).unwrap() >= command.sequence,
+                            "expired payload must have durable terminal checkpoint custody");
+                        break;
+                    }
+                    Err(error) => panic!("reading exact native command receipt: {error:#}"),
+                    Ok(_) => {}
+                }
                 changed.await;
             }
         }).await.expect("real native result must reach durable home custody");
         match self.home.command_receipt(&command.execution_id) {
             Ok(Some(receipt)) => assert!(matches!(receipt.state, ReceiptState::Settled { .. })),
-            Err(error) => assert!(error.to_string().contains("result-expired"), "{error}"),
+            Err(error) => {
+                assert!(error.to_string().contains("result-expired"), "{error}");
+                assert!(self.home.settled_prefix("home", command.binding.epoch).unwrap() >= command.sequence);
+            }
             Ok(None) => panic!("settled command cannot lose its receipt before explicit joint retirement"),
         }
     }
@@ -753,6 +764,12 @@ async fn connected_unknown_start_recovers_late_native_provenance_and_cancel_with
         .expect("actual native provenance must advance recovery generation").unwrap();
     let generation = pair.runtime.snapshot_ptys().unwrap().into_iter()
         .find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
+    // A native event alone must recover this connected execution. Sending Cancel
+    // first would independently reopen recovery and conceal a missing native wake.
+    pair.settled(&start).await;
+    assert!(matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
+        ReceiptState::Settled { outcome: Outcome::Started { incarnation } } if incarnation == generation));
+    assert!(pair.client.as_ref().is_some_and(|client| !client.is_finished()));
     pair.home.request_cancel(&start.execution_id, "withdraw late native producer").unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
@@ -1107,4 +1124,114 @@ async fn native_start_prepares_and_validates_a_real_git_checkout_under_its_activ
     Checkout { repository, base: "main".into(), branch: "remote-admitted".into(), remove_at_run_end: false }
         .validate_workspace(&workspace).unwrap();
     pair.disconnect().await;
+}
+
+#[path = "home_session_stop_tests.rs"]
+mod stop_tests;
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_parent_and_sibling() {
+    use crate::store::resource_membership::{Admission as ResourceAdmission, Coverage, LaneRequest, Owner};
+    for boundary in ["stop", "withdraw", "refusal", "undispatched-withdrawal"] {
+        let mut pair = NativePair::for_start().await;
+        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        let binary = fractal_runtime::resolve_executable("st3", &environment)
+            .expect("inherited finite acceptance requires the real st3 executable");
+        let lane_host = seat_admission::LaneHost {
+            room: fractal_runtime::host::for_lanes(fractal_runtime::host::size().unwrap()),
+            outside: fractal_runtime::host::outside_lane_memory,
+            burst_lane: Some(seat_admission::BURST_LANE),
+        };
+        let mut executor = Reconciler::new(pair.store.clone(), pair.runtime.clone(), pair.selection.host.clone(),
+            Arc::new(Notify::new())).with_lane_host(Some(lane_host));
+        executor.st_binary = Some(binary);
+        executor.install_home_session_journal(pair.seat.clone()).unwrap();
+        pair.executor = Arc::new(executor);
+        pair.driver = Arc::new(NativeSessionExecutor::new(pair.executor.clone()));
+        pair.driver.watch_native_custody().unwrap();
+        let request = LaneRequest {
+            id: format!("inherited-{boundary}"), name: "inherited-native-checks".into(),
+            host: pair.selection.host.clone(), max_members: 1, profile: None, profile_estimate: None,
+            disk_path: None, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 512 * 1024 * 1024 }),
+            class: fractal_runtime::RequestClass::Check, disk: None, io: None,
+            coverage: Coverage::Enforced, admission_timeout_ms: None,
+            owner: Owner { run: "run/native-parent".into(), step: "step/native-parent".into(),
+                attempt: 1, invocation: Some("exec/native-parent".into()) },
+        };
+        pair.executor.ensure_resource_authority().unwrap();
+        let fit = pair.executor.remote_resource_lane_fit(&request).unwrap();
+        assert!(matches!(pair.store.request_resource_membership(&request, fit,
+            u64::try_from(now_ms()).unwrap()).unwrap(), ResourceAdmission::Admitted(_)));
+        let mut authorization = pair.start_authorization("printf ready > inherited-ready; exec sleep 600");
+        authorization.member.terminal = false;
+        resource_lanes::set_request(&mut authorization.member, &request).unwrap();
+        authorization.launch_member = authorization.member.clone();
+        authorization.seal().unwrap();
+        let mut survivors = Vec::new();
+        for runtime_id in ["native-parent", "native-sibling"] {
+            let mut member = authorization.member.clone();
+            member.runtime_id = runtime_id.into();
+            member.launch = crate::model::LaunchSpec::Shell("exec sleep 600".into());
+            pair.runtime.start_resource_guarded(&pair.store, &member, None, &|| Ok(())).unwrap();
+            let incarnation = pair.runtime.observe_exec(runtime_id).unwrap().unwrap().incarnation_id.unwrap();
+            survivors.push((runtime_id, incarnation));
+        }
+        if matches!(boundary, "refusal" | "undispatched-withdrawal") {
+            authorization.member.cwd = pair.root.path().join("unavailable-cwd").display().to_string();
+            authorization.launch_member = authorization.member.clone();
+            authorization.seal().unwrap();
+        }
+        let start = pair.home.enqueue(pair.draft(&format!("inherited-{boundary}"),
+            Operation::Start { authorization: Box::new(authorization) })).unwrap();
+        if boundary == "undispatched-withdrawal" {
+            pair.seat.admit(&start).unwrap();
+            assert!(pair.seat.enter(&start.execution_id, |command, authority|
+                pair.driver.enter(command, authority)).is_err());
+            pair.home.request_cancel(&start.execution_id, "withdraw admitted child before backend").unwrap();
+            pair.seat.cancel_or_revoke(&start.execution_id, "withdraw admitted child before backend".into(),
+                |command, authority, reason| pair.driver.cancel(command, authority, reason)).unwrap();
+        }
+        pair.connect();
+        pair.settled(&start).await;
+        if matches!(boundary, "stop" | "withdraw") {
+            assert_eq!(native_file(&pair.root.path().join("inherited-ready")).await, b"ready");
+            let local = pair.store.local_session(&start.binding.subject).unwrap().unwrap();
+            if boundary == "stop" {
+                pair.binding = pair.executor.session_bindings(&pair.selection).unwrap().pop().unwrap();
+                pair.authorized().await;
+                let stop = pair.home.enqueue(pair.draft("stop-only-inherited-child", Operation::Stop)).unwrap();
+                pair.settled(&stop).await;
+            } else {
+                pair.disconnect().await;
+                pair.home.request_cancel(&start.execution_id, "withdraw only inherited child").unwrap();
+                pair.seat.cancel_or_revoke(&start.execution_id, "withdraw only inherited child".into(),
+                    |command, authority, reason| pair.driver.cancel(command, authority, reason)).unwrap();
+                pair.connect();
+                pair.stopped(&start).await;
+            }
+            assert!(pair.store.local_session_retirement_verified(&local).unwrap());
+        } else {
+            assert!(!pair.root.path().join("inherited-ready").exists());
+        }
+        pair.disconnect().await;
+        let record = pair.store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(record.state, "launched");
+        assert!(record.retirement_requested_at.is_none());
+        assert!(record.retired_at.is_none());
+        for (runtime_id, incarnation) in &survivors {
+            let observed = pair.runtime.observe_exec(runtime_id).unwrap().unwrap();
+            assert_eq!(observed.incarnation_id.as_deref(), Some(incarnation.as_str()));
+            assert_eq!(observed.status, "running");
+            assert!(record.roots.iter().find(|root| root.runtime_id == *runtime_id).unwrap().execution_ended_at.is_none());
+        }
+        if matches!(boundary, "stop" | "withdraw") {
+            assert!(record.roots.iter().find(|root| root.runtime_id == "native-worker").unwrap().execution_ended_at.is_some());
+        } else {
+            assert!(!record.roots.iter().any(|root| root.runtime_id == "native-worker"));
+        }
+        for (runtime_id, incarnation) in survivors {
+            pair.runtime.exec.retire_if(runtime_id, &incarnation).unwrap();
+        }
+    }
 }
