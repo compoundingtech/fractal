@@ -198,8 +198,11 @@ cut) and the first or last rowid of a table. It never counts the rows of a large
 - **Checkpoint trim.** Each daily cut is trimmed under the rules and budget in
   [Checkpoints and trimming](checkpoints.md#the-trim-budget). The status shows the newest cut, its
   state, and the envelopes and claims its plan made eligible. It also shows the claims deleted
-  today against `[trim] daily_claims`, plus what the last pass deleted or deferred and why it
-  stopped:
+  today against `[trim] daily_claims`, plus what the last pass deleted or deferred, how it ended
+  and why it stopped. The deleted counts are what the pass's committed chunks deleted, so they
+  hold even when the pass ends early. The pass ends `complete`, `partial` (it left a cut
+  unfinished: deferred, halted or set aside) or `failed` (it returned an error). It stopped for
+  one of these reasons:
   - `catching_up`: replication is catching up with a peer.
   - `disabled`: `[trim] local` is off.
   - `halted_cut`: a trim stopped because the graph would change, and waits for

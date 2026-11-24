@@ -211,9 +211,10 @@ impl Store {
         self.checkpoint_worker_phase(CheckpointPhase::Sweep);
         self.retention.begin_trim_pass();
         let result = self.checkpoint_step_inner(context);
-        match &result {
-            Ok(actions) => self.retention.finish_trim_pass(actions, context.now_unix_ms),
-            Err(error) => self.checkpoint_worker_error(format!("{error:#}")),
+        // A failed pass still reports what its committed chunks deleted.
+        self.retention.finish_trim_pass(result.as_ref().ok().map(Vec::as_slice), context.now_unix_ms);
+        if let Err(error) = &result {
+            self.checkpoint_worker_error(format!("{error:#}"));
         }
         result
     }

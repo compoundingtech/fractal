@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "fractal replication status reports each retention pass: the checkpoint trim's newest cut, eligible and deleted counts and why its last pass stopped; the valid-record bytes pass, the settled judging prune and the legacy receipt cleanup with their cursors; and that envelope release and valid-record deletion are off, with why",
+  "summary": "fractal replication status reports each retention pass: the checkpoint trim's newest cut, eligible and deleted counts, and how its last pass ended (complete, partial or failed, with what its committed chunks deleted) and why it stopped; the valid-record bytes pass, the settled judging prune and the legacy receipt cleanup with their cursors; and that envelope release and valid-record deletion are off, with why",
   "replay": {"status": "none", "detail": "No claim, replication or digest change."},
   "schema": {"status": "none", "detail": "No database change. The status reads meta keys, the newest checkpoint rows and rowid bounds; counts since start are kept in memory."},
   "rules": {"status": "none", "detail": "No rule, retention or authority change. No pass is enabled or changed."},

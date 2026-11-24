@@ -383,9 +383,10 @@ impl Store {
     /// Log one line for a trim chunk held over `LOGGED_TRIM_CHUNK`: its phase, the envelopes and
     /// claims it took, the bytes of the claim bodies it deleted, its hold split into the steps
     /// and the commit, and the steps' longest stages, so a member attributes its own outliers to
-    /// the statement behind them.
+    /// the statement behind them. Every committed chunk passes here, so the retention tally
+    /// counts a deleting chunk's rows here too; recording tombstones deletes nothing.
     #[allow(clippy::too_many_arguments)]
-    fn log_if_slow_trim_chunk(
+    pub(super) fn log_if_slow_trim_chunk(
         &self,
         phase: &str,
         held: std::time::Duration,
@@ -395,6 +396,9 @@ impl Store {
         body_bytes: u64,
         stages: Option<&StageTimes>,
     ) {
+        if phase != "record" {
+            self.retention.trim_chunk(envelopes, claims);
+        }
         if held <= LOGGED_TRIM_CHUNK {
             return;
         }
