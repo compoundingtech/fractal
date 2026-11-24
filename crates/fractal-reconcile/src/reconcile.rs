@@ -73,6 +73,8 @@ mod program_faults;
 pub mod start_jobs;
 mod host_executor;
 mod host_observations;
+mod home_session;
+pub use home_session::NativeSessionExecutor;
 pub mod seat_admission;
 mod seat_admission_queue;
 mod resource_lanes;
@@ -1649,6 +1651,7 @@ pub struct Reconciler<R = NativeRuntime> {
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
     host_observations: Arc<host_observations::HostObservations>,
+    home_session_journal: std::sync::OnceLock<fractal_peer::light_node::journal::Journal>,
     shell_exec_watches: Mutex<BTreeSet<String>>,
     seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
@@ -2035,6 +2038,7 @@ impl Reconciler<NativeRuntime> {
             start_spacing: Default::default(),
             start_jobs: Default::default(),
             host_observations: Default::default(),
+            home_session_journal: Default::default(),
             shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -2278,6 +2282,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             start_spacing: Default::default(),
             start_jobs: Default::default(),
             host_observations: Default::default(),
+            home_session_journal: Default::default(),
             shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -8637,6 +8642,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 if closed {
                     self.store.settle_local_session_custody(subject, incarnation)?;
+                    self.revoke_session_incarnation(subject, incarnation)?;
                 }
             }
             return Ok(true);
@@ -8747,6 +8753,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.record_once(subject, "runtime.observed", fields)?;
                 }
                 self.store.settle_local_session_custody(subject, incarnation)?;
+                self.revoke_session_incarnation(subject, incarnation)?;
                 self.start_changed(subject);
                 return Ok(true);
             }
@@ -11638,7 +11645,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && o.incarnation_id.as_deref() == Some(binding.incarnation.as_str())
         });
         if running {
-            self.store.bind_local_session(&crate::store::local_sessions::LocalSession {
+            self.record_local_session(&crate::store::local_sessions::LocalSession {
                 subject: subject.subject.clone(), runtime_id: member.runtime_id.clone(),
                 incarnation: incarnation.clone(), native_incarnation: binding.incarnation.clone(),
                 terminal: true, driver: member.driver.clone(), lifecycle: MemberLifecycle::TerminalBound,
@@ -11755,7 +11762,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             && let Some(incarnation) = observation.incarnation_id.as_deref()
             && member.lifecycle != MemberLifecycle::TerminalBound
         {
-            self.store.bind_local_session(&crate::store::local_sessions::LocalSession {
+            self.record_local_session(&crate::store::local_sessions::LocalSession {
                 subject: subject.subject.clone(), runtime_id: member.runtime_id.clone(),
                 incarnation: incarnation.into(), native_incarnation: incarnation.into(),
                 terminal: member.terminal, driver: member.driver.clone(),
@@ -11896,6 +11903,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             && let Some(incarnation) = observation.incarnation_id.as_deref()
         {
             self.store.settle_local_session_custody(&subject.subject, incarnation)?;
+            self.revoke_session_incarnation(&subject.subject, incarnation)?;
         }
         Ok(())
     }
