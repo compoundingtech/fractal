@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Answer a bucketless replication request whose listing does not reproduce its digest with bounded range proofs instead of the full identity inventory",
+  "replay": {"status": "none", "detail": "Existing replicated records retain their interpretation and replay order."},
+  "schema": {"status": "none", "detail": "No durable schema or replicated record format changes."},
+  "rules": {"status": "changed", "detail": "A request without range digests whose listed identities do not reproduce its digest is treated as omitting its range proofs, as a marked root probe is: it receives bounded range listings and no envelopes it does not provably lack. Requests with no digest, or with a complete listing, still receive the complete inventory and are still counted in the full-inventory answer total."},
+  "compatibility": {"status": "changed", "detail": "A root probe whose markers were dropped on the way, such as one sent before capability negotiation to a peer, relay or replication worker that does not read capabilities, now gets a range answer that fits one exchange instead of a full listing refused as replication-exchange-metadata-too-large. Peers that send range digests or complete listings see no change. The full-inventory warning now names only complete listings."},
+  "downtime": {"status": "none", "detail": "No fleet-wide simultaneous upgrade or data migration is required. Upgrade a node's daemon and replication worker together so the worker keeps request capabilities."},
+  "manual": {"status": "none", "detail": "No new configuration is required."},
+  "recovery": {"status": "none", "detail": "No persisted state changes; ordinary binary rollback applies."}
+}

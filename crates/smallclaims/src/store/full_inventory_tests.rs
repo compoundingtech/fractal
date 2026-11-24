@@ -38,7 +38,10 @@ fn answers() -> u64 {
 }
 
 #[test]
-fn a_request_without_range_digests_and_a_different_digest_gets_a_counted_full_answer() {
+fn a_digest_without_range_digests_or_its_listing_gets_bounded_range_proofs() {
+    // A different digest, no range digests and nothing listed: no complete inventory has this
+    // shape. It is a root probe whose markers did not arrive, and its full answer would list
+    // every identity, which on a large store does not fit one exchange.
     let store = source();
     let before = answers();
     let bucketless = ReplicationInventory {
@@ -48,12 +51,77 @@ fn a_request_without_range_digests_and_a_different_digest_gets_a_counted_full_an
     let answer = store
         .export_replication_exchange(FLEET, &bucketless)
         .unwrap();
-    assert!(answers() > before, "the full answer is counted");
-    assert!(answer.inventory.buckets.is_empty());
-    assert!(
-        !answer.inventory.envelopes.is_empty(),
-        "it lists every identity"
+    assert_eq!(answers(), before, "no full inventory was constructed");
+    assert!(!answer.inventory.buckets.is_empty(), "it answers with range proofs");
+    assert!(answer.inventory.can(crate::replication::RANGE_PROOFS));
+    assert!(answer.inventory.envelopes.len() <= REPLICATION_EXCHANGE_ENVELOPE_LIMIT);
+    assert!(answer.envelopes.is_empty(), "omitted proofs do not prove missing envelopes");
+}
+
+#[test]
+fn a_root_probe_without_its_markers_converges_without_a_full_inventory() {
+    let left = node("alder");
+    let right = node("birch");
+    for (from, to) in [(&left, &right), (&right, &left)] {
+        let shared = from.export_replication_exchange(FLEET, &ReplicationInventory::default()).unwrap();
+        to.receive_replication_exchange(&from.origin, FLEET, &shared).unwrap();
+    }
+    for store in [&left, &right] {
+        store.append_claim(&ClaimInput {
+            subject: format!("note/{}-later", store.origin),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    let before = answers();
+    // A root-first build before capability negotiation probes every peer this way. A peer, relay
+    // or replication worker whose `ReplicationInventory` predates `capabilities` drops the markers.
+    let mut probe = left.export_replication_root_summary(FLEET).unwrap();
+    probe.inventory.capabilities.clear();
+    assert!(probe.inventory.buckets.is_empty());
+    assert!(probe.inventory.envelopes.is_empty());
+    let response = right.export_replication_exchange_answering(
+        FLEET, &probe.inventory, &probe.signature_requests,
+    ).unwrap();
+    assert_ne!(response.inventory.digest, probe.inventory.digest);
+    assert!(!response.inventory.buckets.is_empty());
+    assert!(!response.inventory.envelopes.is_empty(), "prove the reverse difference now");
+    assert!(response.inventory.envelopes.len() <= REPLICATION_EXCHANGE_ENVELOPE_LIMIT);
+    assert!(response.envelopes.is_empty(), "omitted proofs do not prove missing envelopes");
+    let push = left.export_replication_exchange_answering(
+        FLEET, &response.inventory, &response.signature_requests,
+    ).unwrap();
+    assert!(!push.envelopes.is_empty(), "the second request must already push the later gap");
+    right.receive_replication_exchange("alder", FLEET, &push).unwrap();
+    let pull = right.export_replication_exchange_answering(
+        FLEET, &push.inventory, &push.signature_requests,
+    ).unwrap();
+    assert!(!pull.envelopes.is_empty(), "the second answer must pull the other later gap");
+    left.receive_replication_exchange("birch", FLEET, &pull).unwrap();
+    assert_eq!(
+        left.export_replication_root_summary(FLEET).unwrap().inventory.digest,
+        right.export_replication_root_summary(FLEET).unwrap().inventory.digest,
     );
+    assert_eq!(answers(), before, "a probe without markers must not get a full inventory");
+}
+
+#[test]
+fn a_complete_listing_without_markers_still_gets_the_complete_inventory() {
+    let store = source();
+    let mut legacy = node("birch").replication_inventory().unwrap();
+    legacy.capabilities.clear();
+    assert!(legacy.buckets.is_empty());
+    assert!(!legacy.envelopes.is_empty());
+    let before = answers();
+    let answer = store.export_replication_exchange(FLEET, &legacy).unwrap();
+    assert_eq!(answers(), before + 1, "the full answer is counted");
+    assert!(answer.inventory.buckets.is_empty());
+    assert_eq!(answer.inventory.envelopes, store.replication_inventory().unwrap().envelopes);
+    assert!(!answer.envelopes.is_empty(), "the complete listing proves what the peer lacks");
 }
 
 #[test]

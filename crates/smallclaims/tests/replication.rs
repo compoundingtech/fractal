@@ -188,25 +188,25 @@ fn full_inventory_fallback_requires_a_complete_digest_and_bounds_payloads() {
     );
     assert_eq!(answer.inventory.envelopes.len(), 6);
 
+    // A listing that does not reproduce its digest is not complete: it gets range proofs.
     remote.envelopes.truncate(3);
+    let answer = source.export_replication_exchange(FLEET, &remote).unwrap();
     assert!(
-        source
-            .export_replication_exchange(FLEET, &remote)
-            .unwrap()
-            .envelopes
-            .is_empty(),
+        answer.envelopes.is_empty(),
         "a truncated listing cannot prove which identities the peer lacks"
     );
+    assert!(!answer.inventory.buckets.is_empty(), "it answers with range proofs");
     remote.envelopes.clear();
     let answer = source.export_replication_exchange(FLEET, &remote).unwrap();
     assert!(
         answer.envelopes.is_empty(),
         "a bare, nonempty digest cannot prove an empty inventory"
     );
+    assert!(!answer.inventory.buckets.is_empty(), "it answers with range proofs");
     assert_eq!(
         answer.inventory.envelopes.len(),
         6,
-        "the peer first receives the full identity proof"
+        "the peer receives the differing range's complete listing"
     );
 }
 

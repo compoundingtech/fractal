@@ -5229,9 +5229,10 @@ pub static FULL_INVENTORY_ANSWERS: AtomicU64 = AtomicU64::new(0);
 static FULL_INVENTORY_LOGGED_AT: AtomicU64 = AtomicU64::new(0);
 
 /// Count a full-inventory answer and say so at most once a minute: how many identities it lists,
-/// and what the request carried, so the request that reached this path can be told apart (an
-/// older build's complete listing, or a digest with nothing listed).
-fn note_full_inventory_answer(identities: usize, listed: usize, complete: bool) {
+/// and how many the request listed. Only a complete listing (an older build's, or an explicit
+/// full-inventory request) reaches this path; a digest its listing does not reproduce gets range
+/// proofs instead (`omits_range_proofs`).
+fn note_full_inventory_answer(identities: usize, listed: usize) {
     FULL_INVENTORY_ANSWERS.fetch_add(1, Ordering::Relaxed);
     let now = now_ms() as u64;
     let last = FULL_INVENTORY_LOGGED_AT.load(Ordering::Relaxed);
@@ -5244,9 +5245,8 @@ fn note_full_inventory_answer(identities: usize, listed: usize, complete: bool) 
     }
     eprintln!(
         "st: warning: answering a replication exchange with the full inventory ({identities} \
-         identities): the request had no range digests and no digest or a different one, listing \
-         {listed} identities ({})",
-        if complete { "a complete listing" } else { "not a complete listing" }
+         identities): the request had no range digests and listed its complete inventory \
+         ({listed} identities)"
     );
 }
 
@@ -5517,10 +5517,30 @@ pub fn replication_bucket_start(sequence: u64) -> u64 {
     sequence - sequence % REPLICATION_BUCKET_WIDTH
 }
 
+/// Whether `remote` lists its whole inventory: it names no digest (an explicit full-inventory
+/// request), or its listed identities reproduce the digest it names.
+fn lists_complete_inventory(remote: &ReplicationInventory) -> bool {
+    remote.digest.is_empty() || remote.digest == replication_inventory_digest(&remote.envelopes)
+}
+
+/// Whether `remote` omits its range proofs, so a range it does not list is unknown rather than
+/// proven empty. A root probe says so with its markers. A bucketless digest that its listing does
+/// not reproduce says so by itself: no complete inventory has that shape, but a root probe has
+/// when it reaches a node through anything that predates its markers (a root-first build before
+/// capability negotiation probing an older peer, or a relay or replication worker whose
+/// `ReplicationInventory` has no `capabilities` and drops them).
+fn omits_range_proofs(remote: &ReplicationInventory) -> bool {
+    remote.buckets.is_empty()
+        && ((remote.can(crate::replication::ROOT_FIRST)
+            && remote.can(crate::replication::ROOT_SUMMARY))
+            || !lists_complete_inventory(remote))
+}
+
 /// Compare a local inventory with a peer's compact inventory. Returns the local envelopes the
 /// peer provably lacks, bounded per exchange, and complete local range listings so the peer can
-/// compute the reverse difference. A root probe proves no ranges absent: it receives bounded
-/// listings without payloads. Whole ranges fit `listing_limit`, except the first is always whole.
+/// compute the reverse difference. A request that omits its proofs (`omits_range_proofs`) proves
+/// no ranges absent: it receives bounded listings without payloads. Whole ranges fit
+/// `listing_limit`, except the first is always whole.
 pub fn compact_replication_difference(
     inventory: &CompactReplicationInventory,
     buckets: &[ReplicationInventoryBucket],
@@ -5560,10 +5580,8 @@ pub fn compact_replication_difference_turn(
             .push(identity);
     }
     let page_limit = replication_page_limit(remote);
-    // A root probe omits proofs; absent ranges are unknown, not proven empty.
-    let omitted_buckets = remote.buckets.is_empty()
-        && remote.can(crate::replication::ROOT_FIRST)
-        && remote.can(crate::replication::ROOT_SUMMARY);
+    // A request that omits its proofs leaves absent ranges unknown, not proven empty.
+    let omitted_buckets = omits_range_proofs(remote);
     let mut missing = Vec::new();
     // Differing ranges with an envelope to send, then those holding only checkpoint identities.
     let (mut live, mut payloadless) = (Vec::new(), Vec::new());
@@ -8212,17 +8230,16 @@ impl Store {
             self.exported_digests(snapshot)?
         };
         note_full_summary_construction(self);
-        let root_probe = remote.can(crate::replication::ROOT_FIRST)
-            && remote.can(crate::replication::ROOT_SUMMARY);
         if !same
-            && (root_probe
+            && (omits_range_proofs(remote)
                 || !remote.buckets.is_empty()
                 || (remote.can(crate::replication::ROOT_FIRST)
                     && remote.can(crate::replication::RANGE_PROOFS)))
         {
             // Capability support alone does not turn a complete identity inventory into
-            // range proofs. A root probe omits proofs; a marked range answer has a
-            // complete bucket list, including when that list proves the empty set.
+            // range proofs. A request that omits its proofs (a root probe, marked or with its
+            // markers dropped) gets bounded listings; a marked range answer has a complete
+            // bucket list, including when that list proves the empty set.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
                 compact_replication_difference_turn(
@@ -8277,21 +8294,14 @@ impl Store {
                 unservable_released,
             });
         }
-        // A peer without range digests (an older build, or an explicit full-inventory request)
-        // still exchanges complete inventories.
-        let remote_is_complete = if remote.digest.is_empty() {
-            true
-        } else {
-            remote.digest == replication_inventory_digest(&remote.envelopes)
-        };
+        // A complete listing without range digests (an older build, or an explicit full-inventory
+        // request) still exchanges complete inventories. Any other bucketless request took the
+        // range path above: it cannot prove what it lacks, and the whole inventory of a large
+        // store does not fit one exchange.
         if !same {
-            note_full_inventory_answer(
-                inventory.envelopes.len(),
-                remote.envelopes.len(),
-                remote_is_complete,
-            );
+            note_full_inventory_answer(inventory.envelopes.len(), remote.envelopes.len());
         }
-        let missing = if same || !remote_is_complete {
+        let missing = if same {
             Vec::new()
         } else {
             // Only membership is needed. Borrow IDs from the request instead of
