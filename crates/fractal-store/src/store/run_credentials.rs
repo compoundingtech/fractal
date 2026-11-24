@@ -1,9 +1,54 @@
-//! Run credentials (docs/st3/program-engine.md §3): the engine mints one per program attempt and
-//! passes it to the attempt's effects as `ST_RUN_CREDENTIAL`; the daemon binds a request carrying
-//! it to `mission-run/RUN`. It is a local, hashed store capability whose subject is the step run
-//! and whose incarnation is the attempt. It needs no revocation: it binds only while that attempt
-//! is the step run's current one and the step is still live, so it dies with its attempt.
+//! Run credentials (docs/st3/program-engine.md §3) stay local to their execution. Full-node
+//! credentials bind through the current graph; light-node credentials bind through durable local
+//! admission and explicit revocation. Forwarded requests carry signed, request-specific assertions,
+//! never bearer secrets. Both paths recheck authority at the actual effect transaction.
 use super::*;
+
+pub mod local;
+pub mod assertions;
+pub mod request_context;
+
+/// Immutable execution identity admitted by the selected home. Run authority is separate from
+/// the executing seat's identity: non-program seats carry no run, and a run is never an agent.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionBinding {
+    pub version: u32,
+    pub home: String,
+    pub host: String,
+    pub epoch: u64,
+    pub subject: String,
+    pub runtime: String,
+    pub incarnation: String,
+    pub authorization_revision: String,
+    pub run: Option<RunBinding>,
+}
+
+impl ExecutionBinding {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.version != 1
+            || self.epoch == 0
+            || self.epoch > i64::MAX as u64
+            || self.home.is_empty()
+            || self.host.is_empty()
+            || self.subject.is_empty()
+            || self.runtime.is_empty()
+            || self.incarnation.is_empty()
+            || self.authorization_revision.is_empty()
+            || self.run.as_ref().is_some_and(|run| {
+                !run.run.starts_with("mission-run/")
+                    || run.step_run.is_empty()
+                    || run.attempt == 0
+            })
+        {
+            return Err(FractalError::new(
+                "invalid-execution-binding",
+                "execution authority requires version 1 and an exact admitted identity",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// The capability kind of a run credential.
 pub const RUN_CREDENTIAL_KIND: &str = "program-run";
@@ -14,7 +59,8 @@ pub const RUN_CREDENTIAL_ENV: &str = "ST_RUN_CREDENTIAL";
 pub(super) const LIVE_STEP_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
 
 /// The actor a run credential binds: `run` is `mission-run/RUN`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunBinding {
     pub run: String,
     pub step_run: String,
@@ -30,6 +76,30 @@ impl Store {
     pub fn issue_run_credential(&self, step_run: &str, attempt: u32, lifetime_ms: u64) -> Result<String> {
         self.issue_capability(RUN_CREDENTIAL_KIND, step_run, Some(&attempt.to_string()), lifetime_ms)
             .map(|(secret, _)| secret)
+    }
+
+    /// The full-node program scheduler retains the same graph-side start admission even when
+    /// an opt-in journal issuer supplies the credential. Local credential use never calls this.
+    pub fn admit_program_attempt(&self, step_run: &str, attempt: u32) -> Result<RunBinding, FractalError> {
+        self.with_run_fence_internal(step_run, |tx| self.admit_program_attempt_tx(tx, step_run, attempt))
+            .map(|run| RunBinding { run, step_run: step_run.to_owned(), attempt })
+    }
+
+    pub(super) fn admit_program_attempt_tx(
+        &self, tx: &Transaction<'_>, step_run: &str, attempt: u32,
+    ) -> Result<String, FractalError> {
+        let run_id: String = tx.query_row(
+            "SELECT step.run_id FROM step_runs step JOIN mission_runs mission ON mission.id=step.run_id
+             WHERE step.subject=?1 AND step.attempt=?2
+               AND step.status IN ('ready','working','blocked','waiting-person')
+               AND step.generation_id=mission.current_generation_id AND mission.phase<>'terminal'",
+            params![step_run, attempt], |row| row.get(0),
+        ).optional().map_err(internal)?.ok_or_else(|| ended("its attempt is no longer current and live"))?;
+        let run = mission_run_header_tx(tx, &run_id).map_err(internal)?;
+        if self.mission_run_supersession_pending_tx(tx, &run).map_err(internal)? {
+            return Err(FractalError::new("stale-run-generation", "the program run awaits automatic revision cutover"));
+        }
+        Ok(run.subject)
     }
 
     /// The run `secret` acts as, while its attempt is its step run's current, live attempt.
