@@ -61,6 +61,10 @@ struct Work {
     projection_fences_rebuilt: std::sync::atomic::AtomicU64,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct PendingProbeCount(pub std::sync::atomic::AtomicU64);
+
 impl DesiredInputs {
     pub fn refresh(&mut self, store: &Store) -> Result<bool> {
         use std::sync::atomic::Ordering::Relaxed;
