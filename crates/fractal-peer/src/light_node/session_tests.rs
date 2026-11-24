@@ -573,7 +573,7 @@ fn accepted_hello_budget_bounds_real_signed_channel_encoding_at_limit() {
         }
         let bound=selected.signed_hello_max_bytes(fleet).unwrap();
         let subject=selected.grant.subjects.last_mut().unwrap();
-        let padding=(1024-subject.len()).min(MAX_FRAME-bound);
+        let padding=(512-subject.len()).min(MAX_FRAME-bound);
         subject.extend(std::iter::repeat_n('x',padding));
         if selected.signed_hello_max_bytes(fleet).unwrap()==MAX_FRAME {break;}
     }

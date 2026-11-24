@@ -257,16 +257,16 @@ mod tests {
     fn both_roles_validate_actual_signed_hello_at_the_exact_encoded_boundary() {
         let fleet = "1f91ca65-7793-48cc-866e-ac15690130e1";
         let mut authority = grant();
-        authority.grant.subjects = (0..63).map(|index| {
-            let prefix = format!("agent/budget-{index:03}-");
-            if index == 62 { prefix } else {
-                format!("{prefix}{}", "x".repeat(1024 - prefix.len()))
-            }
-        }).collect();
-        let remaining = LIGHT_NODE_SESSION_MAX_FRAME - authority.signed_hello_max_bytes(fleet).unwrap();
-        let last = authority.grant.subjects.last_mut().unwrap();
-        assert!(last.len() + remaining < 1024);
-        last.push_str(&"x".repeat(remaining));
+        authority.grant.subjects.clear();
+        while authority.signed_hello_max_bytes(fleet).unwrap() < LIGHT_NODE_SESSION_MAX_FRAME {
+            let prefix = format!("agent/budget-{:03}-", authority.grant.subjects.len());
+            authority.grant.subjects.push(prefix);
+            let remaining = LIGHT_NODE_SESSION_MAX_FRAME - authority.signed_hello_max_bytes(fleet).unwrap();
+            let subject = authority.grant.subjects.last_mut().unwrap();
+            let padding = (512 - subject.len()).min(remaining);
+            subject.push_str(&"x".repeat(padding));
+        }
+        assert!(authority.grant.subjects.last().unwrap().len() < 512);
         assert_eq!(authority.signed_hello_max_bytes(fleet).unwrap(), LIGHT_NODE_SESSION_MAX_FRAME);
         authority.validate_hello_budget(fleet).unwrap();
         for at_boundary in [true, false] {
