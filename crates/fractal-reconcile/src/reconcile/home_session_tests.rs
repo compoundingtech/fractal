@@ -7,6 +7,42 @@ use crate::store::local_sessions::{LocalSession, SessionCustody};
 use smallclaims::{fleet::MemberKey, sync::FleetAuth};
 use tokio::sync::watch;
 
+#[test]
+fn existing_native_custody_schema_upgrades_without_inventing_retirement_proof() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("existing-custody.sqlite3");
+    let binding = LocalSession {
+        subject: "agent/example/retained".into(), runtime_id: "retained".into(),
+        incarnation: "retained-native-generation".into(), native_incarnation: "retained-native-generation".into(),
+        terminal: true, driver: None, lifecycle: MemberLifecycle::Service,
+        custody: SessionCustody::Owned, start_operation: None, invocation: None,
+    };
+    let body = serde_json::to_string(&binding).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hc51ea53acc5a owner=fractal_reconcile::reconcile::home_session_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE local_session_custody (
+                subject TEXT NOT NULL, incarnation TEXT NOT NULL, body TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1, custody_settled INTEGER NOT NULL DEFAULT 0,
+                detached_by TEXT, detach_receipted INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(subject,incarnation)
+            ) WITHOUT ROWID;"
+        ).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h06bc04a22d85 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)",
+            rusqlite::params![binding.subject, binding.incarnation, body]).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    crate::store::local_sessions::create_schema(&connection).unwrap();
+    crate::store::local_sessions::create_schema(&connection).unwrap();
+    let (retained, active, verified): (String, bool, bool) = connection.query_row(
+        "SELECT body,active,native_retirement_verified FROM local_session_custody WHERE subject=?1 AND incarnation=?2",
+        rusqlite::params![binding.subject, binding.incarnation],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    assert_eq!(retained, body);
+    assert!(active);
+    assert!(!verified, "upgrading retained authority cannot manufacture positive physical proof");
+}
+
 struct NativePair {
     root: tempfile::TempDir,
     selection: Selection,
@@ -187,7 +223,9 @@ async fn native_receipt_replay_reconnect_and_offline_stop_need_no_seat_graph() {
     pair.disconnect().await;
     assert!(local_session(&pair.store, pair.runtime.as_ref(), &pair.binding.subject, Some(&pair.binding.incarnation)).is_err());
     // Even after a runtime ID is reused, a replay cannot enter native stop again.
-    let original_native = pair.store.local_session_at(&pair.binding.subject, &pair.binding.incarnation).unwrap().unwrap().native_incarnation;
+    let original = pair.store.local_session_at(&pair.binding.subject, &pair.binding.incarnation).unwrap().unwrap();
+    assert!(pair.store.local_session_retirement_verified(&original).unwrap());
+    let original_native = original.native_incarnation.clone();
     pair.runtime.remove("native-worker", true).unwrap();
     pair.runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
         pair.root.path(), &std::env::vars().collect(), None, &BTreeMap::new(), None).unwrap();
@@ -205,8 +243,33 @@ async fn native_receipt_replay_reconnect_and_offline_stop_need_no_seat_graph() {
         start_operation: None, invocation: None,
     };
     pair.store.bind_local_session(&binding).unwrap();
+    assert!(!pair.store.local_session_retirement_verified(&binding).unwrap(),
+        "replacement custody must not inherit its predecessor's native retirement proof");
     stop_local_session(&pair.store, pair.runtime.as_ref(), &binding.subject, &binding.incarnation, "fresh-offline-stop").unwrap();
+    assert!(pair.store.local_session_retirement_verified(&binding).unwrap());
     assert!(local_session(&pair.store, pair.runtime.as_ref(), &binding.subject, None).is_err());
+}
+
+#[tokio::test]
+async fn native_retirement_proof_is_fenced_to_the_exact_current_custody_body() {
+    let pair = NativePair::new().await;
+    let original = pair.store.local_session(&pair.binding.subject).unwrap().unwrap();
+    let mut updated = original.clone();
+    updated.lifecycle = MemberLifecycle::AdoptOnly;
+    pair.store.bind_local_session(&updated).unwrap();
+    assert!(pair.store.verify_local_session_retirement(&original).is_err(),
+        "a stale lifecycle/custody snapshot cannot record physical retirement");
+    assert!(!pair.store.local_session_retirement_verified(&updated).unwrap());
+    assert!(stop_local_session_with_retirement_proof(&pair.store, pair.runtime.as_ref(),
+        &updated.subject, &updated.incarnation, "exact-custody-stop").unwrap());
+    assert!(pair.store.local_session_retirement_verified(&updated).unwrap());
+    assert!(!pair.store.local_session_retirement_verified(&original).unwrap());
+    assert!(pair.store.has_current_local_session(&updated.subject).unwrap(),
+        "positive native proof is not the durable completion receipt");
+    pair.store.bind_local_session(&original).unwrap();
+    assert!(!pair.store.local_session_retirement_verified(&original).unwrap(),
+        "changing the custody body invalidates the previous body's native proof");
+    assert!(!pair.store.local_session_retirement_verified(&updated).unwrap());
 }
 
 #[tokio::test]
@@ -392,12 +455,20 @@ async fn an_entered_stop_does_not_signal_a_replacement_native_generation() {
     let recovery = pair.seat.recoverable().unwrap().into_iter().find(|entry|
         entry.command.execution_id == stop.execution_id).unwrap();
     pair.runtime.pty().unwrap().stop("native-worker").unwrap();
+    let error = pair.driver.recover(recovery).await.unwrap_err();
+    assert!(error.to_string().contains("native terminal scope retirement is unproven"), "{error:#}");
+    assert!(pair.seat.pending_terminal_results().unwrap().is_empty(),
+        "a direct native stop without retained whole-scope proof must remain unknown");
+    assert!(pair.store.has_current_local_session(&pair.binding.subject).unwrap());
+    let recovery = pair.seat.recoverable().unwrap().into_iter().find(|entry|
+        entry.command.execution_id == stop.execution_id).unwrap();
     pair.runtime.remove("native-worker", true).unwrap();
     pair.runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
         pair.root.path(), &std::env::vars().collect(), None, &BTreeMap::new(), None).unwrap();
     let replacement = pair.runtime.snapshot_ptys().unwrap().into_iter().find(|entry|
         entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
-    assert!(pair.driver.recover(recovery).await.is_err());
+    let error = pair.driver.recover(recovery).await.unwrap_err();
+    assert!(error.to_string().contains("native terminal scope retirement is unproven"), "{error:#}");
     let actual = pair.runtime.snapshot_ptys().unwrap().into_iter().find(|entry|
         entry.runtime_id == "native-worker").unwrap();
     assert_eq!(actual.status, "running");
@@ -414,13 +485,24 @@ async fn positively_retired_unknown_entry_keeps_its_native_snapshot_through_a_st
     pair.seat.enter(&stop.execution_id, |_, _| anyhow::bail!("interrupted native entry")).unwrap_err();
     assert!(stop_local_session_with_retirement_proof(&pair.store, pair.runtime.as_ref(),
         &pair.binding.subject, &pair.binding.incarnation, "independent-local-retirement").unwrap());
+    let binding = pair.store.local_session_at(&pair.binding.subject, &pair.binding.incarnation).unwrap().unwrap();
+    assert!(pair.store.local_session_retirement_verified(&binding).unwrap());
+    // Reopen only native SQLite custody, without reinstalling the deliberately unavailable
+    // graph schema. The positive proof must already be committed, not an in-memory waiter.
+    let reopened = rusqlite::Connection::open(pair.root.path().join("native.sqlite3")).unwrap();
+    let verified: bool = reopened.query_row(
+        "SELECT native_retirement_verified FROM local_session_custody WHERE subject=?1 AND incarnation=?2",
+        rusqlite::params![binding.subject, binding.incarnation], |row| row.get(0)).unwrap();
+    assert!(verified);
+    drop(reopened);
     pair.store.connection.write().execute_batch(
         /* sqlite-large-value: allow-for-now lv-h9089b8a75c90 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_native_finalization BEFORE UPDATE OF custody_settled ON local_session_custody
          WHEN NEW.custody_settled=1 BEGIN SELECT RAISE(ABORT,'injected native finalization failure'); END;"
     ).unwrap();
     let recovery = pair.seat.recoverable().unwrap().into_iter().find(|entry|
         entry.command.execution_id == stop.execution_id).unwrap();
-    assert!(pair.driver.recover(recovery).await.is_err());
+    let error = pair.driver.recover(recovery).await.unwrap_err();
+    assert!(format!("{error:#}").contains("injected native finalization failure"), "{error:#}");
     let pending = pair.seat.pending_terminal_results().unwrap();
     assert_eq!(pending.len(), 1);
     let proof = pending[0].0.custody_proof.as_deref().unwrap();

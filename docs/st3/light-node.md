@@ -158,6 +158,24 @@ a positively identified still-running generation can reconcile the retained
 Stop under the current serialized authority/cancellation barrier. A replaced or
 ambiguous generation cannot be signaled; missing evidence never proves closure.
 
+Native custody admission uses the existing exclusive SQLite writer and an atomic
+owner-local transaction, without preparing graph projection finalizers. It
+continues to work when the graph tables are unavailable. Exact owned stops retain
+`native_retirement_verified` in `local_session_custody` only after positive
+whole-scope native proof, fenced against the complete current binding (logical
+and native incarnation, lifecycle and custody). A changed binding or new native
+generation starts without that proof. Existing databases gain the column with a
+false default while retaining their authoritative bindings.
+
+Unknown-entry recovery consumes this retained physical proof without signalling
+an already-ended PTY again. Direct native stop without retained proof, absence,
+leader exit and a reused runtime ID cannot manufacture closure. A crash between
+the physical stop and proof persistence therefore remains conservatively
+unresolved. Physical proof alone does not settle custody: the separate durable
+completion receipt and local-finalization barrier still gate settlement,
+transmission and reclamation.
+
+
 Epoch replacement first closes old authority. The old home connection remains
 available to drain real terminal receipts and authority changes/ACKs; queued home
 commands are not declared settled merely because control is changing. Both peers

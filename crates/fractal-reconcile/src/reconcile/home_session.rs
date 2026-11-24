@@ -287,11 +287,11 @@ impl Executor for NativeSessionExecutor {
                     let binding = reconciler.store.local_session_at(&live.subject, &live.incarnation)?.context("stop custody binding unavailable")?;
                     anyhow::ensure!(binding.runtime_id == live.runtime && binding.custody == SessionCustody::Owned, "stop recovery custody differs");
                     if binding.terminal {
-                        let mut matching = reconciler.runtime.snapshot_ptys()?.into_iter().filter(|entry| entry.runtime_id == binding.runtime_id);
-                        let observed = matching.next().context("stop custody lacks positive native closure evidence")?;
-                        anyhow::ensure!(matching.next().is_none() && observed.status == "exited"
-                            && observed.incarnation_id.as_deref() == Some(binding.native_incarnation.as_str()), "stop custody lacks exact native closure evidence");
-                        anyhow::ensure!(reconciler.runtime.stop_with_retirement_proof(&binding.runtime_id, true, &binding.native_incarnation)?, "native terminal scope retirement is unproven");
+                        // A daemon exit/absence is not whole-scope closure, and repeating
+                        // native stop on an ended PTY cannot recover the lost result. Consume
+                        // only the exact positive proof retained at the physical stop boundary.
+                        anyhow::ensure!(reconciler.store.local_session_retirement_verified(&binding)?,
+                            "native terminal scope retirement is unproven");
                     } else { self.await_exec_retirement(&binding).await?; }
                     self.finish_stop(&recovery.command, binding)
                 }

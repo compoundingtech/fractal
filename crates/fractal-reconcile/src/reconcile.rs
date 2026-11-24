@@ -823,7 +823,11 @@ pub fn stop_local_session_with_retirement_proof<R: RuntimeControl>(
         store.detach_local_session(subject, incarnation, operation)?;
         Ok(false)
     } else {
-        runtime.stop_with_retirement_proof(&binding.runtime_id, binding.terminal, &binding.native_incarnation)
+        let retired = runtime.stop_with_retirement_proof(&binding.runtime_id, binding.terminal, &binding.native_incarnation)?;
+        if retired {
+            store.verify_local_session_retirement(&binding)?;
+        }
+        Ok(retired)
     }
 }
 
