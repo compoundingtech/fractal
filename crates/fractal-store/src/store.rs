@@ -2911,6 +2911,36 @@ impl Store {
         }
     }
 
+    /// Planning-only snapshot: one global fast-path probe, then at most one
+    /// pending check per distinct owner. Never reuse this result at an effect fence.
+    pub fn pending_projection_runs<'a>(
+        &self,
+        owners: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeSet<String>> {
+        let owners = owners.into_iter().collect::<BTreeSet<_>>();
+        if owners.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        for owner in &owners {
+            smallclaims::touched::note_read(|| (*owner).to_owned());
+        }
+        let connection = self.readers.get();
+        let transaction = connection.unchecked_transaction()?;
+        if !projection_work_pending_tx(&transaction)? {
+            return Ok(BTreeSet::new());
+        }
+        let mut pending = BTreeSet::new();
+        for owner in owners {
+            #[cfg(test)]
+            self.extension::<observer_reconcile_inputs::PendingProbeCount>()
+                .0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if run_projection_pending_tx(&transaction, owner)? {
+                pending.insert(owner.to_owned());
+            }
+        }
+        Ok(pending)
+    }
+
     /// Publish a committed caller-driven drain, even when it appended no replicated claim.
     /// Call only after the transaction containing `finish_run_projection_tx` committed.
     pub fn run_projection_finished(&self) {

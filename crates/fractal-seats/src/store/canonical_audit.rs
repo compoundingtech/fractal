@@ -75,6 +75,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_positions",
         "claim_member_signatures",
         "claim_member_signature_pending",
+        // Member-local signing frontier and pending-key work queue, not replicated authority.
+        "claim_signature_frontiers",
+        "claim_signature_ready",
         "released_envelopes",
         "peer_retired_claims",
         "record_repair_lookups",

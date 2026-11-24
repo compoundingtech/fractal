@@ -2593,6 +2593,44 @@ fn a_predecessor_still_observed_running_is_replaced_once_after_reopen() {
 }
 
 #[test]
+fn suspended_incarnation_closes_mailbox_channel_lost_faults() {
+    let seat = Seat::new();
+    let failure = |episode: &str, incarnation: &str, condition: &str| {
+        seat.store.append_claim(&ClaimInput {
+            subject: SUBJECT.into(),
+            kind: "operational.failure".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(json!({
+                "episode": episode, "condition": condition, "incarnation": incarnation,
+                "reviewer": "person/operator", "title": "Mailbox channel lost",
+                "reason": "The admitted mailbox channel disconnected.",
+                "severity": "error", "targets": [SUBJECT]
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    let lost = failure("mailbox-lost/original", "original-1", "mailbox-channel-lost");
+    let other = failure("mailbox-lost/other", "other-incarnation", "mailbox-channel-lost");
+    let unrelated = failure("unrelated/original", "original-1", "other-condition");
+    assert_eq!(seat.store.operational_failure("mailbox-lost/original").unwrap().unwrap().status, "pending");
+    seat.reconcile();
+    assert!(seat.store.claims_for(SUBJECT, Some("operational.recovered")).unwrap().is_empty(),
+        "a running incarnation still requires replay and native delivery proof");
+
+    seat.finish_suspend();
+    seat.reconcile();
+    let recoveries = seat.store.claims_for(SUBJECT, Some("operational.recovered")).unwrap();
+    assert_eq!(recoveries.len(), 1, "repeated stopped observations recover exactly once");
+    assert_eq!(recoveries[0].body["fields"]["failure"], lost.id);
+    assert_eq!(recoveries[0].body["fields"]["reason"], "incarnation-ended");
+    let faults = seat.store.operational_failures().unwrap();
+    assert_eq!(faults.iter().find(|fault| fault.request == lost.id).unwrap().status, "resolved");
+    for id in [other.id, unrelated.id] {
+        assert_eq!(faults.iter().find(|fault| fault.request == id).unwrap().status, "pending");
+    }
+}
+
+#[test]
 fn a_suspend_whose_stop_timed_out_before_the_exit_leaves_no_fault() {
     let seat = Seat::new();
     *seat.runtime.late_stops.lock().unwrap() = 1;

@@ -13,6 +13,7 @@ WF_EDGE_HOST=$(python3 -c 'import os, urllib.parse; print(urllib.parse.urlparse(
 export WF_EDGE_HOST
 export WF_ALLOWED_HOSTS="127.0.0.1,localhost,$WF_EDGE_HOST"
 export WF_ST_GATEWAY
-WF_ST_AUTHORIZATION="Bearer $(<"$WF_ST_CREDENTIAL_FILE")"
-export WF_ST_AUTHORIZATION
+export WF_ST_CREDENTIAL_FILE
+# Never forward an inherited legacy bearer to the long-lived preview process.
+unset WF_ST_AUTHORIZATION
 exec "$app_dir/node_modules/.bin/vite" --config "$WF_VITE_CONFIG" --configLoader runner --port "$PORT" --host 127.0.0.1 --strictPort

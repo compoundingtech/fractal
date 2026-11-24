@@ -13319,17 +13319,25 @@ fn render_performance(view: &Value) -> String {
         "PERFORMANCE  last {} seconds · sorted by total wall time\n",
         view["window_seconds"]
     );
+    if let Some(note) = view["sqlite_cache_miss_bytes_note"].as_str() {
+        let _ = writeln!(out, "SQLite cache-miss bytes: {note}");
+    }
+    if let Some(note) = view["mmap_major_faults_note"].as_str() {
+        let _ = writeln!(out, "mmap major faults: {note}");
+    }
     for (key, title) in [("requests", "REQUESTS AND TASKS"), ("queries", "QUERIES")] {
-        let _ = writeln!(out, "{title}  count · total ms · max ms · CPU ms · kind");
+        let _ = writeln!(out, "{title}  count · total ms · max ms · CPU ms · SQLite cache-miss bytes · mmap major faults · kind");
         if let Some(rows) = view[key].as_array() {
             for row in rows {
                 let _ = writeln!(
                     out,
-                    "  {}  {:.1}  {:.1}  {:.1}  {}",
+                    "  {}  {:.1}  {:.1}  {:.1}  {}  {}  {}",
                     row["count"],
                     row["total_ms"].as_f64().unwrap_or(0.0),
                     row["max_ms"].as_f64().unwrap_or(0.0),
                     row["cpu_ms"].as_f64().unwrap_or(0.0),
+                    row["sqlite_cache_miss_bytes"].as_u64().unwrap_or(0),
+                    row["mmap_major_faults"],
                     row["kind"].as_str().unwrap_or("?")
                 );
             }
@@ -13344,10 +13352,10 @@ fn render_performance(view: &Value) -> String {
         );
     }
     for (key, title) in [
-        ("clients", "CLIENTS  count · total ms · CPU ms · client"),
+        ("clients", "CLIENTS  count · total ms · CPU ms · SQLite cache-miss bytes · mmap major faults · client"),
         (
             "client_requests",
-            "CLIENT REQUESTS  count · total ms · CPU ms · client · kind",
+            "CLIENT REQUESTS  count · total ms · CPU ms · SQLite cache-miss bytes · mmap major faults · client · kind",
         ),
     ] {
         let Some(rows) = view[key].as_array() else {
@@ -13357,10 +13365,12 @@ fn render_performance(view: &Value) -> String {
         for row in rows {
             let _ = write!(
                 out,
-                "  {}  {:.1}  {:.1}  {}",
+                "  {}  {:.1}  {:.1}  {}  {}  {}",
                 row["count"],
                 row["total_ms"].as_f64().unwrap_or(0.0),
                 row["cpu_ms"].as_f64().unwrap_or(0.0),
+                row["sqlite_cache_miss_bytes"].as_u64().unwrap_or(0),
+                row["mmap_major_faults"],
                 row["client"].as_str().unwrap_or("?")
             );
             if let Some(kind) = row["kind"].as_str() {
@@ -22840,27 +22850,37 @@ async fn release_old_envelopes(store: Arc<Store>) {
     }
 }
 
-/// Sign this member's own claims with its member key (`member_signatures`): the claims it held
-/// before this build a page at a time, then each new one within seconds of its append. Signing
-/// happens outside the writer; each page stores in one short write.
+/// Replay durable signing/ready cursors after subscribing, then wait for changed keys.
+/// The only idle deadline is an actual pending signature's retention expiry.
 async fn sign_own_claims(store: Arc<Store>) {
+    let (_observer, mut changes) = store.subscribe_claim_signatures();
     loop {
+        changes.borrow_and_update();
         let page_store = store.clone();
-        // Signatures that wait for their claims are settled first: a page of them, then a page
-        // of this member's own claims to sign.
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || {
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || -> anyhow::Result<_> {
             page_store.promote_claim_member_signatures()?;
-            page_store.sign_own_claims()
+            page_store.expire_claim_signatures()?;
+            let report = page_store.sign_own_claims()?;
+            Ok((report.done && !page_store.claim_signatures_ready()?, page_store.claim_signature_expiry()?))
         })).await;
-        let pause = match result {
-            Ok(Ok(report)) if report.done => Duration::from_secs(5),
-            Ok(Ok(_)) => Duration::from_millis(50),
+        match result {
+            Ok(Ok((false, _))) => tokio::task::yield_now().await,
+            Ok(Ok((true, expiry))) => {
+                if let Some(expiry) = expiry {
+                    let wait = Duration::from_millis(u64::try_from(expiry.saturating_sub(now_ms())).unwrap_or(u64::MAX));
+                    tokio::select! {
+                        result = changes.changed() => if result.is_err() { return; },
+                        _ = tokio::time::sleep(wait) => {},
+                    }
+                } else if changes.changed().await.is_err() {
+                    return;
+                }
+            }
             error => {
                 stderr_message("fractal", format_args!("signing own claims failed: {error:?}"));
-                Duration::from_secs(60)
+                tokio::time::sleep(Duration::from_secs(60)).await;
             }
-        };
-        tokio::time::sleep(pause).await;
+        }
     }
 }
 
