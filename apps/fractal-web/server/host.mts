@@ -105,6 +105,8 @@ export interface HostConfig {
   readonly deploymentId: string
   /** Interim usage-history producer from `WF_USAGE_HISTORY_URL`; unset registers no relay. */
   readonly usageHistory?: LoopbackProducer | undefined
+  /** Root-detail producer from `WF_ROOT_DETAIL_URL`; unset registers no relay. */
+  readonly rootDetail?: LoopbackProducer | undefined
 }
 
 const loopbackHosts = new Set(['127.0.0.1', '::1', 'localhost'])
@@ -144,6 +146,7 @@ export const readHostConfig = (env: NodeJS.ProcessEnv, files?: SecretFiles, uid:
     tagAuthorization,
     deploymentId: env.WF_DEPLOYMENT_ID?.trim() || new URL(origin).host,
     usageHistory: loopbackProducer(env.WF_USAGE_HISTORY_URL, 'WF_USAGE_HISTORY_URL'),
+    rootDetail: loopbackProducer(env.WF_ROOT_DETAIL_URL, 'WF_ROOT_DETAIL_URL'),
   }
 }
 
@@ -163,6 +166,7 @@ export const startHost = async (config: HostConfig, readText: (path: string) => 
     gateway,
     identity: { deploymentId: config.deploymentId, buildIdentity: buildIdentity as never },
     usageHistory: config.usageHistory,
+    rootDetail: config.rootDetail,
   })
   served.server.once('listening', () => {
     const address = served.server.address()
