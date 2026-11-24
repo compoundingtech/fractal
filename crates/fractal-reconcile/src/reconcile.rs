@@ -8632,7 +8632,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && binding.native_incarnation == incarnation)
             {
                 let closed = if terminal {
-                    self.runtime.stop_with_retirement_proof(runtime_id, terminal, incarnation)?
+                    // Reading an ended observation must not issue another native stop. Recover
+                    // only a positive whole-scope receipt written by this executor before a crash.
+                    self.store.observations_for(subject, "runtime.action.succeeded")?.iter().any(|claim| {
+                        let fields = &claim.body["fields"];
+                        fields["action"].as_str() == Some("terminate")
+                            && fields["operation_status"].as_str() == Some("retired")
+                            && fields["source_host"].as_str() == Some(self.host.as_str())
+                            && fields["runtime_id"].as_str() == Some(runtime_id)
+                            && fields["terminal"].as_bool() == Some(terminal)
+                            && fields["incarnation_id"].as_str() == Some(incarnation)
+                    })
                 } else {
                     self.store.runtime_cleanup_settled(runtime_id, incarnation)?
                 };
@@ -8733,6 +8743,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                             ("runtime_id".into(), Value::from(runtime_id)),
                             ("terminal".into(), Value::from(terminal)),
                             ("incarnation_id".into(), Value::from(incarnation)),
+                            ("source_host".into(), Value::from(self.host.clone())),
+                            ("operation_status".into(), Value::from("retired")),
                         ]),
                         evidence: vec![receipt.request.into()], expected_subject: None,
                         idempotency_key: Some(format!("local-session-stop:{subject}:{incarnation}")),
@@ -11752,20 +11764,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         self.record_native_exec_observation(subject, member, observation)?;
-        if observation.status == "running"
-            && let Some(incarnation) = observation.incarnation_id.as_deref()
-            && member.lifecycle != MemberLifecycle::TerminalBound
-        {
-            self.store.bind_local_session(&crate::store::local_sessions::LocalSession {
-                subject: subject.subject.clone(), runtime_id: member.runtime_id.clone(),
-                incarnation: incarnation.into(), native_incarnation: incarnation.into(),
-                terminal: member.terminal, driver: member.driver.clone(),
-                lifecycle: member.lifecycle.clone(),
-                custody: crate::store::local_sessions::SessionCustody::Owned,
-                start_operation: self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?,
-                invocation: None,
-            })?;
-        }
         let mut fields = member_fields(
             member,
             &observation.status,
@@ -11791,6 +11789,27 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Reuse the observation needed for record-once deduplication. Unmarked agents
         // need no extra actual-state query or harness fold on this hot path.
         let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
+        // Starts persist custody before their first graph observation. An adoption also
+        // establishes custody for runtimes predating this schema. An unchanged ordinary
+        // observation has neither acquired custody nor changed its native generation.
+        if (adopted || previous.as_ref().is_none_or(|claim|
+            claim.body["fields"]["status"].as_str() != Some("running")
+                || claim.body["fields"]["incarnation_id"].as_str()
+                    != observation.incarnation_id.as_deref()))
+            && observation.status == "running"
+            && let Some(incarnation) = observation.incarnation_id.as_deref()
+            && member.lifecycle != MemberLifecycle::TerminalBound
+        {
+            self.store.bind_local_session(&crate::store::local_sessions::LocalSession {
+                subject: subject.subject.clone(), runtime_id: member.runtime_id.clone(),
+                incarnation: incarnation.into(), native_incarnation: incarnation.into(),
+                terminal: member.terminal, driver: member.driver.clone(),
+                lifecycle: member.lifecycle.clone(),
+                custody: crate::store::local_sessions::SessionCustody::Owned,
+                start_operation: self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?,
+                invocation: None,
+            })?;
+        }
         // An exec incarnation that has ended cannot run again; a restart is a new incarnation. The
         // `st3 driver exec` wrapper reports its child's exit before it exits itself, so its own
         // process can still look live here for a moment. Recording that would put `running` over
@@ -11893,8 +11912,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         self.record_once_with_previous(&subject.subject, "runtime.observed", fields, evidence, previous.as_ref())?;
+        // A leader exit is not whole-scope retirement. This is a query-only native
+        // group proof; terminal custody instead closes through its retirement receipt.
         if observation.status == "exited"
             && let Some(incarnation) = observation.incarnation_id.as_deref()
+            && !member.terminal
+            && self.runtime.leftovers_settled(&member.runtime_id, incarnation)?
         {
             self.store.settle_local_session_custody(&subject.subject, incarnation)?;
         }

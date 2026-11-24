@@ -68,6 +68,82 @@ async fn a_managed_stopped_projection_from_absence_does_not_release_native_custo
     assert!(store.local_session_at(subject, incarnation).unwrap().is_some());
 }
 
+#[tokio::test]
+async fn ended_native_observations_recover_only_receipted_custody_without_stopping_again() {
+    let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    let Ok(binary) = fractal_runtime::resolve_executable("pty", &environment) else {
+        assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "hosted custody fixtures require pty");
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("custody.sqlite");
+    let runtime = Arc::new(NativeRuntime::new(root.path(), None, &binary));
+    let runtime_id = "receipt-recovery";
+    runtime.pty().unwrap().spawn(runtime_id, &fractal_runtime::Launch::Shell("sleep 600 & wait".into()),
+        root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
+    struct Cleanup<'a>(&'a NativeRuntime);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) { let _ = self.0.pty().and_then(|pty| pty.stop("receipt-recovery")); }
+    }
+    let _cleanup = Cleanup(&runtime);
+    let mut ended = runtime.snapshot_ptys().unwrap().into_iter()
+        .find(|o| o.runtime_id == runtime_id).unwrap();
+    let incarnation = ended.incarnation_id.clone().unwrap();
+    let subject = "agent/example/receipt-recovery";
+    let binding = LocalSession {
+        subject: subject.into(), runtime_id: runtime_id.into(),
+        incarnation: incarnation.clone(), native_incarnation: incarnation.clone(),
+        terminal: true, driver: None, lifecycle: MemberLifecycle::Service,
+        custody: SessionCustody::Owned, start_operation: None, invocation: None,
+    };
+    let store = Arc::new(Store::open(&database, "executor").unwrap());
+    store.bind_local_session(&binding).unwrap();
+    assert!(runtime.stop_with_retirement_proof(runtime_id, true, &incarnation).unwrap());
+    ended.status = "stopped".into();
+    // The runtime ID is now reused. Replaying its older, genuinely stopped generation
+    // must be observational: another generation-fenced stop would reject this live replacement.
+    runtime.pty().unwrap().spawn(runtime_id, &fractal_runtime::Launch::Shell("sleep 600 & wait".into()),
+        root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
+    let replacement = runtime.snapshot_ptys().unwrap().into_iter()
+        .find(|o| o.runtime_id == runtime_id).unwrap().incarnation_id.unwrap();
+    assert_ne!(replacement, incarnation);
+    let reconciler = Reconciler::new(store.clone(), runtime.clone(), "executor".into(), Arc::new(Notify::new()));
+    for _ in 0..3 {
+        assert!(reconciler.reconcile_runtime_stop(subject, runtime_id, true, Some(&incarnation), 0, Some(&ended)).unwrap());
+        assert!(store.has_current_local_session(subject).unwrap(), "an ended projection alone is not a retirement receipt");
+    }
+    // Simulate a crash after committing the real native retirement receipt but before
+    // settling custody. A receipt for another generation cannot release this binding.
+    let receipt = |generation: &str| ClaimInput {
+        subject: subject.into(), kind: "runtime.action.succeeded".into(), actor: None,
+        fields: BTreeMap::from([
+            ("action".into(), Value::from("terminate")),
+            ("runtime_id".into(), Value::from(runtime_id)),
+            ("terminal".into(), Value::from(true)),
+            ("incarnation_id".into(), Value::from(generation)),
+            ("source_host".into(), Value::from("executor")),
+            ("operation_status".into(), Value::from("retired")),
+        ]),
+        evidence: Vec::new(), expected_subject: None,
+        idempotency_key: Some(format!("local-session-stop:{subject}:{generation}")),
+    };
+    store.append_claim(&receipt(&replacement)).unwrap();
+    assert!(reconciler.reconcile_runtime_stop(subject, runtime_id, true, Some(&incarnation), 0, Some(&ended)).unwrap());
+    assert!(store.has_current_local_session(subject).unwrap());
+    store.append_claim(&receipt(&incarnation)).unwrap();
+    drop(reconciler);
+    drop(store);
+    let store = Arc::new(Store::open(&database, "executor").unwrap());
+    let reconciler = Reconciler::new(store.clone(), runtime.clone(), "executor".into(), Arc::new(Notify::new()));
+    for _ in 0..3 {
+        assert!(reconciler.reconcile_runtime_stop(subject, runtime_id, true, Some(&incarnation), 0, Some(&ended)).unwrap());
+        assert!(!store.has_current_local_session(subject).unwrap());
+    }
+    assert_eq!(store.observations_for(subject, "runtime.action.succeeded").unwrap().len(), 2);
+    assert!(runtime.snapshot_ptys().unwrap().iter().any(|o| o.runtime_id == runtime_id
+        && o.status == "running" && o.incarnation_id.as_deref() == Some(replacement.as_str())));
+}
+
 #[test]
 fn offline_owned_stop_proves_native_retirement_but_waits_for_a_durable_receipt_to_settle() {
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();

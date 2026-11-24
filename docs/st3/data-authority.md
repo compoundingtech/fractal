@@ -390,6 +390,10 @@ order from the same admitted claims.
 | `batches` | Shared storage, with stated local fields | Shared log metadata: origin/sequence/hash/accepted time; primary ordering inputs. Storage rather than an outcome projection. |
 | `blobs` | Shared content authority | Immutable bytes/hash/size carried by durable claims or admitted blob records; included in shared projection digests. |
 | `capabilities` | Local | Local secret-bearing authorization tokens, expiry/use bookkeeping. |
+| `local_session_custody` | Local authority | Exact native-generation identity, owned/borrowed custody and durable detach/retirement settlement. Never replicated or reconstructed from graph absence; retain unresolved custody across restart. |
+| `home_run_authority_v1` | Local authority | This selected home's admitted host key and execution binding/revision. Host admission/revocation acknowledgments, rather than projection replay, control its validity. |
+| `home_run_epoch_fences_v1` | Local authority | Per-host monotonic epoch high-water and closure fences; retain across restart and never infer a successor's permission from old graph state. |
+| `home_run_request_receipts_v1` | Local authority | Authenticated stable request identity and exact outcome, committed with its graph effect for duplicate replay; not a shared projection or disposable cache. |
 | `checkpoint_capture_epoch` | Local | Capture invalidation epoch, monotonic envelope/time guard bounds and trigger-migration version. Store-local physical rowid frontiers and capture timing are not replicated projection outcomes and are outside shared digests. |
 | `checkpoint_claims` | Shared storage, with stated local fields | Shared immutable dropped-claim/evidence/ancestry/operation identity. Digest logical live/tombstoned identity where relevant; nodes may have trimmed at different times. |
 | `checkpoint_envelopes` | Shared storage, with stated local fields | Shared immutable dropped-envelope identity. Live and trimmed nodes represent the same inventory using envelopes versus tombstones, so digest their logical union rather than treating trim progress as divergence. |
