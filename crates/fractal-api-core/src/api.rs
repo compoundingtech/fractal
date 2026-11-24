@@ -11989,6 +11989,15 @@ async fn finish_claim_publication(
 /// Every native, source-backed and declared objective and budget as one list.
 /// Domain rows precede declaration evaluation so native bindings see their real source rows.
 pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow::Result<Vec<Value>> {
+    slo_rows_from_declarations(store, domain_rows, store.declared_objectives()?.iter())
+}
+
+/// Render a history cut from the recorder's changed-key declaration inputs. Native windows
+/// still advance at their real period boundaries; unchanged declaration bodies are not reparsed.
+pub fn slo_rows_from_declarations<'a>(
+    store: &crate::store::Store, domain_rows: Vec<Value>,
+    declarations: impl Iterator<Item = &'a crate::store::declared_objectives::DeclaredObjective> + Clone,
+) -> anyhow::Result<Vec<Value>> {
     let limits = store.account_limits()?;
     let fresh_ms = crate::config::reload_daemon_limits()
         .and_then(|reloaded| reloaded.ok())
@@ -12020,7 +12029,7 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, mail));
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
-    let declared = crate::declared_objectives::rows(store, now, &rows)?;
+    let declared = crate::declared_objectives::rows_from_declarations(store, now, &rows, declarations)?;
     drop(rows.splice(budgets..budgets, declared));
     Ok(rows)
 }
