@@ -953,6 +953,7 @@ impl WriterConnection {
         // The job runs on the writer thread; what it wrote is handed back to this one.
         let capture = crate::touched::recording_wrote();
         let clock = crate::store::ClockContext::capture();
+        let stages = crate::windows::holds::BatchStages::capture();
         let wrote_rows = Mutex::new(Vec::new());
         let wrote = &wrote_rows;
         // Counts this caller until its write begins, or the writer drops it unrun.
@@ -962,6 +963,7 @@ impl WriterConnection {
             let before = tx.total_changes();
             let job = || {
                 let _clock = clock.enter();
+                let _stages = stages.enter();
                 job(tx)
             };
             let (result, written) = if capture {
