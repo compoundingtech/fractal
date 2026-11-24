@@ -66,6 +66,16 @@ describe('program declarations as data', () => {
     )
   })
 
+  it('renders program resource inputs through the native input grammar', () => {
+    expect(render({ inputs: [
+      { name: 'source', kind: 'resource', resourceKind: 'vcs.pull-request' },
+      { name: 'head', kind: 'text' },
+    ] })).toContain('input "source" kind="resource" resource-kind="vcs.pull-request"\n  input "head" kind="text"')
+    expect(() => render({ inputs: [
+      { name: 'head', kind: 'text', resourceKind: 'vcs.pull-request' },
+    ] })).toThrow()
+  })
+
   it('refuse a program step that does not alone decide its outcome', () => {
     for (const extra of [
       { assignedTo: { id: 'factory' } },
