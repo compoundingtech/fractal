@@ -15,8 +15,79 @@ use crate::config::LIGHT_NODE_SESSION_PATH;
 use crate::store::run_credentials::local::AuthorityChange;
 
 const MAX_FRAME: usize = 64 * 1024;
-const CAPABILITIES: [&str; 5] = ["commands-v1", "receipts-v1", "joint-checkpoints-v1", "run-effects-v1", "authority-v1"];
-type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+const CAPABILITIES: [&str; 6] = ["commands-v1", "receipts-v1", "joint-checkpoints-v1", "run-effects-v1", "authority-v1", "signed-channel-v1"];
+type RawClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type ClientSocket = AuthenticatedSocket<RawClientSocket>;
+type ServerSocket = AuthenticatedSocket<WebSocket>;
+
+const SESSION_NONCE_HEADER:&str="x-fractal-light-session-nonce";
+
+struct AuthenticatedSocket<S> { socket:S, channel:Channel }
+
+#[derive(Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedFrame {
+    sequence:u64,
+    frame:Frame,
+    authentication:Vec<(String,String)>,
+}
+
+struct Channel {
+    auth:FleetAuth,
+    node:String,
+    peer:String,
+    peer_key:String,
+    seat:bool,
+    transcript:String,
+    sent:u64,
+    received:u64,
+}
+impl Channel {
+    fn new(auth:FleetAuth,selection:&Selection,seat:bool,path:&str,request_digest:&str,nonce:&str)->Result<Self> {
+        ensure!(nonce.len()==32 && nonce.bytes().all(|byte|byte.is_ascii_hexdigit()),"invalid home session nonce");
+        let transcript=FleetAuth::body_digest(&serde_json::to_vec(&(path,request_digest,nonce))?);
+        let (node,peer,peer_key)=if seat {(&selection.host,&selection.home,&selection.home_key)} else {(&selection.home,&selection.host,&selection.host_key)};
+        Ok(Self {auth,node:node.clone(),peer:peer.clone(),peer_key:peer_key.clone(),seat,transcript,sent:0,received:0})
+    }
+    fn frame_path(&self,seat:bool,sequence:u64)->String {
+        format!("{LIGHT_NODE_SESSION_PATH}/frames/{}/{}/{sequence}",self.transcript,if seat {"seat-to-home"} else {"home-to-seat"})
+    }
+    fn encode(&mut self,frame:Frame)->Result<String> {
+        let sequence=self.sent.checked_add(1).ok_or_else(||anyhow::anyhow!("session frame sequence exhausted"))?;
+        let body=serde_json::to_vec(&frame)?;
+        ensure!(body.len()<=MAX_FRAME,"light-node frame exceeds bounded message size");
+        let headers=self.auth.request_headers_method("POST",&self.frame_path(self.seat,sequence),&self.node,&body)?;
+        let authentication=headers.iter().map(|(key,value)|Ok((key.as_str().to_owned(),value.to_str()?.to_owned()))).collect::<Result<Vec<_>>>()?;
+        let payload=serde_json::to_string(&SignedFrame {sequence,frame,authentication})?;
+        ensure!(payload.len()<=MAX_FRAME,"signed light-node frame exceeds bounded message size");
+        self.sent=sequence;
+        Ok(payload)
+    }
+    fn decode(&mut self,bytes:&[u8])->Result<Frame> {
+        ensure!(bytes.len()<=MAX_FRAME,"signed light-node frame exceeds bounded message size");
+        let message:SignedFrame=serde_json::from_slice(bytes)?;
+        let expected=self.received.checked_add(1).ok_or_else(||anyhow::anyhow!("session frame sequence exhausted"))?;
+        ensure!(message.sequence==expected,"session frame replay or sequence gap");
+        ensure!(message.authentication.len()<=16,"session authentication header limit");
+        let mut headers=HeaderMap::new();
+        for (name,value) in message.authentication {
+            let name=axum::http::HeaderName::from_bytes(name.as_bytes())?;
+            ensure!(!headers.contains_key(&name),"duplicate session authentication header");
+            headers.insert(name,axum::http::HeaderValue::from_str(&value)?);
+        }
+        let body=serde_json::to_vec(&message.frame)?;
+        let sender=self.auth.verify_sender(&headers,"POST",&self.frame_path(!self.seat,expected),&body,Some(&self.peer),None)?;
+        ensure!(sender.member_signature_valid && sender.member_key.as_deref()==Some(self.peer_key.as_str()),"session frame lacks the pinned member signature");
+        self.received=expected;
+        Ok(message.frame)
+    }
+}
+
+fn websocket_key(headers:&HeaderMap)->Result<&str> {
+    let key=headers.get("sec-websocket-key").ok_or_else(||anyhow::anyhow!("missing websocket request challenge"))?.to_str()?;
+    ensure!(key.len()==24 && key.is_ascii(),"invalid websocket request challenge");
+    Ok(key)
+}
 type Work = Pin<Box<dyn Future<Output = (String, Result<Outcome>)> + Send>>;
 
 /// Entry must reuse current native admission/custody, not launch from a decoded payload
@@ -91,27 +162,24 @@ fn check_capabilities(version: u32, offered: &[String]) -> Result<()> {
     ensure!(version == VERSION && offered == capabilities(), "unsupported light-node protocol/capabilities");
     Ok(())
 }
-fn encode(frame: &Frame) -> Result<String> {
-    let payload = serde_json::to_string(frame)?;
-    ensure!(payload.len() <= MAX_FRAME, "light-node frame exceeds bounded message size");
-    Ok(payload)
+fn authenticate_response(auth:FleetAuth,selected:&Selection,path:&str,request_digest:&str,response:&HeaderMap)->Result<Channel> {
+    let nonce=response.get(SESSION_NONCE_HEADER).ok_or_else(||anyhow::anyhow!("missing authenticated home session nonce"))?.to_str()?;
+    let sender=auth.verify_sender(response,"RESPONSE",path,nonce.as_bytes(),Some(&selected.home),Some(request_digest))?;
+    ensure!(sender.member_signature_valid && sender.member_key.as_deref()==Some(selected.home_key.as_str()),"session response lacks the pinned home signature");
+    Channel::new(auth,selected,true,path,request_digest,nonce)
 }
-fn decode(bytes: &[u8]) -> Result<Frame> {
-    ensure!(bytes.len() <= MAX_FRAME, "light-node frame exceeds bounded message size");
-    Ok(serde_json::from_slice(bytes)?)
-}
-async fn server_send(socket: &mut WebSocket, frame: Frame) -> Result<()> {
-    socket.send(ServerMessage::Text(encode(&frame)?.into())).await?;
+async fn server_send(socket: &mut ServerSocket, frame: Frame) -> Result<()> {
+    socket.socket.send(ServerMessage::Text(socket.channel.encode(frame)?.into())).await?;
     Ok(())
 }
 async fn client_send(socket: &mut ClientSocket, frame: Frame) -> Result<()> {
-    socket.send(ClientMessage::Text(encode(&frame)?.into())).await?;
+    socket.socket.send(ClientMessage::Text(socket.channel.encode(frame)?.into())).await?;
     Ok(())
 }
-async fn server_next(socket: &mut WebSocket) -> Result<Option<Frame>> {
+async fn server_next(socket: &mut ServerSocket) -> Result<Option<Frame>> {
     loop {
-        match socket.next().await {
-            Some(Ok(ServerMessage::Text(text))) => return Ok(Some(decode(text.as_bytes())?)),
+        match socket.socket.next().await {
+            Some(Ok(ServerMessage::Text(text))) => return Ok(Some(socket.channel.decode(text.as_bytes())?)),
             Some(Ok(ServerMessage::Close(_))) | None => return Ok(None),
             Some(Ok(ServerMessage::Ping(_) | ServerMessage::Pong(_))) => {}
             Some(Err(error)) => return Err(error.into()),
@@ -121,8 +189,8 @@ async fn server_next(socket: &mut WebSocket) -> Result<Option<Frame>> {
 }
 async fn client_next(socket: &mut ClientSocket) -> Result<Option<Frame>> {
     loop {
-        match socket.next().await {
-            Some(Ok(ClientMessage::Text(text))) => return Ok(Some(decode(text.as_bytes())?)),
+        match socket.socket.next().await {
+            Some(Ok(ClientMessage::Text(text))) => return Ok(Some(socket.channel.decode(text.as_bytes())?)),
             Some(Ok(ClientMessage::Close(_))) | None => return Ok(None),
             Some(Ok(ClientMessage::Ping(_) | ClientMessage::Pong(_))) => {}
             Some(Err(tokio_tungstenite::tungstenite::Error::Io(_) | tokio_tungstenite::tungstenite::Error::ConnectionClosed | tokio_tungstenite::tungstenite::Error::AlreadyClosed)) => return Ok(None),
@@ -174,8 +242,13 @@ async fn upgrade(State(home): State<Home>, OriginalUri(uri): OriginalUri, axum::
     if uri.path_and_query().is_none_or(|value| value.as_str() != path) {
         return (StatusCode::BAD_REQUEST, "invalid session route").into_response();
     }
-    let sender = match home.0.auth.verify_sender(&headers, "GET", &path, &[], None, None) {
-        Ok(sender) => sender,
+    let challenge=match websocket_key(&headers) {
+        Ok(key)=>key,
+        Err(_)=>return (StatusCode::BAD_REQUEST,"invalid websocket challenge").into_response(),
+    };
+    let sender = match home.0.auth.verify_sender(&headers, "GET", &path, challenge.as_bytes(), None, None) {
+        Ok(sender) if sender.member_signature_valid => sender,
+        Ok(_)=>return (StatusCode::UNAUTHORIZED,"missing pinned member signature").into_response(),
         Err(_) => return (StatusCode::UNAUTHORIZED, "untrusted session signer").into_response(),
     };
     let mut granted=None;
@@ -187,47 +260,55 @@ async fn upgrade(State(home): State<Home>, OriginalUri(uri): OriginalUri, axum::
                 return (StatusCode::INTERNAL_SERVER_ERROR,"session journal unavailable").into_response();
             }
         };
-        if selection.is_some_and(|selection| selection.home==home.0.node && selection.host==sender.name && sender.member_key.as_deref()==Some(selection.host_key.as_str())) {
-            granted=Some(entry.clone());
+        if let Some(selection)=selection.filter(|selection| selection.home==home.0.node && selection.host==sender.name && sender.member_key.as_deref()==Some(selection.host_key.as_str())) {
+            granted=Some((entry.clone(),selection));
             break;
         }
     }
     let entry=granted;
-    let Some(entry) = entry else { return (StatusCode::FORBIDDEN, "no explicit seat grant for signer").into_response(); };
-    let permit = match entry.connection.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => return (StatusCode::CONFLICT, "seat session already connected").into_response(),
+    let Some((entry,selected)) = entry else { return (StatusCode::FORBIDDEN, "no explicit seat grant for signer").into_response(); };
+    // Replayed HTTP headers cannot reserve the seat before a fresh signed Hello.
+    if entry.connection.available_permits()==0 {
+        return (StatusCode::CONFLICT,"seat session already connected").into_response();
+    }
+    let nonce=uuid::Uuid::new_v4().simple().to_string();
+    let request_digest=FleetAuth::body_digest(challenge.as_bytes());
+    let channel=match Channel::new(home.0.auth.clone(),&selected,false,&path,&request_digest,&nonce) {
+        Ok(channel)=>channel,
+        Err(_)=>return (StatusCode::INTERNAL_SERVER_ERROR,"session channel unavailable").into_response(),
     };
-    let signed = match home.0.auth.response_headers_for(&path, &home.0.node, &[], &FleetAuth::body_digest(&[])) {
+    let signed = match home.0.auth.response_headers_for(&path, &home.0.node, nonce.as_bytes(), &request_digest) {
         Ok(headers) => headers,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "session signing unavailable").into_response(),
     };
-    let mut response = websocket.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).write_buffer_size(16 * 1024).max_write_buffer_size(MAX_FRAME * 2).on_upgrade(move |mut socket| async move {
-        let _permit = permit;
+    let mut response = websocket.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).write_buffer_size(16 * 1024).max_write_buffer_size(MAX_FRAME * 2).on_upgrade(move |socket| async move {
+        let mut socket=AuthenticatedSocket {socket,channel};
         let mut shutdown=home.0.shutdown.subscribe();
         if *shutdown.borrow() {return;}
         tokio::select! {
             _=shutdown.changed()=>{},
-            result=serve_home(&home,&entry.journal,&mut socket,query.epoch)=>{
+            result=serve_home(&home,&entry.journal,&entry.connection,&mut socket,query.epoch)=>{
                 if let Err(error)=result {tracing::warn!(error=%error,"light-node home session ended");}
             }
         }
     });
     response.headers_mut().extend(signed);
+    response.headers_mut().insert(SESSION_NONCE_HEADER,axum::http::HeaderValue::from_str(&nonce).expect("generated nonce is hexadecimal"));
     response
 }
 
-async fn serve_home(home: &Home, journal: &Journal, socket: &mut WebSocket, epoch:u64) -> Result<()> {
+async fn serve_home(home: &Home, journal: &Journal, connection:&Semaphore, socket: &mut ServerSocket, epoch:u64) -> Result<()> {
     let selected = journal.selection_for_epoch(epoch)?.ok_or_else(||anyhow::anyhow!("unknown session epoch"))?;
     let mut shutdown = home.0.shutdown.subscribe();
     if *shutdown.borrow() { return Ok(()); }
     let hello = tokio::select! {
-        frame = server_next(socket) => frame?,
+        frame = tokio::time::timeout(Duration::from_secs(15),server_next(socket)) => frame.map_err(|_|anyhow::anyhow!("authenticated session hello timed out"))??,
         _ = shutdown.changed() => return Ok(()),
     };
     let Some(Frame::Hello { version, selection, capabilities: offered }) = hello else { bail!("session must begin with explicit hello"); };
     check_capabilities(version, &offered)?;
     ensure!(selection == selected, "stale home/host selection or epoch");
+    let _permit=connection.try_acquire().map_err(|_|anyhow::anyhow!("another authenticated seat session won the lease"))?;
     if journal.retired(epoch)? {
         let (receipt_ack,authority_ack)=journal.epoch_progress(epoch)?;
         server_send(socket,Frame::Retired {epoch,receipt_ack,authority_ack}).await?;
@@ -309,7 +390,7 @@ async fn serve_home(home: &Home, journal: &Journal, socket: &mut WebSocket, epoc
                     ensure!(drained, "retained evidence must drain before new effects");
                     ensure!(request.assertion.binding.home == selected.home && request.assertion.binding.host == selected.host && request.assertion.binding.epoch == selected.epoch, "run effect selection is fenced");
                     ensure!(selected.grant.subjects.contains(&request.assertion.binding.subject), "run effect outside provisioned subject grant");
-                    let result = home.0.effects.execute(&request)?;
+                    let result = home.0.effects.execute(/* sqlite-large-value: allow-for-now lv-h2784ce849550 owner=fractal_peer::light_node::session TODO=trace-statement-and-value-representation */ &request)?;
                     ensure!(result.request_id == request.assertion.request.request_id, "effect result identity differs");
                     server_send(socket, Frame::RunResult { result }).await?;
                 }
@@ -325,7 +406,9 @@ async fn serve_home(home: &Home, journal: &Journal, socket: &mut WebSocket, epoc
 #[derive(Clone)]
 pub struct Requester { journal: Journal }
 impl Requester {
-    pub fn acknowledge(&self,request_id:&str)->Result<()> { self.journal.acknowledge_run_result(request_id) }
+    pub fn acknowledge(&self, request: &RunRequest, accepted: &RunResult) -> Result<()> {
+        self.journal.acknowledge_run_result(request, accepted)
+    }
     pub async fn submit(&self, request: RunRequest) -> Result<RunResult> {
         let request_id = request.assertion.request.request_id.clone();
         self.journal.enqueue_run_request(&request)?;
@@ -399,7 +482,9 @@ impl SeatClient {
         let selected = &self.selected;
         let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch={}",selected.epoch);
         let mut request = format!("{}?epoch={}",self.endpoint,selected.epoch).into_client_request()?;
-        request.headers_mut().extend(self.auth.request_headers_method("GET", &path, &self.node, &[])?);
+        let request_digest=FleetAuth::body_digest(websocket_key(request.headers())?.as_bytes());
+        let signed=self.auth.request_headers_method("GET",&path,&self.node,websocket_key(request.headers())?.as_bytes())?;
+        request.headers_mut().extend(signed);
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_FRAME)).max_frame_size(Some(MAX_FRAME)).write_buffer_size(16 * 1024).max_write_buffer_size(MAX_FRAME * 2);
         let connected = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async_with_config(request, Some(config), true)).await;
         let (socket,response) = match connected {
@@ -415,9 +500,8 @@ impl SeatClient {
             }
             Err(_) => return Ok(None),
         };
-        let sender = self.auth.verify_sender(response.headers(), "RESPONSE", &path, &[], Some(&selected.home), Some(&FleetAuth::body_digest(&[])))?;
-        ensure!(sender.member_key.as_deref() == Some(selected.home_key.as_str()), "session response is not signed by pinned home key");
-        Ok(Some(socket))
+        let channel=authenticate_response(self.auth.clone(),selected,&path,&request_digest,response.headers())?;
+        Ok(Some(AuthenticatedSocket {socket,channel}))
     }
 
     async fn connected(&self, socket: &mut ClientSocket, shutdown: &mut watch::Receiver<bool>) -> Result<LinkEnd> {
@@ -532,8 +616,8 @@ impl SeatClient {
                 frame = client_next(socket) => match frame? {
                     None => return Ok(LinkEnd::Disconnected),
                     Some(Frame::Command { command }) => match self.journal.admit(&command)? {
-                        Admission::Accepted(_) => {},
-                        Admission::Duplicate(receipt) => client_send(socket,Frame::Receipt { receipt }).await?,
+                        // Replay uses the same gated contiguous outbox as first delivery.
+                        Admission::Accepted(_) | Admission::Duplicate(_) => {},
                         Admission::Replay { next_sequence } => client_send(socket,Frame::Replay { next_sequence }).await?,
                         Admission::ResultExpired => client_send(socket,Frame::ResultExpired { execution_id: command.execution_id }).await?,
                     },

@@ -18,21 +18,66 @@ export default {
     const script = `
       const claim = {subject:'custom/example/session-effect',kind:'custom.example.recorded',actor:null,
         fields:{value:'actual-program-effect'},evidence:[],expected_subject:null,idempotency_key:null};
-      const call = async () => {
+      const post = async (request_id, claim) => {
         const response = await fetch('http://localhost/v1/internal/native/run-request/claim', {
           unix:process.env.TEST_SOCKET,method:'POST',headers:{'content-type':'application/json'},
-          body:JSON.stringify({request_id:'program-session-effect',claim})
+          body:JSON.stringify({request_id,claim})
         });
-        const body = await response.json();
-        if (!response.ok) throw new Error(JSON.stringify(body));
-        return body;
+        return {ok:response.ok,body:await response.json()};
       };
-      const first = await call(); const replay = await call();
-      if (JSON.stringify(first) !== JSON.stringify(replay)) throw new Error('retry changed its receipt');
-      console.log(JSON.stringify(first));
+      const first = await post('program-session-effect',claim);
+      const replay = await post('program-session-effect',claim);
+      if (!first.ok || !replay.ok || JSON.stringify(first.body) !== JSON.stringify(replay.body))
+        throw new Error('retry changed its receipt');
+      const blocked = await post('program-capacity-probe',{...claim,subject:'custom/example/capacity-effect'});
+      if (blocked.ok || !JSON.stringify(blocked.body).includes('backpressure'))
+        throw new Error('unacknowledged result did not retain bounded custody');
+      console.log(JSON.stringify(first.body));
     `
     const result = await ctx.spawn(['bun', '-e', script], {env:{TEST_SOCKET:ctx.payload.socket}})
+    // Acceptance is durable before any ACK is possible. The fixture verifies retained
+    // custody here, then releases the real FIFO to permit the explicit acknowledgement.
     await ctx.record({ key: 'forwarded', status: 'completed', value: result.stdout, ms: 0 })
+    await ctx.spawn(['sh', '-c', 'read line < "$TEST_GATE"'], {env:{TEST_GATE:ctx.payload.gate}})
+    const acknowledge = `
+      const claim = {subject:'custom/example/session-effect',kind:'custom.example.recorded',actor:null,
+        fields:{value:'actual-program-effect'},evidence:[],expected_subject:null,idempotency_key:null};
+      const accepted = JSON.parse(process.env.TEST_ACCEPTED);
+      const post = async (path, body) => {
+        const response = await fetch('http://localhost'+path,{unix:process.env.TEST_SOCKET,
+          method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+        return {ok:response.ok,body:await response.json()};
+      };
+      const ack = (claim) => post('/v1/internal/native/run-request/acknowledge',{
+        request:{request_id:'program-session-effect',claim},
+        accepted:{request_id:'program-session-effect',result:{Ok:accepted}}});
+      if ((await ack({...claim,fields:{value:'not-the-original-request'}})).ok)
+        throw new Error('ACK admitted changed immutable request contents');
+      const first = await ack(claim); const retry = await ack(claim);
+      if (!first.ok || !retry.ok || JSON.stringify(first.body) !== JSON.stringify(retry.body))
+        throw new Error('explicit ACK was not retryable');
+      const expired = await post('/v1/internal/native/run-request/claim',{request_id:'program-session-effect',claim});
+      if (expired.ok || !JSON.stringify(expired.body).includes('result-expired'))
+        throw new Error('retired request identity was executed again');
+      const probe = await post('/v1/internal/native/run-request/claim',{
+        request_id:'program-capacity-probe',claim:{...claim,subject:'custom/example/capacity-effect'}});
+      if (!probe.ok) throw new Error('explicit ACK did not release bounded request capacity');
+      console.log(JSON.stringify(probe.body));
+    `
+    const acknowledged = await ctx.spawn(['bun','-e',acknowledge],
+      {env:{TEST_SOCKET:ctx.payload.socket,TEST_ACCEPTED:result.stdout}})
+    await ctx.record({ key: 'acknowledged', status: 'completed', value: acknowledged.stdout, ms: 0 })
+    const finish = `
+      const claim = {subject:'custom/example/capacity-effect',kind:'custom.example.recorded',actor:null,
+        fields:{value:'actual-program-effect'},evidence:[],expected_subject:null,idempotency_key:null};
+      const response = await fetch('http://localhost/v1/internal/native/run-request/acknowledge',{
+        unix:process.env.TEST_SOCKET,method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({request:{request_id:'program-capacity-probe',claim},
+          accepted:{request_id:'program-capacity-probe',result:{Ok:JSON.parse(process.env.TEST_ACCEPTED)}}})});
+      if (!response.ok) throw new Error(JSON.stringify(await response.json()));
+    `
+    await ctx.spawn(['bun','-e',finish],{env:{TEST_SOCKET:ctx.payload.socket,TEST_ACCEPTED:acknowledged.stdout}})
+    await ctx.record({ key: 'capacity-released', status: 'completed', value: true, ms: 0 })
     await ctx.spawn(['sh', '-c', 'read line < "$TEST_GATE"'], {env:{TEST_GATE:ctx.payload.gate}})
     return {_tag:'Success',value:true}
   }
@@ -92,7 +137,8 @@ mission "program-session" state="ready" {{
     let selection = Selection { home: "example-home".into(), home_key: home_key.public().into(),
         host: "example-seat".into(), host_key: seat_key.public().into(), epoch: 1,
         grant: Scope { subjects: vec![step.clone()], operations: vec![OperationKind::Observe, OperationKind::Stop] } };
-    let journal = Journal::open(&root.path().join("seat-session.sqlite3"), Limits::default()).unwrap();
+    let journal = Journal::open(&root.path().join("seat-session.sqlite3"),
+        Limits { max_commands: 1, ..Limits::default() }).unwrap();
     let home_journal = Journal::open(&root.path().join("home-session.sqlite3"), Limits::default()).unwrap();
     journal.install_epoch(&selection).unwrap(); home_journal.install_epoch(&selection).unwrap();
     let notify = Arc::new(Notify::new());
@@ -111,7 +157,7 @@ mission "program-session" state="ready" {{
     // A real full-node graph snapshot provides the exact canonical run/attempt revisions;
     // the two session journals, host signing keys and effect writer remain separate.
     let home_database = root.path().join("home-graph.sqlite3");
-    rusqlite::Connection::open(&database).unwrap().execute("VACUUM INTO ?1", [home_database.to_str().unwrap()]).unwrap();
+    rusqlite::Connection::open(&database).unwrap().execute(/* sqlite-large-value: allow-for-now lv-h76fffc4c4dab owner=fractal::light_node_tests TODO=trace-statement-and-value-representation */ "VACUUM INTO ?1", [home_database.to_str().unwrap()]).unwrap();
     let graph = Arc::new(Store::open(&home_database, selection.home.clone()).unwrap());
     let home_auth = FleetAuth::test("program-session-tests", &[7; 32]).with_member_key(Some(home_key));
     let home = Home::new(vec![home_journal], home_auth, selection.home.clone(), Arc::new(StoreRunEffects::new(graph.clone()))).unwrap();
@@ -149,6 +195,14 @@ mission "program-session" state="ready" {{
     }));
     until(&reconciler, &notify, || store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().iter()
         .any(|claim| claim.body["fields"]["key"] == "forwarded" && claim.body["fields"]["status"] == "completed")).await;
+    assert!(journal.run_result("program-session-effect").unwrap().is_some(),
+        "sending the HTTP response and durably accepting it must not implicitly acknowledge custody");
+    writeln!(gate_writer, "acknowledge").unwrap();
+    until(&reconciler, &notify, || store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().iter()
+        .any(|claim| claim.body["fields"]["key"] == "capacity-released" && claim.body["fields"]["status"] == "completed")).await;
+    assert!(journal.run_result("program-session-effect").unwrap_err().to_string().contains("result-expired"));
+    assert!(journal.run_result("program-capacity-probe").unwrap_err().to_string().contains("result-expired"));
+    assert_eq!(graph.claims_for("custom/example/capacity-effect", Some("custom.example.recorded")).unwrap().len(), 1);
     let effects = graph.claims_for("custom/example/session-effect", Some("custom.example.recorded")).unwrap();
     assert_eq!(effects.len(), 1, "same signed request identity must recover its real effect receipt");
     assert_eq!(effects[0].actor.as_deref(), Some(run.subject.as_str()));

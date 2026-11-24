@@ -37,7 +37,8 @@ impl Fixture {
     fn request(&self,auth:&FleetAuth,node:&str)->tokio_tungstenite::tungstenite::handshake::client::Request {
         let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch={}",self.selected.epoch);
         let mut request=format!("{}?epoch={}",self.endpoint,self.selected.epoch).into_client_request().unwrap();
-        request.headers_mut().extend(auth.request_headers_method("GET",&path,node,&[]).unwrap());
+        let signed=auth.request_headers_method("GET",&path,node,websocket_key(request.headers()).unwrap().as_bytes()).unwrap();
+        request.headers_mut().extend(signed);
         request
     }
     async fn connect(&self)->ClientSocket {
@@ -45,12 +46,13 @@ impl Fixture {
         let deadline=tokio::time::Instant::now()+Duration::from_secs(5);
         loop {
             assert!(tokio::time::Instant::now()<deadline,"previous authenticated session did not release its exclusive lease");
-            match tokio_tungstenite::connect_async(self.request(&self.seat_auth,&self.selected.host)).await {
+            let request=self.request(&self.seat_auth,&self.selected.host);
+            let digest=FleetAuth::body_digest(websocket_key(request.headers()).unwrap().as_bytes());
+            match tokio_tungstenite::connect_async(request).await {
                 Ok((socket,response))=> {
                     let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch={}",self.selected.epoch);
-                    let sender=self.seat_auth.verify_sender(response.headers(),"RESPONSE",&path,&[],Some(&self.selected.home),Some(&FleetAuth::body_digest(&[]))).unwrap();
-                    assert_eq!(sender.member_key.as_deref(),Some(self.selected.home_key.as_str()));
-                    return socket;
+                    let channel=authenticate_response(self.seat_auth.clone(),&self.selected,&path,&digest,response.headers()).unwrap();
+                    return AuthenticatedSocket {socket,channel};
                 }
                 Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status()==StatusCode::CONFLICT=> {
                     // Reconnect only: the old socket must release its exclusive seat lease.
@@ -85,14 +87,14 @@ async fn pinned_signers_are_required_even_with_the_shared_fleet_secret() {
     for auth in [&wrong,&unsigned] {
         let error=tokio_tungstenite::connect_async(f.request(auth,&f.selected.host)).await.unwrap_err();
         let tokio_tungstenite::tungstenite::Error::Http(response)=error else {panic!("expected signed-member refusal")};
-        assert_eq!(response.status(),StatusCode::FORBIDDEN);
+        assert_eq!(response.status(),if auth.member_key().is_some() {StatusCode::FORBIDDEN} else {StatusCode::UNAUTHORIZED});
     }
     let error=tokio_tungstenite::connect_async(f.request(&f.seat_auth,"another-seat")).await.unwrap_err();
     let tokio_tungstenite::tungstenite::Error::Http(response)=error else {panic!("expected explicit-scope refusal")};
     assert_eq!(response.status(),StatusCode::FORBIDDEN);
     // A legitimate connection also verifies the signed home upgrade response.
     let mut socket=f.connect().await; assert_eq!(f.hello(&mut socket).await,(0,0));
-    socket.close(None).await.unwrap(); f.stop().await;
+    socket.socket.close(None).await.unwrap(); f.stop().await;
 }
 
 #[tokio::test]
@@ -121,7 +123,7 @@ async fn reconnect_recovers_lost_receipt_ack_without_readmitting_or_reidentifyin
         }
     }).await.unwrap();
     // Drop without consuming the ACK: the executor still retains its original receipt.
-    socket.close(None).await.unwrap(); drop(socket);
+    socket.socket.close(None).await.unwrap(); drop(socket);
     assert_eq!(f.seat_journal.pending_receipts().unwrap(),vec![receipt.clone()]);
     let mut socket=f.connect().await; let (receipt_ack,authority_ack)=f.hello(&mut socket).await;
     assert_eq!(receipt_ack,receipt.receipt_sequence);
@@ -136,7 +138,7 @@ async fn reconnect_recovers_lost_receipt_ack_without_readmitting_or_reidentifyin
     assert_eq!(f.seat_journal.admit(&replayed).unwrap(),Admission::Duplicate(receipt));
     assert_eq!(f.seat_journal.undispatched().unwrap().len(),1);
     assert!(f.seat_journal.recoverable().unwrap().is_empty(),"transport alone never enters a native backend");
-    socket.close(None).await.unwrap(); f.stop().await;
+    socket.socket.close(None).await.unwrap(); f.stop().await;
 }
 
 #[tokio::test]
@@ -155,8 +157,7 @@ async fn unknown_versions_and_stale_home_epochs_fail_before_session_admission() 
 
 #[test]
 fn protocol_frames_are_bounded_and_unknown_shapes_are_not_accepted() {
-    assert!(decode(&vec![b' ';MAX_FRAME+1]).is_err());
-    assert!(decode(br#"{"type":"drained","unknown":true}"#).is_err());
+    assert!(serde_json::from_slice::<Frame>(br#"{"type":"drained","unknown":true}"#).is_err());
     assert!(check_capabilities(VERSION+1,&capabilities()).is_err());
     assert!(check_capabilities(VERSION,&[]).is_err());
 }
@@ -254,7 +255,7 @@ async fn requester_retains_original_receipt_for_freshly_signed_retries_across_re
     assert_ne!(request.assertion.signature,retry.assertion.signature);
     f.seat_journal.enqueue_run_request(&request).unwrap();
     let graph=Arc::new(crate::store::Store::open(&f._root.path().join("requester-graph"),f.selected.home.clone()).unwrap());
-    let original=StoreRunEffects::new(graph).execute(&request).unwrap();
+    let original=StoreRunEffects::new(graph).execute(/* sqlite-large-value: allow-for-now lv-h40707d5ec849 owner=fractal_peer::light_node::session_tests TODO=trace-statement-and-value-representation */ &request).unwrap();
     assert!(original.result.is_err(),"the actual graph must refuse an expired assertion");
     f.seat_journal.accept_run_result(&original).unwrap();
     let requester=Requester {journal:f.seat_journal.clone()};
@@ -264,4 +265,152 @@ async fn requester_retains_original_receipt_for_freshly_signed_retries_across_re
     assert_eq!(restarted.submit(retry).await.unwrap(),original);
     assert!(restarted.journal.pending_run_requests().unwrap().is_empty(),"a settled retry cannot emit a fresh home effect");
     f.stop().await;
+}
+
+async fn replay_upgrade(f:&Fixture,headers:&HeaderMap)->(RawClientSocket,tokio_tungstenite::tungstenite::handshake::client::Response) {
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let mut request=f.request(&f.seat_auth,&f.selected.host); *request.headers_mut()=headers.clone();
+            match tokio_tungstenite::connect_async(request).await {
+                Ok(connection)=>return connection,
+                Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status()==StatusCode::CONFLICT=>tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error)=>panic!("replayed upgrade failed before channel proof: {error}"),
+            }
+        }
+    }).await.unwrap()
+}
+
+async fn assert_raw_closed(socket:&mut RawClientSocket) {
+    let frame=tokio::time::timeout(Duration::from_secs(5),socket.next()).await.unwrap();
+    assert!(matches!(frame,None | Some(Ok(ClientMessage::Close(_))) | Some(Err(_))),"unauthenticated application frame must close the channel");
+}
+
+#[tokio::test]
+async fn copied_pinned_key_without_member_proof_is_refused_at_both_handshake_verifiers() {
+    let f=Fixture::new().await;
+    for invalid in [false,true] {
+        let mut request=f.request(&f.seat_auth,&f.selected.host);
+        request.headers_mut().remove("x-st3-member-signature"); request.headers_mut().remove("x-fractal-member-signature");
+        if invalid {request.headers_mut().insert("x-st3-member-signature",axum::http::HeaderValue::from_static("invalid"));}
+        let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch=1");
+        let sender=f.seat_auth.verify_sender(request.headers(),"GET",&path,websocket_key(request.headers()).unwrap().as_bytes(),Some(&f.selected.host),None).unwrap();
+        assert_eq!(sender.member_key.as_deref(),Some(f.selected.host_key.as_str())); assert!(!sender.member_signature_valid);
+        let error=tokio_tungstenite::connect_async(request).await.unwrap_err();
+        let tokio_tungstenite::tungstenite::Error::Http(response)=error else {panic!("expected member proof refusal")};
+        assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
+        let nonce=uuid::Uuid::new_v4().simple().to_string(); let digest=FleetAuth::body_digest(b"request-challenge");
+        let mut response=f.home.0.auth.response_headers_for(&path,&f.selected.home,nonce.as_bytes(),&digest).unwrap();
+        response.insert(SESSION_NONCE_HEADER,axum::http::HeaderValue::from_str(&nonce).unwrap());
+        response.remove("x-st3-member-signature"); response.remove("x-fractal-member-signature");
+        if invalid {response.insert("x-st3-member-signature",axum::http::HeaderValue::from_static("invalid"));}
+        assert!(authenticate_response(f.seat_auth.clone(),&f.selected,&path,&digest,&response).is_err());
+    }
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn captured_upgrade_and_frame_cannot_authorize_a_new_socket_or_modified_payload() {
+    let f=Fixture::new().await; let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch=1");
+    let request=f.request(&f.seat_auth,&f.selected.host); let captured=request.headers().clone();
+    let digest=FleetAuth::body_digest(websocket_key(&captured).unwrap().as_bytes());
+    let (socket,response)=tokio_tungstenite::connect_async(request).await.unwrap();
+    let old_nonce=response.headers()[SESSION_NONCE_HEADER].clone();
+    let channel=authenticate_response(f.seat_auth.clone(),&f.selected,&path,&digest,response.headers()).unwrap();
+    let mut first=AuthenticatedSocket {socket,channel};
+    let hello=first.channel.encode(Frame::Hello {version:VERSION,selection:f.selected.clone(),capabilities:capabilities()}).unwrap();
+    first.socket.send(ClientMessage::Text(hello.clone().into())).await.unwrap();
+    assert!(matches!(next(&mut first).await,Frame::Resume {..}));
+    drop(first);
+    // Exact captured HTTP proof can be replayed, but the new home nonce prevents it
+    // from proving possession of the seat's key on this new websocket.
+    let (mut replay,response)=replay_upgrade(&f,&captured).await;
+    assert_ne!(response.headers()[SESSION_NONCE_HEADER],old_nonce);
+    replay.send(ClientMessage::Text(hello.into())).await.unwrap();
+    assert_raw_closed(&mut replay).await; drop(replay);
+    let (socket,response)=replay_upgrade(&f,&captured).await;
+    let channel=authenticate_response(f.seat_auth.clone(),&f.selected,&path,&digest,response.headers()).unwrap();
+    let mut tampered=AuthenticatedSocket {socket,channel};
+    let signed=tampered.channel.encode(Frame::Hello {version:VERSION,selection:f.selected.clone(),capabilities:capabilities()}).unwrap();
+    let mut modified:serde_json::Value=serde_json::from_str(&signed).unwrap(); modified["frame"]["version"]=serde_json::json!(VERSION+1);
+    tampered.socket.send(ClientMessage::Text(serde_json::to_string(&modified).unwrap().into())).await.unwrap();
+    assert_raw_closed(&mut tampered.socket).await;
+    assert_eq!(f.home_journal.received_high_water().unwrap(),0);
+    assert!(f.home_journal.reported_executions().unwrap().is_empty());
+    // A different actual websocket key is not authorized by the captured HTTP proof.
+    let mut different=f.request(&f.seat_auth,&f.selected.host);
+    let fresh_key=different.headers()["sec-websocket-key"].clone(); *different.headers_mut()=captured;
+    different.headers_mut().insert("sec-websocket-key",fresh_key);
+    let error=tokio_tungstenite::connect_async(different).await.unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(response)=error else {panic!("expected challenge binding refusal")};
+    assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn live_channel_rejects_duplicate_signed_sequence_and_unsigned_authority() {
+    let f=Fixture::new().await;
+    let mut socket=f.connect().await; f.hello(&mut socket).await;
+    let drained=socket.channel.encode(Frame::Drained {}).unwrap();
+    socket.socket.send(ClientMessage::Text(drained.clone().into())).await.unwrap();
+    socket.socket.send(ClientMessage::Text(drained.into())).await.unwrap();
+    assert_raw_closed(&mut socket.socket).await; drop(socket);
+    let mut socket=f.connect().await; f.hello(&mut socket).await;
+    socket.socket.send(ClientMessage::Text(serde_json::to_string(&Frame::Authority {change:AuthorityChange {sequence:1,binding:f.binding(),revoked:false}}).unwrap().into())).await.unwrap();
+    assert_raw_closed(&mut socket.socket).await;
+    assert!(f.home_journal.reported_executions().unwrap().is_empty());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn channel_proofs_bind_direction_nonce_request_and_frame_payload() {
+    let f=Fixture::new().await; let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch=1");
+    let digest=FleetAuth::body_digest(b"first-request");
+    let nonce=uuid::Uuid::new_v4().simple().to_string();
+    let mut seat=Channel::new(f.seat_auth.clone(),&f.selected,true,&path,&digest,&nonce).unwrap();
+    let mut home=Channel::new(f.home.0.auth.clone(),&f.selected,false,&path,&digest,&nonce).unwrap();
+    let hello=seat.encode(Frame::Hello {version:VERSION,selection:f.selected.clone(),capabilities:capabilities()}).unwrap();
+    assert!(seat.decode(hello.as_bytes()).is_err(),"a seat-to-home proof cannot be reflected back as a home frame");
+    assert!(home.decode(&vec![b' ';MAX_FRAME+1]).is_err());
+    assert!(home.decode(hello.as_bytes()).is_ok());
+    assert!(home.decode(hello.as_bytes()).is_err());
+    let nonce2=uuid::Uuid::new_v4().simple().to_string();
+    let mut other=Channel::new(f.home.0.auth.clone(),&f.selected,false,&path,&digest,&nonce2).unwrap();
+    assert!(other.decode(hello.as_bytes()).is_err());
+    let mut response=f.home.0.auth.response_headers_for(&path,&f.selected.home,nonce.as_bytes(),&digest).unwrap();
+    response.insert(SESSION_NONCE_HEADER,axum::http::HeaderValue::from_str(&nonce).unwrap());
+    assert!(authenticate_response(f.seat_auth.clone(),&f.selected,&path,&FleetAuth::body_digest(b"another-request"),&response).is_err());
+    response.insert(SESSION_NONCE_HEADER,axum::http::HeaderValue::from_str(&nonce2).unwrap());
+    assert!(authenticate_response(f.seat_auth.clone(),&f.selected,&path,&digest,&response).is_err());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn fleet_secret_and_copied_member_key_cannot_forge_a_live_authority_frame() {
+    let f=Fixture::new().await;
+    for invalid in [false,true] {
+        let mut socket=f.connect().await; f.hello(&mut socket).await;
+        let mut attacker=Channel {
+            auth:FleetAuth::test("light-session-tests",&[7;32]),node:f.selected.host.clone(),peer:f.selected.home.clone(),peer_key:f.selected.home_key.clone(),
+            seat:true,transcript:socket.channel.transcript.clone(),sent:socket.channel.sent,received:0,
+        };
+        let frame=attacker.encode(Frame::Authority {change:AuthorityChange {sequence:1,binding:f.binding(),revoked:false}}).unwrap();
+        let mut forged:SignedFrame=serde_json::from_str(&frame).unwrap();
+        forged.authentication.push(("x-st3-member-key".into(),f.selected.host_key.clone()));
+        if invalid {forged.authentication.push(("x-st3-member-signature".into(),"invalid".into()));}
+        socket.socket.send(ClientMessage::Text(serde_json::to_string(&forged).unwrap().into())).await.unwrap();
+        assert_raw_closed(&mut socket.socket).await; drop(socket);
+        assert!(f.home_journal.reported_executions().unwrap().is_empty());
+        assert_eq!(f.home_journal.received_authority_high_water().unwrap(),0);
+    }
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn replayed_http_proof_without_fresh_channel_proof_cannot_reserve_the_seat() {
+    let f=Fixture::new().await;
+    let captured=f.request(&f.seat_auth,&f.selected.host);
+    let (unproven,_)=tokio_tungstenite::connect_async(captured).await.unwrap();
+    let mut legitimate=f.connect().await;
+    assert_eq!(f.hello(&mut legitimate).await,(0,0),"only a fresh signed Hello can acquire exclusive seat custody");
+    drop(unproven); f.stop().await;
 }

@@ -49,7 +49,7 @@ impl NativePair {
         let generation = runtime.snapshot_ptys().unwrap().into_iter().find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
         let local = LocalSession {
             subject: selection.grant.subjects[0].clone(), runtime_id: "native-worker".into(),
-            incarnation: generation.clone(), native_incarnation: generation,
+            incarnation: format!("owned:{generation}"), native_incarnation: generation,
             terminal: true, driver: None, lifecycle: MemberLifecycle::Service, custody: SessionCustody::Owned,
             start_operation: None, invocation: None,
         };
@@ -58,7 +58,7 @@ impl NativePair {
         executor.install_home_session_journal(seat.clone()).unwrap();
         let binding = executor.session_bindings(&selection).unwrap().pop().unwrap();
         let driver = Arc::new(NativeSessionExecutor::new(executor.clone()));
-        store.connection.write().execute_batch("ALTER TABLE claims RENAME TO unavailable_claims;
+        store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hd36c1be68e80 owner=fractal_reconcile::reconcile::home_session_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE claims RENAME TO unavailable_claims;
             ALTER TABLE desired RENAME TO unavailable_desired;").unwrap();
         let graph = Arc::new(Store::open(&root.path().join("home-graph.sqlite3"), selection.home.clone()).unwrap());
         let home_auth = FleetAuth::test("native-session-tests", &[7; 32]).with_member_key(Some(home_key));
@@ -68,20 +68,52 @@ impl NativePair {
         let endpoint = format!("ws://{}{fractal_peer::config::LIGHT_NODE_SESSION_PATH}", listener.local_addr().unwrap());
         let app = home_service.router();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-        Self { root, selection, home, seat, store, graph, runtime, executor, driver, binding, seat_auth, endpoint,
-            home_service, server, client: None, stop: None }
+        let mut pair = Self { root, selection, home, seat, store, graph, runtime, executor, driver, binding, seat_auth, endpoint,
+            home_service, server, client: None, stop: None };
+        // Obtain the real home admission ACK and freshly revalidate native custody
+        // before the fixtures disconnect and exercise their graph-free offline paths.
+        pair.connect();
+        pair.authorized().await;
+        pair.disconnect().await;
+        pair
     }
+    async fn authorized(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let changed = self.seat.authority_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.seat.with_authority(|authority| Ok(local::require_execution(authority, &self.binding).is_ok())).unwrap() {
+                    break;
+                }
+                changed.await;
+            }
+        }).await.expect("real home admission and fresh native custody must activate the execution");
+    }
+
     fn draft(&self, id: &str, operation: Operation) -> CommandDraft {
         CommandDraft { decision_id: id.into(), binding: self.binding.clone(), operation }
     }
     fn connect(&mut self) {
         assert!(self.client.is_none());
-        // A separate SQLite handle models restart after a durable receipt but before ACK.
-        let journal = Journal::open(&self.root.path().join("seat.sqlite3"), Limits::default()).unwrap();
+        let journal = self.seat.clone();
+        let changes = journal.authority_changed.clone();
+        let executor = self.executor.clone();
         let client = SeatClient::new(journal, self.seat_auth.clone(), self.selection.host.clone(), self.endpoint.clone(), self.driver.clone()).unwrap();
         let (stop, stopped) = watch::channel(false);
         self.stop = Some(stop);
-        self.client = Some(tokio::spawn(async move { client.run(stopped).await }));
+        self.client = Some(tokio::spawn(async move {
+            let authority = async move {
+                loop {
+                    let changed = changes.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    executor.session_authority_changed()?;
+                    changed.await;
+                }
+            };
+            tokio::select! { result = client.run(stopped) => result, result = authority => result }
+        }));
     }
     async fn disconnect(&mut self) {
         self.stop.take().unwrap().send_replace(true);
@@ -143,11 +175,12 @@ async fn native_receipt_replay_reconnect_and_offline_stop_need_no_seat_graph() {
     pair.disconnect().await;
     assert!(local_session(&pair.store, pair.runtime.as_ref(), &pair.binding.subject, Some(&pair.binding.incarnation)).is_err());
     // Even after a runtime ID is reused, a replay cannot enter native stop again.
+    let original_native = pair.store.local_session_at(&pair.binding.subject, &pair.binding.incarnation).unwrap().unwrap().native_incarnation;
     pair.runtime.remove("native-worker", true).unwrap();
     pair.runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
         pair.root.path(), &std::env::vars().collect(), None, &BTreeMap::new(), None).unwrap();
     let replacement = pair.runtime.snapshot_ptys().unwrap().into_iter().find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
-    assert_ne!(replacement, pair.binding.incarnation);
+    assert_ne!(replacement, original_native);
     assert!(matches!(pair.seat.admit(&stop).unwrap(), Admission::Duplicate(_) | Admission::ResultExpired));
     let running = pair.runtime.snapshot_ptys().unwrap().into_iter().find(|entry| entry.runtime_id == "native-worker").unwrap();
     assert_eq!(running.status, "running");
@@ -197,6 +230,7 @@ async fn paired_epoch_replacement_preserves_native_process_and_fences_old_home_s
     assert!(pair.home.enqueue(CommandDraft { decision_id: "old-home-return".into(), binding: old, operation: Operation::Stop }).is_err());
     assert!(local_session(&pair.store, pair.runtime.as_ref(), &pair.binding.subject, Some(&pair.binding.incarnation)).is_ok());
     pair.connect();
+    pair.authorized().await;
     let stop = pair.home.enqueue(pair.draft("new-epoch-stop", Operation::Stop)).unwrap();
     pair.settled(&stop).await;
     pair.disconnect().await;
@@ -208,17 +242,19 @@ async fn restart_finishes_native_custody_from_unacknowledged_stop_receipt_before
     let mut pair = NativePair::new().await;
     let stop = pair.home.enqueue(pair.draft("stop-before-native-metadata-finalization", Operation::Stop)).unwrap();
     assert!(matches!(pair.seat.admit(&stop).unwrap(), Admission::Accepted(_)));
-    pair.seat.enter(&stop.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
+    let recovery = pair.seat.enter(&stop.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
     assert!(pair.runtime.snapshot_ptys().unwrap().iter().all(|entry| entry.runtime_id != "native-worker" || entry.status != "running"));
     // The physical proof is durable, then the command receipt commits. Model process death
     // at precisely the next instruction, before the local metadata finalization.
-    pair.seat.complete(&stop.execution_id, Outcome::Stopped { incarnation: pair.binding.incarnation.clone() }).unwrap();
+    pair.seat.complete_requiring_local_finalization(&stop.execution_id, Outcome::Stopped { incarnation: pair.binding.incarnation.clone() },
+        recovery.custody_proof.as_deref().unwrap()).unwrap();
     assert!(pair.store.has_current_local_session(&pair.binding.subject).unwrap());
     assert_eq!(pair.seat.pending_terminal_results().unwrap().len(), 1);
     let reopened = Journal::open(&pair.root.path().join("seat.sqlite3"), Limits::default()).unwrap();
     let restarted = Arc::new(Reconciler::new(pair.store.clone(), pair.runtime.clone(), pair.selection.host.clone(), Arc::new(Notify::new())));
-    restarted.install_home_session_journal(reopened).unwrap();
+    restarted.install_home_session_journal(reopened.clone()).unwrap();
     assert!(!pair.store.has_current_local_session(&pair.binding.subject).unwrap());
+    pair.seat = reopened;
     pair.executor = restarted;
     pair.driver = Arc::new(NativeSessionExecutor::new(pair.executor.clone()));
     pair.connect();
@@ -226,4 +262,131 @@ async fn restart_finishes_native_custody_from_unacknowledged_stop_receipt_before
     pair.disconnect().await;
     assert!(!pair.store.has_current_local_session(&pair.binding.subject).unwrap(),
         "home acknowledgement and payload retirement cannot resurrect local custody");
+}
+
+#[tokio::test]
+async fn entered_stop_before_native_signal_recovers_the_exact_running_generation() {
+    let mut pair = NativePair::new().await;
+    let stop = pair.home.enqueue(pair.draft("entry-fence-before-native-signal", Operation::Stop)).unwrap();
+    assert!(matches!(pair.seat.admit(&stop).unwrap(), Admission::Accepted(_)));
+    let error = pair.seat.enter(&stop.execution_id, |_, _| anyhow::bail!("process died before the native callback")).unwrap_err();
+    assert!(error.to_string().contains("before the native callback"));
+    assert!(pair.seat.recoverable().unwrap().iter().any(|entry|
+        entry.command.execution_id == stop.execution_id && entry.custody_proof.is_none()));
+    assert!(local_session(&pair.store, pair.runtime.as_ref(), &pair.binding.subject, Some(&pair.binding.incarnation)).is_ok());
+
+    let reopened = Journal::open(&pair.root.path().join("seat.sqlite3"), Limits::default()).unwrap();
+    let restarted = Arc::new(Reconciler::new(pair.store.clone(), pair.runtime.clone(), pair.selection.host.clone(), Arc::new(Notify::new())));
+    restarted.install_home_session_journal(reopened.clone()).unwrap();
+    pair.seat = reopened;
+    pair.executor = restarted;
+    pair.driver = Arc::new(NativeSessionExecutor::new(pair.executor.clone()));
+    pair.connect();
+    pair.settled(&stop).await;
+    pair.disconnect().await;
+    assert!(!pair.store.has_current_local_session(&pair.binding.subject).unwrap());
+    assert!(pair.runtime.snapshot_ptys().unwrap().iter().all(|entry|
+        entry.runtime_id != "native-worker" || entry.status != "running"));
+}
+
+#[tokio::test]
+async fn a_live_store_finalization_error_cannot_send_or_reclaim_the_native_stop_receipt() {
+    let mut pair = NativePair::new().await;
+    let stop = pair.home.enqueue(pair.draft("native-finalization-write-failure", Operation::Stop)).unwrap();
+    assert!(matches!(pair.seat.admit(&stop).unwrap(), Admission::Accepted(_)));
+    let recovery = pair.seat.enter(&stop.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
+    pair.store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h49ca84a271f1 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_native_finalization BEFORE UPDATE OF custody_settled ON local_session_custody
+         WHEN NEW.custody_settled=1 BEGIN SELECT RAISE(ABORT,'injected native finalization failure'); END;"
+    ).unwrap();
+    let error = pair.driver.recover(recovery).await.unwrap_err();
+    assert!(format!("{error:#}").contains("injected native finalization failure"));
+    assert_eq!(pair.seat.pending_terminal_results().unwrap().len(), 1);
+    assert!(pair.seat.pending_receipts().unwrap().iter().all(|receipt| matches!(&receipt.state, ReceiptState::Accepted)));
+    assert!(pair.store.has_current_local_session(&pair.binding.subject).unwrap());
+
+    // Keep the real connection live: the home can ACK the Accepted receipt, but cannot
+    // observe a terminal result or retire its native witness while Store still fails.
+    pair.connect();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let changed = pair.home.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if pair.home.command_receipt(&stop.execution_id).unwrap()
+                .is_some_and(|receipt| matches!(receipt.state, ReceiptState::Accepted)) {
+                break;
+            }
+            changed.await;
+        }
+    }).await.expect("the live home must receive the nonterminal admission receipt");
+    assert!(pair.store.has_current_local_session(&pair.binding.subject).unwrap());
+    assert_eq!(pair.home.settled_prefix("home", pair.selection.epoch).unwrap(), 0);
+    assert!(pair.seat.checkpoint("seat", pair.selection.epoch, stop.sequence).is_err());
+    assert_eq!(pair.seat.pending_terminal_results().unwrap().len(), 1);
+    pair.disconnect().await;
+
+    pair.store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h40e04f0e7f4e owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_native_finalization;").unwrap();
+    pair.connect();
+    pair.settled(&stop).await;
+    pair.disconnect().await;
+    assert!(!pair.store.has_current_local_session(&pair.binding.subject).unwrap());
+    assert!(pair.seat.pending_terminal_results().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_entered_stop_does_not_signal_a_replacement_native_generation() {
+    let pair = NativePair::new().await;
+    let stop = pair.home.enqueue(pair.draft("unknown-entry-before-generation-reuse", Operation::Stop)).unwrap();
+    pair.seat.admit(&stop).unwrap();
+    pair.seat.enter(&stop.execution_id, |_, _| anyhow::bail!("interrupted native entry")).unwrap_err();
+    let recovery = pair.seat.recoverable().unwrap().into_iter().find(|entry|
+        entry.command.execution_id == stop.execution_id).unwrap();
+    pair.runtime.pty().unwrap().stop("native-worker").unwrap();
+    pair.runtime.remove("native-worker", true).unwrap();
+    pair.runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
+        pair.root.path(), &std::env::vars().collect(), None, &BTreeMap::new(), None).unwrap();
+    let replacement = pair.runtime.snapshot_ptys().unwrap().into_iter().find(|entry|
+        entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
+    assert!(pair.driver.recover(recovery).await.is_err());
+    let actual = pair.runtime.snapshot_ptys().unwrap().into_iter().find(|entry|
+        entry.runtime_id == "native-worker").unwrap();
+    assert_eq!(actual.status, "running");
+    assert_eq!(actual.incarnation_id.as_deref(), Some(replacement.as_str()));
+    assert!(pair.seat.recoverable().unwrap().iter().any(|entry|
+        entry.command.execution_id == stop.execution_id && entry.custody_proof.is_none()));
+}
+
+#[tokio::test]
+async fn positively_retired_unknown_entry_keeps_its_native_snapshot_through_a_store_failure() {
+    let mut pair = NativePair::new().await;
+    let stop = pair.home.enqueue(pair.draft("unknown-entry-positive-native-retirement", Operation::Stop)).unwrap();
+    pair.seat.admit(&stop).unwrap();
+    pair.seat.enter(&stop.execution_id, |_, _| anyhow::bail!("interrupted native entry")).unwrap_err();
+    assert!(stop_local_session_with_retirement_proof(&pair.store, pair.runtime.as_ref(),
+        &pair.binding.subject, &pair.binding.incarnation, "independent-local-retirement").unwrap());
+    pair.store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h9089b8a75c90 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_native_finalization BEFORE UPDATE OF custody_settled ON local_session_custody
+         WHEN NEW.custody_settled=1 BEGIN SELECT RAISE(ABORT,'injected native finalization failure'); END;"
+    ).unwrap();
+    let recovery = pair.seat.recoverable().unwrap().into_iter().find(|entry|
+        entry.command.execution_id == stop.execution_id).unwrap();
+    assert!(pair.driver.recover(recovery).await.is_err());
+    let pending = pair.seat.pending_terminal_results().unwrap();
+    assert_eq!(pending.len(), 1);
+    let proof = pending[0].0.custody_proof.as_deref().unwrap();
+    assert!(matches!(serde_json::from_str::<NativeProof>(proof).unwrap(), NativeProof::Stop { retired: true, .. }));
+    assert!(pair.store.has_current_local_session(&pair.binding.subject).unwrap());
+    pair.store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-he41d028a3d0c owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_native_finalization;").unwrap();
+
+    let reopened = Journal::open(&pair.root.path().join("seat.sqlite3"), Limits::default()).unwrap();
+    let restarted = Arc::new(Reconciler::new(pair.store.clone(), pair.runtime.clone(), pair.selection.host.clone(), Arc::new(Notify::new())));
+    restarted.install_home_session_journal(reopened.clone()).unwrap();
+    assert!(!pair.store.has_current_local_session(&pair.binding.subject).unwrap());
+    pair.seat = reopened;
+    pair.executor = restarted;
+    pair.driver = Arc::new(NativeSessionExecutor::new(pair.executor.clone()));
+    pair.connect();
+    pair.settled(&stop).await;
+    pair.disconnect().await;
 }

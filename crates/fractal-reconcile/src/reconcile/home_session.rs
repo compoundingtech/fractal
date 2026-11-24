@@ -60,17 +60,33 @@ impl NativeSessionExecutor {
         }
     }
 
-    fn finish_stop(&self, command: &Command, binding: &LocalSession) -> Result<Outcome> {
+    fn stop_proof(&self, command: &Command, binding: LocalSession) -> Result<NativeProof> {
+        let reconciler = &self.reconciler;
+        reconciler.host_observations.invalidate_member(&binding.runtime_id, binding.terminal);
+        let retired = stop_local_session_with_retirement_proof(&reconciler.store, reconciler.runtime.as_ref(),
+            &binding.subject, &binding.incarnation, &command.execution_id)?;
+        reconciler.start_changed(&binding.subject);
+        Ok(if binding.custody == SessionCustody::Borrowed {
+            NativeProof::Complete { outcome: Outcome::Detached { incarnation: binding.incarnation } }
+        } else { NativeProof::Stop { binding, retired } })
+    }
+
+    fn finish_stop(&self, command: &Command, binding: LocalSession) -> Result<Outcome> {
         anyhow::ensure!(binding.subject == command.binding.subject && binding.runtime_id == command.binding.runtime
             && binding.incarnation == command.binding.incarnation && binding.custody == SessionCustody::Owned,
             "native stop receipt custody differs");
         let outcome = Outcome::Stopped { incarnation: binding.incarnation.clone() };
         let reconciler = &self.reconciler;
-        // No await between durable receipt and native metadata finalization. If the process
-        // dies here, bootstrap replays unacknowledged terminal receipts before transmission.
-        reconciler.home_session_journal.get().context("session journal is not installed")?
-            .complete(&command.execution_id, outcome.clone())?;
-        reconciler.store.settle_local_session_custody(&binding.subject, &binding.incarnation)?;
+        // Receipt custody is durable before local finalization, but cannot be transmitted
+        // or reclaimed until that finalization succeeds. A returned Store error is just
+        // as recoverable as a crash, including while the websocket remains connected.
+        let proof = NativeProof::Stop { binding, retired: true };
+        let encoded = serde_json::to_string(&proof)?;
+        let NativeProof::Stop { binding, .. } = proof else { unreachable!("constructed stop proof") };
+        let journal = reconciler.home_session_journal.get().context("session journal is not installed")?;
+        journal.complete_requiring_local_finalization(&command.execution_id, outcome.clone(), &encoded)?;
+        reconciler.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
+        journal.finish_local_finalization(&command.execution_id)?;
         self.waits.lock().map_err(|_| anyhow::anyhow!("native retirement wait ownership poisoned"))?
             .remove(&(binding.runtime_id.clone(), binding.native_incarnation.clone()));
         Ok(outcome)
@@ -110,12 +126,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         anyhow::ensure!(journal.selection()?.host == self.host, "session journal names another physical host");
         self.home_session_journal.set(journal).map_err(|_| anyhow::anyhow!("session journal already installed"))?;
         let journal = self.home_session_journal.get().context("session journal installation failed")?;
-        for (command, outcome) in journal.pending_terminal_results()? {
-            if let Outcome::Stopped { incarnation } = outcome {
-                anyhow::ensure!(command.binding.host == self.host && command.binding.incarnation == incarnation,
-                    "pending native stop receipt names another custody owner");
-                self.store.settle_local_session_custody(&command.binding.subject, &incarnation)?;
-            }
+        for (recovery, outcome) in journal.pending_terminal_results()? {
+            let command = recovery.command;
+            let Outcome::Stopped { incarnation } = outcome else {
+                anyhow::bail!("pending native finalization is not an exact stop receipt");
+            };
+            let proof = recovery.custody_proof.context("pending stop finalization lost its native custody proof")?;
+            let NativeProof::Stop { binding, .. } = serde_json::from_str(&proof)? else {
+                anyhow::bail!("pending stop finalization lost its native custody snapshot");
+            };
+            anyhow::ensure!(command.binding.host == self.host && command.binding.incarnation == incarnation
+                && binding.subject == command.binding.subject && binding.runtime_id == command.binding.runtime
+                && binding.incarnation == incarnation && binding.custody == SessionCustody::Owned,
+                "pending native stop receipt names another custody owner");
+            self.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
+            journal.finish_local_finalization(&command.execution_id)?;
         }
         // A new daemon cannot adopt the previous in-memory program VM. Permission is
         // revoked before a fresh attempt, without claiming that the old process exited.
@@ -177,7 +202,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(journal) = self.home_session_journal.get() {
             for subject in &journal.selection()?.grant.subjects { self.start_changed(subject); }
         }
-        Ok(())
+        self.refresh_session_bindings()
     }
 
     fn session_live(&self, command: &Command) -> Result<LocalSession> {
@@ -204,15 +229,7 @@ impl Executor for NativeSessionExecutor {
         };
         let proof = match command.operation {
             Operation::Observe => NativeProof::Complete { outcome: Outcome::Observed { incarnation: binding.incarnation, state: "running".into() } },
-            Operation::Stop => {
-                reconciler.host_observations.invalidate_member(&binding.runtime_id, binding.terminal);
-                let retired = stop_local_session_with_retirement_proof(&reconciler.store, reconciler.runtime.as_ref(),
-                    &binding.subject, &binding.incarnation, &command.execution_id)?;
-                reconciler.start_changed(&binding.subject);
-                if binding.custody == SessionCustody::Borrowed {
-                    NativeProof::Complete { outcome: Outcome::Detached { incarnation: binding.incarnation } }
-                } else { NativeProof::Stop { binding, retired } }
-            }
+            Operation::Stop => self.stop_proof(command, binding)?,
             Operation::Start => unreachable!("remote start was refused before native resolution"),
         };
         Ok(serde_json::to_string(&proof)?)
@@ -227,6 +244,23 @@ impl Executor for NativeSessionExecutor {
     fn recover<'a>(&'a self, recovery: Recovery) -> Pin<Box<dyn Future<Output = Result<Outcome>> + Send + 'a>> {
         Box::pin(async move {
             let reconciler = &self.reconciler;
+            let mut recovery = recovery;
+            if recovery.custody_proof.is_none() && matches!(recovery.command.operation, Operation::Stop) {
+                match reconciler.session_live(&recovery.command) {
+                    Ok(_) => {
+                        let journal = reconciler.home_session_journal.get().context("session journal is not installed")?;
+                        recovery = journal.reconcile_entered_stop(&recovery.command.execution_id, |command, authority| {
+                            // This is generation-fenced reconciliation of a retained Stop
+                            // intent, not blind dispatch or permission to launch anything.
+                            local::require_execution(authority, &command.binding)?;
+                            let binding = reconciler.session_live(command)?;
+                            Ok(serde_json::to_string(&self.stop_proof(command, binding)?)?)
+                        })?;
+                    }
+                    Err(error) if error.is::<LocalSessionUnavailable>() => {}
+                    Err(error) => return Err(error),
+                }
+            }
             if let Some(proof) = recovery.custody_proof.as_deref() {
                 match serde_json::from_str::<NativeProof>(proof)? {
                     NativeProof::Complete { outcome } => {
@@ -239,7 +273,7 @@ impl Executor for NativeSessionExecutor {
                             anyhow::ensure!(!binding.terminal, "terminal retirement proof is unavailable");
                             self.await_exec_retirement(&binding).await?;
                         }
-                        return self.finish_stop(&recovery.command, &binding);
+                        return self.finish_stop(&recovery.command, binding);
                     }
                 }
             }
@@ -260,7 +294,7 @@ impl Executor for NativeSessionExecutor {
                             && observed.incarnation_id.as_deref() == Some(binding.native_incarnation.as_str()), "stop custody lacks exact native closure evidence");
                         anyhow::ensure!(reconciler.runtime.stop_with_retirement_proof(&binding.runtime_id, true, &binding.native_incarnation)?, "native terminal scope retirement is unproven");
                     } else { self.await_exec_retirement(&binding).await?; }
-                    self.finish_stop(&recovery.command, &binding)
+                    self.finish_stop(&recovery.command, binding)
                 }
             }
         })

@@ -12,7 +12,7 @@ use axum::{Json, Router, extract::{Path as AxumPath, Query, State}, http::Status
 use fractal_daemon::api::run_requests::LocalRunAuthority;
 use fractal_daemon::config::{Config, LightNodeSessionConfig};
 use fractal_daemon::fleet::MemberKey;
-use fractal_daemon::light_node::journal::{CommandDraft, EpochInstall, Journal, Limits, Operation, RunRequest, Selection};
+use fractal_daemon::light_node::journal::{CommandDraft, EpochInstall, Journal, Limits, Operation, RunRequest, RunResult, Selection};
 use fractal_daemon::light_node::session::{Home, Requester, RunEffects as _, SeatClient, StoreRunEffects};
 use fractal_daemon::model::{ClaimInput, FractalError};
 use fractal_daemon::reconcile::{NativeSessionExecutor, Reconciler, program::{ProgramExecution, RunAuthority}};
@@ -95,6 +95,17 @@ impl LocalRunAuthority for NativeRunAuthority {
             let result = self.requester.submit(RunRequest { assertion, claim }).await.map_err(authority_error)?;
             result.result.map_err(|error| FractalError::new(error.code, error.message))
         })
+    }
+    fn acknowledge_claim(
+        &self, secret: &str, request_id: &str, claim: ClaimInput, accepted: RunResult,
+    ) -> Result<(), FractalError> {
+        let payload = serde_json::to_vec(&claim)
+            .map_err(|error| FractalError::new("invalid-run-request", error.to_string()))?;
+        let identity = RequestIdentity::new(request_id.into(), "POST".into(), "/v1/claims".into(), &payload);
+        // Resolve the credential again, then compare the original immutable logical
+        // request digest. A run cannot retire another execution's retained result.
+        let assertion = self.sign(secret, identity, 30_000)?;
+        self.requester.acknowledge(&RunRequest { assertion, claim }, &accepted).map_err(authority_error)
     }
 }
 
