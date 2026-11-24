@@ -1,5 +1,5 @@
 //! Actual SQLite journals, authenticated loopback transport and native executor custody.
-//! The seat graph is unavailable throughout observe/stop and reconnect recovery.
+//! The seat graph is unavailable throughout Start/Observe/Stop and reconnect recovery.
 use super::*;
 use fractal_peer::light_node::journal::{Admission, CommandDraft, Limits, OperationKind, ReceiptState, Scope};
 use fractal_peer::light_node::session::{Home, SeatClient, StoreRunEffects};
@@ -67,6 +67,14 @@ impl NativePair {
     }
 
     async fn with_custody(custody: SessionCustody) -> Self {
+        Self::with_options(custody, true).await
+    }
+
+    async fn for_start() -> Self {
+        Self::with_options(SessionCustody::Owned, false).await
+    }
+
+    async fn with_options(custody: SessionCustody, launch_existing: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let home_key = Arc::new(MemberKey::generate().unwrap().0);
         let seat_key = Arc::new(MemberKey::generate().unwrap().0);
@@ -74,7 +82,7 @@ impl NativePair {
             home: "example-home".into(), home_key: home_key.public().into(),
             host: "example-seat".into(), host_key: seat_key.public().into(), epoch: 1,
             grant: Scope { subjects: vec!["agent/example/worker".into()],
-                operations: vec![OperationKind::Observe, OperationKind::Stop] },
+                operations: vec![OperationKind::Start, OperationKind::Observe, OperationKind::Stop] },
         };
         let home = Journal::open(&root.path().join("home.sqlite3"), Limits::default()).unwrap();
         let seat = Journal::open(&root.path().join("seat.sqlite3"), Limits::default()).unwrap();
@@ -84,6 +92,7 @@ impl NativePair {
         let environment = std::env::vars().collect::<BTreeMap<_, _>>();
         let binary = fractal_runtime::resolve_executable("pty", &environment).expect("native session fixtures require the real pty binary");
         let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&root.path().join("pty")), &binary));
+        if launch_existing {
         runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
             root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
         let generation = runtime.snapshot_ptys().unwrap().into_iter().find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
@@ -102,9 +111,15 @@ impl NativePair {
             custody, start_operation: None,
         };
         store.bind_local_session(&local).unwrap();
+        }
         let executor = Arc::new(Reconciler::new(store.clone(), runtime.clone(), selection.host.clone(), Arc::new(Notify::new())));
         executor.install_home_session_journal(seat.clone()).unwrap();
-        let binding = executor.session_bindings(&selection).unwrap().pop().unwrap();
+        let binding = executor.session_bindings(&selection).unwrap().pop().unwrap_or_else(|| ExecutionBinding {
+            version: 1, home: selection.home.clone(), host: selection.host.clone(),
+            subject: selection.grant.subjects[0].clone(), runtime: "native-worker".into(),
+            incarnation: "immutable-start-request".into(), authorization_revision: "1".into(),
+            epoch: selection.epoch, run: None,
+        });
         let driver = Arc::new(NativeSessionExecutor::new(executor.clone()));
         store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hd36c1be68e80 owner=fractal_reconcile::reconcile::home_session_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE claims RENAME TO unavailable_claims;
             ALTER TABLE desired RENAME TO unavailable_desired;").unwrap();
@@ -120,9 +135,11 @@ impl NativePair {
             home_service, server, client: None, stop: None };
         // Obtain the real home admission ACK and freshly revalidate native custody
         // before the fixtures disconnect and exercise their graph-free offline paths.
-        pair.connect();
-        pair.authorized().await;
-        pair.disconnect().await;
+        if launch_existing {
+            pair.connect();
+            pair.authorized().await;
+            pair.disconnect().await;
+        }
         pair
     }
     async fn authorized(&self) {
@@ -141,6 +158,46 @@ impl NativePair {
 
     fn draft(&self, id: &str, operation: Operation) -> CommandDraft {
         CommandDraft { decision_id: id.into(), binding: self.binding.clone(), operation }
+    }
+
+    fn start_authorization(&self, command: &str) -> fractal_peer::light_node::journal::StartAuthorization {
+        use crate::model::{LaunchSpec, MemberKind, RestartIntensity, RestartType};
+        use fractal_peer::light_node::journal::StartAuthorization;
+        let member = MemberSpec {
+            kind: MemberKind::Agent, host: self.selection.host.clone(), runtime_id: "native-worker".into(),
+            workspace: self.root.path().display().to_string(), workspace_create: false,
+            cwd: self.root.path().display().to_string(), terminal: true,
+            launch: LaunchSpec::Shell(command.into()), environment: BTreeMap::new(), tags: BTreeMap::new(),
+            display_name: None, lifecycle: MemberLifecycle::Service, terminal_binding: None,
+            one_shot: false, restart: RestartType::Never, restart_intensity: RestartIntensity::default(),
+            shutdown_timeout_ms: 5_000, driver: None, terminal_size: None, capacity: None,
+            declared_priority: None, declared_lane: None, declared_budgets: None,
+        };
+        let mut authorization = StartAuthorization {
+            revision: 1, content_sha256: String::new(), desired_token: "immutable-desired".into(),
+            selected_desired_token: "immutable-declaration".into(),
+            declaration_sha256: "a".repeat(64), publication_sha256: "b".repeat(64),
+            helper: None, rollout: None, member: member.clone(), launch_member: member,
+            workspace_admission: StartWorkspaceAdmission::NonGit, start_request: "home-start-request".into(),
+            expected_incarnation: None, checkout: None, render: None, credentials: None, continuation: None,
+        };
+        authorization.seal().unwrap();
+        authorization
+    }
+
+    fn reopen_native(&mut self) {
+        let journal = Journal::open(&self.root.path().join("seat.sqlite3"), Limits::default()).unwrap();
+        let mut executor = Reconciler::new(self.store.clone(), self.runtime.clone(),
+            self.selection.host.clone(), Arc::new(Notify::new()))
+            .with_lane_host(self.executor.seat_admission.lanes)
+            .with_finite_resources(Some(self.executor.seat_admission.finite_policy.clone()));
+        executor.st_binary = self.executor.st_binary.clone();
+        let executor = Arc::new(executor);
+        executor.install_home_session_journal(journal.clone()).unwrap();
+        self.seat = journal;
+        self.executor = executor;
+        self.driver = Arc::new(NativeSessionExecutor::new(self.executor.clone()));
+        self.driver.watch_native_custody().unwrap();
     }
     fn connect(&mut self) {
         assert!(self.client.is_none());
@@ -190,6 +247,11 @@ impl Drop for NativePair {
         self.home_service.shutdown();
         self.server.abort();
         let _ = self.runtime.pty().and_then(|pty| pty.stop("native-worker"));
+        let _ = self.runtime.pty().and_then(|pty| pty.stop("native-launcher"));
+        if let Ok(Some(observed)) = self.runtime.observe_exec("native-worker")
+            && let Some(incarnation) = observed.incarnation_id {
+                let _ = self.runtime.exec.kill_if("native-worker", Some(&incarnation));
+            }
     }
 }
 
@@ -197,12 +259,6 @@ impl Drop for NativePair {
 async fn native_receipt_replay_reconnect_and_offline_stop_need_no_seat_graph() {
     let mut pair = NativePair::new().await;
     let observe = pair.home.enqueue(pair.draft("observe-before-ack-loss", Operation::Observe)).unwrap();
-    let refused = pair.home.enqueue(pair.draft("unsupported-start", Operation::Start)).unwrap_err();
-    assert_eq!(refused.downcast_ref::<FractalError>().unwrap().code, "light-node-start-not-supported");
-    let mut bypass = observe.clone();
-    bypass.operation = Operation::Start;
-    let refused = pair.seat.with_authority(|authority| pair.driver.enter(&bypass, authority)).unwrap_err();
-    assert_eq!(refused.downcast_ref::<FractalError>().unwrap().code, "light-node-start-not-supported");
     assert!(matches!(pair.seat.admit(&observe).unwrap(), Admission::Accepted(_)));
     pair.seat.enter(&observe.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
     let recovery = pair.seat.recoverable().unwrap().into_iter().find(|entry| entry.command.execution_id == observe.execution_id).unwrap();
@@ -519,5 +575,386 @@ async fn positively_retired_unknown_entry_keeps_its_native_snapshot_through_a_st
     pair.driver = Arc::new(NativeSessionExecutor::new(pair.executor.clone()));
     pair.connect();
     pair.settled(&stop).await;
+    pair.disconnect().await;
+}
+
+async fn native_file(path: &Path) -> Vec<u8> {
+    let changed = Arc::new(Notify::new());
+    let wake = changed.clone();
+    let mut watcher = notify::recommended_watcher(move |_: notify::Result<notify::Event>| { wake.notify_one(); }).unwrap();
+    watcher.watch(path.parent().unwrap(), notify::RecursiveMode::NonRecursive).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match std::fs::read(path) {
+                Ok(bytes) => return bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => notified.await,
+                Err(error) => panic!("native fixture file: {error}"),
+            }
+        }
+    }).await.expect("actual native child must publish its file")
+}
+
+#[tokio::test]
+async fn native_start_runs_real_bun_with_sealed_render_then_reconnects_reopens_and_stops_exactly_once() {
+    use fractal_peer::light_node::journal::StartRender;
+    let mut pair = NativePair::for_start().await;
+    std::fs::write(pair.root.path().join("local.json"), br#"{"seatOnly":true}"#).unwrap();
+    std::fs::write(pair.root.path().join("local.lines"), "seat-only\n").unwrap();
+    let mut authorization = pair.start_authorization("unused");
+    authorization.member.launch = crate::model::LaunchSpec::Argv(vec!["bun".into(), "-e".into(), r#"
+        const doc = await Bun.file("sealed.txt").text();
+        const json = await Bun.file("local.json").json();
+        const lines = await Bun.file("local.lines").text();
+        if (doc !== "home document bytes" || !json.seatOnly || json.fromHome !== 7 ||
+            lines !== "seat-only\nhome-line\n") throw new Error("seat render differs");
+        const count = await Bun.file("launch-count").exists() ? Number(await Bun.file("launch-count").text()) : 0;
+        await Bun.write("launch-count", String(count + 1));
+        setInterval(() => {}, 60000);
+    "#.into()]);
+    authorization.launch_member = authorization.member.clone();
+    let hash = hex::encode(Sha256::digest(b"home document bytes"));
+    authorization.render = Some(StartRender {
+        declaration: serde_json::json!({"name":"render","arguments":[],"properties":{},"children":[
+            {"name":"copy","arguments":[format!("doc/native@{hash}"),"sealed.txt"],"properties":{},"children":[]},
+            {"name":"json-upsert","arguments":["local.json","{\"fromHome\":7}"],"properties":{},"children":[]},
+            {"name":"ensure-line","arguments":["local.lines","home-line"],"properties":{},"children":[]}
+        ]}),
+        documents: BTreeMap::from([(format!("doc/native@{hash}"), b"home document bytes".to_vec())]),
+    });
+    authorization.seal().unwrap();
+    let start = pair.home.enqueue(pair.draft("actual-bun-start", Operation::Start { authorization: Box::new(authorization) })).unwrap();
+    pair.connect();
+    pair.settled(&start).await;
+    let receipt = pair.home.command_receipt(&start.execution_id).unwrap().unwrap();
+    let ReceiptState::Settled { outcome: Outcome::Started { incarnation } } = receipt.state else {
+        panic!("native Start must return actual generation");
+    };
+    assert_ne!(incarnation, start.binding.incarnation);
+    assert_eq!(native_file(&pair.root.path().join("launch-count")).await, b"1");
+    let local = pair.store.local_session(&start.binding.subject).unwrap().unwrap();
+    assert_eq!(local.native_incarnation, incarnation);
+    assert_eq!(local.start_operation.as_deref(), Some(start.execution_id.as_str()));
+    pair.disconnect().await;
+    pair.reopen_native();
+    pair.driver.watch_native_custody().unwrap();
+    pair.connect();
+    pair.settled(&start).await;
+    assert!(matches!(pair.seat.admit(&start).unwrap(), Admission::Duplicate(_) | Admission::ResultExpired));
+    assert_eq!(std::fs::read(pair.root.path().join("launch-count")).unwrap(), b"1");
+    assert_eq!(pair.runtime.start_operation(&local.runtime_id, true, &incarnation).unwrap().as_deref(), Some(start.execution_id.as_str()));
+    pair.binding = pair.executor.session_bindings(&pair.selection).unwrap().pop().unwrap();
+    pair.authorized().await;
+    let observe = pair.home.enqueue(pair.draft("actual-bun-observe", Operation::Observe)).unwrap();
+    pair.settled(&observe).await;
+    assert!(matches!(pair.home.command_receipt(&observe.execution_id).unwrap().unwrap().state,
+        ReceiptState::Settled { outcome: Outcome::Observed { incarnation: seen, .. } } if seen == incarnation));
+    let stop = pair.home.enqueue(pair.draft("actual-bun-stop", Operation::Stop)).unwrap();
+    pair.settled(&stop).await;
+    pair.disconnect().await;
+    assert!(pair.store.local_session_retirement_verified(&local).unwrap());
+    assert!(pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
+    assert_eq!(std::fs::read(pair.root.path().join("launch-count")).unwrap(), b"1");
+}
+
+#[tokio::test]
+async fn native_start_preentry_withdrawal_never_creates_native_producer() {
+    let mut pair = NativePair::for_start().await;
+    let authorization = pair.start_authorization("printf entered > forbidden; exec sleep 600");
+    let start = pair.home.enqueue(pair.draft("withdraw-before-entry", Operation::Start { authorization: Box::new(authorization) })).unwrap();
+    pair.home.request_cancel(&start.execution_id, "home withdrew before entry").unwrap();
+    assert!(matches!(pair.seat.admit(&start).unwrap(), Admission::Accepted(_)));
+    pair.seat.cancel_or_revoke(&start.execution_id, "home withdrew before entry".into(),
+        |_, _, _| panic!("preentry withdrawal must not touch native custody")).unwrap();
+    pair.connect();
+    pair.settled(&start).await;
+    pair.disconnect().await;
+    assert!(!pair.root.path().join("forbidden").exists());
+    assert!(pair.store.remote_runtime_start(&start.execution_id).unwrap().is_none());
+    assert!(pair.store.local_session(&start.binding.subject).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn native_start_physical_workspace_freeze_and_preexisting_generation_are_not_graph_bypasses() {
+    for boundary in ["workspace", "checkout", "freeze", "generation", "shared-producer", "capacity", "finite-root-fit"] {
+        let mut pair = NativePair::for_start().await;
+        let mut authorization = pair.start_authorization("printf entered > forbidden; exec sleep 600");
+        match boundary {
+            "workspace" => {
+                authorization.member.workspace = pair.root.path().join("missing").display().to_string();
+                authorization.launch_member = authorization.member.clone();
+            }
+            "checkout" => {
+                authorization.checkout = Some(fractal_peer::light_node::journal::StartCheckout {
+                    repository: pair.root.path().join("missing-repository").display().to_string(),
+                    base: "main".into(), branch: "expected".into(), remove_at_run_end: false,
+                });
+            }
+            "shared-producer" => {
+                // A graph-owned launch lost its daemon after backend entry. Remote
+                // authorization may not erase that same journal's producer exclusion.
+                pair.store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-hf72dc22c4e56 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_runtime_starts(id,subject,owner,body,dispatched) VALUES(?1,?2,?3,?4,1)",
+                    rusqlite::params!["prior-full-node-operation", pair.binding.subject, "prior-native-owner",
+                        serde_json::to_string(&serde_json::json!({
+                            "member": authorization.member,
+                            "backend_entry": {"version":1,"operation":"prior-full-node-operation",
+                                "owner":"prior-native-owner","phase":"backend-entering"}
+                        })).unwrap()]).unwrap();
+            }
+            "freeze" => { pair.store.set_launch_freeze("person/operator", "fixture", "physical fence", 60_000, 0).unwrap(); }
+            "generation" => {
+                pair.runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
+                    pair.root.path(), &std::env::vars().collect(), None, &BTreeMap::new(), None).unwrap();
+            }
+            "capacity" => {
+                for index in 0..start_jobs::MAX_START_JOBS {
+                    let id = format!("held-{index}");
+                    let operation = crate::store::RuntimeStartOperation {
+                        id: id.clone(), subject: format!("agent/example/held-{index}"), owner: id.clone(),
+                        body: serde_json::json!({"remote_start": {"fixture":"capacity"}}),
+                        revoked_by: None, finished: false, result: None, applied: false,
+                        cleanup_verified: false, dispatched: false, receipted: false,
+                    };
+                    assert!(pair.store.admit_remote_runtime_start(&operation, start_jobs::MAX_START_JOBS).unwrap());
+                    pair.store.enter_remote_runtime_start(&id, &id).unwrap();
+                }
+            }
+            "finite-root-fit" => {
+                use crate::store::resource_membership::{Coverage, LaneRequest, Owner};
+                let request = LaneRequest {
+                    id: "remote-impossible".into(), name: "remote-checks".into(), host: pair.selection.host.clone(),
+                    max_members: 1, profile: None, profile_estimate: None, disk_path: None,
+                    capacity: Some(fractal_runtime::Capacity { cores: 65_536, memory: 1 << 60 }),
+                    class: fractal_runtime::RequestClass::Check, disk: None, io: None,
+                    coverage: Coverage::Enforced, admission_timeout_ms: None,
+                    owner: Owner { run: "run/remote".into(), step: "step/remote".into(), attempt: 1,
+                        invocation: Some(pair.binding.subject.clone()) },
+                };
+                authorization.member.terminal = false;
+                resource_lanes::set_request(&mut authorization.member, &request).unwrap();
+                authorization.launch_member = authorization.member.clone();
+            }
+            _ => unreachable!(),
+        }
+        authorization.seal().unwrap();
+        let start = pair.home.enqueue(pair.draft(&format!("physical-{boundary}"), Operation::Start { authorization: Box::new(authorization) })).unwrap();
+        pair.connect();
+        pair.settled(&start).await;
+        pair.disconnect().await;
+        assert!(!pair.root.path().join("forbidden").exists(), "{boundary}");
+        assert!(matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
+            ReceiptState::Settled { outcome: Outcome::Refused { .. } }), "{boundary}");
+        assert!(pair.store.local_session(&start.binding.subject).unwrap().is_none(), "{boundary}");
+    }
+}
+
+#[tokio::test]
+async fn native_start_entered_unknown_recovers_only_its_positive_operation_proof_after_reopen() {
+    let mut pair = NativePair::for_start().await;
+    let authorization = pair.start_authorization("printf x >> entered; exec sleep 600");
+    let start = pair.home.enqueue(pair.draft("entered-with-lost-result",
+        Operation::Start { authorization: Box::new(authorization) })).unwrap();
+    assert!(matches!(pair.seat.admit(&start).unwrap(), Admission::Accepted(_)));
+    let entered = pair.seat.enter(&start.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
+    assert_eq!(native_file(&pair.root.path().join("entered")).await, b"x");
+    // Crash at native acceptance before the operation result and session proof commit.
+    // The actual PTY/process survives; no fake runtime or restored graph is involved.
+    pair.store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h5221d97ee725 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=0,result=NULL WHERE id=?1", [&start.execution_id]).unwrap();
+    pair.reopen_native();
+    let outcome = pair.driver.recover(Recovery { custody_proof: None, ..entered }).await.unwrap();
+    let Outcome::Started { incarnation } = &outcome else { panic!("positive operation provenance must recover Start"); };
+    let binding = pair.store.local_session(&start.binding.subject).unwrap().unwrap();
+    assert_eq!(&binding.native_incarnation, incarnation);
+    pair.seat.complete(&start.execution_id, outcome).unwrap();
+    pair.connect();
+    pair.settled(&start).await;
+    pair.disconnect().await;
+    assert_eq!(std::fs::read(pair.root.path().join("entered")).unwrap(), b"x");
+    pair.home.request_cancel(&start.execution_id, "withdraw recovered producer").unwrap();
+    pair.seat.cancel_or_revoke(&start.execution_id, "withdraw recovered producer".into(),
+        |command, authority, reason| pair.driver.cancel(command, authority, reason)).unwrap();
+    let recovery = pair.seat.recoverable().unwrap().into_iter()
+        .find(|recovery| recovery.command.execution_id == start.execution_id).unwrap();
+    let outcome = pair.driver.recover(recovery).await.unwrap();
+    assert!(matches!(outcome, Outcome::Stopped { incarnation } if incarnation == binding.native_incarnation));
+    assert!(pair.store.local_session_retirement_verified(&binding).unwrap());
+    assert!(pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
+}
+
+#[tokio::test]
+async fn native_start_unknown_never_adopts_or_stops_a_reused_runtime_generation() {
+    let mut pair = NativePair::for_start().await;
+    let authorization = pair.start_authorization("printf x >> entered; exec sleep 600");
+    let start = pair.home.enqueue(pair.draft("unknown-before-generation-reuse",
+        Operation::Start { authorization: Box::new(authorization) })).unwrap();
+    assert!(matches!(pair.seat.admit(&start).unwrap(), Admission::Accepted(_)));
+    let entered = pair.seat.enter(&start.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
+    assert_eq!(native_file(&pair.root.path().join("entered")).await, b"x");
+    let original = pair.runtime.snapshot_ptys().unwrap().into_iter()
+        .find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
+    pair.store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h3387d8df1df9 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=0,result=NULL WHERE id=?1", [&start.execution_id]).unwrap();
+    pair.runtime.pty().unwrap().stop_if("native-worker", Some(&original)).unwrap();
+    pair.runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
+        pair.root.path(), &std::env::vars().collect(), None, &BTreeMap::new(), None).unwrap();
+    let successor = pair.runtime.snapshot_ptys().unwrap().into_iter()
+        .find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
+    assert_ne!(original, successor);
+    pair.reopen_native();
+    assert!(pair.driver.recover(Recovery { custody_proof: None, ..entered }).await.is_err(),
+        "absence of original provenance must retain entered custody, never launch/adopt a successor");
+    pair.seat.cancel_or_revoke(&start.execution_id, "withdraw unknown".into(),
+        |command, authority, reason| pair.driver.cancel(command, authority, reason)).unwrap();
+    let recovery = pair.seat.recoverable().unwrap().into_iter()
+        .find(|recovery| recovery.command.execution_id == start.execution_id).unwrap();
+    assert!(pair.driver.recover(recovery).await.is_err(), "unknown producer closure cannot be guessed");
+    let running = pair.runtime.snapshot_ptys().unwrap().into_iter().find(|entry| entry.runtime_id == "native-worker").unwrap();
+    assert_eq!(running.incarnation_id.as_deref(), Some(successor.as_str()));
+    assert_eq!(running.status, "running", "old Start revocation must not signal a reused generation");
+    assert_eq!(std::fs::read(pair.root.path().join("entered")).unwrap(), b"x");
+    assert!(pair.store.local_session(&start.binding.subject).unwrap().is_none());
+    assert!(!pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
+}
+
+#[tokio::test]
+async fn native_helper_exit_event_withdraws_remote_producer_without_fleet_graph_or_polling() {
+    use fractal_peer::light_node::journal::StartHelperScope;
+    let mut pair = NativePair::for_start().await;
+    pair.runtime.pty().unwrap().spawn("native-launcher", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
+        pair.root.path(), &std::env::vars().collect(), None, &BTreeMap::new(), None).unwrap();
+    let generation = pair.runtime.snapshot_ptys().unwrap().into_iter()
+        .find(|entry| entry.runtime_id == "native-launcher").unwrap().incarnation_id.unwrap();
+    let launcher = LocalSession {
+        subject: "agent/example/launcher".into(), runtime_id: "native-launcher".into(),
+        incarnation: generation.clone(), native_incarnation: generation.clone(), terminal: true,
+        driver: None, lifecycle: MemberLifecycle::Service, custody: SessionCustody::Owned,
+        start_operation: None, invocation: None,
+    };
+    pair.store.bind_local_session(&launcher).unwrap();
+    let mut authorization = pair.start_authorization("printf ready > helper-ready; exec sleep 600");
+    authorization.helper = Some(StartHelperScope { subject: launcher.subject.clone(), lifetime: generation.clone() });
+    authorization.seal().unwrap();
+    let start = pair.home.enqueue(pair.draft("helper-root-custody",
+        Operation::Start { authorization: Box::new(authorization) })).unwrap();
+    pair.connect();
+    pair.settled(&start).await;
+    assert_eq!(native_file(&pair.root.path().join("helper-ready")).await, b"ready");
+    let child = pair.store.local_session(&start.binding.subject).unwrap().unwrap();
+    pair.runtime.pty().unwrap().stop_if("native-launcher", Some(&generation)).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let changed = pair.home.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
+                ReceiptState::Settled { outcome: Outcome::Stopped { .. } }) { break; }
+            changed.await;
+        }
+    }).await.expect("native registry events must fence and retire the helper's child");
+    pair.disconnect().await;
+    assert!(pair.store.local_session_retirement_verified(&child).unwrap());
+    assert!(pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_and_retirement() {
+    use crate::store::resource_membership::{Coverage, LaneRequest, Owner};
+    let mut pair = NativePair::for_start().await;
+    let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    let binary = fractal_runtime::resolve_executable("st3", &environment)
+        .expect("native finite session acceptance requires the built real st3 executable on PATH");
+    let lane_host = seat_admission::LaneHost {
+        room: fractal_runtime::host::for_lanes(fractal_runtime::host::size().expect("native finite host sizing")),
+        outside: fractal_runtime::host::outside_lane_memory, burst_lane: Some(seat_admission::BURST_LANE),
+    };
+    let mut executor = Reconciler::new(pair.store.clone(), pair.runtime.clone(), pair.selection.host.clone(),
+        Arc::new(Notify::new())).with_lane_host(Some(lane_host));
+    executor.st_binary = Some(binary);
+    executor.install_home_session_journal(pair.seat.clone()).unwrap();
+    pair.executor = Arc::new(executor);
+    pair.driver = Arc::new(NativeSessionExecutor::new(pair.executor.clone()));
+    pair.driver.watch_native_custody().unwrap();
+    let mut authorization = pair.start_authorization("unused");
+    authorization.member.terminal = false;
+    authorization.member.launch = crate::model::LaunchSpec::Argv(vec!["bun".into(), "-e".into(),
+        "await Bun.write('finite-entered', 'actual-bun'); setInterval(() => {}, 60000);".into()]);
+    let request = LaneRequest {
+        id: "remote-native-finite".into(), name: "remote-native-checks".into(), host: pair.selection.host.clone(),
+        max_members: 1, profile: None, profile_estimate: None, disk_path: None,
+        capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 512 * 1024 * 1024 }),
+        class: fractal_runtime::RequestClass::Check, disk: None, io: None,
+        coverage: Coverage::Enforced, admission_timeout_ms: None,
+        owner: Owner { run: "run/remote-native".into(), step: "step/remote-native".into(), attempt: 1,
+            invocation: Some(pair.binding.subject.clone()) },
+    };
+    resource_lanes::set_request(&mut authorization.member, &request).unwrap();
+    authorization.launch_member = authorization.member.clone();
+    authorization.seal().unwrap();
+    let start = pair.home.enqueue(pair.draft("real-finite-start",
+        Operation::Start { authorization: Box::new(authorization) })).unwrap();
+    pair.connect();
+    pair.settled(&start).await;
+    let ReceiptState::Settled { outcome: Outcome::Started { incarnation } } =
+        pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state else {
+            panic!("supported Linux native lane must launch, not silently skip unsupported coverage");
+        };
+    assert_eq!(native_file(&pair.root.path().join("finite-entered")).await, b"actual-bun");
+    let record = pair.store.resource_membership_record(&request.id, &request.owner).unwrap();
+    assert_eq!(record.state, "launched");
+    assert_eq!(record.roots.len(), 1);
+    assert_eq!(record.roots[0].execution.as_ref().unwrap().generation_id, incarnation);
+    assert!(record.roots[0].payload_released_at.is_some());
+    let local = pair.store.local_session(&start.binding.subject).unwrap().unwrap();
+    pair.binding = pair.executor.session_bindings(&pair.selection).unwrap().pop().unwrap();
+    pair.authorized().await;
+    let stop = pair.home.enqueue(pair.draft("real-finite-stop", Operation::Stop)).unwrap();
+    pair.settled(&stop).await;
+    pair.disconnect().await;
+    assert!(pair.store.local_session_retirement_verified(&local).unwrap());
+    assert_eq!(pair.store.resource_membership_record(&request.id, &request.owner).unwrap().state, "retired");
+    assert!(pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
+}
+
+#[tokio::test]
+async fn native_start_prepares_and_validates_a_real_git_checkout_under_its_activation_lease() {
+    use fractal_peer::light_node::journal::StartCheckout;
+    let mut pair = NativePair::for_start().await;
+    let repository = pair.root.path().join("repository");
+    let workspace = pair.root.path().join("remote-worktree");
+    let status = std::process::Command::new("git").args(["init", "--initial-branch=main"])
+        .arg(&repository).status().unwrap();
+    assert!(status.success());
+    std::fs::write(repository.join("seed.txt"), "tracked checkout seed\n").unwrap();
+    assert!(std::process::Command::new("git").arg("-C").arg(&repository)
+        .args(["add", "seed.txt"]).status().unwrap().success());
+    assert!(std::process::Command::new("git").arg("-C").arg(&repository)
+        .args(["-c", "user.name=Native fixture", "-c", "user.email=native@example.test",
+            "commit", "-m", "Native checkout fixture"]).status().unwrap().success());
+    let mut authorization = pair.start_authorization("printf checkout-ready > ready; exec sleep 600");
+    authorization.member.workspace = workspace.display().to_string();
+    authorization.member.cwd = workspace.display().to_string();
+    authorization.launch_member = authorization.member.clone();
+    authorization.checkout = Some(StartCheckout {
+        repository: repository.display().to_string(), base: "main".into(),
+        branch: "remote-admitted".into(), remove_at_run_end: false,
+    });
+    authorization.workspace_admission = StartWorkspaceAdmission::Git {
+        owner: workspace.display().to_string(), repository: repository.display().to_string(),
+    };
+    authorization.seal().unwrap();
+    let start = pair.home.enqueue(pair.draft("physical-checkout-preparation",
+        Operation::Start { authorization: Box::new(authorization) })).unwrap();
+    pair.connect();
+    pair.settled(&start).await;
+    assert!(matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
+        ReceiptState::Settled { outcome: Outcome::Started { .. } }));
+    assert_eq!(native_file(&workspace.join("ready")).await, b"checkout-ready");
+    Checkout { repository, base: "main".into(), branch: "remote-admitted".into(), remove_at_run_end: false }
+        .validate_workspace(&workspace).unwrap();
     pair.disconnect().await;
 }

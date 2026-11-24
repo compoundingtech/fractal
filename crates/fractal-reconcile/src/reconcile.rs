@@ -74,6 +74,7 @@ pub mod start_jobs;
 mod host_executor;
 mod host_observations;
 mod home_session;
+mod remote_start_home;
 pub use home_session::NativeSessionExecutor;
 pub mod seat_admission;
 mod seat_admission_queue;
@@ -9152,47 +9153,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         crate::native_seed::omit_seed_for_native_resume(&mut launch_member);
-        crate::environment::set(&mut launch_member.environment, "ST3_ENDPOINT", self.endpoint.clone());
-        crate::environment::set(&mut launch_member.environment, "ST3_DRIVER_STATE_DIR",
-            self.driver_state_dir.to_string_lossy().into_owned());
-        crate::environment::set(&mut launch_member.environment, "ST3_SUBJECT", subject.subject.clone());
-        if subject.kind == "exec" && subject.owner_step.is_some() && !member.terminal {
-            launch_member.environment.insert(fractal_runtime::payload_receipt::TRACK_ENV.into(), "1".into());
-        }
-        if subject.kind == "agent" {
-            crate::environment::set(&mut launch_member.environment, "ST_AGENT", subject.subject.clone());
-            crate::environment::set(&mut launch_member.environment, "ST3_MAILBOX_TRANSPORT", "push".into());
-        } else if let Some(owner) = member.tags.get("st3.agent") {
-            crate::environment::set(&mut launch_member.environment, "ST_AGENT", owner.clone());
-        } else {
-            crate::environment::remove_aliases(&mut launch_member.environment, "ST_AGENT");
-        }
-        let executable = launch_executable()?;
-        let st_binary = self.st_binary.as_ref().unwrap_or(&executable);
-        crate::environment::set(&mut launch_member.environment, "ST3_BIN", st_binary.to_string_lossy().into_owned());
-        if let crate::model::LaunchSpec::Argv(argv) = &mut launch_member.launch
-            && argv.first().map(String::as_str) == Some("st3")
-        {
-            argv[0] = executable.to_string_lossy().into_owned();
-        }
-        if !launch_member.terminal {
-            let original = match &launch_member.launch {
-                crate::model::LaunchSpec::Shell(source) => {
-                    vec!["sh".into(), "-c".into(), source.clone()]
-                }
-                crate::model::LaunchSpec::Argv(argv) => argv.clone(),
-            };
-            let mut wrapper = vec![
-                executable.to_string_lossy().into_owned(),
-                "driver".into(),
-                "exec".into(),
-                "--subject".into(),
-                subject.subject.clone(),
-                "--".into(),
-            ];
-            wrapper.extend(original);
-            launch_member.launch = crate::model::LaunchSpec::Argv(wrapper);
-        }
+        self.decorate_local_launch(&subject.subject, &subject.kind,
+            subject.owner_step.is_some(), member, &mut launch_member)?;
         self.store.owned_desired_guard(subject)?;
         if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
             anyhow::ensure!(
@@ -9271,6 +9233,52 @@ impl<R: RuntimeControl> Reconciler<R> {
                 None
             },
         })
+    }
+
+    /// Host-local launch decoration is shared with graph-free admitted remote starts.
+    /// Endpoint, executable and driver state are never selected by the home payload.
+    pub(super) fn decorate_local_launch(
+        &self, subject: &str, kind: &str, track_payload: bool,
+        member: &MemberSpec, launch_member: &mut MemberSpec,
+    ) -> Result<()> {
+        crate::environment::set(&mut launch_member.environment, "ST3_ENDPOINT", self.endpoint.clone());
+        crate::environment::set(&mut launch_member.environment, "ST3_DRIVER_STATE_DIR",
+            self.driver_state_dir.to_string_lossy().into_owned());
+        crate::environment::set(&mut launch_member.environment, "ST3_SUBJECT", subject.to_owned());
+        if kind == "exec" && track_payload && !member.terminal {
+            launch_member.environment.insert(fractal_runtime::payload_receipt::TRACK_ENV.into(), "1".into());
+        }
+        if kind == "agent" {
+            crate::environment::set(&mut launch_member.environment, "ST_AGENT", subject.to_owned());
+            crate::environment::set(&mut launch_member.environment, "ST3_MAILBOX_TRANSPORT", "push".into());
+        } else if let Some(owner) = member.tags.get("st3.agent") {
+            crate::environment::set(&mut launch_member.environment, "ST_AGENT", owner.clone());
+        } else {
+            crate::environment::remove_aliases(&mut launch_member.environment, "ST_AGENT");
+        }
+        let executable = launch_executable()?;
+        let st_binary = self.st_binary.as_ref().unwrap_or(&executable);
+        crate::environment::set(&mut launch_member.environment, "ST3_BIN", st_binary.to_string_lossy().into_owned());
+        if let crate::model::LaunchSpec::Argv(argv) = &mut launch_member.launch
+            && argv.first().map(String::as_str) == Some("st3")
+        {
+            argv[0] = executable.to_string_lossy().into_owned();
+        }
+        if !launch_member.terminal {
+            let original = match &launch_member.launch {
+                crate::model::LaunchSpec::Shell(source) => {
+                    vec!["sh".into(), "-c".into(), source.clone()]
+                }
+                crate::model::LaunchSpec::Argv(argv) => argv.clone(),
+            };
+            let mut wrapper = vec![
+                st_binary.to_string_lossy().into_owned(),
+                "driver".into(), "exec".into(), "--subject".into(), subject.to_owned(), "--".into(),
+            ];
+            wrapper.extend(original);
+            launch_member.launch = crate::model::LaunchSpec::Argv(wrapper);
+        }
+        Ok(())
     }
 
     fn finish_start(

@@ -99,7 +99,7 @@ Phase 2 session implementation nor a CPU/offload measurement.
 
 ## Agent/home session
 
-The full target contract follows. The first opt-in Phase 2 slice implements durable **Observe and Stop only**, as detailed below; it does not enable remote Start, terminal-stream transport, mail forwarding or graph/deployment cutover.
+The full target contract follows. Durable Observe/Stop was the first opt-in Phase 2 slice; the separate graph-free remote Start boundary below adds explicitly admitted native launch. Neither implements terminal-stream transport, mail forwarding or graph/deployment cutover.
 
 1. Authenticate both ends and negotiate a versioned capability and scoped grant. Bind the session to the explicitly selected home and durable control epoch. Reject commands from any other home or an older epoch, including a returning old session.
 2. Before first transmission, the home transactionally records epoch, sequence, stable command/execution ID, immutable payload and its association with the planning decision in a durable outbox. Recovery replays that same record, even after a lost ACK; replanning cannot mint another execution ID for the same decision. The executor persists admission and its receipt atomically **before ACK**; an ACK means durable custody, not successful execution. Reject new admission explicitly when bounded capacity is exhausted; never discard accepted work.
@@ -117,7 +117,7 @@ an authenticated bidirectional websocket opened **outbound by the seat agent**.
 `light_node_session` is explicit opt-in configuration: the home role names its
 `listen` address and bounded `grants`; the agent role names `home_endpoint` and one
 `grant`. Both ends pin the same home/host identities, Ed25519 public keys, positive
-control epoch, exact subjects and explicit `observe`/`stop` operations. It requires
+control epoch, exact subjects and explicit `start`/`observe`/`stop` operations. It requires
 the existing admitted fleet identity and fleet authentication configuration.
 Unencrypted `ws` is restricted to literal loopback or tailnet addresses; other
 routes require `wss`. Version, key, grant and epoch mismatches fail closed.
@@ -130,10 +130,9 @@ signed over this channel transcript, its direction and its strictly increasing
 sequence before any journal/native effect. Replayed upgrade headers cannot
 reserve the seat lease without a fresh signed Hello, whose wait has a deadline.
 
-Start grants, either configuration role containing Start, command enqueue and
-seat admission explicitly refuse with `light-node-start-not-supported`, including
-attempts to reuse retired execution identities. There is no remote launch adapter
-or transported prepared-start payload. Native Observe/Stop resolves exact current
+Start additionally requires the negotiated `start-authorizations-v1` capability
+and a sealed immutable home authorization; a grant-shaped claim or bare Start
+operation is not launch authority. Native Observe/Stop resolves exact current
 local custody and generation without a seat graph read; a borrowed terminal Stop
 detaches the invocation and never signals its shell or harness. These commands
 control native local sessions, not the separate program engine's VM lifecycle.
@@ -188,7 +187,7 @@ Keep the old home and its signing identity available until this drain completes;
 this does not implement unattended home discovery, key rotation or failover.
 
 Home command administration is owner-local Unix only:
-`POST /v1/internal/light-node/commands`,
+`POST /v1/internal/light-node/commands`, `POST /v1/internal/light-node/starts`,
 `GET /v1/internal/light-node/commands/{execution}?host=...`,
 `GET /v1/internal/light-node/executions`, and
 `POST /v1/internal/light-node/commands/{execution}/cancel`.
@@ -220,10 +219,48 @@ pipeline, including own-ACK waiting, exact-once retry and revocation on completi
 Run the Linux integration lanes and obtain an exact-head independent review before
 treating these exit gates as verified; no CPU/offload or deployment result is claimed.
 
-**Next reviewed slice:** implement graph-free remote Start with locally admitted,
-withdrawable authorization replacing the remaining full-node graph preflight
-reads, while preserving workspace leases, launch-freeze, kernel/capacity and native
-producer/cleanup custody. This Observe/Stop slice does not weaken those start gates.
+### Graph-free remote Start
+
+The home compiles current declaration/publication content, selected desired and
+launch tokens, helper lifetime, rollout permission, account/continuation selectors,
+checkout identity and retained start intent into a content-sealed `StartAuthorization`.
+`POST /v1/internal/light-node/starts` constructs this payload from the home graph;
+the generic command queue revalidates a supplied Start payload against the same
+canonical facts. The graph's exclusive writer is held through journal admission.
+The seat validates the selected exact grant, epoch, monotonic authorization revision,
+payload identity and cancellation state in its existing serialized dispatch barrier.
+A launch binding is not a program run and uses a fresh proposal identity; `Started`
+returns its positively verified actual native incarnation.
+
+The host preserves workspace creation/checkout activation leases and validation,
+launch freeze, native resource lane/root fit, kernel/capacity and producer custody.
+Only graph preflight is replaced. Native launch decoration, login-directory
+expansion and secrets stay on the host. Graph document copies carry admitted
+immutable bytes; filesystem copies, JSON merges, ensure-line and Git exclusions
+still prepare and commit against the host's own filesystem through the existing
+render transaction. No mutable graph-name lookup or alternate graph connection
+is available to the executor.
+The home's selected launch geometry is sealed at admission; later pane-size
+preferences do not revoke a running producer or cause a restart.
+
+Graph commits and reopened custody trigger bounded home authorization
+reconciliation without timer polling. A changed declaration, publication, helper
+lifetime or permission durably withdraws the original Start; an earlier operator
+withdrawal keeps its first reason. Native helper-generation events also withdraw
+dependent local work without a home connection. Accepted-but-undispatched work
+cannot enter; entered or Started work retains custody until positive exact native
+cleanup and its terminal receipt. The home cannot admit a conflicting successor
+until that receipt. A disconnect is not withdrawal and cannot mint a successor.
+Unknown entry recovers the original native operation, never respawns from absence.
+Live Start payloads and unresolved custody block checkpoint reclamation.
+
+Existing authoritative session rows survive the additive authorization-table
+upgrade. Native producer custody remains in `local_runtime_starts`; current readers
+route remote records to session recovery rather than graph adoption. Do not roll
+an enabled journal back to readers that lack these authority/custody fences:
+retain state, drain under the original epoch and roll forward. Unconfigured full
+nodes retain their graph admission and existing native behavior. This is isolated
+execution support, not production cutover or a CPU/offload measurement.
 
 
 ## Phases and exit gates
