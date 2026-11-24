@@ -421,6 +421,20 @@ impl FleetAuth {
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — sender hold.
 // Keep old names until every member accepts aliases; sunset 60 days after first shipping release.
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+/// JSON size of the signed request-header pairs, without reading secrets or signing.
+/// SHA-256/HMAC hex is 64 bytes; an unpadded base64url Ed25519 signature is 86.
+pub fn signed_request_authentication_json_size(fleet: &str, node: &str, member_key: &str) -> Result<usize> {
+    const HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const SIGNATURE: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const _: () = assert!(HEX.len() == 64 && SIGNATURE.len() == 86);
+    let mut authentication = headers(fleet, node, HEX, HEX, None)?;
+    authentication.insert(HEADER_MEMBER_KEY, HeaderValue::from_str(member_key)?);
+    authentication.insert(HEADER_MEMBER_SIGNATURE, HeaderValue::from_static(SIGNATURE));
+    let pairs = authentication.iter().map(|(name, value)|
+        Ok((name.as_str(), value.to_str()?))).collect::<Result<Vec<_>>>()?;
+    Ok(serde_json::to_vec(&pairs)?.len())
+}
+
 fn headers(
     fleet: &str,
     node: &str,

@@ -66,6 +66,17 @@ pub fn prepare_render(
     workspace: &Path,
     input: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<(Vec<PlannedWrite>, Vec<String>)> {
+    prepare_render_with_documents(render, workspace, input, &|name, hash| store.get_document(name, hash))
+}
+
+/// Resolve immutable graph documents through an admitted payload while keeping all
+/// filesystem-dependent rendering and safety checks on the execution host.
+pub fn prepare_render_with_documents(
+    render: &Value,
+    workspace: &Path,
+    input: &dyn Fn(&Path) -> Result<()>,
+    document: &dyn Fn(&str, &str) -> Result<Option<Vec<u8>>>,
+) -> Result<(Vec<PlannedWrite>, Vec<String>)> {
     let mut writes = Vec::new();
     let mut warnings = Vec::new();
     for operation in children(render) {
@@ -84,8 +95,7 @@ pub fn prepare_render(
                     let (name, hash) = source
                         .rsplit_once('@')
                         .context("render document source needs @HASH")?;
-                    store
-                        .get_document(name, hash)?
+                    document(name, hash)?
                         .with_context(|| format!("render document `{source}` is missing"))?
                 } else {
                     input(Path::new(source))?;
