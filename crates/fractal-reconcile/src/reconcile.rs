@@ -12098,6 +12098,45 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// A stopped incarnation cannot consume the replay that normally ends channel loss.
+    /// Run for unchanged observations too, so retained faults converge after an upgrade.
+    fn recover_ended_mailbox_faults(&self, observation: &crate::model::ClaimRecord) -> Result<()> {
+        let fields = &observation.body["fields"];
+        if !matches!(fields["status"].as_str(),
+            Some("stopped" | "suspended" | "exited" | "vanished" | "absent" | "failed"))
+        {
+            return Ok(());
+        }
+        let Some(incarnation) = fields["incarnation_id"].as_str() else { return Ok(()); };
+        let failures = self.store.claims_for(&observation.subject, Some("operational.failure"))?;
+        let failures = failures.iter().filter(|failure| {
+            failure.body["fields"]["condition"] == "mailbox-channel-lost"
+                && failure.body["fields"]["incarnation"].as_str() == Some(incarnation)
+        }).collect::<Vec<_>>();
+        if failures.is_empty() { return Ok(()); }
+        let recovered = self.store.claims_for(&observation.subject, Some("operational.recovered"))?;
+        for failure in failures {
+            if recovered.iter().any(|recovery| recovery.body["fields"]["failure"] == failure.id) {
+                continue;
+            }
+            self.store.append_claim(&ClaimInput {
+                subject: observation.subject.clone(),
+                kind: "operational.recovered".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: BTreeMap::from([
+                    ("episode".into(), failure.body["fields"]["episode"].clone()),
+                    ("failure".into(), Value::from(failure.id.clone())),
+                    ("reason".into(), Value::from("incarnation-ended")),
+                ]),
+                evidence: vec![observation.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(format!("mailbox-incarnation-ended:{}", failure.id)),
+            })?;
+            self.signal_changed();
+        }
+        Ok(())
+    }
+
     fn record_once_with_evidence(
         &self,
         subject: &str,
@@ -12127,6 +12166,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.record_runtime_observation_admission(subject, false)?;
                 if let Some(previous) = previous {
                     self.retain_stopped_invocation_transcripts(previous)?;
+                    self.recover_ended_mailbox_faults(previous)?;
                 }
             }
             return Ok(());
@@ -12154,6 +12194,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if kind == "runtime.observed" {
             self.retain_stopped_invocation_transcripts(&record)?;
+            self.recover_ended_mailbox_faults(&record)?;
         }
         if crate::store::local_observation_position(&record).is_some() {
             // Only this node reads a local observation, and it cannot advance a mission.
