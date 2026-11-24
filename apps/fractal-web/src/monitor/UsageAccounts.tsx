@@ -54,9 +54,9 @@ const History = ({ view }: { readonly view: HistoryView }) => {
   return <figure aria-labelledby={captionId} data-usage-history="" {...stylex.props(styles.figure)}>
     <figcaption id={captionId} {...stylex.props(styles.name)}>{view.caption}</figcaption>
     <div role="img" aria-label={view.summary} {...stylex.props(styles.bars)}>
-      {view.bars.map(bar => <span key={bar.day} title={bar.words} data-usage-day={bar.day} data-open={bar.open || undefined}
-        style={{ blockSize: bar.fill === undefined ? undefined : `${Math.max(bar.fill, 1)}%` }}
-        {...stylex.props(styles.bar, bar.open && styles.open, bar.fill === undefined && styles.unrated)} />)}
+      {view.bars.map(bar => <span key={bar.day} title={bar.words} data-usage-day={bar.day} data-state={bar.state} data-open={bar.open || undefined}
+        style={{ blockSize: bar.state === 'recorded' ? `${Math.max(bar.fill ?? 0, 1)}%` : undefined }}
+        {...stylex.props(styles.bar, styles[bar.state], bar.open && styles.open)} />)}
     </div>
     <p aria-hidden="true" {...stylex.props(styles.axis)}><span>{view.bars[0]?.day}</span><span>today, so far</span></p>
     <p {...stylex.props(styles.meta)}>{view.summary}</p>
@@ -109,11 +109,15 @@ const styles = stylex.create({
   region: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0 },
   detail: { display: 'flex', flexDirection: 'column', gap: s.xs, padding: s.md, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: r.sm },
   figure: { margin: 0, display: 'flex', flexDirection: 'column', gap: s.xs, paddingInline: s.md },
-  // One column per day; the open day is an outline, since its total is still growing.
+  // One column per day. The open day is an outline, since its total is still growing; a day the producer
+  // did not report, or reported without a rate, is an empty dotted slot, unlike a recorded zero's flat tick.
   bars: { display: 'flex', alignItems: 'flex-end', gap: 2, blockSize: 72, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
   bar: { flex: '1 1 0', minWidth: 0, borderStartStartRadius: 2, borderStartEndRadius: 2, backgroundColor: c.primary },
+  recorded: {},
+  zero: { blockSize: 2, backgroundColor: c.fgMuted },
+  unreported: { blockSize: '100%', backgroundColor: 'transparent', borderWidth: 1, borderBottomWidth: 0, borderStyle: 'dotted', borderColor: c.borderStrong },
+  unrated: { blockSize: '100%', backgroundColor: 'transparent', borderWidth: 1, borderBottomWidth: 0, borderStyle: 'dotted', borderColor: c.attention },
   open: { backgroundColor: 'transparent', borderWidth: 1, borderBottomWidth: 0, borderStyle: 'dashed', borderColor: c.primary },
-  unrated: { blockSize: 0 },
   axis: { margin: 0, display: 'flex', justifyContent: 'space-between', color: c.fgMuted, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
   name: { margin: 0, fontSize: t.metaSize, fontWeight: t.weightSemibold, overflowWrap: 'anywhere' },
   section: { margin: 0, paddingInline: s.md, paddingBlock: s.xs, fontSize: t.metaSize, fontWeight: t.weightSemibold, color: c.fgMuted },

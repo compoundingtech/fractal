@@ -82,7 +82,7 @@ describe('usage account history', () => {
     expect(view.bars).toHaveLength(30)
     expect(view.bars.filter(bar => bar.open)).toEqual([view.bars.at(-1)])
     expect(view.bars.at(-1)!.words).toMatch(/so far: \$\d+\.\d\d$/)
-    expect(view.bars.at(-4)!).toMatchObject({ fill: 0, words: expect.stringMatching(/: \$0\.00$/) })
+    expect(view.bars.at(-4)!).toMatchObject({ state: 'zero', fill: 0, words: expect.stringMatching(/: \$0\.00$/) })
     expect(Math.max(...view.bars.map(bar => bar.fill ?? 0))).toBe(100)
     expect(view.summary).toMatch(/^\$\d+ over 29 full days · peak \$\d+\.\d\d on \d{4}-\d\d-\d\d · today so far \$\d+\.\d\d$/)
     expect(view.notes).toEqual([])
@@ -94,9 +94,37 @@ describe('usage account history', () => {
     expect(view.caption).toBe('Daily tokens · last 30 days')
     expect(view.notes).toEqual([
       'USD coverage is below the producer’s gate, so this shows tokens',
-      '4 older days not reported',
+      'The producer dropped 4 older days',
       'Refresh failed: history timed out; showing the last good reading',
     ])
     expect(history({ last: seriesOf(), attempt: { _tag: 'ok' } }, 'tokens')).toMatchObject({ caption: 'Daily tokens · last 30 days', notes: [] })
+  })
+
+  it('spans 30 calendar days back from the open day, marking days before the series as not reported', () => {
+    const view = history({ last: seriesOf({ days: 3 }), attempt: { _tag: 'ok' } })
+    if (view._tag !== 'chart') throw new Error('expected chart')
+    expect(view.bars).toHaveLength(30)
+    expect(view.bars.at(-1)!).toMatchObject({ day: '2026-10-01', open: true })
+    expect(view.bars[0]!).toMatchObject({ day: '2026-09-02', state: 'unreported', fill: undefined, words: '2026-09-02: not reported' })
+    expect(view.bars.map(bar => bar.state === 'unreported')).toEqual([...Array(27).fill(true), false, false, false])
+    expect(view.summary).toMatch(/^\$\d+\.\d\d over 2 full days · 27 days not reported · peak /)
+  })
+
+  const unrated = (usd: ReadonlyArray<number | undefined>): HistoryState['last'] => {
+    const days = usd.map((value, index) => ({ day: `2026-09-0${index + 1}`, tokens: 1000, usd: value, open: index === usd.length - 1 }))
+    return { series: { days, openDay: days.at(-1)!.day, coverageOk: true, omittedDays: 0, computedAt: '2026-09-04T12:00:00Z' }, at: now }
+  }
+
+  it('sums only rated days and says how many lack a rate', () => {
+    const view = history({ last: unrated([10, undefined, 5, 2]), attempt: { _tag: 'ok' } })
+    if (view._tag !== 'chart') throw new Error('expected chart')
+    expect(view.summary).toBe('$15.00 rated subtotal over 2 full days · 1 without a rate · 26 days not reported · peak $10.00 on 2026-09-01 · today so far $2.00')
+    expect(view.bars.at(-3)!).toMatchObject({ state: 'unrated', fill: undefined, words: '2026-09-02: no rate' })
+  })
+
+  it('shows no USD total when no day is rated', () => {
+    expect(history({ last: unrated([undefined, undefined, undefined]), attempt: { _tag: 'ok' } })).toMatchObject({
+      summary: 'no rate for 2 full days · 27 days not reported · today so far no rate',
+    })
   })
 })
