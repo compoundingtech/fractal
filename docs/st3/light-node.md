@@ -61,7 +61,6 @@ send implies consumer acceptance. The Bun fixture first completes a real
 `ctx.record`, proves the result remains retained, then explicitly acknowledges
 it and admits the next request through a one-slot journal.
 
-
 The home retains the admitted host key, exact execution binding and graph authorization revision. A delayed report of an ended execution is an inactive tombstone that can be acknowledged, not a renewed start grant. Installing an authenticated newer epoch atomically fences all older execution authority; lower epochs are refused. Signature, scope, current live step/attempt/generation/revision and replay checks run in the same graph writer transaction as the actual effect and durable response receipt. Revocation uses that same writer order. An already-forwarded assertion therefore cannot create a new effect after revocation, even before expiry. An identical signed retry can recover its already committed response after revocation or assertion expiry without creating another effect; conflicting request-ID reuse, including across epochs, fails closed. Retained response receipts and home authority fences are bounded and are not age-deleted. Full-node bound run writes also carry authenticated scope through blocking admission and recheck the attempt in the actual claim transaction, closing the local authentication-to-commit race.
 
 Closing a home epoch freezes new effects immediately while its old authenticated transport drains authority changes and receipts. The home persists a closed epoch fence and revokes all older or equal execution authority in one writer transaction. Reinstalling that same closed epoch cannot reopen it, including after restart; only an explicitly authenticated higher selection can open new authority. Delayed execution reports can settle as inactive tombstones during the drain, but cannot issue a new graph effect.
@@ -124,7 +123,6 @@ signed over this channel transcript, its direction and its strictly increasing
 sequence before any journal/native effect. Replayed upgrade headers cannot
 reserve the seat lease without a fresh signed Hello, whose wait has a deadline.
 
-
 Start grants, either configuration role containing Start, command enqueue and
 seat admission explicitly refuse with `light-node-start-not-supported`, including
 attempts to reuse retired execution identities. There is no remote launch adapter
@@ -152,7 +150,6 @@ distinct, and finalization uses the latter. If entry committed before its proof,
 a positively identified still-running generation can reconcile the retained
 Stop under the current serialized authority/cancellation barrier. A replaced or
 ambiguous generation cannot be signaled; missing evidence never proves closure.
-
 
 Epoch replacement first closes old authority. The old home connection remains
 available to drain real terminal receipts and authority changes/ACKs; queued home

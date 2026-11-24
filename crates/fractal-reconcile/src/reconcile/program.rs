@@ -130,7 +130,6 @@ struct AuthorityWait {
     generation: u64,
     execution: ProgramExecution,
 }
-
 struct Running {
     dispatch: Dispatch,
     /// The host generation running it; a host that exits takes exactly its own programs with it.
@@ -1136,8 +1135,10 @@ impl ProgramEngine {
                 since: Instant::now(),
             };
             running.requests.insert(key.to_owned(), request);
+            // Publish the wake before requests() can expose this input to an evaluation.
+            // Resource requests have no started journal claim to rediscover in the feed.
+            (self.wake)(step);
         }
-        (self.wake)(step);
         Ok(())
     }
 
