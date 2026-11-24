@@ -9,12 +9,18 @@ fn invalid_start(message: impl Into<String>) -> FractalError {
     FractalError::new("light-node-start-authorization-changed", message)
 }
 
+enum SnapshotMode<'a> {
+    Prepare,
+    Admit,
+    Retain(&'a Option<StartContinuation>),
+}
+
 impl<R: RuntimeControl> Reconciler<R> {
     pub fn prepare_home_start(&self, binding: &ExecutionBinding, revision: u64,
         start_request: &str, workspace: StartWorkspaceAdmission) -> Result<StartAuthorization> {
         let expected = self.store.latest_actual_value(&binding.subject)?.and_then(|actual|
             actual_field(&actual, "incarnation_id").and_then(Value::as_str).map(str::to_owned));
-        let mut authorization = self.home_start_snapshot(binding, revision, start_request, workspace, expected, true, None)?;
+        let mut authorization = self.home_start_snapshot(binding, revision, start_request, workspace, expected, SnapshotMode::Prepare)?;
         authorization.seal()?;
         Ok(authorization)
     }
@@ -39,7 +45,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         authorization.verify()?;
         let mut current = self.home_start_snapshot(binding, authorization.revision,
             &authorization.start_request, authorization.workspace_admission.clone(),
-            authorization.expected_incarnation.clone(), false, retained.then_some(&authorization.continuation))?;
+            authorization.expected_incarnation.clone(), if retained { SnapshotMode::Retain(&authorization.continuation) } else { SnapshotMode::Admit })?;
         if current.member.terminal {
             current.launch_member.terminal_size = authorization.launch_member.terminal_size;
         }
@@ -51,7 +57,8 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn home_start_snapshot(&self, binding: &ExecutionBinding, revision: u64, start_request: &str,
         workspace_admission: StartWorkspaceAdmission, expected_incarnation: Option<String>,
-        retain_account: bool, retained_continuation: Option<&Option<StartContinuation>>) -> Result<StartAuthorization> {
+        mode: SnapshotMode<'_>) -> Result<StartAuthorization> {
+        let retain_account = matches!(mode, SnapshotMode::Prepare);
         anyhow::ensure!(binding.run.is_none() && binding.authorization_revision == revision.to_string(),
             invalid_start("remote Start requires its exact non-program authorization revision"));
         binding.validate()?;
@@ -106,7 +113,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 now_ms(), retain_account).map_err(|reason| invalid_start(format!("remote Start account refused: {reason}")))?;
             Some(StartCredentials { driver: account.driver, account: Some(selected.account.name), login: selected.login })
         } else { None };
-        let continuation = if let Some(retained) = retained_continuation { retained.clone() }
+        let continuation = if let SnapshotMode::Retain(retained) = mode { retained.clone() }
         else if desired.kind == "agent" && !member.environment.contains_key(crate::suspension::RESUME_ENV)
             && let Some(driver) = member.driver.as_deref() {
             let account = credentials.as_ref().and_then(|selected| selected.account.as_deref());

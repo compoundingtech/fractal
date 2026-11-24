@@ -100,7 +100,7 @@ pub(super) async fn watch_home_starts(controls: Controls, mut shutdown: watch::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fractal_daemon::{MissionsStore as _, parse_intent};
+    use fractal_daemon::parse_intent;
     use fractal_daemon::light_node::journal::{Command, Scope};
     use fractal_daemon::model::IntentInput;
     use fractal_daemon::reconcile::NativeRuntime;

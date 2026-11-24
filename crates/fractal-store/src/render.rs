@@ -75,7 +75,7 @@ pub fn prepare_render_with_documents(
     render: &Value,
     workspace: &Path,
     input: &dyn Fn(&Path) -> Result<()>,
-    document: &dyn Fn(&str, &str) -> Result<Option<Vec<u8>>>,
+    document: &impl Fn(&str, &str) -> Result<Option<Vec<u8>>>,
 ) -> Result<(Vec<PlannedWrite>, Vec<String>)> {
     let mut writes = Vec::new();
     let mut warnings = Vec::new();
