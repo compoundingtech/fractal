@@ -2,7 +2,7 @@
 //! the audited retention rules, and every reader answers the same from the full log and the
 //! trimmed one.
 use super::*;
-use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, kinds, step};
+use crate::store::checkpoint_agreement_tests_shared_attention_tests::kinds;
 use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +11,29 @@ use smallclaims::store::checkpoint_agreement::CheckpointContext;
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
 const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
+// Ordinary retention fixtures start after signed freshness activates and age past the
+// forget bound before trimming. The bound tests below choose their own earlier trim times.
+const FIXTURE_WRITTEN_MS: u128 = smallclaims::principal::FRESHNESS_FROM_UNIX_MS as u128 + 60_000;
+
+fn clocked(store: Store) -> Store {
+    store.set_write_clock_at(FIXTURE_WRITTEN_MS).unwrap();
+    store
+}
+
+/// The fixture's observations are before the due cut, independent of the wall clock.
+fn context(scratch: &Path, days_later: u128) -> CheckpointContext {
+    CheckpointContext {
+        now_unix_ms: FIXTURE_WRITTEN_MS + smallclaims::principal::FORGET_SIGNED_AFTER_MS as u128
+            + (3 + days_later) * smallclaims::store::checkpoint::DAY_MS,
+        scratch: scratch.to_path_buf(),
+    }
+}
+
+fn step(store: &Store, context: &CheckpointContext) -> Vec<smallclaims::store::checkpoint_agreement::CheckpointAction> {
+    store.set_write_clock_at(context.now_unix_ms).unwrap();
+    store.checkpoint_step(context).unwrap()
+}
+
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
     declared(Store::open_memory("node").unwrap(), trims_locally)
@@ -18,6 +41,7 @@ fn member(trims_locally: bool) -> Store {
 
 /// `store` with both seats declared.
 fn declared(store: Store, trims_locally: bool) -> Store {
+    let store = clocked(store);
     store.bind_fleet(TEST_FLEET).unwrap();
     let source = "version 2\nagent \"amber\" { command \"true\" }\nagent \"birch\" { command \"true\" }\n";
     let intent = crate::graph::parse_test_intent(source, "node").unwrap();
@@ -398,7 +422,7 @@ fn retiring_pair(scratch: &std::path::Path) -> (Store, Store, CheckpointContext)
     assert_eq!(kinds(&step(&alder, &context(scratch, 0))), ["trimmed"]);
     assert_eq!(claims_of(&alder, "observer.observed"), 1);
     birch.set_retirement_wins(true);
-    let quiet = CheckpointContext { now_unix_ms: now_ms(), scratch: scratch.to_path_buf() };
+    let quiet = CheckpointContext { now_unix_ms: FIXTURE_WRITTEN_MS, scratch: scratch.to_path_buf() };
     (alder, birch, quiet)
 }
 
@@ -535,7 +559,7 @@ fn unheld_retirements(scratch: &std::path::Path) -> (Store, Store, Store, Checkp
     sync_all(&[&alder, &oak]);
     assert_eq!(kinds(&step(&alder, &context(scratch, 0))), ["trimmed"]);
     birch.set_retirement_wins(true);
-    let quiet = CheckpointContext { now_unix_ms: now_ms(), scratch: scratch.to_path_buf() };
+    let quiet = CheckpointContext { now_unix_ms: FIXTURE_WRITTEN_MS, scratch: scratch.to_path_buf() };
     (alder, birch, oak, quiet)
 }
 
@@ -885,7 +909,7 @@ fn a_local_cut_keeps_the_replication_snapshot_and_a_peer_syncing_through_it_agre
     for n in 0..30 {
         apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
     }
-    let peer = Arc::new(Store::open_memory("birch").unwrap());
+    let peer = Arc::new(clocked(Store::open_memory("birch").unwrap()));
     peer.bind_fleet(TEST_FLEET).unwrap();
     while sync_into(&store, &peer) != 0 {}
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1070,7 +1094,7 @@ fn tail_member() -> (Arc<Store>, Arc<Store>, i64) {
         apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
     }
     let tail = last_dropped_observer_envelope_to_the_tail(&store);
-    let peer = Arc::new(Store::open_memory("birch").unwrap());
+    let peer = Arc::new(clocked(Store::open_memory("birch").unwrap()));
     peer.bind_fleet(TEST_FLEET).unwrap();
     while sync_into(&store, &peer) != 0 {}
     (store, peer, tail)
@@ -1134,7 +1158,7 @@ fn after_a_trim_s_stop_a_lagging_peer_is_not_listed_the_same_empty_page_twice() 
     store.set_trim_pause(std::time::Duration::ZERO);
     store.set_trim_chunk_envelopes(1);
     store.set_trim_view_refold_interval(std::time::Duration::from_secs(3_600));
-    let peer = Store::open_memory("birch").unwrap();
+    let peer = clocked(Store::open_memory("birch").unwrap());
     peer.bind_fleet(TEST_FLEET).unwrap();
     while sync_into(&store, &peer) != 0 {}
     // Enough that the newest fill a sequence range the peer holds nothing in.
@@ -1308,6 +1332,9 @@ fn the_next_day_s_cut_follows_the_leftover_of_a_capped_one() {
     let all_first = observer_ids(&store);
     assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 0))), ["deferred"]);
     // Observations of another observer after the first cut was recorded: the next cut's.
+    // These arrive late just after the first due cut, so only the next cut includes them.
+    let first_cut = smallclaims::store::checkpoint::newest_due_cut(cap_context(scratch.path(), 0).now_unix_ms);
+    store.set_write_clock_at(first_cut + 1).unwrap();
     for n in 16..24 {
         apply(&store, &Write::Observer { observer: 1, status: (n % 3) as u8, cursor: None }, n);
     }
@@ -1338,7 +1365,8 @@ fn a_restart_during_a_capped_cut_goes_on_where_it_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claims.sqlite3");
     let open = |first: bool| {
-        let store = Store::open(&path, "node").unwrap();
+        // The writer clock is connection-local, so restore it on every open.
+        let store = clocked(Store::open(&path, "node").unwrap());
         store.bind_fleet(TEST_FLEET).unwrap();
         if first {
             store.import_retired_identities_paced(|_| {}).unwrap();
@@ -1765,7 +1793,7 @@ fn a_fresh_member_joining_from_one_that_split_envelopes_admits_them_whole_and_ag
             .unwrap()
     };
     for trims_locally in [false, true] {
-        let cedar = Store::open_memory("cedar").unwrap();
+        let cedar = clocked(Store::open_memory("cedar").unwrap());
         cedar.bind_fleet(TEST_FLEET).unwrap();
         cedar.import_retired_identities_paced(|_| {}).unwrap();
         cedar.trim_locally(trims_locally).unwrap();
@@ -2254,7 +2282,7 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
         Step::Seat { kind, seat, incarnation, state, old } => {
             let seat = SEATS[usize::from(*seat)];
             let incarnation = format!("{seat}-{incarnation}");
-            let observed_at = now_ms() - if *old { 9 * smallclaims::store::checkpoint::DAY_MS } else { 0 };
+            let observed_at = FIXTURE_WRITTEN_MS - if *old { 9 * smallclaims::store::checkpoint::DAY_MS } else { 0 };
             let (kind, fields) = match kind {
                 0 => ("harness.observed", BTreeMap::from([
                     ("state".into(), json!(STATES[usize::from(*state)])),
@@ -2386,7 +2414,7 @@ fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
     let seat = SEATS[0];
-    let old = (now_ms() - 9 * smallclaims::store::checkpoint::DAY_MS) as u64;
+    let old = (FIXTURE_WRITTEN_MS - 9 * smallclaims::store::checkpoint::DAY_MS) as u64;
     let mut n = 0;
     let mut append = |kind: &str, fields: Value| -> String {
         n += 1;
@@ -2437,7 +2465,7 @@ proptest! {
         let scratch = tempfile::tempdir().unwrap();
         let context = context(scratch.path(), 0);
         let store = local_member("alder");
-        let peer = Store::open_memory("birch").unwrap();
+        let peer = clocked(Store::open_memory("birch").unwrap());
         for (n, step) in steps.iter().enumerate() {
             take_step(&store, &peer, step, n);
         }
@@ -2462,7 +2490,7 @@ fn a_retired_citer_leaves_what_the_others_cite() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
-    let peer = Store::open_memory("birch").unwrap();
+    let peer = clocked(Store::open_memory("birch").unwrap());
     for n in 0..2 {
         take_step(&store, &peer, &Step::Write(Write::Observer { observer: 0, status: n, cursor: None }), usize::from(n));
     }
