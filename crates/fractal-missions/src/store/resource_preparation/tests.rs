@@ -202,6 +202,7 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
             .is_ok()
         }),
         profile: None,
+        charged: None,
         wait: None,
         holder: smallclaims::windows::holds::Holder::current(),
         enqueued: std::time::Instant::now(),
@@ -233,6 +234,7 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
             true
         }),
         profile: None,
+        charged: None,
         wait: None,
         holder: smallclaims::windows::holds::Holder::current(),
         enqueued: std::time::Instant::now(),

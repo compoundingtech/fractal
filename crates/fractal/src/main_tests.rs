@@ -1,4 +1,27 @@
 #[test]
+fn performance_renders_sqlite_cache_miss_bytes_beside_cpu() {
+    let row = serde_json::json!({
+        "count": 1, "total_ms": 2.0, "max_ms": 2.0, "cpu_ms": 1.0,
+        "sqlite_cache_miss_bytes": 12288, "mmap_major_faults": 7,
+        "kind": "/v1/example", "client": "example"
+    });
+    let report = serde_json::json!({
+        "window_seconds": 300,
+        "requests": [row.clone()], "queries": [row.clone()],
+        "clients": [row.clone()], "client_requests": [row],
+        "sqlite_cache_miss_bytes_note": "Excludes mmap reads.",
+        "mmap_major_faults_note": "Counts, not bytes."
+    });
+    let rendered = render_performance(&report);
+    assert!(rendered.contains("CPU ms · SQLite cache-miss bytes"));
+    assert!(rendered.contains("Excludes mmap reads."));
+    assert_eq!(rendered.matches("12288").count(), 4);
+    assert!(rendered.contains("mmap major faults"));
+    assert!(rendered.contains("Counts, not bytes."));
+    assert_eq!(rendered.matches("12288  7").count(), 4);
+}
+
+#[test]
 fn subject_activity_summary_is_explicit_and_conflicts_with_other_views() {
     assert!(Cli::try_parse_from([
         "fractal", "subject", "show", "agent/example", "--activity-summary", "--json", "--daemon-wait", "0",
