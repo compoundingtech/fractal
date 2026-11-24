@@ -6343,6 +6343,9 @@ fn remote_terminal_live_session(
     expected_incarnation: &str,
 ) -> Result<LiveSession, ApiError> {
     let _span = crate::profile::span("terminal/live-fence");
+    if state.store.local_session_known(subject).map_err(ApiError::internal)? {
+        return terminal_live_session(state, subject, Some(expected_incarnation));
+    }
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
@@ -6385,6 +6388,7 @@ fn remote_terminal_live_session(
     Ok(LiveSession {
         runtime_id: runtime_id.into(),
         incarnation_id: incarnation.into(),
+        native_incarnation_id: incarnation.into(),
         owner_host_id,
         terminal: fields
             .get("terminal")

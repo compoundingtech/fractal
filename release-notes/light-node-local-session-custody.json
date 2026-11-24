@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve executor-local sessions from durable native custody and detach borrowed terminals without signalling their shells",
+  "replay": {"status": "none", "detail": "Existing native runtime adoption establishes local custody; no graph replay or full-node topology change is required."},
+  "schema": {"status": "changed", "detail": "An owner-local bounded custody table retains subject, runtime, exact native generation, launch operation, lifecycle, ownership and adopted invocation fences. It is not replicated graph authority."},
+  "rules": {"status": "changed", "detail": "Local reads, attach and emergency control validate durable local custody against fresh native identity before consulting graph routing. Remote subjects keep graph routing. Borrowed invocation stop journals detach without signalling the harness or shell, fabricating exit evidence, or allowing re-adoption."},
+  "compatibility": {"status": "changed", "detail": "Old binaries do not enforce durable detach fences. Roll forward while borrowed detach receipts remain unsettled."},
+  "downtime": {"status": "none", "detail": "No production light-node cutover or deployment change is enabled."},
+  "manual": {"status": "none", "detail": "Real process and PTY fixtures cover restart with unavailable graph tables, native reads and attachment, owned exact-generation stop, stale identity denial, and retained borrowed shells. Their integration-lane execution remains required; no CPU or offload result is claimed."},
+  "recovery": {"status": "changed", "detail": "Detached invocations remain fenced across restart. Pending detach receipts carry stable operation identity, are acknowledged only after idempotent graph acceptance, and retain custody metadata until settlement permits existing checkpoint removal."}
+}

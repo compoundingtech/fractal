@@ -90,6 +90,8 @@ pub enum Dispatched {
     Running,
     /// The host was asked to start (or resume) it.
     Started,
+    /// No worker or credential yet; an authority ACK will target this run for reconsideration.
+    AwaitingAuthority,
     /// The step cannot run; the reason fails it.
     Refused(String),
     /// No host could be started to run it; the step keeps its state and the engine reports the
@@ -109,10 +111,26 @@ struct Host {
     ping: Option<(u64, Instant)>,
 }
 
+
+/// The actual in-process program runtime generation, distinct from a native agent/person seat.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgramExecution {
+    pub run: crate::store::run_credentials::RunBinding,
+    pub runtime: String,
+    pub incarnation: String,
+}
+
+/// Opt-in light-node credential issuance. Implementations serialize issue/revoke with their
+/// durable local journal; an error must not fall back to a graph credential.
+pub trait RunAuthority: Send + Sync {
+    fn issue(&self, execution: &ProgramExecution, lifetime_ms: u64) -> Result<String>;
+    fn revoke(&self, execution: &ProgramExecution) -> Result<()>;
+}
 struct Running {
     dispatch: Dispatch,
     /// The host generation running it; a host that exits takes exactly its own programs with it.
     generation: u64,
+    execution: ProgramExecution,
     /// By journal key: the child runs and asks the program waits on.
     requests: BTreeMap<String, Request>,
     /// Closed whenever this exact host attempt is forgotten, including cancellation.
@@ -191,6 +209,8 @@ struct Inner {
     pings: u64,
     supervised: bool,
     running: HashMap<String, Running>,
+    /// Register before issuing, so an ACK concurrent with the issuer cannot lose its wake.
+    authority_waits: HashMap<String, ProgramExecution>,
     /// Exact worker identities awaiting termination, independent of their recorded outcomes.
     terminating: HashSet<(u64, String, u32)>,
     /// By step: the attempt and the last host or liveness failure that stopped it.
@@ -207,6 +227,8 @@ pub struct ProgramEngine {
     dir: PathBuf,
     liveness: Liveness,
     inner: Mutex<Inner>,
+    instance: uuid::Uuid,
+    run_authority: std::sync::OnceLock<Arc<dyn RunAuthority>>,
 }
 
 /// Isolated-daemon fault injection only. Production builds contain neither registry nor hook.
@@ -239,7 +261,10 @@ pub fn interrupt_message_for_test(store: &Arc<Store>, state_dir: &Path, operatio
 impl ProgramEngine {
     /// `wake(step)` tells the reconciler a program step changed outside its evaluation.
     pub fn new(store: Arc<Store>, wake: Arc<dyn Fn(&str) + Send + Sync>, dir: PathBuf, liveness: Liveness) -> Arc<Self> {
-        let engine = Arc::new(Self { store, wake, dir, liveness, inner: Mutex::default() });
+        let engine = Arc::new(Self {
+            store, wake, dir, liveness, inner: Mutex::default(),
+            instance: uuid::Uuid::new_v4(), run_authority: Default::default(),
+        });
         #[cfg(feature = "test-support")]
         test_engines().lock().unwrap_or_else(PoisonError::into_inner)
             .insert(Arc::as_ptr(&engine.store) as usize, Arc::downgrade(&engine));
@@ -248,6 +273,57 @@ impl ProgramEngine {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Configure before any host starts. Authority cannot be swapped underneath live attempts.
+    pub fn install_run_authority(&self, authority: Arc<dyn RunAuthority>) -> Result<()> {
+        let inner = self.lock();
+        anyhow::ensure!(inner.generations == 0, "program run authority must be installed before dispatch");
+        self.run_authority.set(authority).map_err(|_| anyhow::anyhow!("program run authority is already installed"))
+    }
+
+    fn execution(&self, run: crate::store::run_credentials::RunBinding, generation: u64) -> ProgramExecution {
+        ProgramExecution {
+            runtime: format!("program-step/{}", run.step_run),
+            incarnation: format!("{}:{generation}:{}", self.instance, run.attempt),
+            run,
+        }
+    }
+
+    fn revoke_execution(&self, running: &Running) -> Result<()> {
+        if let Some(authority) = self.run_authority.get() {
+            authority.revoke(&running.execution)?;
+        }
+        Ok(())
+    }
+
+    fn forget(&self, inner: &mut Inner, step: &str, attempt: u32, generation: u64) -> Result<bool> {
+        let Some(running) = inner.running.get(step)
+            .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)
+        else { return Ok(false); };
+        self.revoke_execution(running)?;
+        inner.running.remove(step);
+        Ok(true)
+    }
+
+    fn revoke_authority_wait(&self, inner: &mut Inner, step: &str) -> Result<()> {
+        if let Some(execution) = inner.authority_waits.get(step)
+            && let Some(authority) = self.run_authority.get()
+        {
+            authority.revoke(execution)?;
+        }
+        inner.authority_waits.remove(step);
+        Ok(())
+    }
+
+    pub(super) fn authority_changed(&self) {
+        let waiting = self.lock().authority_waits.values()
+            .map(|execution| (execution.run.step_run.clone(), execution.run.run.clone()))
+            .collect::<Vec<_>>();
+        for (step, run) in waiting {
+            (self.wake)(&step);
+            (self.wake)(&run);
+        }
     }
 
     /// The same authoritative `run.env` used by spawnEffect, only for this live attempt.
@@ -278,6 +354,7 @@ impl ProgramEngine {
             return Ok(Dispatched::Running);
         }
         if let Some(reason) = self.ended_or_left(&inner, &dispatch.step, dispatch.attempt)? {
+            self.revoke_authority_wait(&mut inner, &dispatch.step)?;
             return Ok(Dispatched::Left(reason));
         }
         let generation = match self.ensure_host(&mut inner) {
@@ -288,17 +365,59 @@ impl ProgramEngine {
                 return Ok(Dispatched::HostDown(reason));
             }
         };
+        let run = if self.run_authority.get().is_some() {
+            let admitted = self.store.admit_program_attempt(&dispatch.step, dispatch.attempt)?;
+            anyhow::ensure!(admitted.run == dispatch.run, "program dispatch names another run");
+            admitted
+        } else {
+            crate::store::run_credentials::RunBinding {
+                run: dispatch.run.clone(), step_run: dispatch.step.clone(), attempt: dispatch.attempt,
+            }
+        };
+        if let Some(prior) = inner.running.get(&dispatch.step) {
+            self.revoke_execution(prior)?;
+        }
         inner.faults.remove(&dispatch.step);
         // The attempt's effects act as its run (docs/st3/program-engine.md §3). The credential is
         // minted only here, once the host runs and this attempt is about to start, so a refused,
         // already running or host-down dispatch leaves no row; each start or resume mints one, and
         // it never enters the journal or a log.
-        let trace = self.start_trace(&dispatch)?;
+        let execution = self.execution(run, generation);
+        let (credential, execution) = if let Some(authority) = self.run_authority.get() {
+            if let Some(prior) = inner.authority_waits.get(&dispatch.step)
+                && prior != &execution
+            {
+                authority.revoke(prior)?;
+            }
+            inner.authority_waits.insert(dispatch.step.clone(), execution);
+            let credential = match authority.issue(
+                inner.authority_waits.get(&dispatch.step).expect("registered authority wait"),
+                RUN_CREDENTIAL_LIFETIME_MS,
+            ) {
+                Ok(credential) => credential,
+                Err(error) if error.downcast_ref::<crate::model::FractalError>()
+                    .is_some_and(|error| error.code == "local-authority-backpressure") =>
+                {
+                    return Ok(Dispatched::AwaitingAuthority);
+                }
+                Err(error) => return Err(error),
+            };
+            (credential, inner.authority_waits.remove(&dispatch.step).expect("registered authority wait"))
+        } else {
+            (self.store.issue_run_credential(&dispatch.step, dispatch.attempt, RUN_CREDENTIAL_LIFETIME_MS)?, execution)
+        };
+        let trace = match self.start_trace(&dispatch) {
+            Ok(trace) => trace,
+            Err(error) => {
+                if let Some(authority) = self.run_authority.get() { authority.revoke(&execution)?; }
+                return Err(error);
+            }
+        };
         let mut env = std::mem::take(&mut dispatch.env);
         trace.correlation.environment(&mut env);
         env.insert(
             crate::store::run_credentials::RUN_CREDENTIAL_ENV.to_owned(),
-            self.store.issue_run_credential(&dispatch.step, dispatch.attempt, RUN_CREDENTIAL_LIFETIME_MS)?,
+            credential,
         );
         eprintln!(
             "fractal: program {} attempt {} started with {} journaled steps",
@@ -324,7 +443,7 @@ impl ProgramEngine {
         // Keep exactly the environment sent to spawnEffect's host, including this attempt's
         // trace and credential, for native lane commands. Never reconstruct a parallel context.
         dispatch.env = env;
-        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, requests: BTreeMap::new(), _trace: trace });
+        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, execution, requests: BTreeMap::new(), _trace: trace });
         send(&inner, &message);
         Ok(Dispatched::Started)
     }
@@ -428,10 +547,20 @@ impl ProgramEngine {
                 })
                 .collect::<Vec<_>>();
             for (step, attempt, generation, reason) in &left {
+                if let Some(running) = inner.running.get(step) {
+                    self.revoke_execution(running)?;
+                }
                 inner.running.remove(step);
                 eprintln!("fractal: program {step} attempt {attempt} cancelled: {reason}");
                 send_cancel(&mut inner, *generation, step, *attempt, reason);
             }
+            let abandoned_waits = inner.authority_waits.iter()
+                .filter(|(_, execution)| execution.run.run == run.subject)
+                .filter(|(_, execution)| terminal || !run.steps.iter().any(|view|
+                    view.subject == execution.run.step_run && view.attempt == execution.run.attempt
+                        && RUNNING_STATES.contains(&view.status.as_str())))
+                .map(|(step, _)| step.clone()).collect::<Vec<_>>();
+            for step in abandoned_waits { self.revoke_authority_wait(&mut inner, &step)?; }
             left
         };
         for (step, attempt, _, reason) in left {
@@ -571,7 +700,7 @@ impl ProgramEngine {
                     running.generation
                 });
             if let Some(generation) = generation
-                && forget(&mut inner, step, attempt, generation)
+                && self.forget(&mut inner, step, attempt, generation)?
             {
                 inner.ended.insert(step.to_owned(), attempt);
                 send_cancel(&mut inner, generation, step, attempt, reason);
@@ -1015,7 +1144,7 @@ impl ProgramEngine {
         let Some(reason) = self.left(step, attempt)? else { return Ok(false) };
         {
             let mut inner = self.lock();
-            if forget(&mut inner, step, attempt, generation) {
+            if self.forget(&mut inner, step, attempt, generation)? {
                 send_cancel(&mut inner, generation, step, attempt, &reason);
             }
         }
@@ -1108,7 +1237,7 @@ impl ProgramEngine {
     }
 
     fn done(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
-        let Some(trace) = self.end(step, attempt, generation, None, message["exit"]["_tag"] != "Success") else {
+        let Some(trace) = self.end(step, attempt, generation, None, message["exit"]["_tag"] != "Success")? else {
             return Ok(());
         };
         let exit = &message["exit"];
@@ -1152,7 +1281,7 @@ impl ProgramEngine {
     fn unresponsive(&self, step: &str, attempt: u32, generation: u64, message: &Value) -> Result<()> {
         let ms = message["ms"].as_u64().unwrap_or_default();
         let reason = format!("the program's worker missed its {ms} ms liveness deadline and was terminated");
-        let Some(_trace) = self.end(step, attempt, generation, Some(&reason), true) else {
+        let Some(_trace) = self.end(step, attempt, generation, Some(&reason), true)? else {
             return Ok(());
         };
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
@@ -1164,11 +1293,13 @@ impl ProgramEngine {
 
     /// Forget exactly this host attempt, returning its span owner so terminal journal
     /// writes can still mark it failed before it closes.
-    fn end(&self, step: &str, attempt: u32, generation: u64, fault: Option<&str>, failed: bool) -> Option<crate::otel::AttemptTrace> {
+    fn end(&self, step: &str, attempt: u32, generation: u64, fault: Option<&str>, failed: bool) -> Result<Option<crate::otel::AttemptTrace>> {
         let mut inner = self.lock();
-        inner.running.get(step)
-            .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)?;
-        let running = inner.running.remove(step)?;
+        let Some(running) = inner.running.get(step)
+            .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)
+        else { return Ok(None); };
+        self.revoke_execution(running)?;
+        let running = inner.running.remove(step).expect("exact running attempt checked");
         if failed {
             running._trace.failed();
         }
@@ -1176,7 +1307,7 @@ impl ProgramEngine {
             inner.faults.insert(step.to_owned(), (attempt, fault.to_owned()));
         }
         inner.ended.insert(step.to_owned(), attempt);
-        Some(running._trace)
+        Ok(Some(running._trace))
     }
 
     /// Write the new state of a step whose `attempt` this engine just ended, unless the step
@@ -1247,7 +1378,17 @@ impl ProgramEngine {
                 .filter(|(_, running)| running.generation == generation)
                 .map(|(step, _)| step.clone())
                 .collect::<Vec<_>>();
-            let resume = gone.iter().filter_map(|step| inner.running.remove(step)).map(|running| running.dispatch).collect::<Vec<_>>();
+            let mut resume = Vec::new();
+            for step in gone {
+                let running = inner.running.get(&step).expect("collected running step");
+                if let Err(error) = self.revoke_execution(running) {
+                    let attempt = running.dispatch.attempt;
+                    inner.faults.insert(step.clone(), (attempt, format!("revoking exited program authority: {error:#}")));
+                    eprintln!("fractal: cannot revoke exited program {step}: {error:#}");
+                    continue;
+                }
+                resume.push(inner.running.remove(&step).expect("collected running step").dispatch);
+            }
             (resume, released)
         };
         if released { (self.wake)("program-effects"); }
@@ -1268,7 +1409,7 @@ impl ProgramEngine {
                     None
                 }
                 Ok(Dispatched::HostDown(reason)) => Some(reason),
-                Ok(Dispatched::Running | Dispatched::Started | Dispatched::Left(_)) => continue,
+                Ok(Dispatched::Running | Dispatched::Started | Dispatched::Left(_) | Dispatched::AwaitingAuthority) => continue,
                 Err(error) => Some(format!("resuming the program after its host exited: {error:#}")),
             };
             if let Some(reason) = failure {
@@ -1288,18 +1429,6 @@ fn supervise(engine: Weak<ProgramEngine>, every: Duration) {
     }
 }
 
-/// Forget `step` only while this engine still runs exactly that attempt on that host generation,
-/// so a late message never removes a newer attempt. True when it did.
-fn forget(inner: &mut Inner, step: &str, attempt: u32, generation: u64) -> bool {
-    let current = inner
-        .running
-        .get(step)
-        .is_some_and(|running| running.dispatch.attempt == attempt && running.generation == generation);
-    if current {
-        inner.running.remove(step);
-    }
-    current
-}
 
 /// Queue one line for host `generation` only; a replaced host's messages never reach its successor.
 fn send_to(inner: &Inner, generation: u64, message: &Value) {
