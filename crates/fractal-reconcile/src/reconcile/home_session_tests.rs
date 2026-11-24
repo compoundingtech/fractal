@@ -96,6 +96,13 @@ impl NativePair {
         Self::with_pregraph_setup(SessionCustody::Owned, false, |executor, _store| {
             let mut executor = executor.with_lane_host(Some(lane_host));
             executor.st_binary = Some(binary);
+            // These fixtures do not run the daemon's host observer loop. Initialize
+            // its real kernel PSI observation before either parent or child admission;
+            // an unsampled controller correctly refuses to grant finite resources.
+            let pressure = executor.seat_admission.sample_pressure()
+                .expect("native finite acceptance requires a real host pressure observation");
+            assert!(!pressure.blocked,
+                "native finite acceptance requires healthy actual host pressure: {pressure:?}");
             executor
         }, pregraph).await
     }
@@ -972,15 +979,34 @@ async fn native_start_physical_workspace_freeze_and_preexisting_generation_are_n
         authorization.seal().unwrap();
         let start = pair.home.enqueue(pair.draft(&format!("physical-{boundary}"), Operation::Start { authorization: Box::new(authorization) })).unwrap();
         assert!(matches!(pair.seat.admit(&start).unwrap(), Admission::Accepted(_)));
-        let _entry = pair.seat.enter(&start.execution_id, |command, authority|
+        let entry = pair.seat.enter(&start.execution_id, |command, authority|
             pair.driver.enter(command, authority));
+        let entry_reason = match entry {
+            Err(error) => format!("{error:#}"),
+            Ok(recovery) => {
+                let NativeProof::Complete { outcome: Outcome::Refused { reason } } =
+                    serde_json::from_str(recovery.custody_proof.as_deref().unwrap()).unwrap() else {
+                    panic!("{boundary}: refusal must retain its original entry error");
+                };
+                reason
+            }
+        };
         let recovery = pair.seat.recoverable().unwrap().into_iter()
             .find(|recovery| recovery.command.execution_id == start.execution_id).unwrap();
         let outcome = pair.driver.recover(recovery).await.unwrap();
-        assert!(matches!(&outcome, Outcome::Refused { .. }), "{boundary}: {outcome:?}");
+        assert!(matches!(&outcome, Outcome::Refused { reason } if reason == &entry_reason),
+            "{boundary}: original entry error {entry_reason:?} must survive recovery: {outcome:?}");
+        assert_ne!(entry_reason, "native backend was never entered");
+        if boundary == "finite-root-fit" {
+            assert!(entry_reason.contains("Refused"), "{entry_reason}");
+            assert!(entry_reason.contains("UnsupportedCoverage"), "{entry_reason}");
+        }
         pair.seat.complete(&start.execution_id, outcome).unwrap();
         pair.connect();
         pair.settled(&start).await;
+        let receipt = pair.home.command_receipt(&start.execution_id).unwrap().unwrap();
+        assert!(matches!(&receipt.state, ReceiptState::Settled { outcome: Outcome::Refused { reason } }
+            if reason == &entry_reason), "{boundary}: {receipt:?}");
         pair.disconnect().await;
         assert!(!pair.root.path().join("forbidden").exists(), "{boundary}");
         assert!(pair.store.local_session(&start.binding.subject).unwrap().is_none(), "{boundary}");
@@ -1230,8 +1256,10 @@ async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_paren
                     attempt: 1, invocation: Some("exec/native-parent".into()) },
             };
             let fit = pair.executor.remote_resource_lane_fit(&request).unwrap();
-            assert!(matches!(pair.store.request_resource_membership(&request, fit,
-                u64::try_from(now_ms()).unwrap()).unwrap(), ResourceAdmission::Admitted(_)));
+            let admission = pair.store.request_resource_membership(&request, fit,
+                u64::try_from(now_ms()).unwrap()).unwrap();
+            assert!(matches!(admission, ResourceAdmission::Admitted(_)),
+                "full-node parent setup must admit its enforced membership: {admission:?}");
             let mut authorization = pair.start_authorization("printf ready > inherited-ready; exec sleep 600");
             authorization.member.terminal = false;
             resource_lanes::set_request(&mut authorization.member, &request).unwrap();

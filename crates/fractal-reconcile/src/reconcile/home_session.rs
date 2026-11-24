@@ -197,10 +197,10 @@ impl NativeSessionExecutor {
             anyhow::ensure!(request.host == reconciler.host, "finite Start names another resource host");
             reconciler.ensure_resource_authority()?;
             let fit = reconciler.remote_resource_lane_fit(&request)?;
-            anyhow::ensure!(matches!(reconciler.store.request_native_resource_membership(&command.execution_id, &request, fit,
-                u64::try_from(now_ms()).unwrap_or(u64::MAX))?,
-                crate::store::resource_membership::Admission::Admitted(_)),
-                "native finite resource membership was not admitted");
+            let admission = reconciler.store.request_native_resource_membership(&command.execution_id, &request, fit,
+                u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
+            anyhow::ensure!(matches!(&admission, crate::store::resource_membership::Admission::Admitted(_)),
+                "native finite resource membership was not admitted: {admission:?}");
         }
         let workspace = Path::new(&authorization.member.workspace);
         let _preparation_lease = if !workspace.is_dir() {
@@ -292,6 +292,13 @@ impl NativeSessionExecutor {
         let reconciler = &self.reconciler;
         let Some(mut operation) = reconciler.store.remote_runtime_start(&command.execution_id)? else {
             // The barrier was entered, but native admission did not create an operation.
+            if let Some(reason) = &recovery.cancellation_reason {
+                return Ok(Outcome::Cancelled { reason: reason.clone() });
+            }
+            if let Some(proof) = &recovery.custody_proof
+                && let NativeProof::Complete { outcome: Outcome::Refused { reason } } = serde_json::from_str(proof)? {
+                return Ok(Outcome::Refused { reason });
+            }
             return Ok(Outcome::Refused { reason: "native Start was not admitted".into() });
         };
         anyhow::ensure!(operation.body["remote_start"] == serde_json::to_value(authorization)?,
@@ -302,7 +309,9 @@ impl NativeSessionExecutor {
             reconciler.store.settle_remote_runtime_start(&operation.id)?;
             return Ok(match cancelled {
                 Some(reason) => Outcome::Cancelled { reason: reason.clone() },
-                None => Outcome::Refused { reason: "native backend was never entered".into() },
+                None => Outcome::Refused { reason: operation.result.as_ref()
+                    .and_then(|result| result["error"].as_str())
+                    .unwrap_or("native backend was never entered").into() },
             });
         }
         let mut result = operation.result.clone().unwrap_or_else(|| serde_json::json!({}));
@@ -661,7 +670,31 @@ impl Executor for NativeSessionExecutor {
         let reconciler = &self.reconciler;
         anyhow::ensure!(command.binding.host == reconciler.host, "command names another physical host");
         if matches!(command.operation, Operation::Start { .. }) {
-            return Ok(serde_json::to_string(&self.enter_start(command, authority)?)?);
+            let proof = match self.enter_start(command, authority) {
+                Ok(proof) => proof,
+                Err(error) => {
+                    let reason = format!("{error:#}");
+                    tracing::warn!(execution = %command.execution_id, error = %reason, "native Start entry failed");
+                    let operation = reconciler.store.remote_runtime_start(&command.execution_id)
+                        .with_context(|| format!("retaining native Start entry error: {reason}"))?;
+                    if let Some(operation) = operation {
+                        // A returned predispatch failure is positive nonentry evidence,
+                        // but resource cleanup must still complete in recover_start.
+                        // Do not replace dispatched producer proof with an entry error.
+                        if !operation.dispatched {
+                            reconciler.store.finish_remote_runtime_start(&operation.id,
+                                &serde_json::json!({"phase": "refused-before-backend", "error": reason}))
+                                .with_context(|| format!("retaining native Start entry error: {error:#}"))?;
+                        }
+                        return Err(error);
+                    }
+                    // No native operation was admitted, hence no resource/producer
+                    // custody can need finalization. Retain the actual refusal rather
+                    // than losing it when the journal recovers its entry barrier.
+                    NativeProof::Complete { outcome: Outcome::Refused { reason } }
+                }
+            };
+            return Ok(serde_json::to_string(&proof)?);
         }
         local::require_execution(authority, &command.binding)?;
         let binding = match reconciler.session_live(command) {
