@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "summary": "Conversation search no longer re-reads every page of every remote conversation at each index refresh. It probes each remote conversation's newest entry and, only when that changed, reads its newest 200-entry page. Refreshes log their trigger, remote source count, remote reads and elapsed time.",
+  "summary": "Conversation search no longer re-reads every page of every remote conversation at each index refresh. It probes each remote conversation's newest entry and reads its newest 200-entry page only when that entry changed or the indexed page is an hour old. Refreshes log their trigger, remote source count, remote reads and elapsed time.",
   "replay": {"status": "none", "detail": "No replay or projection changes."},
   "schema": {"status": "none", "detail": "No persistent schema changes; the search index is in memory."},
   "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
-  "compatibility": {"status": "changed", "detail": "Search covers only the newest 200 entries of a remote conversation; such conversations report 'older remote history is not indexed' in the search incomplete list. Local conversations are indexed as before."},
+  "compatibility": {"status": "changed", "detail": "Search covers only the newest 200 entries of a remote conversation; such conversations report 'older remote history is not indexed' in the search incomplete list. An edit to an older entry within those 200, such as a replaced or finalized harness entry, can stay unsearchable for up to one hour. Local conversations are indexed as before."},
   "downtime": {"status": "none", "detail": "No migration or downtime is required."},
   "manual": {"status": "none", "detail": "No user action is required."},
   "recovery": {"status": "none", "detail": "Reverting restores full remote history indexing."}
