@@ -12606,16 +12606,19 @@ agent "worker" {
     #[test]
     fn codex_short_lived_exits_stop_relaunching() {
         let store = Arc::new(Store::open_memory("node").unwrap());
+        // This test exercises restart intensity, not activation of the shared repository.
+        // Give it an independent workspace so concurrent tests cannot hold its lease.
+        let workspace = tempfile::tempdir().unwrap();
         apply_source(
             &store,
-            r#"
+            &format!(r#"
 version 2
-agent "worker" {
-  workspace "."
+agent "worker" {{
+  workspace {:?}
   restart "always"
-  harness "codex" {}
-}
-"#,
+  harness "codex" {{}}
+}}
+"#, workspace.path()),
             "codex-short-lived-exits",
         );
         let runtime = Arc::new(FakeRuntime::default());
@@ -12637,6 +12640,11 @@ agent "worker" {
             reconciler.reconcile_once().unwrap();
         }
         assert_eq!(runtime.starts.lock().unwrap().len(), 3);
+        assert_eq!(
+            store.member_reconcile_fault("agent/node.worker", None).unwrap(),
+            None,
+            "workspace admission must not interfere with crash-loop decisions"
+        );
         let decision = store
             .latest_claim("agent/node.worker", Some("runtime.reconcile-decision"))
             .unwrap()
