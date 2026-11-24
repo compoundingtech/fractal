@@ -578,7 +578,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), None, |_, _| HarnessAncestry::Bound("agent/example".into()),
+        reserved, router(state), Some(store.clone()), None, None, |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -630,7 +630,7 @@ async fn scratch_clients_under_program_ancestry_publish_only_as_their_explicit_a
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state.clone()), Some(store.clone()), None, harness_ancestor,
+        reserved, router(state.clone()), Some(store.clone()), None, None, harness_ancestor,
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -695,7 +695,7 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             WorkerAuthority::new("test-replication.service", || Ok(std::process::id()))
         });
         let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
-            reserved, app, Some(state.store), authority, lookup,
+            reserved, app, Some(state.store), authority, None, lookup,
             move || { let _ = ready.send(()); },
         ));
         waiting.await.unwrap();
@@ -743,7 +743,7 @@ async fn leave_state_read_admits_unreadable_ancestor_without_granting_actor_auth
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
-        reserved, router(state.clone()), Some(state.store), None,
+        reserved, router(state.clone()), Some(state.store), None, None,
         |_, _| with_process_fixture(
             std::process::Command::new("sh").args(["-c", "echo $$; read answer"]),
             |pid| {
@@ -17811,7 +17811,7 @@ async fn invocation_artifact_unix_server_preserves_verified_person_ancestry() {
         // Use the production accept/ancestry-to-request handoff, not manually inserted
         // request extensions. Only the completed ancestry lookup result is controlled.
         let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
-            reserved, router(state), Some(store), None,
+            reserved, router(state), Some(store), None, None,
             move |_, _| Ok(match caller {
                 "person" => HarnessAncestry::Person,
                 "own-agent" => HarnessAncestry::Bound("agent/example/unix-private".into()),

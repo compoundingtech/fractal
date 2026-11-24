@@ -191,6 +191,7 @@ impl Store {
 impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
+        local_sessions::create_schema(connection)?;
         resource_references::create_schema(connection)?;
         effects::create_schema(connection)?;
         // Legacy run stamps are projection metadata, not ownership of a shared URI.
