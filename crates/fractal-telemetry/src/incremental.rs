@@ -127,6 +127,8 @@ pub struct Incremental {
 struct State {
     /// The change feed's watermark; `None` until the first pass, which evaluates every item.
     watermark: Option<(u64, i64)>,
+    /// Monotonic marks for inputs changed outside the durable feed.
+    touch_revision: u64,
     items: HashMap<String, Item>,
     /// Which items read each key.
     readers: HashMap<String, BTreeSet<String>>,
@@ -169,6 +171,8 @@ struct Item {
     reads: BTreeSet<String>,
     due: Option<u128>,
     dirty: bool,
+    /// Zero once acknowledged; otherwise the latest external invalidation.
+    touch_revision: u64,
 }
 
 /// The keys a change can affect: its subject, its actor's work, its kind, and for some kinds a
@@ -480,10 +484,13 @@ impl Incremental {
     }
 
     fn mark_locked(state: &mut State, key: &str) {
+        state.touch_revision += 1;
+        let revision = state.touch_revision;
         let State { items, readers, .. } = state;
         for item in readers.get(key).into_iter().flatten() {
             if let Some(item) = items.get_mut(item) {
                 item.dirty = true;
+                item.touch_revision = revision;
             }
         }
     }
@@ -660,12 +667,31 @@ impl Incremental {
         })
     }
 
+    /// Snapshot before evaluating work whose external inputs can change concurrently.
+    pub fn touch_revision(&self) -> u64 {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).touch_revision
+    }
+
+    /// Unlike durable feed changes, these marks cannot be rediscovered from the feed.
+    pub fn has_pending_touch(&self, item: &str) -> bool {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .items.get(item).is_some_and(|item| item.touch_revision != 0)
+    }
+
     pub fn evaluated(&self, item: &str, reads: BTreeSet<String>, due: Option<u128>) {
+        self.evaluated_after(item, reads, due, u64::MAX);
+    }
+
+    /// A concurrent external invalidation belongs to the next evaluation, even if this
+    /// evaluation already saw its value. Never erase its wake while replacing the reads.
+    pub fn evaluated_after(&self, item: &str, reads: BTreeSet<String>, due: Option<u128>, started: u64) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let State { items, readers, .. } = &mut *state;
+        let touch_revision = items.get(item).map_or(0, |item| item.touch_revision);
+        let touch_revision = if touch_revision > started { touch_revision } else { 0 };
         if let Some(previous) = items.get(item) {
             for key in &previous.reads {
                 if let Some(set) = readers.get_mut(key) {
@@ -687,7 +713,8 @@ impl Incremental {
             Item {
                 reads,
                 due,
-                dirty: false,
+                dirty: touch_revision != 0,
+                touch_revision,
             },
         );
     }
@@ -859,6 +886,25 @@ mod tests {
                 changes: changes[seen..].to_vec(),
             })
         }
+    }
+
+    #[test]
+    fn evaluation_preserves_raced_external_touches_but_acknowledges_prior_ones() {
+        let incremental = Incremental::default();
+        let reads = BTreeSet::from(["step-run/program".to_owned()]);
+        incremental.evaluated("mission-run/parent", reads.clone(), None);
+        assert!(!incremental.has_pending_touch("mission-run/parent"));
+        let started = incremental.touch_revision();
+        incremental.touch("step-run/program");
+        assert!(incremental.has_pending_touch("mission-run/parent"));
+        incremental.evaluated_after("mission-run/parent", reads.clone(), None, started);
+        assert!(incremental.needs("mission-run/parent", 0));
+        assert!(incremental.has_pending_touch("mission-run/parent"));
+        let started = incremental.touch_revision();
+        incremental.touch("unread");
+        incremental.evaluated_after("mission-run/parent", reads, None, started);
+        assert!(!incremental.needs("mission-run/parent", 0));
+        assert!(!incremental.has_pending_touch("mission-run/parent"));
     }
 
     #[test]
