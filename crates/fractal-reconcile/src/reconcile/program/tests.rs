@@ -335,7 +335,7 @@ fn host_ending_survives_outcome_and_requires_each_exact_termination_acknowledgem
     for (attempt, generation) in [(2, 1), (2, 2)] {
         running_attempt(&engine, &run, attempt, generation);
         engine.handle(&message("ending", attempt), generation).unwrap();
-        assert!(engine.end(step, attempt, generation, None, false).is_some());
+        assert!(engine.end(step, attempt, generation, None, false).unwrap().is_some());
     }
     engine.handle(&message("cancelled", 1), 2).unwrap();
     assert_eq!(engine.lock().terminating.len(), 3);
@@ -432,7 +432,7 @@ fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
     let step = &unrelated.steps[0].subject;
     running_attempt(&engine, &unrelated, 1, 1);
     engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
-    assert!(engine.end(step, 1, 1, None, false).is_some());
+    assert!(engine.end(step, 1, 1, None, false).unwrap().is_some());
     assert!(engine.fence_left_effects(&replacement).unwrap());
     assert!(!engine.fence_left_effects(&unrelated).unwrap());
     engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();

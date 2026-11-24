@@ -98,7 +98,7 @@ impl RequestAssertion {
 
 pub fn initialize_home_authority(connection: &Connection) -> Result<(), FractalError> {
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS home_run_authority_v1 (
+        /* sqlite-large-value: allow-for-now lv-h4fd849d8a786 owner=fractal_store::store::run_credentials::assertions TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS home_run_authority_v1 (
              host TEXT NOT NULL, revision TEXT NOT NULL, host_key TEXT NOT NULL,
              mission_revision TEXT NOT NULL, binding_json TEXT NOT NULL,
              epoch INTEGER NOT NULL, revoked INTEGER NOT NULL, PRIMARY KEY(host, revision)
@@ -171,7 +171,7 @@ impl Store {
                 revoked = self.mission_run_supersession_pending_tx(tx, &run).map_err(internal)?;
             }
             tx.execute(
-                "INSERT INTO home_run_authority_v1(host, revision, host_key, mission_revision, binding_json, epoch, revoked)
+                /* sqlite-large-value: allow-for-now lv-h68ade3293619 owner=fractal_store::store::run_credentials::assertions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO home_run_authority_v1(host, revision, host_key, mission_revision, binding_json, epoch, revoked)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![binding.host, binding.authorization_revision, host_key, revision, encoded, binding.epoch, revoked],
             ).map_err(internal)?;
@@ -193,14 +193,14 @@ impl Store {
             ).optional().map_err(internal)?;
             if let Some(prior) = prior {
                 if prior != encoded { return Err(refused("the revoked revision changed identity")); }
-                tx.execute("UPDATE home_run_authority_v1 SET revoked=1 WHERE host=?1 AND revision=?2", params![binding.host, binding.authorization_revision]).map_err(internal)?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hdf1e58f400c7 owner=fractal_store::store::run_credentials::assertions TODO=bound-or-reference-values-and-reclamation */ "UPDATE home_run_authority_v1 SET revoked=1 WHERE host=?1 AND revision=?2", params![binding.host, binding.authorization_revision]).map_err(internal)?;
             } else {
                 let count: usize = tx.query_row("SELECT COUNT(*) FROM home_run_authority_v1", [], |row| row.get(0)).map_err(internal)?;
                 if count >= local::MAX_RETAINED_AUTHORITIES {
                     return Err(FractalError::new("home-authority-backpressure", "the retained home authority fences are full"));
                 }
                 tx.execute(
-                    "INSERT INTO home_run_authority_v1(host, revision, host_key, mission_revision, binding_json, epoch, revoked)
+                    /* sqlite-large-value: allow-for-now lv-h32dd16fa1ef9 owner=fractal_store::store::run_credentials::assertions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO home_run_authority_v1(host, revision, host_key, mission_revision, binding_json, epoch, revoked)
                      VALUES (?1, ?2, '', '', ?3, ?4, 1)",
                     params![binding.host, binding.authorization_revision, encoded, binding.epoch],
                 ).map_err(internal)?;
@@ -232,9 +232,9 @@ impl Store {
                     return Err(FractalError::new("home-authority-backpressure", "the retained home epoch fences are full"));
                 }
             }
-            tx.execute("UPDATE home_run_authority_v1 SET revoked=1 WHERE host=?1 AND epoch<?2", params![host, epoch]).map_err(internal)?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-he1a544e814b9 owner=fractal_store::store::run_credentials::assertions TODO=bound-or-reference-values-and-reclamation */ "UPDATE home_run_authority_v1 SET revoked=1 WHERE host=?1 AND epoch<?2", params![host, epoch]).map_err(internal)?;
             tx.execute(
-                "INSERT INTO home_run_epoch_fences_v1(host, highest_epoch, closed) VALUES (?1, ?2, 0)
+                /* sqlite-large-value: allow-for-now lv-h9dc209230794 owner=fractal_store::store::run_credentials::assertions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO home_run_epoch_fences_v1(host, highest_epoch, closed) VALUES (?1, ?2, 0)
                  ON CONFLICT(host) DO UPDATE SET highest_epoch=excluded.highest_epoch, closed=0",
                 params![host, epoch],
             ).map_err(internal)?;
@@ -262,9 +262,9 @@ impl Store {
                     return Err(FractalError::new("home-authority-backpressure", "the retained home epoch fences are full"));
                 }
             }
-            tx.execute("UPDATE home_run_authority_v1 SET revoked=1 WHERE host=?1 AND epoch<=?2", params![host, epoch]).map_err(internal)?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-he183de98a1a2 owner=fractal_store::store::run_credentials::assertions TODO=bound-or-reference-values-and-reclamation */ "UPDATE home_run_authority_v1 SET revoked=1 WHERE host=?1 AND epoch<=?2", params![host, epoch]).map_err(internal)?;
             tx.execute(
-                "INSERT INTO home_run_epoch_fences_v1(host, highest_epoch, closed) VALUES (?1, ?2, 1)
+                /* sqlite-large-value: allow-for-now lv-h4404d26934e5 owner=fractal_store::store::run_credentials::assertions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO home_run_epoch_fences_v1(host, highest_epoch, closed) VALUES (?1, ?2, 1)
                  ON CONFLICT(host) DO UPDATE SET highest_epoch=excluded.highest_epoch, closed=1",
                 params![host, epoch],
             ).map_err(internal)?;
@@ -390,7 +390,7 @@ impl RunRequestAdmission<'_> {
         }
         let encoded = serde_json::to_string(outcome).map_err(internal)?;
         tx.execute(
-            "INSERT INTO home_run_request_receipts_v1(host, request_id, identity_hash, outcome_json) VALUES (?1, ?2, ?3, ?4)",
+            /* sqlite-large-value: allow-for-now lv-h32528dc1bb0d owner=fractal_store::store::run_credentials::assertions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO home_run_request_receipts_v1(host, request_id, identity_hash, outcome_json) VALUES (?1, ?2, ?3, ?4)",
             params![self.assertion.binding.host, self.assertion.request.request_id, self.assertion.identity_hash()?, encoded],
         ).map_err(internal)?;
         Ok(())

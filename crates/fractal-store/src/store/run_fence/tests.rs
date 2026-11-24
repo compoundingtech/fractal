@@ -353,7 +353,7 @@ fn a_previously_authenticated_claim_cannot_outlive_cancellation_or_attempt_repla
             });
             submitted.recv().unwrap();
             transaction.execute(
-                "UPDATE step_runs SET status=?2,attempt=?3 WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-h66b9863d7bf6 owner=fractal_store::store::run_fence::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2,attempt=?3 WHERE subject=?1",
                 params![step.subject, status, attempt],
             ).unwrap();
             transaction.commit().unwrap();
