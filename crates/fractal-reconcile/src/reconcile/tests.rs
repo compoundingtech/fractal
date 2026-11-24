@@ -4040,15 +4040,38 @@ mission "counted" state="ready" {
     }
 
     #[tokio::test]
+    async fn the_mission_follower_pins_its_cursor_before_dispatching_launch_work() {
+        let store = smallclaims::sqlite::with_write_limit_for_test(1, ||
+            Arc::new(Store::open_memory("node").unwrap()));
+        let (store, reconciler, _) = run_paused_on_its_allocation(store);
+        let starting_at = reconciler.incremental.watermark();
+        assert!(starting_at.is_some());
+        assert!(reconciler.mission_reads_cursor.lock().unwrap().is_none());
+        let _held = store.connection.admit_write().await;
+        let mut follower = Box::pin(reconciler.clone().follow_mission_reads());
+        // Holding the only admission permit makes the first dispatch yield
+        // deterministically, before launch work can advance the pass feed.
+        assert!(futures_util::poll!(&mut follower).is_pending());
+        assert_eq!(*reconciler.mission_reads_cursor.lock().unwrap(), starting_at);
+    }
+
+    #[tokio::test]
     async fn the_post_commit_feed_wakes_the_runs_a_change_touched() {
         // On disk, so this test's reads wait for the follower's writes rather than fail.
         let root = tempfile::tempdir().unwrap();
-        let (store, reconciler, run) = run_paused_on_its_allocation(Arc::new(
-            Store::open(&root.path().join("store.sqlite"), "node").unwrap(),
-        ));
+        let store = Arc::new(Store::open(&root.path().join("store.sqlite"), "node").unwrap());
+        apply_source(&store, r#"
+version 2
+agent "launch" { workspace "/tmp"; command "true"; restart "never" }
+"#, "launch-alongside-mission");
+        let (store, reconciler, run) = run_paused_on_its_allocation(store);
         let before = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
         let follower = tokio::spawn(reconciler.clone().follow_mission_reads());
         observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
+        // Force scoped launch work on the first follower iteration, rather than
+        // depending on when its executable identity measurement completes. That
+        // work observes the shared pass feed before the mission follower reads it.
+        reconciler.file_changes.select_launch(&reconciler.incremental, "agent/launch");
         // What a write through the API does after it commits.
         reconciler.event_notify.send_modify(|generation| *generation += 1);
         // The step is agentless, so the follower's next evaluation admits it and completes it:

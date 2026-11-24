@@ -656,6 +656,16 @@ async fn test_retire_closed_mail(
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
     let (threads, claims) = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, usize)> {
+        // The signed-claim forget backstop reads the store clock, not the planner's argument.
+        // Advance this worker's simulation clock too, without changing concurrent daemon writes.
+        struct RetirementClock;
+        impl Drop for RetirementClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = RetirementClock;
+        smallclaims::store::set_thread_clock(Some(u128::from(request.now_ms)));
         let (mut threads, mut claims) = (0, 0);
         loop {
             let step = store.retire_closed_mail_step(request.now_ms)?;
