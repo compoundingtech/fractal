@@ -12890,7 +12890,7 @@ agent "worker" {
             .mission(
                 &intent,
                 crate::model::IntentInput {
-                    kdl: source.into(),
+                    kdl: source,
                     source_name: None,
                 },
             )
