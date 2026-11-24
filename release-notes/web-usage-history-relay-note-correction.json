@@ -6,6 +6,6 @@
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
   "compatibility": { "status": "none", "detail": "Release-note correction only; no behavior changes." },
   "downtime": { "status": "none", "detail": "No startup work." },
-  "manual": { "status": "none", "detail": "No new action. Setting WF_USAGE_HISTORY_URL only makes account history available to the web client; no UI displays it in this release." },
+  "manual": { "status": "changed", "detail": "Correction to the interim usage-history relay note: configuring WF_USAGE_HISTORY_URL makes account history available to the web client, but no UI displays it in this release; the UI follows in a later release. No other action is needed." },
   "recovery": { "status": "none", "detail": "Nothing to recover." }
 }
