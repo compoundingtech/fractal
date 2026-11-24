@@ -1,6 +1,6 @@
-import { request } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { gatewayCredential, type GatewayOptions } from './gateway.mts'
+import { LoadsBusy, failure, json, producerJson, reasonOf, ttlCache, type LoopbackProducer } from './relayHttp.mts'
 import { readCapabilities, scopeGranted } from './tagAuthorization.mts'
 
 /**
@@ -27,94 +27,11 @@ import { readCapabilities, scopeGranted } from './tagAuthorization.mts'
  */
 export const usageHistoryRoute = '/v1/client/usage/history'
 
-/** The configured loopback producer the relay may read. */
-export interface UsageHistoryProducer {
-  readonly hostname: '127.0.0.1' | '::1'
-  readonly port: number
-}
-
-/** Parse the optional producer base URL; unset or empty means the relay is off. */
-export const usageHistoryProducer = (value: string | undefined, name = 'WF_USAGE_HISTORY_URL'): UsageHistoryProducer | undefined => {
-  const text = value?.trim()
-  if (!text) return undefined
-  let url: URL
-  try { url = new URL(text) } catch { throw new TypeError(`${name} must be a URL`) }
-  const hostname = url.hostname === '[::1]' ? '::1' : url.hostname
-  // URL drops an explicit default port (`:80`), so the port must be read from the raw authority.
-  const explicitPort = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*:(\d+)(?:[/?#]|$)/i.exec(text)?.[1] !== undefined
-  const port = url.port === '' ? 80 : Number(url.port)
-  if (url.protocol !== 'http:' || (hostname !== '127.0.0.1' && hostname !== '::1') || !explicitPort || port < 1 || port > 65535 ||
-      url.username !== '' || url.password !== '' || url.pathname !== '/' || url.search !== '' || url.hash !== '')
-    throw new TypeError(`${name} must be a loopback base URL such as http://127.0.0.1:PORT, with a nonzero port and no credentials, path or query`)
-  return { hostname, port }
-}
-
 /** The one producer history read: day buckets of one published quota account. */
 export const usageHistoryPath = (ledgerAccountId: string): string =>
   `/api/v1/lens/usage_over_time?${new URLSearchParams({ window: 'all', group_by: 'account', bucket: 'day', group: ledgerAccountId })}`
 
 export const isUsageHistoryRequest = (url: string): boolean => url === usageHistoryRoute || url.startsWith(`${usageHistoryRoute}?`)
-
-const maxBytes = 2 * 1024 * 1024
-
-/** A GET that must finish within `deadlineMs` of elapsed time, requires 200 and a JSON body, and returns that body verbatim. */
-const producerJson = (producer: UsageHistoryProducer, path: string, deadlineMs: number): Promise<string> => {
-  const { promise, resolve, reject } = Promise.withResolvers<string>()
-  const upstream = request({ hostname: producer.hostname, port: producer.port, path, method: 'GET', headers: { accept: 'application/json' }, agent: false }, (response) => {
-    const chunks: Buffer[] = []
-    let size = 0
-    response.on('error', reject)
-    response.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > maxBytes) { response.destroy(new Error('response too large')); return }
-      chunks.push(chunk)
-    })
-    response.on('end', () => {
-      if (response.statusCode !== 200) { reject(new Error(`HTTP ${response.statusCode}`)); return }
-      const body = Buffer.concat(chunks).toString('utf8')
-      try { JSON.parse(body) } catch { reject(new Error('response is not JSON')); return }
-      resolve(body)
-    })
-  })
-  upstream.on('error', reject)
-  // Elapsed, not idle: a producer that keeps trickling bytes must not hold the single-flight slot.
-  const deadline = setTimeout(() => {
-    reject(new Error('deadline'))
-    upstream.destroy()
-  }, deadlineMs)
-  upstream.end()
-  return promise.finally(() => clearTimeout(deadline))
-}
-
-/** Too many distinct loads are already in flight; nothing was requested. */
-class LoadsBusy extends Error {}
-
-/**
- * Bounded insertion-ordered TTL cache: at most `entries` stored values and `entries` distinct
- * in-flight loads. Concurrent loads of one key share work; failures are never stored.
- */
-const ttlCache = <T,>(ttlMs: number, entries: number) => {
-  const cache = new Map<string, { value: T; expiresAt: number }>()
-  const pending = new Map<string, Promise<T>>()
-  return (key: string, load: () => Promise<T>): Promise<T> => {
-    const cached = cache.get(key)
-    if (cached !== undefined && performance.now() < cached.expiresAt) return Promise.resolve(cached.value)
-    const current = pending.get(key)
-    if (current !== undefined) return current
-    if (pending.size >= entries) return Promise.reject(new LoadsBusy('too many producer reads in flight'))
-    const loading = load().then((value) => {
-      cache.delete(key)
-      cache.set(key, { value, expiresAt: performance.now() + ttlMs })
-      for (const stale of cache.keys()) {
-        if (cache.size <= entries) break
-        cache.delete(stale)
-      }
-      return value
-    }).finally(() => pending.delete(key))
-    pending.set(key, loading)
-    return loading
-  }
-}
 
 /** `ledgerAccountId`s the producer's quota answer publishes; nothing else may be asked for. */
 const publishedAccounts = (body: string): ReadonlySet<string> => {
@@ -134,22 +51,13 @@ const requestedAccount = (url: string): string | undefined => {
   return keys.length === 1 && keys[0] === 'account' && account !== null && account.length > 0 && account.length <= 256 ? account : undefined
 }
 
-const json = (res: ServerResponse, status: number, body: string): void => {
-  if (res.destroyed) return
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-  res.end(body)
-}
-const failure = (res: ServerResponse, status: number, code: string, message: string, reason?: string): void =>
-  json(res, status, JSON.stringify(reason === undefined ? { code, message } : { code, message, reason }))
-const reasonOf = (error: unknown): string => error instanceof Error ? error.message : 'failed'
-
 export interface UsageHistoryRelay {
   /** Answer an admitted request for `usageHistoryRoute`; `preview` marks tag admission. */
   handle(req: IncomingMessage, res: ServerResponse, preview: boolean): Promise<void>
 }
 
 export const createUsageHistoryRelay = ({ producer, gateway, producerDeadlineMs = 5000 }: {
-  readonly producer: UsageHistoryProducer
+  readonly producer: LoopbackProducer
   readonly gateway: GatewayOptions
   /** Elapsed deadline for each producer read. */
   readonly producerDeadlineMs?: number

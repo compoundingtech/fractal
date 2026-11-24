@@ -341,12 +341,21 @@ pair with one verb, the narrower pattern if one covers the other, nothing otherw
 **Credential.** On an unconfigured full node, each start or resume mints a `program-run` store
 capability whose subject is the step run and whose incarnation is the attempt. The opt-in
 light-node issuer instead uses the session journal's exact execution binding: engine instance,
-actual host generation, runtime, run, step, attempt and admitted authorization revision. It waits
-for the home admission ACK before minting and for predecessor revocation ACK before replacing;
-an ACK targets waiting run evaluations, not a timer poll. Already acknowledged live authority can
-mint offline. Both paths hash secrets at rest, never journal them as graph claims, and pass only
+actual host generation, fresh dispatch identity, runtime, run, step, attempt and admitted
+authorization revision. An admission-ACK wait retains that dispatch identity while the graph
+attempt and actual host generation match. Once issuance is revoked, retrying the same graph
+attempt on the same live host uses a new dispatch identity; a persistence failure cannot
+resurrect a tombstoned authorization revision. The issuer waits for its own home admission ACK
+before minting and for predecessor revocation ACK before replacing; an ACK targets waiting run
+evaluations, not a timer poll. Already acknowledged live authority can mint offline. Both paths
+hash secrets at rest, never journal them as graph claims, and pass only
 the local secret as `ST_RUN_CREDENTIAL` in the start message's `env`. The host spreads run env last,
 so an effect cannot replace it. See [light-node authorization](light-node.md#authorization-withdrawal-and-host-admission).
+The shared host is launched without inherited `ST_AGENT`, `FRACTAL_AGENT` or
+`ST_RUN_CREDENTIAL` markers from the process that started the daemon. Each effect
+receives only its own dispatch's authoritative run credential; an invoking
+harness's identity must not conflict with that run at the Unix ancestry guard.
+The guard still rejects an effect that explicitly supplies both identity kinds.
 
 **Binding.** The ancestry walk reads `ST_RUN_CREDENTIAL` from each ancestor's exec-time environment
 beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon
@@ -887,6 +896,24 @@ value. The success value is encoded with `intent.output` and journaled under the
 `$result`; a typed failure is encoded with its `_tag` and fields, journaled under the same key as
 a failed result, and fails the step with it. Retry classification reads this attempt's durable
 failure rather than an inner effect's possibly caught error.
+
+Required string-encoded fields normally lower to `input "name" kind="text"`. For a native
+subscription resource binding, use `Schema.Struct({ source: Fractal.resourceInput('vcs.pull-request') })`.
+This field lowers to `input "source" kind="resource" resource-kind="vcs.pull-request"`, the same
+resource input convention used by native missions. Use the helper directly as the Struct field;
+it carries declaration metadata in addition to the pinned-reference string schema. Optional fields
+are not admitted. The existing subscription `delivery "mission" { ...; resource "source" }` starts
+the program without a dispatch mission or a separate program delivery protocol.
+
+Run admission resolves and pins the observation before the worker starts. Both explicit
+`resource/NAME@CLAIM` and unpinned `resource/NAME` starts check the resolved claim's resource kind,
+not the subject's latest kind; `vcs.item.state` pins use their `item_kind`. A mismatch returns the
+typed native error code `resource-input-kind-mismatch` and creates no run. The program receives
+the unchanged `resource/NAME@CLAIM` string, preserving native observation identity and replay.
+Constraints are optional for existing native declarations; declarations without one retain their
+previous behavior and serialized revision identity. Deploy supporting daemons to every member
+that can admit runs before publishing constrained inputs; older binaries do not enforce the new
+constraint in replicated structured revisions.
 
 A program waiting on an ask, a child run or a pull-request outcome stays loaded in the host.
 A replaced host replays the program to the same wait.

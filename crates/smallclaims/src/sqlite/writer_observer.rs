@@ -201,7 +201,7 @@ impl MutationState {
             replacing_authorizer: AtomicBool::new(false),
             missed_rows: AtomicBool::new(false),
             missed_authorizer: AtomicBool::new(false),
-            ledger: Mutex::new(super::commit_scope::Ledger::default()),
+            ledger: Mutex::new(super::commit_scope::Ledger::new(connection)),
             resolution: ensure_resolution(connection)?,
             replacing_scope: AtomicBool::new(false),
             missed_scope: AtomicBool::new(false),

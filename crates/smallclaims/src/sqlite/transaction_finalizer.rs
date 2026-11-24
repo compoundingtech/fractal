@@ -557,6 +557,7 @@ mod tests {
                     success
                 }),
                 profile: None,
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 done,
@@ -596,6 +597,7 @@ mod tests {
                     true
                 }),
                 profile: None,
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 done,
@@ -839,6 +841,7 @@ mod tests {
                     success
                 }),
                 profile: None,
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 done,
