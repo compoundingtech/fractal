@@ -379,17 +379,32 @@ fn inventory(
 /// A digest of a remote entry for its source stamp. The whole entry is hashed, so an entry
 /// that grew in place counts as changed, except the owner-reference handles that
 /// `conversation_blocks::continuation` generates: each read seals their `ref` with a fresh
-/// random nonce. Any other `ref` is payload and stays in the digest.
+/// random nonce. Only a handle where conversation_blocks puts one, a `continuation` member or
+/// the `content` of an `{"type":"image","content":…}` value, with exactly that function's
+/// shape loses its `ref`. Any other `ref` is payload and stays in the digest.
 fn remote_mark(entry: Option<&Value>) -> String {
+    // `continuation()` always emits a sealed `v2.` ref, media_type and reason; size is optional.
+    fn seal_only(handle: &mut Value) {
+        let Value::Object(fields) = handle else { return };
+        let sealed = fields.get("ref").and_then(Value::as_str).is_some_and(|reference| reference.starts_with("v2."))
+            && fields.get("media_type").is_some_and(Value::is_string)
+            && fields.get("reason").is_some_and(Value::is_string)
+            && fields.get("size").is_none_or(Value::is_u64)
+            && fields.keys().all(|key| matches!(key.as_str(), "ref" | "media_type" | "reason" | "size"));
+        if sealed {
+            fields.remove("ref");
+        }
+    }
     fn stable(value: &mut Value) {
         match value {
             Value::Object(fields) => {
-                let handle = fields.get("ref").and_then(Value::as_str).is_some_and(|reference| reference.starts_with("v2."))
-                    && fields.keys().all(|key| matches!(key.as_str(), "ref" | "media_type" | "reason" | "size"));
-                if handle {
-                    fields.remove("ref");
+                let image = fields.len() == 2 && fields.get("type").and_then(Value::as_str) == Some("image");
+                for (key, child) in fields.iter_mut() {
+                    if key == "continuation" || (image && key == "content") {
+                        seal_only(child);
+                    }
+                    stable(child);
                 }
-                fields.values_mut().for_each(stable);
             }
             Value::Array(values) => values.iter_mut().for_each(stable),
             _ => {}
@@ -1428,10 +1443,23 @@ mod tests {
         // An ordinary payload `ref` is content; only a sealed continuation handle is not.
         let branch = |reference: &str| json!({"id": "entry/branch", "revision": 1, "body": {"ref": reference}});
         assert_ne!(remote_mark(Some(&branch("old-branch"))), remote_mark(Some(&branch("new-branch"))));
-        let handle = |reference: &str| json!({"id": "entry/image", "body": {"content": {"ref": reference, "media_type": "image/png", "reason": "on-demand"}}});
-        assert_eq!(remote_mark(Some(&handle("v2.first-nonce"))), remote_mark(Some(&handle("v2.second-nonce"))));
-        let payload = |reference: &str| json!({"id": "entry/tool", "body": {"payload": {"ref": reference, "path": "/work"}}});
-        assert_ne!(remote_mark(Some(&payload("v2.one"))), remote_mark(Some(&payload("v2.two"))));
+        // Sealed handles where conversation_blocks generates them: an image value's content
+        // and a block's continuation. Their nonce is not a change.
+        let image = |reference: &str| json!({"id": "entry/image", "body": {"content": [{"type": "image", "content": {"ref": reference, "media_type": "image/png", "reason": "on-demand", "size": 12}}]}});
+        assert_eq!(remote_mark(Some(&image("v2.first-nonce"))), remote_mark(Some(&image("v2.second-nonce"))));
+        let block = |reference: &str| json!({"id": "entry/block", "body": {"blocks": [{"kind": "raw_text", "continuation": {"ref": reference, "media_type": "application/json", "reason": "size-limit"}}]}});
+        assert_eq!(remote_mark(Some(&block("v2.first-nonce"))), remote_mark(Some(&block("v2.second-nonce"))));
+        // Anything else with a `v2.` ref is payload: elsewhere, or not exactly a handle's shape.
+        let payloads: [fn(&str) -> Value; 5] = [
+            |reference: &str| json!({"id": "entry/tool", "body": {"payload": {"ref": reference}}}),
+            |reference: &str| json!({"id": "entry/tool", "body": {"payload": {"ref": reference, "media_type": "image/png", "reason": "on-demand"}}}),
+            |reference: &str| json!({"id": "entry/tool", "body": {"payload": {"ref": reference, "path": "/work"}}}),
+            |reference: &str| json!({"id": "entry/tool", "body": {"continuation": {"ref": reference}}}),
+            |reference: &str| json!({"id": "entry/tool", "body": {"continuation": {"ref": reference, "media_type": "text/plain", "reason": "r", "path": "/work"}}}),
+        ];
+        for payload in payloads {
+            assert_ne!(remote_mark(Some(&payload("v2.one"))), remote_mark(Some(&payload("v2.two"))));
+        }
     }
 
     type Shared<T> = std::rc::Rc<std::cell::RefCell<T>>;
