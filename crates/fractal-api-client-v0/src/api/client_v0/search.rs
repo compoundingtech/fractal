@@ -16,10 +16,25 @@ const ENTRIES: usize = 50_000;
 
 static REFRESHERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+/// Items in the one newest page a refresh reads from a changed remote conversation. Its
+/// owner pays a transcript read per page, and walking every page of every remote
+/// conversation on each refresh kept owners busy for hours; older history stays unread.
+const REMOTE_PAGE_ITEMS: usize = 200;
+
+/// The newest-entry probe misses an edit to an older entry, such as a harness.timeline
+/// replace or finalize that keeps its sequence and timestamp. Each remote source's newest
+/// page is therefore read again at least this often: such edits show up within this bound.
+const REMOTE_PAGE_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
 #[cfg(test)]
 thread_local! {
     static BEFORE_SEARCH_OWNER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Remote conversations a test owner serves, and its timeline reader `(id, limit)`.
+    static TEST_REMOTE: std::cell::RefCell<Option<(Vec<String>, TestOwner)>> = const { std::cell::RefCell::new(None) };
 }
+
+#[cfg(test)]
+type TestOwner = Box<dyn FnMut(&str, usize) -> Value>;
 
 #[derive(Clone, Default, Deserialize)]
 pub struct SearchQuery {
@@ -41,6 +56,8 @@ struct IndexState {
     stamps: BTreeMap<String, String>,
     sizes: BTreeMap<String, (usize, usize)>,
     incomplete: Vec<String>,
+    /// When each remote source's newest page was last read.
+    remote_pages: BTreeMap<String, Instant>,
     indexed_at: Option<String>,
     revision: String,
     checked: Instant,
@@ -98,6 +115,7 @@ fn index_for(
         index: SearchIndex::new().map_err(ApiError::internal)?,
         stamps: BTreeMap::new(),
         sizes: BTreeMap::new(),
+        remote_pages: BTreeMap::new(),
         incomplete: Vec::new(),
         indexed_at: None,
         revision: uuid::Uuid::now_v7().to_string(),
@@ -341,11 +359,8 @@ fn inventory(
                 }
             }
         }
-        // The remote transcript may grow without a replicated observation. Recheck it at
-        // each demand refresh rather than pretending its local observation is current.
-        if remote.is_some() {
-            stamp.push_str(&snapshot.id);
-        }
+        // A remote transcript may grow without a replicated observation; `refresh` appends
+        // its owner's newest-entry mark to this stamp at each demand refresh.
         stamps.insert(id.to_owned(), stamp.clone());
         // Budget order matters: the exhausted check and unchanged-skip happen per source,
         // in this order, after earlier sources consumed their share. Inventory records
@@ -359,6 +374,48 @@ fn inventory(
         });
     }
     Ok(Inventory { snapshot, stamps, sizes, changed, sources, budget, slots, incomplete, old })
+}
+
+/// A digest of a remote entry for its source stamp. The whole entry is hashed, so an entry
+/// that grew in place counts as changed, except the owner-reference handles that
+/// `conversation_blocks::continuation` generates: each read seals their `ref` with a fresh
+/// random nonce. Any other `ref` is payload and stays in the digest.
+fn remote_mark(entry: Option<&Value>) -> String {
+    fn stable(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                let handle = fields.get("ref").and_then(Value::as_str).is_some_and(|reference| reference.starts_with("v2."))
+                    && fields.keys().all(|key| matches!(key.as_str(), "ref" | "media_type" | "reason" | "size"));
+                if handle {
+                    fields.remove("ref");
+                }
+                fields.values_mut().for_each(stable);
+            }
+            Value::Array(values) => values.iter_mut().for_each(stable),
+            _ => {}
+        }
+    }
+    let mut entry = entry.cloned().unwrap_or_default();
+    stable(&mut entry);
+    hex::encode(Sha256::digest(entry.to_string()))
+}
+
+/// The remote half of a source stamp: a one-entry probe of its newest entry. Only when this
+/// mark moved, or the old entries can't be kept (no longer fit, or older than
+/// [`REMOTE_PAGE_MAX_AGE`]), is the newest page read. Returns the full stamp and that page.
+fn remote_newest(
+    stamp: &str,
+    old: Option<&String>,
+    can_keep: bool,
+    mut read: impl FnMut(usize) -> Result<Value, ApiError>,
+) -> Result<(String, Option<Value>), ApiError> {
+    let probe = read(1)?;
+    let mark = remote_mark(probe["items"].as_array().and_then(|items| items.last()));
+    let stamp = format!("{stamp}:{mark}");
+    if can_keep && old == Some(&stamp) {
+        return Ok((stamp, None));
+    }
+    Ok((stamp, Some(read(REMOTE_PAGE_ITEMS)?)))
 }
 
 /// Fetch every page of one owner-local conversation inside one admitted reader scope.
@@ -441,6 +498,8 @@ fn refresh(
 ) -> anyhow::Result<()> {
     let old = held.lock().unwrap().stamps.clone();
     let old_sizes = held.lock().unwrap().sizes.clone();
+    let old_pages = held.lock().unwrap().remote_pages.clone();
+    let mut remote_pages = BTreeMap::new();
     // The inventory reads take reader admission first; the remote page fetches below wait
     // for their owners without holding any reader, and each local conversation re-admits
     // for its own pages. The search index's own lock is taken only after both.
@@ -462,16 +521,95 @@ fn refresh(
             store.read_snapshot(|_| inventory(inventory_state, inventory_session, old, old_sizes))
         }))
         .map_err(anyhow::Error::from)??;
+    // A test owner's conversations, appended here because `inventory` runs on a reader thread.
+    #[cfg(test)]
+    let sources = {
+        let mut sources = sources;
+        TEST_REMOTE.with(|remote| {
+            for id in remote.borrow().iter().flat_map(|(ids, _)| ids) {
+                stamps.insert(id.clone(), String::new());
+                sources.push(Source {
+                    id: id.clone(),
+                    owner: "agent/remote".into(),
+                    remote: Some("host/test-owner".into()),
+                    stamp_unchanged: false,
+                    old_size: held.lock().unwrap().sizes.get(id).copied().unwrap_or_default(),
+                });
+            }
+        });
+        sources
+    };
     #[cfg(any(test, feature = "test-support"))]
     let local_conversations = sources.iter().filter(|source| source.remote.is_none()).count();
+    let started = Instant::now();
+    let remote_sources = sources.iter().filter(|source| source.remote.is_some()).count();
+    let mut remote_reads = 0usize;
+    let trigger = if assistant_text_only { "assistant-conversation-search" } else { "conversation-search" };
+    // The caller is the local client session that asked; which UI or command it runs is
+    // not threaded here.
+    tracing::info!(
+        person = %session.authority_actor,
+        session = %session.actor,
+        transport = session.transport,
+        trigger,
+        sources = sources.len(),
+        remote_sources,
+        "conversation search refresh started"
+    );
     for source in sources {
-        let Source { id, owner, remote, stamp_unchanged, old_size } = source;
+        let Source { id, owner, remote, mut stamp_unchanged, old_size } = source;
         // Original per-source order: exhausted check, unchanged-skip, then fetch with
         // this source's start counters captured immediately before it.
         if budget == 0 || slots == 0 {
             incomplete.push(format!("{id}: search index budget reached"));
             stamps.remove(&id);
             continue;
+        }
+        // A remote source is unchanged only while its owner's newest entry is the indexed one.
+        let mut newest = None;
+        if let Some(remote) = &remote {
+            let read_at = old_pages.get(&id).copied();
+            let can_keep = read_at.is_some_and(|at| at.elapsed() < REMOTE_PAGE_MAX_AGE)
+                && old_size.0 <= budget
+                && old_size.1 <= slots;
+            let base = stamps.get(&id).cloned().unwrap_or_default();
+            let read = |limit| {
+                remote_reads += 1;
+                #[cfg(test)]
+                if let Some(page) = TEST_REMOTE.with(|test| test.borrow_mut().as_mut().map(|(_, serve)| serve(id.as_str(), limit))) {
+                    return Ok(page);
+                }
+                runtime
+                    .block_on(state.client_relay.as_ref().expect("checked relay").read(
+                        remote,
+                        &crate::peer::ClientReadRequest {
+                            authority_actor: session.authority_actor.clone(),
+                            relay: None,
+                            request: crate::peer::ClientReadOperation::Timeline {
+                                session_id: id.clone(),
+                                limit,
+                                cursor: None,
+                            },
+                        },
+                    ))
+                    .map_err(|error| remote_read_error(remote, error))
+            };
+            match remote_newest(&base, old.get(&id), can_keep, read) {
+                Ok((stamp, page)) => {
+                    stamp_unchanged = page.is_none();
+                    stamps.insert(id.clone(), stamp);
+                    remote_pages.insert(id.clone(), read_at.filter(|_| page.is_none()).unwrap_or_else(Instant::now));
+                    newest = page;
+                }
+                Err(error) => {
+                    // Never leave old searchable text behind after a source becomes unavailable.
+                    incomplete.push(format!("{id}: {}: {}", error.code, error.message));
+                    stamps.remove(&id);
+                    sizes.insert(id.clone(), (0, 0));
+                    changed.push((id, Vec::new()));
+                    continue;
+                }
+            }
         }
         if stamp_unchanged && old_size.0 <= budget && old_size.1 <= slots {
             budget -= old_size.0;
@@ -483,71 +621,39 @@ fn refresh(
         let start_slots = slots;
         let mut entries = Vec::new();
         let mut unavailable = false;
-        if let Some(remote) = &remote {
-            let mut query = ClientListQuery {
-                limit: Some(200),
-                ..Default::default()
-            };
-            loop {
-                let read = runtime
-                    .block_on(state.client_relay.as_ref().expect("checked relay").read(
-                        remote,
-                        &crate::peer::ClientReadRequest {
-                            authority_actor: session.authority_actor.clone(),
-                            relay: None,
-                            request: crate::peer::ClientReadOperation::Timeline {
-                                session_id: id.clone(),
-                                limit: 200,
-                                cursor: query.cursor.clone(),
-                            },
-                        },
-                    ))
-                    .map_err(|error| remote_read_error(remote, error));
-                let page = match read {
-                    Ok(page) => page,
-                    Err(error) => {
-                        incomplete.push(format!("{id}: {}: {}", error.code, error.message));
-                        unavailable = true;
-                        break;
-                    }
-                };
-                for item in page["items"].as_array().into_iter().flatten().rev() {
-                    let kind = item["type"].as_str().unwrap_or_default();
-                    if matches!(kind, "truncation" | "redaction" | "error") {
-                        incomplete.push(format!("{id}: {kind}"));
-                    }
-                    // A Fractal message has its canonical mailbox hit; avoid indexing its
-                    // duplicated title and content again through each seat's transcript.
-                    if !matches!(kind, "content" | "tool_call" | "tool_result") {
-                        continue;
-                    }
-                    let text = entry_text(item, assistant_text_only);
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    if text.len() > budget || slots == 0 {
-                        incomplete.push(format!("{id}: search index budget reached"));
-                        continue;
-                    }
-                    budget -= text.len();
-                    slots -= 1;
-                    entries.push(SearchEntry {
-                        conversation_id: id.clone(),
-                        entry_id: item["id"].as_str().unwrap_or_default().into(),
-                        agent_id: owner.starts_with("agent/").then(|| owner.clone()),
-                        timestamp: item["timestamp"].as_str().unwrap_or_default().into(),
-                        entry_type: kind.into(),
-                        text,
-                    });
+        // Only a remote source has a newest page here; local sources read their own pages.
+        if let Some(page) = newest {
+            for item in page["items"].as_array().into_iter().flatten().rev() {
+                let kind = item["type"].as_str().unwrap_or_default();
+                if matches!(kind, "truncation" | "redaction" | "error") {
+                    incomplete.push(format!("{id}: {kind}"));
                 }
-                query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
-                if query.cursor.is_some() && (budget == 0 || slots == 0) {
+                // A Fractal message has its canonical mailbox hit; avoid indexing its
+                // duplicated title and content again through each seat's transcript.
+                if !matches!(kind, "content" | "tool_call" | "tool_result") {
+                    continue;
+                }
+                let text = entry_text(item, assistant_text_only);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if text.len() > budget || slots == 0 {
                     incomplete.push(format!("{id}: search index budget reached"));
-                    break;
+                    continue;
                 }
-                if query.cursor.is_none() {
-                    break;
-                }
+                budget -= text.len();
+                slots -= 1;
+                entries.push(SearchEntry {
+                    conversation_id: id.clone(),
+                    entry_id: item["id"].as_str().unwrap_or_default().into(),
+                    agent_id: owner.starts_with("agent/").then(|| owner.clone()),
+                    timestamp: item["timestamp"].as_str().unwrap_or_default().into(),
+                    entry_type: kind.into(),
+                    text,
+                });
+            }
+            if page["page"]["next_cursor"].is_string() {
+                incomplete.push(format!("{id}: older remote history is not indexed"));
             }
         } else {
             let (local_state, local_session, local_snapshot) =
@@ -589,7 +695,16 @@ fn refresh(
         sizes.insert(id.clone(), (start_budget - budget, start_slots - slots));
         changed.push((id, entries));
     }
+    tracing::info!(
+        person = %session.authority_actor,
+        trigger,
+        remote_sources,
+        remote_reads,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "conversation search refresh finished"
+    );
     let mut index = held.lock().unwrap();
+    index.remote_pages = remote_pages;
     for source in old.keys().filter(|source| !stamps.contains_key(*source)) {
         index.index.remove(source)?;
     }
@@ -1253,5 +1368,184 @@ mod tests {
         }
         let both = read(&state, "person/alex", query("orchid", 200)).await.unwrap();
         assert_eq!(both["items"].as_array().unwrap().len(), 2, "{both}");
+    }
+
+    /// A remote owner holding `items` (oldest first), answering first-page timeline reads.
+    fn owner<'a>(items: &'a [Value], reads: &'a mut Vec<usize>) -> impl FnMut(usize) -> Result<Value, ApiError> + 'a {
+        move |limit| {
+            reads.push(limit);
+            let start = items.len().saturating_sub(limit);
+            Ok(json!({
+                "items": items[start..].to_vec(),
+                "page": {"next_cursor": (start > 0).then_some("older")},
+            }))
+        }
+    }
+
+    fn entries(count: usize, last_text: &str) -> Vec<Value> {
+        (0..count)
+            .map(|n| {
+                let text = if n + 1 == count { last_text.to_owned() } else { format!("text {n}") };
+                let timestamp = format!("2026-10-06T12:{:02}:{:02}Z", n / 60, n % 60);
+                json!({"id": format!("entry/{n}"), "type": "content", "timestamp": timestamp, "body": {"text": text}})
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remote_refresh_reads_one_newest_page_of_a_long_conversation() {
+        // Three full pages of history: the first refresh reads the probe and one page only.
+        let items = entries(3 * REMOTE_PAGE_ITEMS, "newest");
+        let mut reads = Vec::new();
+        let (_, page) = remote_newest("rev", None, true, owner(&items, &mut reads)).unwrap();
+        assert_eq!(reads, [1, REMOTE_PAGE_ITEMS]);
+        let page = page.expect("a new source reads its newest page");
+        assert_eq!(page["items"].as_array().unwrap().len(), REMOTE_PAGE_ITEMS);
+        assert_eq!(page["items"][REMOTE_PAGE_ITEMS - 1]["id"], format!("entry/{}", 3 * REMOTE_PAGE_ITEMS - 1));
+        assert!(page["page"]["next_cursor"].is_string());
+    }
+
+    #[test]
+    fn remote_refresh_probes_unchanged_and_rereads_changed_sources() {
+        let items = entries(3 * REMOTE_PAGE_ITEMS, "newest");
+        let mut reads = Vec::new();
+        let (stamp, _) = remote_newest("rev", None, true, owner(&items, &mut reads)).unwrap();
+        // Unchanged: only the one-entry probe.
+        let mut reads = Vec::new();
+        let (same, page) = remote_newest("rev", Some(&stamp), true, owner(&items, &mut reads)).unwrap();
+        assert_eq!((same.as_str(), page.is_none(), reads.as_slice()), (stamp.as_str(), true, &[1][..]));
+        // Unchanged but its old entries no longer fit the budget: read the page again.
+        let mut reads = Vec::new();
+        let (_, page) = remote_newest("rev", Some(&stamp), false, owner(&items, &mut reads)).unwrap();
+        assert_eq!((page.is_some(), reads.as_slice()), (true, &[1, REMOTE_PAGE_ITEMS][..]));
+        // A newer entry, or the newest entry growing in place, is a change.
+        for changed in [entries(3 * REMOTE_PAGE_ITEMS + 1, "newest"), entries(3 * REMOTE_PAGE_ITEMS, "newest, longer")] {
+            let mut reads = Vec::new();
+            let (next, page) = remote_newest("rev", Some(&stamp), true, owner(&changed, &mut reads)).unwrap();
+            assert_ne!(next, stamp);
+            assert_eq!((page.is_some(), reads.as_slice()), (true, &[1, REMOTE_PAGE_ITEMS][..]));
+        }
+        // An ordinary payload `ref` is content; only a sealed continuation handle is not.
+        let branch = |reference: &str| json!({"id": "entry/branch", "revision": 1, "body": {"ref": reference}});
+        assert_ne!(remote_mark(Some(&branch("old-branch"))), remote_mark(Some(&branch("new-branch"))));
+        let handle = |reference: &str| json!({"id": "entry/image", "body": {"content": {"ref": reference, "media_type": "image/png", "reason": "on-demand"}}});
+        assert_eq!(remote_mark(Some(&handle("v2.first-nonce"))), remote_mark(Some(&handle("v2.second-nonce"))));
+        let payload = |reference: &str| json!({"id": "entry/tool", "body": {"payload": {"ref": reference, "path": "/work"}}});
+        assert_ne!(remote_mark(Some(&payload("v2.one"))), remote_mark(Some(&payload("v2.two"))));
+    }
+
+    type Shared<T> = std::rc::Rc<std::cell::RefCell<T>>;
+
+    /// Serve remote conversation `id` to `refresh` on this thread from `items` (oldest first),
+    /// preparing each served entry with `prepare` and recording each read's limit.
+    fn serve(id: &str, items: Shared<Vec<Value>>, reads: Shared<Vec<usize>>, prepare: Box<dyn Fn(&mut Value)>) {
+        let serve: TestOwner = Box::new(move |_: &str, limit: usize| {
+            reads.borrow_mut().push(limit);
+            let items = items.borrow();
+            let start = items.len().saturating_sub(limit);
+            let mut page = items[start..].to_vec();
+            for item in &mut page {
+                prepare(item);
+            }
+            json!({"items": page, "page": {"next_cursor": (start > 0).then_some("older")}})
+        });
+        TEST_REMOTE.with(|test| *test.borrow_mut() = Some((vec![id.to_owned()], serve)));
+    }
+
+    /// Run one refresh on this thread, so the test owner serves it; returns the reads it made
+    /// and the remote source's indexed size.
+    fn refreshed(state: &AppState, held: &HeldIndex, runtime: &tokio::runtime::Runtime, reads: &Shared<Vec<usize>>, id: &str) -> (Vec<usize>, (usize, usize)) {
+        reads.borrow_mut().clear();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        refresh(state, &session, held, runtime.handle(), false).unwrap();
+        let size = held.lock().unwrap().sizes[id];
+        (reads.borrow().clone(), size)
+    }
+
+    #[test]
+    fn refresh_reads_remote_probe_then_at_most_one_page_and_rereads_hour_old_pages() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let held = index_for(&state, &ClientSession::local(Some("person/alex")).unwrap(), false, None).unwrap();
+        let id = "session/remote-three-pages";
+        let older = format!("{id}: older remote history is not indexed");
+        let items: Shared<Vec<Value>> = Default::default();
+        let reads: Shared<Vec<usize>> = Default::default();
+        *items.borrow_mut() = entries(3 * REMOTE_PAGE_ITEMS, "newest");
+        serve(id, items.clone(), reads.clone(), Box::new(|_: &mut Value| {}));
+        // Three pages of history: the probe and the newest page, never a cursor walk.
+        let (first_reads, first) = refreshed(&state, &held, &runtime, &reads, id);
+        assert_eq!(first_reads, [1, REMOTE_PAGE_ITEMS]);
+        assert!(held.lock().unwrap().incomplete.contains(&older));
+        // Unchanged: the probe only; the old entries and their warning stay.
+        assert_eq!(refreshed(&state, &held, &runtime, &reads, id), (vec![1], first));
+        assert!(held.lock().unwrap().incomplete.contains(&older));
+        // A new newest entry: the newest page again.
+        items.borrow_mut().push(json!({"id": "entry/later", "type": "content", "timestamp": "2026-10-06T13:00:00Z", "body": {"text": "a later entry"}}));
+        let (later_reads, later) = refreshed(&state, &held, &runtime, &reads, id);
+        assert_eq!(later_reads, [1, REMOTE_PAGE_ITEMS]);
+        // An older entry replaced in place keeps the newest entry, so the probe misses it...
+        items.borrow_mut()[3 * REMOTE_PAGE_ITEMS - 10]["body"]["text"] = json!("a much longer replacement of an older entry");
+        assert_eq!(refreshed(&state, &held, &runtime, &reads, id), (vec![1], later));
+        // ...until the indexed page is an hour old (when this clock can represent that).
+        let Some(hour_ago) = Instant::now().checked_sub(REMOTE_PAGE_MAX_AGE) else {
+            return;
+        };
+        held.lock().unwrap().remote_pages.insert(id.into(), hour_ago);
+        let (replaced_reads, replaced) = refreshed(&state, &held, &runtime, &reads, id);
+        assert_eq!(replaced_reads, [1, REMOTE_PAGE_ITEMS]);
+        assert!(replaced.0 > later.0, "{replaced:?} {later:?}");
+        assert_eq!(refreshed(&state, &held, &runtime, &reads, id).0, [1]);
+    }
+
+    #[test]
+    fn refresh_keeps_a_remote_entry_whose_prepared_references_change_per_read() {
+        use super::super::conversation_blocks::{basis, prepare_one};
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let held = index_for(&state, &ClientSession::local(Some("person/alex")).unwrap(), false, None).unwrap();
+        // An owner-side native session whose prepared entries carry sealed continuation refs.
+        let transcript = root.path().join(".omp/agent/sessions/example/native-test.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, format!("{}\n", json!({"type":"session","id":"native-test","cwd":"/work/example","timestamp":"2026-10-06T12:00:00Z"}))).unwrap();
+        let native = crate::external_sessions::ExternalSession {
+            id: "session/external-remote-test".into(),
+            revision: "revision-test".into(),
+            driver: crate::external_sessions::ExternalDriver::Omp,
+            native_id: "native-test".into(),
+            transcript,
+            codex_home: None,
+            cwd: None,
+            title: None,
+            started_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+            process: None,
+        };
+        let basis = basis(&native).unwrap();
+        let mut owner_session = ClientSession::local(None).unwrap();
+        owner_session.conversation_blocks = true;
+        owner_session.assistant_content_handles = true;
+        let prepare = move |item: &mut Value| prepare_one(&native, &owner_session, &native.id, &basis, item).unwrap();
+        let raw = json!({"id": "entry/reply", "type": "content", "role": "assistant", "sequence": 1, "revision": 1,
+            "timestamp": "2026-10-06T12:00:01Z", "body": {"media_type": "text/plain", "text": "a short reply"}});
+        let (mut once, mut twice) = (raw.clone(), raw.clone());
+        prepare(&mut once);
+        prepare(&mut twice);
+        // Each preparation seals its reference with a fresh nonce; the mark ignores only that.
+        assert!(once.to_string().contains("\"ref\":\"v2."), "{once}");
+        assert_ne!(once, twice);
+        assert_eq!(remote_mark(Some(&once)), remote_mark(Some(&twice)));
+        let id = "session/remote-prepared";
+        let items: Shared<Vec<Value>> = Default::default();
+        let reads: Shared<Vec<usize>> = Default::default();
+        items.borrow_mut().push(raw);
+        serve(id, items.clone(), reads.clone(), Box::new(prepare));
+        let (first_reads, first) = refreshed(&state, &held, &runtime, &reads, id);
+        assert_eq!(first_reads, [1, REMOTE_PAGE_ITEMS]);
+        assert_eq!(refreshed(&state, &held, &runtime, &reads, id), (vec![1], first));
+        items.borrow_mut()[0]["body"]["text"] = json!("a short reply, edited");
+        assert_eq!(refreshed(&state, &held, &runtime, &reads, id).0, [1, REMOTE_PAGE_ITEMS]);
     }
 }
