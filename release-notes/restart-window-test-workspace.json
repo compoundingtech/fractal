@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Isolate restart sliding-window coverage from shared checkout activation leases",
+  "replay": {"status": "none", "detail": "Test fixture only; no claim or replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No graph rule changes."},
+  "compatibility": {"status": "none", "detail": "The restart sliding-window test owns a temporary workspace so concurrent checkout admission cannot replace its restart decision with an unrelated member fault. Existing restart assertions remain intact, with explicit first-start and fault-free assertions."},
+  "downtime": {"status": "none", "detail": "No runtime changes."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "No migration required."}
+}
