@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Performance reports show SQLite cache-miss bytes and Linux thread major-fault counts beside CPU and wall time.",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes. Performance JSON adds sqlite_cache_miss_bytes, mmap_major_faults and explanatory notes; existing fields are unchanged."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "Counters are additive. SQLite pager misses include OS-cache hits but exclude mmap reads; major faults count thread faults, including non-store faults, not bytes. Major-fault counts are null when unavailable or not sampled."},
+  "downtime": {"status": "none", "detail": "No migration or downtime is required."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Existing performance fields remain available to older clients."}
+}

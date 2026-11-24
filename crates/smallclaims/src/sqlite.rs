@@ -2187,10 +2187,14 @@ pub static SQLITE_COMMITS: AtomicU64 = AtomicU64::new(0);
 pub static SQLITE_COMMIT_NANOS: AtomicU64 = AtomicU64::new(0);
 
 pub fn record_sqlite_time(statement: &str, duration: std::time::Duration) {
+    record_sqlite_time_with_reads(statement, duration, 0);
+}
+
+fn record_sqlite_time_with_reads(statement: &str, duration: std::time::Duration, bytes: u64) {
     #[cfg(any(test, feature = "test-support"))]
     STATEMENTS_RUN.with(|run| run.set(run.get() + 1));
     crate::profile::sql(statement, duration);
-    crate::performance::record_query(statement, duration);
+    crate::performance::record_query_with_reads(statement, duration, bytes);
     crate::windows::record_store(crate::windows::StoreWork::Statement, duration);
     #[cfg(any(test, feature = "test-support"))]
     histogram::record(statement, duration);
@@ -2205,9 +2209,65 @@ pub fn record_sqlite_time(statement: &str, duration: std::time::Duration) {
 /// its work in [`work`].
 pub fn observe(connection: &mut Connection) {
     census_files::register(connection);
-    #[cfg(any(test, feature = "test-support"))]
-    work::count(connection);
-    connection.profile(Some(record_sqlite_time));
+    let page_size = performance_page_size(connection);
+    // The context is an integer, not an allocated pointer. SQLite retains it unchanged.
+    // SAFETY: SQLite owns the live statement passed to this synchronous callback.
+    unsafe {
+        ffi::sqlite3_trace_v2(
+            connection.handle(),
+            (ffi::SQLITE_TRACE_STMT | ffi::SQLITE_TRACE_PROFILE) as std::ffi::c_uint,
+            Some(performance_trace),
+            page_size as *mut std::ffi::c_void,
+        );
+    }
+}
+
+fn performance_page_size(connection: &Connection) -> usize {
+    connection.pragma_query_value(None, "page_size", |row| row.get(0))
+        .expect("SQLite exposes the main database page size")
+}
+
+/// One O(1) counter read/reset per completed statement, without allocation or locking.
+/// Nested statements/triggers consume the shared counter only once.
+/// This measures SQLite pager misses, not physical disk reads; mmap bypasses it.
+unsafe fn performance_reads(database: *mut ffi::sqlite3, page_size: usize) -> u64 {
+    let mut misses = 0;
+    let mut highwater = 0;
+    // SAFETY: the trace callback supplies its live database; both outputs are valid.
+    let status = unsafe {
+        ffi::sqlite3_db_status(database, ffi::SQLITE_DBSTATUS_CACHE_MISS, &mut misses, &mut highwater, 1)
+    };
+    let bytes = if status == ffi::SQLITE_OK {
+        (misses.max(0) as u64).saturating_mul(page_size as u64)
+    } else {
+        0
+    };
+    crate::performance::sqlite_reads(bytes);
+    bytes
+}
+
+unsafe extern "C" fn performance_trace(
+    event: std::ffi::c_uint,
+    context: *mut std::ffi::c_void,
+    statement: *mut std::ffi::c_void,
+    detail: *mut std::ffi::c_void,
+) -> std::ffi::c_int {
+    // SAFETY: SQLite supplies live pointers for this synchronous callback. Never
+    // unwind through C. The context carries only the page-size integer.
+    let _ = std::panic::catch_unwind(|| unsafe {
+        #[cfg(any(test, feature = "test-support"))]
+        work::traced(event, std::ptr::null_mut(), statement, detail);
+        let statement = statement.cast::<ffi::sqlite3_stmt>();
+        if event == ffi::SQLITE_TRACE_PROFILE as std::ffi::c_uint {
+            let bytes = performance_reads(ffi::sqlite3_db_handle(statement), context as usize);
+            let sql = ffi::sqlite3_sql(statement);
+            if !sql.is_null() {
+                let sql = std::ffi::CStr::from_ptr(sql).to_string_lossy();
+                record_sqlite_time_with_reads(&sql, std::time::Duration::from_nanos(*detail.cast::<u64>()), bytes);
+            }
+        }
+    });
+    0
 }
 
 /// Every statement this process ran since the last [`histogram::take`], by normalized text, so a
