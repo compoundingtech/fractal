@@ -740,6 +740,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/internal/resources", get(resources::list))
+        .route("/v1/internal/resources/scratch/inventory", get(resources::scratch_inventory))
         .route("/v1/internal/resources/exec", post(resources::submit))
         .route("/v1/internal/resources/{id}", get(resources::show))
         .route("/v1/internal/resources/{id}/wait", post(resources::wait))

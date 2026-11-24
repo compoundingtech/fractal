@@ -631,6 +631,38 @@ fn a_replayed_grant_still_visits_native_authority_and_cancellation_wins_the_repl
 }
 
 #[test]
+fn scratch_acquisition_replays_exact_activity_occurrence_through_native_authority() {
+    use crate::reconcile::{NativeRuntime, Reconciler};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "scratch-replay");
+    running_attempt(&engine, &run, 1, 7);
+    let runtime = Arc::new(NativeRuntime::new(dir.path(), None, Path::new("unused-pty")));
+    let reconciler = Reconciler::new(engine.store.clone(), runtime,
+        "node".into(), Arc::new(tokio::sync::Notify::new()));
+    let root = dir.path().canonicalize().unwrap().join("dedicated");
+    let payload = json!({"host":"node","root":root.display().to_string()});
+    let message = json!({
+        "t":"resource","step":run.steps[0].subject,"attempt":1,"seq":10,
+        "key":"prepare/resource.scratch/output","operation":"resource.scratch.acquire","payload":payload,
+    });
+    engine.handle(&message, 7).unwrap();
+    let first = engine.requests(&run.subject)[0].clone();
+    assert!(reconciler.settle_program_resource(&engine, &run, &first,
+        "resource.scratch.acquire", &payload, false).unwrap());
+    let handle = engine.store.scratch_handle(&first.idempotency_key()).unwrap().unwrap();
+    assert_eq!(handle.owner, run.subject);
+    assert_eq!(handle.owner_generation, run.generation);
+    assert!(Path::new(&handle.path).is_dir());
+    engine.handle(&message, 7).unwrap();
+    let replay = engine.requests(&run.subject)[0].clone();
+    assert!(reconciler.settle_program_resource(&engine, &run, &replay,
+        "resource.scratch.acquire", &payload, false).unwrap());
+    assert_eq!(engine.store.scratch_handle(&first.idempotency_key()).unwrap().unwrap(), handle);
+    assert_eq!(engine.store.scratch_inventory("node", None, 100).unwrap().len(), 1);
+}
+
+#[test]
 fn launch_freeze_defers_resource_exec_and_clear_invalidates_the_pending_effect() {
     frozen_resource_exec(false);
 }
