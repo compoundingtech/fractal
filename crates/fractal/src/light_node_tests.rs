@@ -30,8 +30,10 @@ export default {
       };
       const first = await post('program-session-effect',claim);
       const replay = await post('program-session-effect',claim);
-      if (!first.ok || !replay.ok || JSON.stringify(first.body) !== JSON.stringify(replay.body))
-        throw new Error('retry changed its receipt');
+      if (!first.ok) throw new Error('first effect was refused: '+JSON.stringify(first.body));
+      if (!replay.ok) throw new Error('effect retry was refused: '+JSON.stringify(replay.body));
+      if (JSON.stringify(first.body) !== JSON.stringify(replay.body))
+        throw new Error('retry changed its receipt: '+JSON.stringify({first:first.body,replay:replay.body}));
       const blocked = await post('program-capacity-probe',{...claim,subject:'custom/example/capacity-effect'});
       if (blocked.ok || !JSON.stringify(blocked.body).includes('backpressure'))
         throw new Error('unacknowledged result did not retain bounded custody');
