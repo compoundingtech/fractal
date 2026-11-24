@@ -136,7 +136,7 @@ export default githubWorkflow(scopeLinuxNixSandbox({
             shell: 'bash',
             run: `set -euo pipefail
 if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
-  echo "Ghostty cache publishing skipped: CACHIX_AUTH_TOKEN is absent."
+  echo "::warning::Ghostty cache publishing skipped: repository secret CACHIX_AUTH_TOKEN is absent. See the publish-ghostty-cache job in .github/workflows/nix.yml."
   exit 0
 fi
 # Use Fractal's locked PTY input, including Fractal's nixpkgs follows.
