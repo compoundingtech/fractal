@@ -2434,7 +2434,9 @@ fn a_local_cut_s_scoped_capture_stages_every_kind_its_rules_read() {
 #[test]
 fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
     let scratch = tempfile::tempdir().unwrap();
-    let context = context(scratch.path(), 0);
+    // This plans history retention, not deletion: the restored prompt must still be
+    // inside the seven-day history window while its underlying observations are older.
+    let now = FIXTURE_WRITTEN_MS + 3 * smallclaims::store::checkpoint::DAY_MS;
     let store = local_member("alder");
     let seat = SEATS[0];
     let old = (FIXTURE_WRITTEN_MS - 9 * smallclaims::store::checkpoint::DAY_MS) as u64;
@@ -2467,7 +2469,7 @@ fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
     append("harness.observed", harness("ready", old + 3));
     append("harness.observed", harness("working", old + 4));
     store.seal_local_batches().unwrap();
-    let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+    let cut = smallclaims::store::checkpoint::newest_due_cut(now);
     let full = local_plan(&store, cut, &scratch.path().join("full"), false);
     let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
     assert!(!full.0.contains(&before_prompt), "the whole capture keeps it");
