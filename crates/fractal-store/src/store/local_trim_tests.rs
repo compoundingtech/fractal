@@ -512,11 +512,16 @@ fn retirements_that_wait_do_not_hold_back_the_rest() {
            AND id NOT IN (SELECT id FROM peer_retired_claims)",
         [],
     ).unwrap();
-    // One deletion a step: a page of one.
+    // One deletion a step: a page of one, at the end of the UTC day, when the whole paced
+    // allowance is available.
+    let day_end = CheckpointContext {
+        now_unix_ms: (quiet.now_unix_ms / smallclaims::store::checkpoint::DAY_MS + 1) * smallclaims::store::checkpoint::DAY_MS - 1,
+        ..quiet
+    };
     for _ in 0..40 {
         let deleted = 20 - claims_of(&birch, "observer.observed");
         birch.trim_locally_at_most(u64::try_from(deleted).unwrap() + 1);
-        step(&birch, &quiet);
+        step(&birch, &day_end);
     }
     assert_eq!(claims_of(&birch, "observer.observed"), 2, "all but the two that wait went");
     assert_eq!(pending(&birch), 2);
