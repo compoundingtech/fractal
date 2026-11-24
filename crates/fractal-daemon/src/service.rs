@@ -1734,6 +1734,7 @@ mod tests {
     #[test]
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config { node: "node-a".into(),
+        light_node_session: None,
         quota_source: None,
         usage_limits: None,
         host_envelope_file: None,
