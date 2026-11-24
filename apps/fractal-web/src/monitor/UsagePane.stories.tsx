@@ -9,21 +9,37 @@ import { scenarioArgTypes } from '@fractal/scenarios/storybook'
 import { assistantDarkTheme, liveAccentTheme, compositionLightTheme } from '@fractal/ui/assistant-ui'
 import { colorVars as color, typeVars as type } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DataSourceProvider } from '../data/react.tsx'
+import { accountOf, accounts, FIXTURE_NOW, fixtureSource, quotaEnvelope } from './fixtures.ts'
 import { scenarioUsageSource, usageReads, type UsageRead } from './usageFixtures.ts'
 import { UsagePane } from './UsagePane.tsx'
+import type { QuotaAccount } from './wire.ts'
 
-interface UsageArgs { readonly reads: readonly UsageRead[]; readonly scheme: 'dark' | 'light'; readonly objectives?: string }
+const HOUR = 3_600_000
+const atLimit = accountOf({ harness: 'codex', provider: 'openai-codex', name: 'team-north', label: 'Team North', plan: 'Pro',
+  limits: [{ id: 'week', label: 'Weekly', slot: 'governing', fraction: 1, exhausted: true, resetsIn: 4 * 24 * HOUR }, { id: 'five', label: '5 Hour', slot: 'pressure-1', kind: 'rolling', fraction: 0.12, resetsIn: 2 * HOUR }],
+  resets: { availableCount: 1, credits: [{ grantedAt: null, expiresAt: new Date(FIXTURE_NOW + 6 * 24 * HOUR).toISOString(), status: 'available' }] } })
+const held = accountOf({ harness: 'codex', provider: 'openai-codex', name: 'held', label: 'Held', plan: 'Plus', retained: { observedAgo: 3 * HOUR, reason: 'provider answered 401' },
+  limits: [{ id: 'week', label: 'Weekly', slot: 'governing', fraction: 0.74, resetsIn: 2 * 24 * HOUR }] })
+const quotaOf = (list: readonly QuotaAccount[], generatedAgo?: number) => fixtureSource({ quota: [{ _tag: 'ok', json: quotaEnvelope({ list, ...(generatedAgo === undefined ? {} : { generatedAgo }) }) }] })
+/** Made-up v3 quota envelopes for the quota accounts at the top of the pane, at the fixture clock. */
+const quotas = {
+  'at limit': quotaOf([accounts.claudeAlpha, atLimit, accounts.codexAlpha]),
+  stale: quotaOf([held, accounts.claudeBravo], 2 * HOUR),
+  empty: quotaOf([]),
+}
 
-const Specimen = ({ read }: { readonly read: UsageRead }) => {
+interface UsageArgs { readonly reads: readonly UsageRead[]; readonly scheme: 'dark' | 'light'; readonly objectives?: string; readonly quota?: keyof typeof quotas }
+
+const Specimen = ({ read, quota }: { readonly read: UsageRead; readonly quota: UsageArgs['quota'] }) => {
   const slice = useScenarioSlice('objectives')
   const now = useScenarioNow()
   const [registry] = React.useState(() => AtomRegistry.make())
-  const source = React.useMemo(() => scenarioUsageSource({ state: slice.state, loading: slice.loading, read, now, registry }), [slice, read, now, registry])
+  const source = React.useMemo(() => ({ ...scenarioUsageSource({ state: slice.state, loading: slice.loading, read, now, registry }), ...(quota === undefined ? {} : { usage: quotas[quota] }) }), [slice, read, now, registry, quota])
   return <div data-usage-read={read} {...stylex.props(styles.frame)}><DataSourceProvider source={source} registry={registry}><UsagePane label={`Usage · ${read}`} /></DataSourceProvider></div>
 }
-const UsageSurface = ({ reads, scheme }: UsageArgs) =>
+const UsageSurface = ({ reads, scheme, quota }: UsageArgs) =>
   <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-    {reads.map(read => <Specimen key={read} read={read} />)}
+    {reads.map(read => <Specimen key={read} read={read} quota={quota} />)}
   </main>
 
 const meta = {
@@ -125,6 +141,55 @@ export const Retry: Story = {
     await userEvent.click(await usage.findByRole('button', { name: 'Retry: Could not read objectives and budgets' }))
     await expect(await usage.findByRole('heading', { name: 'budgets 4' })).toBeVisible()
     await expect(usage.getByText('robin/codex-pro')).toBeVisible()
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+const detailOf = (canvas: HTMLElement) => canvas.querySelector<HTMLElement>('[data-usage-detail]')
+const accountRow = (canvas: HTMLElement, id: string) => canvas.querySelector<HTMLElement>(`[data-usage-account="${id}"]`)!
+
+/** The worst account opens on top with every limit; picking another row, by pointer or arrow key, changes it. */
+export const QuotaAtLimit: Story = {
+  args: { quota: 'at limit' },
+  globals: { scenarioNow: FIXTURE_NOW },
+  play: async ({ canvasElement }) => {
+    await waitFor(() => expect(detailOf(canvasElement)).toHaveAttribute('data-usage-detail', 'codex/team-north'))
+    const detail = within(detailOf(canvasElement)!)
+    await expect(detail.getByText('100%!')).toBeVisible()
+    await expect(detail.getByText('at limit · resets 4d')).toBeVisible()
+    await expect(detail.getByText('12%')).toBeVisible()
+    await expect(detail.getByText('1 banked reset · expires in 6d')).toBeVisible()
+    await expect(detail.getByText('Reading, 42s old')).toBeVisible()
+    await userEvent.click(accountRow(canvasElement, 'claude/alpha'))
+    await waitFor(() => expect(detailOf(canvasElement)).toHaveAttribute('data-usage-detail', 'claude/alpha'))
+    await expect(within(detailOf(canvasElement)!).getAllByRole('listitem')).toHaveLength(3)
+    await userEvent.keyboard('{ArrowUp}')
+    await waitFor(() => expect(detailOf(canvasElement)).not.toHaveAttribute('data-usage-detail', 'claude/alpha'))
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+/** A snapshot past its horizon says so; a held account names its age and the producer's reason. */
+export const QuotaStale: Story = {
+  args: { quota: 'stale' },
+  globals: { scenarioNow: FIXTURE_NOW },
+  play: async ({ canvasElement }) => {
+    const usage = within(canvasElement)
+    await expect(await usage.findByText('Last reading, 2h old')).toBeVisible()
+    await userEvent.click(accountRow(canvasElement, 'codex/held'))
+    const detail = within(detailOf(canvasElement)!)
+    await expect(detail.getByText('Held reading, 3h old')).toBeVisible()
+    await expect(detail.getByText('Last attempt: indeterminate 40s ago: provider answered 401')).toBeVisible()
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+export const QuotaEmpty: Story = {
+  args: { quota: 'empty' },
+  globals: { scenarioNow: FIXTURE_NOW },
+  play: async ({ canvasElement }) => {
+    await expect(await within(canvasElement).findByText(/The quota source reports no accounts/)).toBeVisible()
+    expect(detailOf(canvasElement)).toBeNull()
     canvasElement.dataset.proof = 'passed'
   },
 }
