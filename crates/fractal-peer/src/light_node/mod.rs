@@ -4,3 +4,4 @@
 //! a connected session is not evidence of runtime health or fleet freshness.
 pub mod journal;
 pub mod session;
+pub mod start;
