@@ -180,12 +180,16 @@ export const QuotaAtLimit: Story = {
     expect(canvasElement.querySelectorAll('[data-usage-day]')).toHaveLength(30)
     expect(canvasElement.querySelector('[data-usage-day]:last-child')).toHaveAttribute('data-open', 'true')
     await expect(detail.getByText('1 banked reset · expires in 6d')).toBeVisible()
-    await expect(detail.getByText('Reading, 42s old')).toBeVisible()
+    await expect(detail.getByText('This account’s reading, 42s old')).toBeVisible()
     await userEvent.click(accountRow(canvasElement, 'claude/alpha'))
     await waitFor(() => expect(detailOf(canvasElement)).toHaveAttribute('data-usage-detail', 'claude/alpha'))
     await expect(within(detailOf(canvasElement)!).getAllByRole('listitem')).toHaveLength(3)
     await userEvent.keyboard('{ArrowUp}')
     await waitFor(() => expect(detailOf(canvasElement)).not.toHaveAttribute('data-usage-detail', 'claude/alpha'))
+    // Selection carries the accent bar; the keyboard focus ring is neutral, never the accent.
+    const selected = canvasElement.querySelector<HTMLElement>('[data-usage-account][data-selected]')!
+    expect(getComputedStyle(selected).boxShadow).toMatch(/inset/)
+    expect(getComputedStyle(document.activeElement!).outlineColor).not.toBe(getComputedStyle(selected).boxShadow.match(/rgba?\([^)]*\)/)![0])
     canvasElement.dataset.proof = 'passed'
   },
 }
@@ -196,10 +200,10 @@ export const QuotaStale: Story = {
   globals: { scenarioNow: FIXTURE_NOW },
   play: async ({ canvasElement }) => {
     const usage = within(canvasElement)
-    await expect(await usage.findByText('Last reading, 2h old')).toBeVisible()
+    await expect(await usage.findByText('Quota snapshot 2h old: no account below is newer')).toBeVisible()
     await userEvent.click(accountRow(canvasElement, 'codex/held'))
     const detail = within(detailOf(canvasElement)!)
-    await expect(detail.getByText('Held reading, 3h old')).toBeVisible()
+    await expect(detail.getByText('This account’s reading, 3h old, held by the producer')).toBeVisible()
     await expect(detail.getByText('Last attempt: indeterminate 40s ago: provider answered 401')).toBeVisible()
     canvasElement.dataset.proof = 'passed'
   },
