@@ -54,7 +54,7 @@ pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The table, before any projection backfill folds it in.
 pub fn create_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hfe0fdba03f21 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
+        /* sqlite-large-value: allow-for-now lv-h6ddd39fcffe1 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_message_marks (
     message TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('message.delivered','message.read','message.closed')),
@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS local_message_mark_events (
     message TEXT NOT NULL,
     consumer TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS local_message_mark_scope_events (
+    -- Retention always preserves the newest row, so SQLite's next rowid stays monotonic.
+    -- Avoid AUTOINCREMENT's shared sqlite_sequence scan on every other journal's insert.
+    id INTEGER PRIMARY KEY,
+    message TEXT,
+    consumer TEXT
+);
 ",
     )?;
     Ok(())
@@ -88,7 +95,7 @@ CREATE TABLE IF NOT EXISTS local_message_mark_events (
 /// The triggers, once every projection they maintain exists.
 pub fn create_triggers(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h074f8716f6c1 owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
+        /* sqlite-large-value: allow-for-now lv-hbaf488ab92c8 owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
 -- The same projection rows a lifecycle claim of the mark's kind writes (see the claim triggers
 -- in store.rs, idle_mail.rs, unread_mail.rs, coordination.rs and client_messages.rs). A lifecycle
 -- claim carries a status field, so it always marks the client selector dirty; a mark does too.
@@ -145,6 +152,42 @@ BEGIN
     INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
     VALUES(OLD.message,-1,1,2)
     ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1;
+END;
+-- Held and authorization changes have their own keyed journal: do not manufacture marks.
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_message_insert AFTER INSERT ON message_index
+BEGIN
+    INSERT INTO local_message_mark_scope_events(message) VALUES(NEW.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_message_delete AFTER DELETE ON message_index
+BEGIN
+    INSERT INTO local_message_mark_scope_events(message) VALUES(OLD.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_desired_insert AFTER INSERT ON desired
+WHEN NEW.member IS NOT NULL
+BEGIN
+    INSERT INTO local_message_mark_scope_events(consumer) VALUES(NEW.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_desired_update AFTER UPDATE OF member ON desired
+WHEN OLD.member IS NOT NEW.member
+BEGIN
+    INSERT INTO local_message_mark_scope_events(consumer) VALUES(NEW.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_desired_delete AFTER DELETE ON desired
+WHEN OLD.member IS NOT NULL
+BEGIN
+    INSERT INTO local_message_mark_scope_events(consumer) VALUES(OLD.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_trim AFTER INSERT ON local_message_mark_scope_events
+BEGIN
+    DELETE FROM local_message_mark_scope_events WHERE id <= NEW.id - 16384;
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_marks_removed_event AFTER DELETE ON local_message_marks
+BEGIN
+    INSERT INTO local_message_mark_events(message, consumer) VALUES(OLD.message, OLD.consumer);
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_staged_removed_event AFTER DELETE ON local_message_staged
+BEGIN
+    INSERT INTO local_message_mark_events(message, consumer) VALUES(OLD.message, OLD.consumer);
 END;
 ",
     )?;

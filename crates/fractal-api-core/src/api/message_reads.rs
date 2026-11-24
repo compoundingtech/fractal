@@ -121,7 +121,7 @@ impl KeptAnswers {
 }
 
 /// Whether `member`'s own newest `daemon.started` advertises `feature` at `version`.
-fn advertises(store: &Store, member: &str, feature: &str, version: u64) -> anyhow::Result<bool> {
+pub(super) fn advertises(store: &Store, member: &str, feature: &str, version: u64) -> anyhow::Result<bool> {
     Ok(store
         .latest_claim(&format!("daemon/{member}"), Some("daemon.started"))?
         .is_some_and(|claim| {
@@ -196,17 +196,7 @@ pub fn relay_hosts(store: &Store) -> anyhow::Result<BTreeMap<String, BTreeSet<St
 
 /// The seats this member's declarations place on `host`.
 fn seats_on(store: &Store, host: &str) -> anyhow::Result<BTreeSet<String>> {
-    Ok(store
-        .desired_subjects()?
-        .into_iter()
-        .filter(|desired| {
-            desired
-                .member
-                .as_ref()
-                .is_some_and(|member| member.host == host)
-        })
-        .map(|desired| desired.subject)
-        .collect())
+    store.hosted_seats(host)
 }
 
 /// The newest of `answer`'s marks of seats this member places on the host: its receipt and when

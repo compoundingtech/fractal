@@ -413,9 +413,6 @@ impl Windows {
         // Work uses its selected projection time. Missions and attention use exact
         // transition fences, not a coarse shared wall-clock bucket.
         let period = match request.collection.as_str() {
-            // Summary windows keep the shared wall-clock bucket; missions and attention
-            // above use exact transition fences instead.
-            "summary" | "summary-missions" => now / ATTENTION_CLOCK_INTERVAL.as_millis(),
             // Work's deterministic selected projection time is itself an input, even if a
             // claim kind does not otherwise change its rows (elapsed budgets/lease expiry).
             "work" => state.store.projection_time_at(index)?,

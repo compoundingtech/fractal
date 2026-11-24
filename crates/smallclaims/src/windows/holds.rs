@@ -419,11 +419,16 @@ impl WriterHold {
         });
     }
 
-    /// A batched write from `holder` ran for `took` in this hold.
+    /// A batched write from `holder` ran for `took` in this hold. The longest write's stages are
+    /// the batch's, when that write was asked for in a batch scope.
     pub fn ran(&mut self, holder: &Holder, took: Duration) {
         self.writes += 1;
         if self.longest.as_ref().is_none_or(|(_, longest)| took > *longest) {
             self.longest = Some((holder.clone(), took));
+            let clock = holder.0.stages.as_ref().map(|clock| clock.lock().unwrap_or_else(PoisonError::into_inner));
+            let clock = clock.filter(|clock| clock.batch);
+            self.stages = clock.as_ref().map(|clock| clock.snapshot(Instant::now()));
+            self.rebuilt = clock.map(|clock| clock.rebuilt.clone()).unwrap_or_default();
         }
     }
 
@@ -619,6 +624,8 @@ struct StageClock {
     rebuilt: Vec<(&'static str, Rebuilt)>,
     closed: bool,
     progress: Option<(u64, u64)>,
+    /// Begun by `Stages::begin_batch`: a batched write asked for in it carries it.
+    batch: bool,
 }
 
 impl StageClock {
@@ -664,6 +671,16 @@ impl StageClock {
         self.closed = true;
         self.spent.clone()
     }
+
+    /// The stages so far, the open one counted up to `at`, without ending it: a later lend in the
+    /// same scope keeps adding to them.
+    fn snapshot(&self, at: Instant) -> Vec<(&'static str, Duration)> {
+        let mut copy = StageClock { spent: self.spent.clone(), ..Self::default() };
+        if let Some((stage, since)) = self.open {
+            copy.add(stage, at.saturating_duration_since(since));
+        }
+        copy.spent
+    }
 }
 
 thread_local! {static STAGES: RefCell<Option<Arc<Mutex<StageClock>>>> = const {RefCell::new(None)};}
@@ -689,7 +706,10 @@ pub fn unstaged<T>(work: impl FnOnce() -> T) -> T {
 /// A scope whose writer lend records where its hold went. Begin it before asking for the writer,
 /// enter each stage as the borrower reaches it, and end it once the writer is given back: a lend
 /// asked for in the scope carries its clock, and the writer thread closes the stage still open
-/// when the hold ends. Holds asked for outside it, and batches, are not staged.
+/// when the hold ends. A batched write asked for in a scope begun with `begin_batch` runs its job
+/// inside that scope on the writer thread, and a batch hold reports the stages of its longest
+/// write so far, without closing them. Holds asked for outside a scope, and batches asked for in
+/// a plain scope, are not staged.
 pub struct Stages {
     clock: Arc<Mutex<StageClock>>,
     previous: Option<Arc<Mutex<StageClock>>>,
@@ -708,6 +728,13 @@ impl Stages {
         Self { clock, previous }
     }
 
+    /// A scope for one batched write: its job's stages are the batch hold's.
+    pub fn begin_batch() -> Self {
+        let stages = Self::begin();
+        stages.clock.lock().unwrap_or_else(PoisonError::into_inner).batch = true;
+        stages
+    }
+
     /// End the open stage and begin `stage`, returning the stage it ended, so a callback can be
     /// charged to its own stage and the caller's resumed after it.
     pub fn enter(&self, stage: &'static str) -> Option<&'static str> {
@@ -717,6 +744,29 @@ impl Stages {
     /// Run `work` as `stage`, then resume the stage it interrupted.
     pub fn during<T>(&self, stage: &'static str, work: impl FnOnce() -> T) -> T {
         during(&self.clock, stage, work)
+    }
+}
+
+/// The asking thread's stage scope, carried to the writer thread for one batched job.
+pub(crate) struct BatchStages(Option<Arc<Mutex<StageClock>>>);
+
+impl BatchStages {
+    pub(crate) fn capture() -> Self {
+        let clock = STAGES.with(|stages| stages.borrow().clone());
+        Self(clock.filter(|clock| clock.lock().unwrap_or_else(PoisonError::into_inner).batch))
+    }
+
+    /// Install the captured scope on this thread until the guard drops, then restore its own.
+    pub(crate) fn enter(&self) -> impl Drop + use<> {
+        struct Restore(Option<Arc<Mutex<StageClock>>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let previous = self.0.take();
+                STAGES.with(|stages| *stages.borrow_mut() = previous);
+            }
+        }
+        let installed = self.0.clone();
+        Restore(STAGES.with(|stages| std::mem::replace(&mut *stages.borrow_mut(), installed)))
     }
 }
 
@@ -1211,12 +1261,49 @@ mod tests {
             long["rebuilt"],
             json!({"rebuild-tree": {"aggregates": 2, "claims": 40}})
         );
-        // A batch inside a scope is charged as before, with no stages.
+        // A batch whose writes were asked for outside a scope reports no stages.
         let mut batch = hold(HoldKind::Batch, "/v1/messages");
         record.held(now, 1_000_000, &mut batch, Duration::from_millis(200), true);
         std::mem::forget(batch);
         let batch = &record.report(now, 1_000_000)["long_holds"][0];
         assert!(batch.get("stages").is_none() && batch.get("unattributed_ms").is_none(), "{batch}");
+    }
+
+    #[test]
+    fn a_batched_write_asked_for_in_a_stage_scope_reports_its_job_stages_without_closing_them() {
+        let stages = Stages::begin_batch();
+        let asked = Holder::current();
+        let carried = BatchStages::capture();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                assert!(STAGES.with(|stages| stages.borrow().is_none()), "the writer thread starts unstaged");
+                {
+                    let _stages = carried.enter();
+                    stage("fence-action", || std::thread::sleep(Duration::from_millis(5)));
+                }
+                assert!(STAGES.with(|stages| stages.borrow().is_none()), "the job's guard restores the writer thread");
+            });
+        });
+        let mut batch = WriterHold {
+            kind: HoldKind::Batch,
+            started: Instant::now(),
+            first: asked.clone(),
+            longest: None,
+            writes: 0,
+            stages: None,
+            rebuilt: Vec::new(),
+            receive_shared_batch: None,
+        };
+        batch.ran(&asked, Duration::from_millis(6));
+        let reported = batch.stages.clone().expect("the longest write's stages");
+        assert_eq!(reported.iter().map(|(stage, _)| *stage).collect::<Vec<_>>(), ["fence-action"]);
+        assert!(reported[0].1 >= Duration::from_millis(5));
+        assert!(!stages.clock.lock().unwrap().closed, "a later lend in the scope still records");
+        // A longer write from outside the scope replaces the batch's stages.
+        let outside = { drop(stages); Holder::current() };
+        batch.ran(&outside, Duration::from_millis(60));
+        assert!(batch.stages.is_none());
+        std::mem::forget(batch);
     }
 
     #[test]

@@ -597,7 +597,10 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    let work: ErasedWork = Box::new(move || Box::new(work()) as Erased);
+    let binding = crate::store::run_credentials::request_context::capture();
+    let work: ErasedWork = Box::new(move || {
+        crate::store::run_credentials::request_context::with(binding, || Box::new(work()) as Erased)
+    });
     let erased = spawn_erased(work, query, roster, writer);
     async move {
         erased

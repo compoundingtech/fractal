@@ -197,7 +197,7 @@
     {
       "package": "fractal",
       "binary": "integration",
-      "test": "otel_export::replication_projection_is_linked_root_only_for_new_data",
+      "test": "otel_export::replication_projection_attempts_link_receive_and_stop_after_completion",
       "reason": "The daemon captures the account's login-shell environment and the Nix build user has no login shell; the test output says so ('capture the daemon login-shell environment ... the user account has no default shell').",
       "owner": "nix-evidence (mission fleet/factory/nix-evidence)",
       "runs_instead": "central CI linux-tests shards and the wrapper path"
