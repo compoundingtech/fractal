@@ -2594,6 +2594,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     async fn run_passes(self: Arc<Self>) {
         #[cfg(any(test, feature = "test-support"))]
         self.wait_for_test_starts.store(false, Ordering::Release);
+        self.blocking(|this| {
+            let daemon = format!("daemon/{}", this.host);
+            this.isolate("stage/suspended-store", &daemon, || {
+                crate::seat_snapshot::sweep(this.driver_state_dir.parent().unwrap(), &this.store)
+            });
+        }).await;
         self.notify.notify_one();
         let mut wake_cause = crate::reconcile_telemetry::WakeCause::Startup;
         // When the last pass began, and whether it changed nothing.
@@ -10065,7 +10071,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     ("native_session_id".into(), Value::String(live)),
                                     ("incarnation_id".into(), Value::String(incarnation.into())),
                                 ]),
-                            )
+                            )?;
+                            if let Some(operation) = suspension.suspend_operation_id.as_deref() {
+                                crate::seat_snapshot::remove(
+                                    self.driver_state_dir.parent().unwrap(), &self.store, operation,
+                                )?;
+                            }
+                            Ok(())
                         }
                         Some((_, live)) => self.fail_suspension(
                             agent,
