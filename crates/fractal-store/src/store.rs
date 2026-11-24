@@ -4731,6 +4731,27 @@ impl Store {
     }
 
     pub fn append_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
+        if input.kind == program_journal::JOURNAL_KIND && input.fields.get("key").and_then(Value::as_str) == Some("$result") {
+            // Cancellation deliberately keeps program steps live for cleanup. Fence the
+            // normal root result in its own append transaction, not with a prior read.
+            let admission = |connection: &Connection| {
+                let finalizing = connection.query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM step_runs AS step
+                       JOIN mission_runs AS run ON run.id=step.run_id
+                       WHERE step.subject=?1 AND (run.phase LIKE 'cleanup-%' OR run.phase='final-cancelled')
+                     )", [&input.subject], |row| row.get::<_, bool>(0),
+                ).map_err(internal)?;
+                if finalizing {
+                    return Err(FractalError::new("program-finalizing", "a finalizing program cannot publish a normal root outcome"));
+                }
+                Ok(())
+            };
+            return append_claim_with_commit_context(
+                &self.graph, input, None, None, None, None,
+                ClaimCommitContext { admission: Some(&admission), ..Default::default() },
+            ).map(|(claim, _)| claim);
+        }
         self.append_claim_outcome(input).map(|(claim, _)| claim)
     }
 

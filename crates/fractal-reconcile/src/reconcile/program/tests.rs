@@ -1290,3 +1290,43 @@ fn finalization_retains_execution_authority_until_its_outcome_and_then_revokes_i
     fixture.engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();
     assert!(!fixture.engine.lock().running.contains_key(step));
 }
+
+#[test]
+fn a_queued_root_outcome_cannot_complete_a_cancelled_program() {
+    for released in [false, true] {
+        for exit in [json!({"_tag": "Success", "value": true}), json!({"_tag": "Failure", "error": {"_tag": "BodyFailed"}})] {
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(dir.path());
+            let hash = engine.store.put_blob(b"export default {}").unwrap();
+            crate::reconcile::tests::apply_source(&engine.store, &format!(r#"version 2
+mission "cancel-queued-root" state="ready" {{
+  goal "Fence a queued root outcome."
+  step "program" {{ program "/bundle.mjs" sha256="{hash}" }}
+}}"#), "cancel-queued-root-declaration");
+            let run = engine.store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "cancel-queued-root".into(), revision: None, workspace: "/tmp".into(),
+                requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "cancel-queued-root".into(),
+            }).unwrap();
+            let step = &run.steps[0].subject;
+            running_attempt(&engine, &run, 1, 1);
+            engine.lock().running.get_mut(step).unwrap().dispatch.program.bundle_hash = hash.clone();
+            // The host has ended the worker and queued its normal root notification.
+            engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
+            let done = json!({"t": "done", "step": step, "attempt": 1, "exit": exit});
+            engine.store.request_mission_run_cancellation(&run.subject, "cancel before queued done").unwrap();
+            let cancelled = engine.store.mission_run(&run.subject).unwrap().unwrap();
+            if released { engine.release_left(&cancelled).unwrap(); }
+            engine.handle(&done, 1).unwrap();
+            assert!(engine.lock().running[step].finalizing);
+            assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "working");
+            assert!(!engine.journal_claims(step).unwrap().iter().any(|claim| claim.body["fields"]["key"] == RESULT_KEY));
+            // A stale normal append is also refused inside its own transaction.
+            assert_eq!(engine.write_journal(step, 1, &hash, RESULT_KEY, "completed",
+                &json!({"value": true}), None).unwrap_err().code, "program-finalizing");
+            engine.handle(&json!({"t": "finalizers", "step": step, "attempt": 1, "outcome": "completed"}), 1).unwrap();
+            assert!(engine.journal_claims(step).unwrap().iter().any(|claim|
+                claim.body["fields"]["key"] == "$finalizers" && claim.body["fields"]["status"] == "completed"));
+        }
+    }
+}

@@ -201,15 +201,24 @@ suspension wrapper's explicit interruptible region must not reinstate the pendin
 Interruption detaches preexisting child/ask waits; late results cannot become finalizer results.
 Finalizer requests remain admitted under the same live attempt.
 Only keys started during finalization may publish finalizer results; a killed normal command
-cannot journal a late completion merely because cleanup retains the attempt. The scoped body
-fiber's complete exit is preserved before the workflow suspension join can discard release failures.
+cannot journal a late completion merely because cleanup retains the attempt. Normal root
+`done` notifications are fenced by the authoritative cleanup phase even before the engine
+observes cancellation; the `$result` append rechecks that phase in its own transaction.
+Only finalizer outcomes, not queued normal root success or failure, may settle cleanup.
 
 The `$finalizers` result is tagged `Finalizers`, with `outcome: completed | failed | timed-out |
 interrupted-by-restart | worker-failed` and the effective `grace_ms`. Incomplete finalization is
 a failed journal entry with that typed error, visible in `missions show`, not a failed run.
-Finalizer defects and journal refusals remain `FinalizerFailed` across the SDK/worker boundary;
-the result's optional `cause` preserves that failure rather than treating every interrupted
-root exit as successful cleanup. `$finalizers` is reserved for both steps and request-backed operations.
+`FinalizerFailed` reflects only engine-registered finalizers: use `Effect.addFinalizer` or
+`Effect.acquireRelease` in the program's provided scope. The engine observes that scope's
+close exit separately from the body exit, so an earlier typed body failure or defect does
+not turn successful cleanup into a cleanup failure. Journal refusals also produce
+`FinalizerFailed`. Arbitrary user `Effect.ensuring` and nested user-owned scopes remain
+part of the body: their failures are body failures, not classified as engine cleanup failures.
+They still run under Effect's interruption semantics. Register cleanup whose failure must
+raise finalizer attention in the engine-provided program scope.
+The result's optional `cause` preserves cleanup failure across the SDK/worker boundary.
+`$finalizers` is reserved for both steps and request-backed operations.
 A timed-out worker is forcibly terminated,
 and its command groups are killed. Worker-thread termination can still await blocking native
 I/O: the timeout is recorded immediately, but the run's execution fence waits for actual exit,

@@ -1411,6 +1411,19 @@ impl ProgramEngine {
     }
 
     fn done(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
+        let run = self.store.step_run(step)?.map(|step| step.run)
+            .map(|run| self.store.mission_run(&run)).transpose()?.flatten();
+        if let Some(run) = &run
+            && (run.phase.starts_with("cleanup-") || run.phase == "final-cancelled")
+        {
+            self.release_left(run)?;
+            return Ok(());
+        }
+        if self.lock().running.get(step).is_some_and(|running|
+            running.dispatch.attempt == attempt && running.generation == generation && running.finalizing)
+        {
+            return Ok(());
+        }
         let Some(trace) = self.end(step, attempt, generation, None, message["exit"]["_tag"] != "Success")? else {
             return Ok(());
         };
@@ -1419,6 +1432,7 @@ impl ProgramEngine {
             let (status, reason) = match exit["_tag"].as_str() {
                 Some("Success") => match self.write_journal(step, attempt, program, RESULT_KEY, "completed", &json!({"value": exit["value"]}), None) {
                     Ok(_) => ("completed", None),
+                    Err(error) if error.code == "program-finalizing" => return Ok(None),
                     Err(error) => {
                         trace.failed();
                         ("failed", Some(format!("the program's result could not be journaled: {error}")))
@@ -1426,6 +1440,7 @@ impl ProgramEngine {
                 },
                 _ => match self.write_journal(step, attempt, program, RESULT_KEY, "failed", &json!({"error": exit["error"]}), None) {
                     Ok(_) => ("failed", Some(failure_reason(&exit["error"]))),
+                    Err(error) if error.code == "program-finalizing" => return Ok(None),
                     Err(error) => {
                         trace.failed();
                         ("failed", Some(format!("the program's failure could not be journaled: {error}")))
@@ -1433,12 +1448,13 @@ impl ProgramEngine {
                 },
             };
             self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
-            Ok(status)
+            Ok(Some(status))
         })?;
-        let Some(status) = written else {
+        let Some(Some(status)) = written else {
             if let Some(reason) = self.left(step, attempt)? {
                 self.cancel_waits(step, attempt, &reason)?;
             }
+            (self.wake)(step);
             return Ok(());
         };
         // A program can end while a child run or ask it started is still open (a lost race):
