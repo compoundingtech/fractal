@@ -258,8 +258,28 @@ impl NativePair {
                 let changed = self.home.changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                if self.home.command_receipt(&command.execution_id).unwrap().is_some_and(|receipt|
-                    matches!(receipt.state, ReceiptState::Settled { outcome: Outcome::Stopped { .. } })) { break; }
+                match self.home.command_receipt(&command.execution_id) {
+                    Ok(Some(receipt)) if matches!(receipt.state,
+                        ReceiptState::Settled { outcome: Outcome::Stopped { .. } }) => break,
+                    Err(error) if error.to_string().contains("result-expired") => {
+                        assert!(self.home.settled_prefix("home", command.binding.epoch).unwrap() >= command.sequence,
+                            "expired closure requires durable terminal checkpoint custody");
+                        assert!(matches!(&command.operation, Operation::Start { .. }),
+                            "reclaimed stopped waits require this exact Start's native closure");
+                        let operation = self.store.remote_runtime_start(&command.execution_id).unwrap().unwrap();
+                        assert!(operation.dispatched && operation.cleanup_verified && operation.applied);
+                        let result = operation.result.unwrap();
+                        assert_eq!(result["verification"], "operation-incarnation");
+                        let incarnation = result["incarnation"].as_str().unwrap();
+                        let binding = self.store.local_session_at(&command.binding.subject, incarnation).unwrap().unwrap();
+                        assert_eq!(binding.start_operation.as_deref(), Some(command.execution_id.as_str()));
+                        assert!(self.store.local_session_retirement_verified(&binding).unwrap(),
+                            "checkpoint alone cannot stand in for positive exact native retirement");
+                        break;
+                    }
+                    Err(error) => panic!("reading exact native closure receipt: {error:#}"),
+                    Ok(_) => {}
+                }
                 changed.await;
             }
         }).await.expect("exact native closure receipt must reach home");
