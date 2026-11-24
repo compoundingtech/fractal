@@ -1,7 +1,7 @@
 //! Actual SQLite journals, authenticated loopback transport and native executor custody.
 //! The seat graph is unavailable throughout Start/Observe/Stop and reconnect recovery.
 use super::*;
-use fractal_peer::light_node::journal::{Admission, CommandDraft, Limits, OperationKind, ReceiptState, Scope};
+use fractal_peer::light_node::journal::{Admission, CommandDraft, Limits, OperationKind, Receipt, ReceiptState, Scope};
 use fractal_peer::light_node::session::{Home, SeatClient, StoreRunEffects};
 use crate::store::local_sessions::{LocalSession, SessionCustody};
 use smallclaims::{fleet::MemberKey, sync::FleetAuth};
@@ -618,8 +618,8 @@ async fn positively_retired_unknown_entry_keeps_its_native_snapshot_through_a_st
     let proof = pending[0].0.custody_proof.as_deref().unwrap();
     assert!(matches!(serde_json::from_str::<NativeProof>(proof).unwrap(), NativeProof::Stop { retired: true, .. }));
     assert!(pair.store.has_current_local_session(&pair.binding.subject).unwrap());
-    assert!(matches!(pair.seat.command_receipt(&start.execution_id).unwrap().unwrap().state,
-        ReceiptState::Settled { outcome: Outcome::Started { .. } }),
+    assert!(matches!(pair.seat.admit(&start).unwrap(),
+        Admission::Duplicate(Receipt { state: ReceiptState::Settled { outcome: Outcome::Started { .. } }, .. })),
         "associated Start must not publish closure before Stop local finalization");
     assert!(matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
         ReceiptState::Settled { outcome: Outcome::Started { .. } }));
@@ -638,8 +638,6 @@ async fn positively_retired_unknown_entry_keeps_its_native_snapshot_through_a_st
     pair.settled(&stop).await;
     pair.stopped(&start).await;
     pair.disconnect().await;
-    assert!(matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
-        ReceiptState::Settled { outcome: Outcome::Stopped { .. } }));
     assert!(pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
 }
 
@@ -791,16 +789,7 @@ async fn connected_unknown_start_recovers_late_native_provenance_and_cancel_with
         ReceiptState::Settled { outcome: Outcome::Started { incarnation } } if incarnation == generation));
     assert!(pair.client.as_ref().is_some_and(|client| !client.is_finished()));
     pair.home.request_cancel(&start.execution_id, "withdraw late native producer").unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            let changed = pair.home.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if pair.home.command_receipt(&start.execution_id).unwrap().is_some_and(|receipt|
-                matches!(receipt.state, ReceiptState::Settled { outcome: Outcome::Stopped { .. } })) { break; }
-            changed.await;
-        }
-    }).await.expect("live connection must physically close the late producer after withdrawal");
+    pair.stopped(&start).await;
     assert!(pair.client.as_ref().is_some_and(|client| !client.is_finished()));
     let local = pair.store.local_session_at(&start.binding.subject, &generation).unwrap().unwrap();
     assert!(pair.store.local_session_retirement_verified(&local).unwrap());
@@ -1032,16 +1021,7 @@ async fn native_helper_exit_event_withdraws_remote_producer_without_fleet_graph_
     pair.runtime.pty().unwrap().stop_if("native-launcher", Some(&generation)).unwrap();
     pair.executor.session_authority_changed().unwrap();
     pair.connect();
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            let changed = pair.home.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
-                ReceiptState::Settled { outcome: Outcome::Stopped { .. } }) { break; }
-            changed.await;
-        }
-    }).await.expect("native registry events must fence and retire the helper's child");
+    pair.stopped(&start).await;
     pair.disconnect().await;
     assert!(pair.store.local_session_retirement_verified(&child).unwrap());
     assert!(pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
