@@ -25,13 +25,9 @@ pub struct LightNodeScope {
 
 impl LightNodeScope {
     pub fn validate(&self) -> Result<()> {
-        if self.operations.contains(&LightNodeOperation::Start) {
-            return Err(crate::model::FractalError::new("light-node-start-not-supported",
-                "this session slice supports observe and stop only; graph-free remote start requires a separate authorization boundary").into());
-        }
         anyhow::ensure!((1..=256).contains(&self.subjects.len()),
             "a light-node grant needs between 1 and 256 exact subjects");
-        anyhow::ensure!((1..=2).contains(&self.operations.len()),
+        anyhow::ensure!((1..=3).contains(&self.operations.len()),
             "a light-node grant needs explicit operations");
         let mut subjects = BTreeSet::new();
         for subject in &self.subjects {
@@ -172,14 +168,10 @@ mod tests {
     }
 
     #[test]
-    fn start_grants_and_both_configuration_roles_are_explicitly_refused() {
+    fn start_grants_are_explicit_scopes_for_both_configuration_roles() {
         let mut authority = grant();
         authority.grant.operations.push(LightNodeOperation::Start);
-        let assert_unsupported = |error: anyhow::Error| {
-            assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,
-                "light-node-start-not-supported");
-        };
-        assert_unsupported(authority.validate().unwrap_err());
+        authority.validate().unwrap();
         for (node, config) in [
             ("example-home", LightNodeSessionConfig::Home {
                 listen: "127.0.0.1:1234".parse().unwrap(), grants: vec![authority.clone()],
@@ -189,7 +181,7 @@ mod tests {
             }),
         ] {
             let decoded: LightNodeSessionConfig = serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
-            assert_unsupported(decoded.validate_for(node).unwrap_err());
+            decoded.validate_for(node).unwrap();
         }
     }
 }

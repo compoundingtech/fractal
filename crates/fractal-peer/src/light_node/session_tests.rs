@@ -20,7 +20,7 @@ impl Fixture {
         let root=tempfile::tempdir().unwrap();
         let home_key=Arc::new(MemberKey::generate().unwrap().0);
         let seat_key=Arc::new(MemberKey::generate().unwrap().0);
-        let selected=Selection { home:"example-home".into(),home_key:home_key.public().into(),host:"example-seat".into(),host_key:seat_key.public().into(),epoch:1,grant:Scope {subjects:vec!["agent/example/worker".into()],operations:vec![OperationKind::Observe,OperationKind::Stop]} };
+        let selected=Selection { home:"example-home".into(),home_key:home_key.public().into(),host:"example-seat".into(),host_key:seat_key.public().into(),epoch:1,grant:Scope {subjects:vec!["agent/example/worker".into()],operations:vec![OperationKind::Start,OperationKind::Observe,OperationKind::Stop]} };
         let home_auth=FleetAuth::test("light-session-tests",&[7;32]).with_member_key(Some(home_key));
         let seat_auth=FleetAuth::test("light-session-tests",&[7;32]).with_member_key(Some(seat_key.clone()));
         let home_journal=Journal::open(&root.path().join("home.sqlite3"),Limits::default()).unwrap();
@@ -455,4 +455,29 @@ async fn finalization_retry_requires_real_progress_and_never_retries_unknown_cus
     assert!(!may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,(3,f.seat_journal.local_change_count().unwrap())).unwrap());
     assert!(f.seat_journal.recoverable().unwrap().is_empty());
     f.stop().await;
+}
+
+#[tokio::test]
+async fn signed_start_replay_and_ordered_withdrawal_retain_sqlite_custody() {
+    let f=Fixture::new().await;
+    let command=f.home_journal.enqueue(super::super::journal::start_tests::start_draft(&f.selected,"decision/signed-start",1)).unwrap();
+    let mut socket=f.connect().await; f.hello(&mut socket).await;
+    client_send(&mut socket,Frame::Drained {}).await.unwrap();
+    let Frame::Command {command:delivered}=next(&mut socket).await else {panic!("expected signed Start")};
+    assert_eq!(delivered.execution_id,command.execution_id);
+    f.seat_journal.admit(&delivered).unwrap();
+    f.home_journal.request_cancel(&command.execution_id,"graph withdrawal").unwrap();
+    let Frame::Cancel {execution_id,reason}=next(&mut socket).await else {panic!("expected ordered withdrawal")};
+    assert_eq!(execution_id,command.execution_id);
+    f.seat_journal.cancel_or_revoke(&execution_id,reason,|_,_,_|panic!("preentry withdrawal has no native work")).unwrap();
+    assert!(f.home_journal.enqueue(super::super::journal::start_tests::start_draft(&f.selected,"decision/too-early",2)).is_err());
+    for receipt in f.seat_journal.pending_receipts().unwrap() {
+        let sequence=receipt.receipt_sequence;
+        client_send(&mut socket,Frame::Receipt {receipt}).await.unwrap();
+        assert!(matches!(next(&mut socket).await,Frame::ReceiptAck {through} if through==sequence));
+        f.seat_journal.acknowledge_receipts(sequence).unwrap();
+    }
+    assert!(matches!(f.seat_journal.admit(&command).unwrap(),Admission::Duplicate(_)));
+    assert!(f.home_journal.enqueue(super::super::journal::start_tests::start_draft(&f.selected,"decision/next",2)).is_ok());
+    socket.socket.close(None).await.unwrap(); f.stop().await;
 }

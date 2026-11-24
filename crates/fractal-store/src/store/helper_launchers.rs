@@ -319,14 +319,17 @@ impl Store {
         Ok(incarnation.to_owned())
     }
 
+    /// Exact home-validated helper lifetime, independent of its optional credential binding.
+    pub fn helper_launcher_lifetime(&self, subject: &str) -> Result<Option<(String, String)>> {
+        match self.helper_launcher_binding(subject)? {
+            Some(binding) => Ok(Some((binding.launcher, binding.incarnation))),
+            None => lifetime_binding_at(&self.readers.get(), subject),
+        }
+    }
+
     /// A helper cannot outlive the exact launcher runtime captured at creation.
     pub fn helper_launcher_alive(&self, subject: &str) -> Result<bool> {
-        let binding = self.helper_launcher_binding(subject)?;
-        let lifetime = match binding {
-            Some(binding) => Some((binding.launcher, binding.incarnation)),
-            None => lifetime_binding_at(&self.readers.get(), subject)?,
-        };
-        let Some((launcher, incarnation)) = lifetime else { return Ok(true) };
+        let Some((launcher, incarnation)) = self.helper_launcher_lifetime(subject)? else { return Ok(true) };
         let Some((actual, _)) = launcher_runtime(self, &launcher)? else { return Ok(false) };
         let fields = actual.get("fields").unwrap_or(&actual);
         Ok(fields["status"] == "running" && fields["incarnation_id"] == incarnation)

@@ -15,7 +15,7 @@ use crate::config::LIGHT_NODE_SESSION_PATH;
 use crate::store::run_credentials::local::AuthorityChange;
 
 const MAX_FRAME: usize = 64 * 1024;
-const CAPABILITIES: [&str; 6] = ["commands-v1", "receipts-v1", "joint-checkpoints-v1", "run-effects-v1", "authority-v1", "signed-channel-v1"];
+const CAPABILITIES: [&str; 7] = ["commands-v1", "receipts-v1", "joint-checkpoints-v1", "run-effects-v1", "authority-v1", "signed-channel-v1", "start-authorizations-v1"];
 type RawClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type ClientSocket = AuthenticatedSocket<RawClientSocket>;
 type ServerSocket = AuthenticatedSocket<WebSocket>;
@@ -90,8 +90,8 @@ fn websocket_key(headers:&HeaderMap)->Result<&str> {
 }
 type Work = Pin<Box<dyn Future<Output = (String, Result<Outcome>)> + Send>>;
 
-/// Entry must reuse current native admission/custody, not launch from a decoded payload
-/// directly. Recovery resolves the existing operation/incarnation and must never relaunch.
+/// Entry consumes immutable locally admitted Start facts and reuses native resource/custody
+/// gates. Recovery resolves existing operation/incarnation custody and must never relaunch.
 pub trait Executor: Send + Sync + 'static {
     fn enter(&self, command: &Command, authority: &rusqlite::Connection) -> Result<String>;
     fn cancel(&self, command: &Command, authority: &rusqlite::Connection, reason: &str) -> Result<()>;
@@ -610,6 +610,13 @@ impl SeatClient {
                     let (execution,result) = finished;
                     match result {
                         Ok(outcome) => {
+                            // A launch result can race an ordered withdrawal while its future
+                            // runs. Never publish that stale positive proof as withdrawal closure.
+                            if matches!(&outcome, Outcome::Started { .. }) && self.journal.recoverable()?.iter().any(|recovery|
+                                recovery.command.execution_id == execution && recovery.cancellation_reason.is_some()) {
+                                attempted.remove(&execution);
+                                continue;
+                            }
                             self.journal.complete(&execution,outcome)?;
                             attempted.remove(&execution); cancelled_native.remove(&execution);
                         }
