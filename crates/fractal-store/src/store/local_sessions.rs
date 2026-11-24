@@ -28,6 +28,13 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         PRIMARY KEY(subject,incarnation)
     ) WITHOUT ROWID;
     CREATE UNIQUE INDEX IF NOT EXISTS local_session_current ON local_session_custody(subject) WHERE active=1;")?;
+    let has_retirement_proof: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_session_custody') WHERE name='native_retirement_verified')",
+        [], |row| row.get(0))?;
+    if !has_retirement_proof {
+        // Existing authoritative bindings survive the additive upgrade without acquiring proof.
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h643365c9c213 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE local_session_custody ADD COLUMN native_retirement_verified INTEGER NOT NULL DEFAULT 0", [])?;
+    }
     Ok(())
 }
 
@@ -66,7 +73,9 @@ impl Store {
                 "owned custody requires an exact native generation");
         }
         let mut connection = self.connection.write();
-        let tx = connection.transaction()?;
+        // Custody is executor-owned, not a graph projection. Keep the exclusive writer
+        // and atomic generation switch, without preparing graph COMMIT finalizers.
+        let tx = Connection::transaction(&mut connection)?;
         let prior: Option<Option<String>> = tx.query_row(
             "SELECT detached_by FROM local_session_custody WHERE subject=?1 AND incarnation=?2",
             params![binding.subject, binding.incarnation], |row| row.get(0)).optional()?;
@@ -77,13 +86,35 @@ impl Store {
         }
         tx.execute(/* sqlite-large-value: allow-for-now lv-hdce8a783bfb6 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET active=0 WHERE subject=?1 AND incarnation<>?2 AND active=1",
             params![binding.subject, binding.incarnation])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h8252aefb7494 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)
-            ON CONFLICT(subject,incarnation) DO UPDATE SET body=excluded.body,active=1
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h1298428266a6 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)
+            ON CONFLICT(subject,incarnation) DO UPDATE SET body=excluded.body,active=1,native_retirement_verified=0
             WHERE local_session_custody.detached_by IS NULL
               AND (local_session_custody.body<>excluded.body OR local_session_custody.active<>1)",
             params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Persist only a positively verified whole-scope stop, before reporting native success.
+    /// This is not the command completion receipt and does not settle custody.
+    pub fn verify_local_session_retirement(&self, binding: &LocalSession) -> Result<()> {
+        anyhow::ensure!(binding.custody == SessionCustody::Owned, "borrowed custody cannot retire its native runtime");
+        let changed = self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h31a948e882b8 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET native_retirement_verified=1
+             WHERE subject=?1 AND incarnation=?2 AND body=?3 AND active=1
+               AND custody_settled=0 AND detached_by IS NULL",
+            params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
+        anyhow::ensure!(changed == 1, "native retirement custody changed before its proof was recorded");
+        Ok(())
+    }
+
+    /// Query exact retained native proof without signalling or consulting graph projections.
+    pub fn local_session_retirement_verified(&self, binding: &LocalSession) -> Result<bool> {
+        if binding.custody != SessionCustody::Owned { return Ok(false); }
+        Ok(self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_session_custody
+             WHERE subject=?1 AND incarnation=?2 AND body=?3 AND native_retirement_verified=1)",
+            params![binding.subject, binding.incarnation, serde_json::to_string(binding)?], |row| row.get(0))?)
     }
 
     /// Historical, detached and positively closed rows are retention, not local routing authority.
