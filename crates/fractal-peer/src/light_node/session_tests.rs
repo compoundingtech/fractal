@@ -414,3 +414,42 @@ async fn replayed_http_proof_without_fresh_channel_proof_cannot_reserve_the_seat
     assert_eq!(f.hello(&mut legitimate).await,(0,0),"only a fresh signed Hello can acquire exclusive seat custody");
     drop(unproven); f.stop().await;
 }
+
+#[tokio::test]
+async fn finalization_retry_requires_real_progress_and_never_retries_unknown_custody() {
+    use futures_util::FutureExt;
+    let f=Fixture::new().await;
+    let binding=f.binding(); f.seat_journal.offer_execution(&binding).unwrap();
+    let command=f.home_journal.enqueue(CommandDraft {decision_id:"decision/live-finalization".into(),binding,operation:Operation::Stop}).unwrap();
+    f.seat_journal.admit(&command).unwrap();
+    // Journal fault-boundary fixture: actual native closure is covered by the
+    // production adapter's connected Store-failure test, not a replacement executor.
+    f.seat_journal.enter(&command.execution_id,|_,_|Ok("custody/live-finalization".into())).unwrap();
+    let mut attempted=BTreeMap::new();
+    let started=(1,f.seat_journal.local_change_count().unwrap());
+    attempted.insert(command.execution_id.clone(),started);
+    assert!(!may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,(2,started.1)).unwrap(),"incoming progress must never reenter unknown physical custody");
+    let outcome=Outcome::Stopped {incarnation:command.binding.incarnation.clone()};
+    f.seat_journal.complete_requiring_local_finalization(&command.execution_id,outcome.clone(),"retired/live-finalization").unwrap();
+    let own_progress=(1,f.seat_journal.local_change_count().unwrap());
+    assert!(may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,own_progress).unwrap(),"the first terminal commit permits one idempotent finalization retry");
+    attempted.insert(command.execution_id.clone(),own_progress);
+    let wake=f.seat_journal.changed.notified(); tokio::pin!(wake); wake.as_mut().enable();
+    f.seat_journal.complete_requiring_local_finalization(&command.execution_id,outcome.clone(),"retired/live-finalization").unwrap();
+    let unchanged=(1,f.seat_journal.local_change_count().unwrap());
+    assert_eq!(unchanged,own_progress);
+    assert!(wake.as_mut().now_or_never().is_none(),"same-proof completion must neither write nor self-notify");
+    assert!(!may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,unchanged).unwrap());
+    let mut socket=f.connect().await; f.hello(&mut socket).await;
+    client_send(&mut socket,Frame::Drained {}).await.unwrap();
+    // A valid incoming frame received while an attempt is in flight must remain
+    // visible when it finishes, even if its Notify was already consumed.
+    let arrived=(2,unchanged.1);
+    assert!(may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,arrived).unwrap());
+    attempted.insert(command.execution_id.clone(),arrived);
+    assert!(!may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,arrived).unwrap());
+    f.seat_journal.finish_local_finalization(&command.execution_id).unwrap();
+    assert!(!may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,(3,f.seat_journal.local_change_count().unwrap())).unwrap());
+    assert!(f.seat_journal.recoverable().unwrap().is_empty());
+    f.stop().await;
+}

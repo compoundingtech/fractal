@@ -451,6 +451,16 @@ impl Journal {
         rows.map(|row| { let (payload, custody_proof, cancellation_reason) = row?; Ok(Recovery { command: serde_json::from_str(&payload)?, custody_proof, cancellation_reason }) }).collect()
     }
 
+    /// This connection's write count, paired with authenticated frame progress,
+    /// prevents idle or self-notification loops while allowing live finalization retry.
+    pub fn local_change_count(&self)->Result<u64> {
+        Ok(self.lock()?.total_changes())
+    }
+
+    pub fn is_local_finalization_pending(&self,execution:&str)->Result<bool> {
+        Ok(self.lock()?.query_row("SELECT local_finalization>0 FROM commands WHERE side='seat' AND execution=?1",[execution],|row|row.get(0)).optional()?.unwrap_or(false))
+    }
+
     /// Retry only an exact, freshly proven still-live Stop after a pre-proof crash.
     /// The adapter must recheck that same generation inside the callback. Unlike fresh
     /// entry, withdrawal here cannot prove that an earlier process never signalled it.

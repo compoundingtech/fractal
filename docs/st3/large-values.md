@@ -1221,10 +1221,10 @@ flow record changes are accepted by this refresh.
 ### Light-node observe/stop session custody (#7107)
 
 Inventory review: [authenticated session custody](https://github.com/compoundingtech/fractal/pull/7107).
-The owning maintainers are the producer modules listed below. These 58
+The owning maintainers are the producer modules listed below. These 60
 transitional site registrations cover Phase 2 peer/session custody and its
-native/binary fixtures only, not the separate local-authority/ProgramEngine
-inventory. The proposal helper supplied fingerprints and declaration metadata;
+native/binary and dispatch-persistence fixtures, not the separate Phase 1
+local-authority inventory. The proposal helper supplied fingerprints and declaration metadata;
 acceptance preserves the inventory's existing `reviewed_base` and manual flows.
 All ten added declaration records retain `value_size_proven: false`.
 
@@ -1291,6 +1291,17 @@ constructing a fake graph effect. The tracing obligation must account for the
 backup destination key and full copied representation while preserving exact
 history. This registration introduces no new size proof or general exemption
 for backup/import producers.
+
+The `fractal_reconcile::reconcile::program::tests` maintainer owns
+`lv-ha7ab904670ea` and `lv-hb943a6b8edb9`. The temporary trigger refuses exact
+`program.attempt.trace` or `step-run.state` claim inserts, then is dropped to
+exercise persistence-failure recovery without replacing the real writer.
+These Phase 2 dispatch-nonce fixtures retain the existing claim representation;
+the trigger's formatted kind is restricted to those two literals. The
+`prepare-body-and-predecessor-values` and
+`bound-or-reference-values-and-reclamation` obligations preserve exact claim
+and dispatch identities when changing writer preparation or cleanup. Temporary
+test DDL and fixed trigger literals do not prove a physical value-size bound.
 
 ### Model-return admission ledger (#6803)
 

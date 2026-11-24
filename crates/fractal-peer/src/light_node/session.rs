@@ -1,6 +1,6 @@
 //! A seat opens one authenticated, pinned, bidirectional connection to its selected home.
 //! Transport loss never tears down a native runtime or discards durable custody.
-use std::{collections::BTreeSet, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::{BTreeMap,BTreeSet}, pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::{Result, bail, ensure};
 use axum::{Router, extract::{OriginalUri, State, ws::{Message as ServerMessage, WebSocket, WebSocketUpgrade}}, http::{HeaderMap, StatusCode}, response::{IntoResponse as _, Response}, routing::get};
@@ -534,7 +534,7 @@ impl SeatClient {
         let mut closing_sent = self.journal.closing()?;
         if closing_sent { client_send(socket,Frame::Closing {}).await?; }
         client_send(socket, Frame::Drained {}).await?;
-        let mut attempted = BTreeSet::new();
+        let mut attempted = BTreeMap::new();
         let mut sent_requests = BTreeSet::new();
         let mut cancelled_native = BTreeSet::new();
         let mut ready_sent=false;
@@ -577,7 +577,7 @@ impl SeatClient {
             }
             if work.is_none() {
                 for command in self.journal.undispatched()? {
-                    if attempted.contains(&command.execution_id) { continue; }
+                    if attempted.contains_key(&command.execution_id) { continue; }
                     // Entry errors retain the conservative durable fence. The recovery adapter
                     // must prove what happened, including a native last-moment refusal.
                     if let Err(error) = self.journal.enter(&command.execution_id,|command,authority| self.executor.enter(command,authority)) {
@@ -585,8 +585,10 @@ impl SeatClient {
                     }
                     break;
                 }
-                if let Some(recovery) = self.journal.recoverable()?.into_iter().find(|recovery| !attempted.contains(&recovery.command.execution_id)) {
-                    let id = recovery.command.execution_id.clone(); attempted.insert(id.clone());
+                let progress=(socket.channel.received,self.journal.local_change_count()?);
+                for recovery in self.journal.recoverable()? {
+                    if !may_attempt_recovery(&self.journal,&attempted,&recovery.command.execution_id,progress)? {continue;}
+                    let id = recovery.command.execution_id.clone(); attempted.insert(id.clone(),progress);
                     let executor = self.executor.clone(); let journal = self.journal.clone();
                     work = Some(Box::pin(async move {
                         let result = async {
@@ -597,6 +599,7 @@ impl SeatClient {
                         }.await;
                         (id,result)
                     }));
+                    break;
                 }
             }
             tokio::select! {
@@ -644,6 +647,16 @@ impl SeatClient {
                 }
             }
         }
+    }
+}
+
+// Never retry unknown physical custody merely because another event happened.
+// Settled native finalization is idempotent and may retry on actual new progress.
+fn may_attempt_recovery(journal:&Journal,attempted:&BTreeMap<String,(u64,u64)>,execution:&str,progress:(u64,u64))->Result<bool> {
+    match attempted.get(execution) {
+        None=>Ok(true),
+        Some(previous) if *previous!=progress=>journal.is_local_finalization_pending(execution),
+        Some(_)=>Ok(false),
     }
 }
 

@@ -1147,13 +1147,13 @@ export default {
     fn reject_claim(&self, kind: &str) {
         assert!(["program.attempt.trace", "step-run.state"].contains(&kind));
         self.engine.store.connection.write().execute_batch(&format!(
-            "CREATE TEMP TRIGGER reject_program_persistence BEFORE INSERT ON claims
+            /* sqlite-large-value: allow-for-now lv-ha7ab904670ea owner=fractal_reconcile::reconcile::program::tests TODO=prepare-body-and-predecessor-values */ "CREATE TEMP TRIGGER reject_program_persistence BEFORE INSERT ON claims
              WHEN NEW.kind='{kind}' BEGIN SELECT RAISE(ABORT, 'program persistence refused'); END;"
         )).unwrap();
     }
 
     fn allow_claims(&self) {
-        self.engine.store.connection.write().execute_batch("DROP TRIGGER reject_program_persistence").unwrap();
+        self.engine.store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hb943a6b8edb9 owner=fractal_reconcile::reconcile::program::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_program_persistence").unwrap();
     }
 }
 

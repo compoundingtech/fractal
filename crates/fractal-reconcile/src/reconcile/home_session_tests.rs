@@ -324,11 +324,11 @@ async fn a_live_store_finalization_error_cannot_send_or_reclaim_the_native_stop_
     assert_eq!(pair.home.settled_prefix("home", pair.selection.epoch).unwrap(), 0);
     assert!(pair.seat.checkpoint("seat", pair.selection.epoch, stop.sequence).is_err());
     assert_eq!(pair.seat.pending_terminal_results().unwrap().len(), 1);
-    pair.disconnect().await;
 
     pair.store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h40e04f0e7f4e owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_native_finalization;").unwrap();
-    pair.connect();
+    let followup = pair.home.enqueue(pair.draft("observe-after-native-finalization-repair", Operation::Observe)).unwrap();
     pair.settled(&stop).await;
+    pair.settled(&followup).await;
     pair.disconnect().await;
     assert!(!pair.store.has_current_local_session(&pair.binding.subject).unwrap());
     assert!(pair.seat.pending_terminal_results().unwrap().is_empty());
