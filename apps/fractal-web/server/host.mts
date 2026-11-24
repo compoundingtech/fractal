@@ -5,6 +5,7 @@ import { Tracer } from 'effect'
 import { createFractalWebServer, type FractalWebServer, type AdmissionIdentity } from './core.mts'
 import { checkPublisherAuthorization, checkTagAuthorization } from './tagAuthorization.mts'
 import { readAuthorization, type SecretFiles } from './authorization.mts'
+import { usageHistoryProducer, type UsageHistoryProducer } from './usageHistory.mts'
 
 /**
  * Loopback trust boundary: only the identity-stripping published-surface filter is a legitimate
@@ -102,6 +103,8 @@ export interface HostConfig {
   readonly authorization: string
   readonly tagAuthorization: string | undefined
   readonly deploymentId: string
+  /** Interim usage-history producer from `WF_USAGE_HISTORY_URL`; unset registers no relay. */
+  readonly usageHistory?: UsageHistoryProducer | undefined
 }
 
 const loopbackHosts = new Set(['127.0.0.1', '::1', 'localhost'])
@@ -140,6 +143,7 @@ export const readHostConfig = (env: NodeJS.ProcessEnv, files?: SecretFiles, uid:
     authorization,
     tagAuthorization,
     deploymentId: env.WF_DEPLOYMENT_ID?.trim() || new URL(origin).host,
+    usageHistory: usageHistoryProducer(env.WF_USAGE_HISTORY_URL),
   }
 }
 
@@ -158,6 +162,7 @@ export const startHost = async (config: HostConfig, readText: (path: string) => 
     tracer: Tracer.make({ span: (options) => new Tracer.NativeSpan(options) }),
     gateway,
     identity: { deploymentId: config.deploymentId, buildIdentity: buildIdentity as never },
+    usageHistory: config.usageHistory,
   })
   served.server.once('listening', () => {
     const address = served.server.address()
