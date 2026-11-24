@@ -117,6 +117,40 @@ export default githubWorkflow(scopeLinuxNixSandbox({
         }
       ]
     },
+    'publish-ghostty-cache': {
+      name: 'Publish Ghostty dependency cache',
+      needs: ['publish-x86_64-linux'],
+      if: "github.repository == 'compoundingtech/fractal' && github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 30,
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        installNixStep({ binaryCaches: readOnlyBinaryCaches }),
+        cachixPushStep({
+          jobIf: "github.repository == 'compoundingtech/fractal' && github.event_name == 'push' && github.ref == 'refs/heads/main'",
+          triggers: ['push'],
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}',
+          step: {
+            name: 'Realize and publish the two PTY contract outputs',
+            env: { CACHE_NAME: 'overeng-effect-utils' },
+            shell: 'bash',
+            run: `set -euo pipefail
+if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+  echo "Ghostty cache publishing skipped: CACHIX_AUTH_TOKEN is absent."
+  exit 0
+fi
+# Use Fractal's locked PTY input, including Fractal's nixpkgs follows.
+lib_drv=$(nix eval --impure --raw --expr 'let f = builtins.getFlake ("git+file://" + builtins.getEnv "GITHUB_WORKSPACE"); in f.inputs.pty.packages.x86_64-linux.libghostty-vt.drvPath')
+# PTY keeps the contract-hashed fixed-output derivation private. Select its direct input,
+# rather than copying the fetch recipe or pinning a store path outside the contract.
+deps_drv=$(nix derivation show "$lib_drv" | jq -er '[.derivations[] | (.inputDrvs // .inputs.drvs) | keys[] | select(test("-ghostty-[^-]+-zig-deps\\\\.drv$"))] | if length == 1 then .[0] | if startswith("/nix/store/") then . else "/nix/store/" + . end else error("expected exactly one Ghostty Zig dependency input") end')
+nix build --no-link --print-out-paths "$deps_drv^out" "$lib_drv^out" > "$RUNNER_TEMP/ghostty-cache.paths"
+cachix=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#cachix)
+"$cachix/bin/cachix" push "$CACHE_NAME" < "$RUNNER_TEMP/ghostty-cache.paths"`,
+          },
+        }),
+      ],
+    },
     ...readyPRJobs({ jobs: {
     "nix-release-x86_64-linux": {
       // Nathan/CoS 2026-10-15: optional Nix must not occupy merge-serving workers.
