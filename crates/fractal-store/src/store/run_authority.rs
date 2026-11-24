@@ -133,6 +133,7 @@ pub fn admit_reach_tx(
     run_subject: &str,
     action: &str,
 ) -> Result<(), FractalError> {
+    run_credentials::request_context::admit_tx(transaction)?;
     let Some(run) = actor.and_then(|actor| actor.strip_prefix("mission-run/")) else { return Ok(()) };
     let target = run_subject.strip_prefix("mission-run/").unwrap_or(run_subject);
     refuse_foreign_run_tx(transaction, run, target, &format!("{action} `mission-run/{target}`"))
@@ -249,6 +250,7 @@ pub(super) fn admit_tx(
     subject: &str,
     fields: &BTreeMap<String, Value>,
 ) -> Result<(), FractalError> {
+    run_credentials::request_context::admit_tx(transaction)?;
     let Some(actor) = actor.filter(|actor| actor.starts_with("mission-run/")) else { return Ok(()) };
     let run = actor.trim_start_matches("mission-run/");
     if let Some(target) = touched_run_tx(transaction, kind, subject, fields)? {
