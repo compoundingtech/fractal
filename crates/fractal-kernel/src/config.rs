@@ -13,6 +13,11 @@ use crate::model::PlannerSpec;
 
 pub mod changes;
 pub mod model_return;
+mod light_node;
+pub use light_node::{
+    LIGHT_NODE_SESSION_PATH, LightNodeGrant, LightNodeOperation, LightNodeScope,
+    LightNodeSessionConfig,
+};
 mod client;
 
 /// The per-host switch for seat lanes.
@@ -117,6 +122,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub peer_listen_allow_plain_http: bool,
     pub peers: Vec<PeerConfig>,
+    /// Opt-in Phase 2 execution session; absent leaves full-node services unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_node_session: Option<LightNodeSessionConfig>,
     /// Default harness configuration for new planning sessions only.
     pub planner: PlannerSpec,
     /// The local observation log of this node.
@@ -1037,6 +1045,7 @@ impl Default for Config {
             work_root: None,
             peer_listen_allow_plain_http: false,
             peers: Vec::new(),
+            light_node_session: None,
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
             readiness_slo: None,
@@ -1288,6 +1297,12 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(session) = &self.light_node_session {
+            session.validate_for(&self.node)?;
+            anyhow::ensure!(self.fleet_id.is_some() && self.shared_secret_file.is_some()
+                && self.fleet.is_some(),
+                "light-node session needs the admitted local fleet signing identity");
+        }
         if let Some(usage_limits) = &self.usage_limits {
             usage_limits.validate()?;
         }
