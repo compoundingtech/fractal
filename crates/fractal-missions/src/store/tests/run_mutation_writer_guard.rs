@@ -107,8 +107,8 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [2, 0, 0, 2, 0],
         },
         Exception {
-            reason: "run_projection_pending, claim_ids_at_after_first_row and claims_summary_at pin read-only snapshots; they acquire no writer",
-            counts: [0, 0, 0, 0, 3],
+            reason: "run_projection_pending, pending_projection_runs, claim_ids_at_after_first_row and claims_summary_at pin read-only reader snapshots; they acquire no writer",
+            counts: [0, 0, 0, 0, 4],
         },
         Exception {
             reason: "apply_as_impl raw publication branch is reachable only when intent.mission_runs is empty; run mutations use the all-runs wrapper",
