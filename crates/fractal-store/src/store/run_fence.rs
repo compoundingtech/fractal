@@ -29,8 +29,9 @@ fn execute_with_turn_hook<T: Send, E: From<FractalError> + Send>(
     let mut action = Some(action);
     // The savepoint is gone, and the batched writer has returned, before we take
     // the projection gate. No callback or persisted request preparation runs on NeedsDrain.
-    // A caller's own stage scope keeps the hold; otherwise this one names the fence's parts.
-    let stages = holds::Stages::begin_unless_staged();
+    // The batched attempt gets its own stage scope, so its stages never enter a caller's scope
+    // and the caller's later lends record as before. Dropping it restores the caller's scope.
+    let stages = holds::Stages::begin();
     let attempt = graph.connection.batched(|transaction| {
         if holds::stage("fence-pending", || pending(transaction, fence)).map_err(E::from)?.is_some() {
             return Ok(Attempt::NeedsDrain);

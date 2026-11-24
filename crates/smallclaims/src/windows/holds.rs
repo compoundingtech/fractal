@@ -724,11 +724,6 @@ impl Stages {
         Self { clock, previous }
     }
 
-    /// Begin a scope unless this thread is already in one, whose stages then keep the hold.
-    pub fn begin_unless_staged() -> Option<Self> {
-        STAGES.with(|stages| stages.borrow().is_none()).then(Self::begin)
-    }
-
     /// End the open stage and begin `stage`, returning the stage it ended, so a callback can be
     /// charged to its own stage and the caller's resumed after it.
     pub fn enter(&self, stage: &'static str) -> Option<&'static str> {
