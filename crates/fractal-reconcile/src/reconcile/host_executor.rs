@@ -7,6 +7,7 @@ use super::start_jobs::PreparedStart;
 use crate::RuntimeStartsStore;
 use crate::store::{RuntimeStartAdmission, RuntimeStartOperation};
 
+pub(super) mod resource_commands;
 
 const ENVIRONMENT_CAPTURE_ATTEMPTS: u32 = 3;
 
