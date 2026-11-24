@@ -278,11 +278,27 @@ is retained independently from applied custody; local-session finalization must
 succeed before the remote start is applied or either associated terminal receipt
 can be transmitted, including during reopened-journal recovery.
 
+Finite remote admission authenticates the immutable lane request against the
+admitted, undispatched native Start before enrolling canonical resource membership
+in native custody. The membership's durable `nativeCustody` reader arm keeps
+admission, physical preparation/release and exact-root retirement in owner-local
+transactions without graph reads or projection finalizers. It preserves the same
+request, parent/child owner and grant; it does not create replacement resource
+authority. Native changes enqueue the existing durable resource-admission feed.
+A full-node publication cut drains that feed even after prior coverage completed,
+atomically publishing the actual state and reconciliation invalidations before
+removing its pending entry. Ordinary memberships retain synchronous graph
+publication. The inherited fixture establishes its genuine parent and sibling
+roots before disabling graph tables; remote child execution and retirement still
+run with those tables unavailable.
+
 Existing authoritative session rows survive the additive authorization-table
 upgrade. Native producer custody remains in `local_runtime_starts`; current readers
 route remote records to session recovery rather than graph adoption. Do not roll
-an enabled journal back to readers that lack these authority/custody fences:
-retain state, drain under the original epoch and roll forward. Unconfigured full
+an enabled journal or `nativeCustody` membership back to readers that lack these
+authority/custody fences: retain state, drain under the original epoch and roll
+forward. Old readers must not take ownership of unresolved native-custody rows.
+Unconfigured full
 nodes retain their graph admission and existing native behavior. This is isolated
 execution support, not production cutover or a CPU/offload measurement.
 

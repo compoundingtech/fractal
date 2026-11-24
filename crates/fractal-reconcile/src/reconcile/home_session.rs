@@ -197,7 +197,7 @@ impl NativeSessionExecutor {
             anyhow::ensure!(request.host == reconciler.host, "finite Start names another resource host");
             reconciler.ensure_resource_authority()?;
             let fit = reconciler.remote_resource_lane_fit(&request)?;
-            anyhow::ensure!(matches!(reconciler.store.request_resource_membership(&request, fit,
+            anyhow::ensure!(matches!(reconciler.store.request_native_resource_membership(&command.execution_id, &request, fit,
                 u64::try_from(now_ms()).unwrap_or(u64::MAX))?,
                 crate::store::resource_membership::Admission::Admitted(_)),
                 "native finite resource membership was not admitted");

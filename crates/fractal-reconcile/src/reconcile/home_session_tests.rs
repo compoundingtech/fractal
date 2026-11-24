@@ -80,6 +80,11 @@ impl NativePair {
 
     #[cfg(target_os = "linux")]
     async fn for_finite_start() -> Self {
+        Self::for_finite_start_with_setup(|_| {}).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn for_finite_start_with_setup(pregraph: impl FnOnce(&Self)) -> Self {
         let environment = std::env::vars().collect::<BTreeMap<_, _>>();
         let binary = fractal_runtime::resolve_executable("st3", &environment)
             .expect("native finite acceptance requires the built real st3 executable on PATH");
@@ -88,17 +93,26 @@ impl NativePair {
             outside: fractal_runtime::host::outside_lane_memory,
             burst_lane: Some(seat_admission::BURST_LANE),
         };
-        Self::with_setup(SessionCustody::Owned, false, |executor, _store| {
+        Self::with_pregraph_setup(SessionCustody::Owned, false, |executor, _store| {
             let mut executor = executor.with_lane_host(Some(lane_host));
             executor.st_binary = Some(binary);
             executor
-        }).await
+        }, pregraph).await
     }
 
     async fn with_setup(
         custody: SessionCustody,
         launch_existing: bool,
         setup: impl FnOnce(Reconciler<NativeRuntime>, &Store) -> Reconciler<NativeRuntime>,
+    ) -> Self {
+        Self::with_pregraph_setup(custody, launch_existing, setup, |_| {}).await
+    }
+
+    async fn with_pregraph_setup(
+        custody: SessionCustody,
+        launch_existing: bool,
+        setup: impl FnOnce(Reconciler<NativeRuntime>, &Store) -> Reconciler<NativeRuntime>,
+        pregraph: impl FnOnce(&Self),
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let home_key = Arc::new(MemberKey::generate().unwrap().0);
@@ -152,8 +166,6 @@ impl NativePair {
             epoch: selection.epoch, run: None,
         });
         let driver = Arc::new(NativeSessionExecutor::new(executor.clone()));
-        store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hd36c1be68e80 owner=fractal_reconcile::reconcile::home_session_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE claims RENAME TO unavailable_claims;
-            ALTER TABLE desired RENAME TO unavailable_desired;").unwrap();
         let graph = Arc::new(Store::open(&root.path().join("home-graph.sqlite3"), selection.home.clone()).unwrap());
         let home_auth = FleetAuth::test("native-session-tests", &[7; 32]).with_member_key(Some(home_key));
         let seat_auth = FleetAuth::test("native-session-tests", &[7; 32]).with_member_key(Some(seat_key));
@@ -164,6 +176,11 @@ impl NativePair {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let mut pair = Self { root, selection, home, seat, store, graph, runtime, executor, driver, binding, seat_auth, endpoint,
             home_service, server, client: None, stop: None };
+        // Full-node fixtures may admit parent memberships and launch their native
+        // roots, but every remote operation below must run without graph tables.
+        pregraph(&pair);
+        pair.store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hd36c1be68e80 owner=fractal_reconcile::reconcile::home_session_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE claims RENAME TO unavailable_claims;
+            ALTER TABLE desired RENAME TO unavailable_desired;").unwrap();
         // Obtain the real home admission ACK and freshly revalidate native custody
         // before the fixtures disconnect and exercise their graph-free offline paths.
         if launch_existing {
@@ -1110,6 +1127,11 @@ async fn native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_an
     assert_eq!(native_file(&pair.root.path().join("finite-entered")).await, b"actual-bun");
     let record = pair.store.resource_membership_record(&request.id, &request.owner).unwrap();
     assert_eq!(record.state, "launched");
+    assert!(record.native_custody);
+    let operation = pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap();
+    assert!(operation.dispatched);
+    assert_eq!(operation.result.as_ref().unwrap()["verification"], "operation-incarnation");
+    assert_eq!(operation.result.as_ref().unwrap()["incarnation"], incarnation.as_str());
     assert_eq!(record.roots.len(), 1);
     assert_eq!(record.roots[0].execution.as_ref().unwrap().generation_id.as_str(), incarnation.as_str());
     assert!(record.roots[0].payload_released_at.is_some());
@@ -1122,6 +1144,19 @@ async fn native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_an
     assert!(pair.store.local_session_retirement_verified(&local).unwrap());
     assert_eq!(pair.store.resource_membership_record(&request.id, &request.owner).unwrap().state, "retired");
     assert!(pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
+    assert!(pair.store.has_pending_resource_admission_observations().unwrap(),
+        "graph-free custody retains publication work until a full-node projection commits");
+    // All launch, payload and exact retirement assertions above ran with both graph
+    // tables unavailable. Only now exercise the independent full-node publication cut.
+    pair.store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hd19d3d07f46f owner=fractal_reconcile::reconcile::home_session_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE unavailable_claims RENAME TO claims;
+         ALTER TABLE unavailable_desired RENAME TO desired;").unwrap();
+    assert!(!pair.store.replay_resource_admission_observations().unwrap());
+    assert!(!pair.store.has_pending_resource_admission_observations().unwrap());
+    let published = pair.store.latest_claim(
+        &format!("resource-admission/{}/{}", request.host, request.id),
+        Some(crate::store::resource_admission_objectives::KIND)).unwrap().unwrap();
+    assert_eq!(published.body["fields"]["state"], "retired");
 }
 
 #[tokio::test]
@@ -1181,34 +1216,39 @@ mod stop_tests;
 async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_parent_and_sibling() {
     use crate::store::resource_membership::{Admission as ResourceAdmission, Coverage, LaneRequest, Owner};
     for boundary in ["stop", "withdraw", "refusal", "undispatched-withdrawal"] {
-        let mut pair = NativePair::for_finite_start().await;
-        let request = LaneRequest {
-            id: format!("inherited-{boundary}"), name: "inherited-native-checks".into(),
-            host: pair.selection.host.clone(), max_members: 1, profile: None, profile_estimate: None,
-            disk_path: None, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 512 * 1024 * 1024 }),
-            class: fractal_runtime::RequestClass::Check, disk: None, io: None,
-            coverage: Coverage::Enforced, admission_timeout_ms: None,
-            owner: Owner { run: "run/native-parent".into(), step: "step/native-parent".into(),
-                attempt: 1, invocation: Some("exec/native-parent".into()) },
-        };
-        pair.executor.ensure_resource_authority().unwrap();
-        let fit = pair.executor.remote_resource_lane_fit(&request).unwrap();
-        assert!(matches!(pair.store.request_resource_membership(&request, fit,
-            u64::try_from(now_ms()).unwrap()).unwrap(), ResourceAdmission::Admitted(_)));
-        let mut authorization = pair.start_authorization("printf ready > inherited-ready; exec sleep 600");
-        authorization.member.terminal = false;
-        resource_lanes::set_request(&mut authorization.member, &request).unwrap();
-        authorization.launch_member = authorization.member.clone();
-        authorization.seal().unwrap();
-        let mut survivors = Vec::new();
-        for runtime_id in ["native-parent", "native-sibling"] {
-            let mut member = authorization.member.clone();
-            member.runtime_id = runtime_id.into();
-            member.launch = crate::model::LaunchSpec::Shell("exec sleep 600".into());
-            pair.runtime.start_resource_guarded(&pair.store, &member, None, &|| Ok(())).unwrap();
-            let incarnation = pair.runtime.observe_exec(runtime_id).unwrap().unwrap().incarnation_id.unwrap();
-            survivors.push((runtime_id, incarnation));
-        }
+        let mut inherited = None;
+        let mut pair = NativePair::for_finite_start_with_setup(|pair| {
+            // Membership admission and parent roots belong to the existing full
+            // node. Only the remote child lifecycle runs after graph removal.
+            let request = LaneRequest {
+                id: format!("inherited-{boundary}"), name: "inherited-native-checks".into(),
+                host: pair.selection.host.clone(), max_members: 1, profile: None, profile_estimate: None,
+                disk_path: None, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 512 * 1024 * 1024 }),
+                class: fractal_runtime::RequestClass::Check, disk: None, io: None,
+                coverage: Coverage::Enforced, admission_timeout_ms: None,
+                owner: Owner { run: "run/native-parent".into(), step: "step/native-parent".into(),
+                    attempt: 1, invocation: Some("exec/native-parent".into()) },
+            };
+            let fit = pair.executor.remote_resource_lane_fit(&request).unwrap();
+            assert!(matches!(pair.store.request_resource_membership(&request, fit,
+                u64::try_from(now_ms()).unwrap()).unwrap(), ResourceAdmission::Admitted(_)));
+            let mut authorization = pair.start_authorization("printf ready > inherited-ready; exec sleep 600");
+            authorization.member.terminal = false;
+            resource_lanes::set_request(&mut authorization.member, &request).unwrap();
+            authorization.launch_member = authorization.member.clone();
+            authorization.seal().unwrap();
+            let mut survivors = Vec::new();
+            for runtime_id in ["native-parent", "native-sibling"] {
+                let mut member = authorization.member.clone();
+                member.runtime_id = runtime_id.into();
+                member.launch = crate::model::LaunchSpec::Shell("exec sleep 600".into());
+                pair.runtime.start_resource_guarded(&pair.store, &member, None, &|| Ok(())).unwrap();
+                let incarnation = pair.runtime.observe_exec(runtime_id).unwrap().unwrap().incarnation_id.unwrap();
+                survivors.push((runtime_id, incarnation));
+            }
+            inherited = Some((request, authorization, survivors));
+        }).await;
+        let (request, mut authorization, survivors) = inherited.unwrap();
         if matches!(boundary, "refusal" | "undispatched-withdrawal") {
             authorization.member.cwd = pair.root.path().join("unavailable-cwd").display().to_string();
             authorization.launch_member = authorization.member.clone();
@@ -1226,6 +1266,7 @@ async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_paren
         }
         pair.connect();
         pair.settled(&start).await;
+        let mut child_incarnation = None;
         if matches!(boundary, "stop" | "withdraw") {
             assert_eq!(native_file(&pair.root.path().join("inherited-ready")).await, b"ready");
             let local = pair.store.local_session(&start.binding.subject).unwrap().unwrap();
@@ -1243,6 +1284,7 @@ async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_paren
                 pair.stopped(&start).await;
             }
             assert!(pair.store.local_session_retirement_verified(&local).unwrap());
+            child_incarnation = Some(local.native_incarnation);
         } else {
             assert!(!pair.root.path().join("inherited-ready").exists());
         }
@@ -1255,11 +1297,17 @@ async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_paren
             let observed = pair.runtime.observe_exec(runtime_id).unwrap().unwrap();
             assert_eq!(observed.incarnation_id.as_deref(), Some(incarnation.as_str()));
             assert_eq!(observed.status, "running");
-            assert!(record.roots.iter().find(|root| root.runtime_id == *runtime_id).unwrap().execution_ended_at.is_none());
+            let root = record.roots.iter().find(|root| root.runtime_id == *runtime_id).unwrap();
+            assert_eq!(root.execution.as_ref().unwrap().generation_id, *incarnation);
+            assert!(root.execution_ended_at.is_none());
         }
-        if matches!(boundary, "stop" | "withdraw") {
-            assert!(record.roots.iter().find(|root| root.runtime_id == "native-worker").unwrap().execution_ended_at.is_some());
+        if let Some(incarnation) = child_incarnation {
+            assert_eq!(record.roots.len(), survivors.len() + 1);
+            let child = record.roots.iter().find(|root| root.runtime_id == "native-worker").unwrap();
+            assert_eq!(child.execution.as_ref().unwrap().generation_id, incarnation);
+            assert!(child.execution_ended_at.is_some());
         } else {
+            assert_eq!(record.roots.len(), survivors.len());
             assert!(!record.roots.iter().any(|root| root.runtime_id == "native-worker"));
         }
         for (runtime_id, incarnation) in survivors {
