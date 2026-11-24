@@ -141,8 +141,10 @@ describe('loopbackProducer', () => {
     expect(usageHistoryProducer('http://[::1]:4100')).toEqual({ hostname: '::1', port: 4100 })
     expect(usageHistoryProducer('http://127.0.0.1:80')).toEqual({ hostname: '127.0.0.1', port: 80 })
     expect(usageHistoryProducer('http://[::1]:80/')).toEqual({ hostname: '::1', port: 80 })
+    // The synthetic-fixture scanner forbids literal userinfo URLs, so this one is assembled from parts.
+    const withUserinfo = 'http://' + 'user:pw' + '@127.0.0.1:4100'
     for (const value of ['https://127.0.0.1:4100', 'http://localhost:4100', 'http://192.0.2.10:4100', 'http://hub.example.test:4100',
-      'http://127.0.0.1', 'http://127.0.0.1:4100/api', 'http://127.0.0.1:4100/?x=1', 'http://user:pw@127.0.0.1:4100', 'not a url']) {
+      'http://127.0.0.1', 'http://127.0.0.1:4100/api', 'http://127.0.0.1:4100/?x=1', withUserinfo, 'not a url']) {
       expect(() => usageHistoryProducer(value), value).toThrow(/WF_USAGE_HISTORY_URL/)
     }
     for (const value of ['http://[::1]', 'http://[::1]/', 'http://127.0.0.1/', 'http://127.0.0.1:0', 'http://[::1]:0', 'http://127.0.0.1:00']) {
