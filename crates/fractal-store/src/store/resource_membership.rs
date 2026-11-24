@@ -206,6 +206,10 @@ pub struct DiskFit {
 #[serde(rename_all = "camelCase")]
 pub struct Membership {
     pub request: LaneRequest,
+    /// Physical remote custody commits without fleet projection. Full-node maintenance
+    /// publishes its pending observations separately; this never changes the lane owner.
+    #[serde(default)]
+    pub native_custody: bool,
     pub grant: Option<Grant>,
     pub state: String,
     pub reason: String,
@@ -291,6 +295,40 @@ fn read(connection: &Connection, id: &str) -> Result<Membership> {
     Ok(serde_json::from_str(&body)?)
 }
 
+enum CustodyTransaction<'a> {
+    Native(Transaction<'a>),
+    Managed(smallclaims::sqlite::WriterTransaction<'a>),
+}
+
+impl<'a> std::ops::Deref for CustodyTransaction<'a> {
+    type Target = Transaction<'a>;
+    fn deref(&self) -> &Self::Target {
+        match self { Self::Native(tx) => tx, Self::Managed(tx) => tx }
+    }
+}
+
+impl CustodyTransaction<'_> {
+    fn commit(self) -> Result<()> {
+        match self {
+            Self::Native(tx) => tx.commit().map_err(Into::into),
+            Self::Managed(tx) => tx.commit(),
+        }
+    }
+}
+
+fn custody_transaction<'a>(
+    connection: &'a mut smallclaims::sqlite::WriterGuard<'_>, id: &str, native: bool,
+) -> Result<CustodyTransaction<'a>> {
+    let native = native || connection.query_row(
+        "SELECT coalesce(json_extract(body,'$.nativeCustody'),0) FROM resource_memberships_v1 WHERE id=?1",
+        [id], |row| row.get::<_, bool>(0)).optional()?.unwrap_or(false);
+    if native {
+        Ok(CustodyTransaction::Native(Connection::transaction(connection)?))
+    } else {
+        Ok(CustodyTransaction::Managed(connection.transaction()?))
+    }
+}
+
 fn write(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
     let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h15191adeac97 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_memberships_v1(id,host,lane,state,queued_at,memory,body)
         VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,body=excluded.body
@@ -298,7 +336,15 @@ fn write(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
         rusqlite::params![member.request.id,member.request.host,member.request.name,member.state,member.queued_at,
             member.request.capacity.map_or(0, |c| c.memory),serde_json::to_string(member)?])?;
     if changed == 0 { return Ok(()); }
+    if member.native_custody {
+        // This is the existing durable publication queue, not a second authority.
+        return super::resource_admission_objectives::enqueue(connection, member);
+    }
     super::resource_admission_objectives::observe(connection, member)?;
+    publish_invalidation(connection, member)
+}
+
+pub(super) fn publish_invalidation(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
     // Durable feed invalidation commits with custody; a diagnostic note alone cannot wake IVM.
     // This observation references custody, never carries a replayable grant.
     insert_local_observation_tx(connection, &member.request.host, &ClaimInput {
@@ -678,14 +724,41 @@ impl Store {
     }
 
     pub fn request_resource_membership(&self, request: &LaneRequest, fit: Fit, now_ms: u64) -> Result<Admission> {
+        self.request_resource_membership_inner(request, fit, now_ms, None)
+    }
+
+    /// Only an already-admitted immutable remote Start may move this membership's
+    /// physical commits outside fleet finalization. Existing parent grants and owners
+    /// are unchanged; their publication remains durable in the ordinary pending feed.
+    pub fn request_native_resource_membership(
+        &self, operation: &str, request: &LaneRequest, fit: Fit, now_ms: u64,
+    ) -> Result<Admission> {
+        self.request_resource_membership_inner(request, fit, now_ms, Some(operation))
+    }
+
+    fn request_resource_membership_inner(
+        &self, request: &LaneRequest, fit: Fit, now_ms: u64, operation: Option<&str>,
+    ) -> Result<Admission> {
         request.class.ensure_supported()?;
         anyhow::ensure!(!request.id.is_empty() && !request.name.is_empty() && !request.host.is_empty(), "empty resource identity");
         anyhow::ensure!(request.host == self.origin, "only the execution host may grant resource membership");
         anyhow::ensure!(request.max_members > 0, "maxMembers must be positive");
         anyhow::ensure!(!request.owner.run.is_empty() && !request.owner.step.is_empty() && request.owner.attempt > 0, "resource execution owner required");
         let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
-        super::resource_admission_objectives::validate_publication(&transaction, &request.host, &request.class)?;
+        if let Some(operation) = operation {
+            let body: String = connection.query_row(
+                "SELECT body FROM local_runtime_starts WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL",
+                [operation], |row| row.get(0))?;
+            let body: Value = serde_json::from_str(&body)?;
+            let encoded = body["remote_start"]["launch_member"]["tags"][crate::model::RESOURCE_LANE_REQUEST_TAG]
+                .as_str().context("admitted remote Start has no finite request")?;
+            anyhow::ensure!(serde_json::from_str::<LaneRequest>(encoded)? == *request,
+                "native membership differs from admitted remote Start");
+        }
+        let transaction = custody_transaction(&mut connection, &request.id, operation.is_some())?;
+        if operation.is_none() {
+            super::resource_admission_objectives::validate_publication(&transaction, &request.host, &request.class)?;
+        }
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
         if request.capacity.is_some() {
             let expected = InstalledPolicy::for_request(request);
@@ -715,15 +788,20 @@ impl Store {
             anyhow::ensure!(member.request == *request, "resource request identity reused with different execution");
             member
         } else {
-            Membership { request: request.clone(), grant: None, state: "queued".into(), reason: "waiting for admission".into(),
+            Membership { request: request.clone(), native_custody: operation.is_some(), grant: None, state: "queued".into(), reason: "waiting for admission".into(),
                 queued_at: now_ms, admitted_at: None, payload_released_at: None, execution_ended_at: None,
                 retirement_requested_at: None, retired_at: None, disk_filesystem: None,
                 roots: Vec::new(), child_runs: Vec::new(), clock_uncertain: false, clock_epoch: epoch.clone(),
                 refusal_code: None, blocked_by: None, pressure_reason: None, admission_decision: None }
         };
+        if operation.is_some() && !member.native_custody {
+            member.native_custody = true;
+            write(&transaction, &member)?;
+        }
         let previous = exists.then(|| member.state.clone());
         if member.state != "queued" {
             if let Some(grant) = &member.grant { fenced(&transaction, &member, grant)?; }
+            transaction.commit()?;
             return Ok(admission(member));
         }
         smallclaims::touched::note_read(|| dependency(&request.host, &request.name));
@@ -834,7 +912,8 @@ impl Store {
     }
 
     pub fn withdraw_resource_membership(&self, id: &str, owner: &Owner, now_ms: u64) -> Result<()> {
-        let mut connection = self.connection.write(); let tx = connection.transaction()?;
+        let mut connection = self.connection.write();
+        let tx = custody_transaction(&mut connection, id, false)?;
         let mut member = read(&tx, id)?; authorized(&member, owner)?;
         member.request.class.ensure_supported()?;
         let previous = member.state.clone();
@@ -896,7 +975,7 @@ impl Store {
         let mut member;
         let mut admission_failure = None;
         {
-            let transaction = connection.transaction()?;
+            let transaction = custody_transaction(&mut connection, &grant.membership_id, false)?;
             member = read(&transaction, &grant.membership_id)?;
             fenced(&transaction, &member, grant)?;
             anyhow::ensure!(matches!(member.state.as_str(), "admitted" | "launched"), "resource scope cancelled before payload release");
@@ -936,7 +1015,7 @@ impl Store {
             Err(error) => {
                 member.state = "uncertain".into();
                 member.reason = format!("payload release outcome requires exact-generation cleanup: {error:#}");
-                let transaction = connection.transaction()?;
+                let transaction = custody_transaction(&mut connection, &grant.membership_id, false)?;
                 write(&transaction, &member)?;
                 transaction.commit()?;
                 self.observe_resource_transition(&connection, &member, Some("admitted"),
@@ -950,7 +1029,7 @@ impl Store {
         member.state = "launched".into();
         member.payload_released_at.get_or_insert(released_at);
         member.execution_ended_at = None;
-        let transaction = connection.transaction()?;
+        let transaction = custody_transaction(&mut connection, &grant.membership_id, false)?;
         write(&transaction, &member)?;
         transaction.commit()?;
         self.observe_resource_transition(&connection, &member, Some("admitted"), released_at, false);
@@ -1063,7 +1142,8 @@ impl Store {
     }
 
     fn update_resource_membership(&self, grant: &Grant, update: impl FnOnce(&mut Membership) -> Result<()>) -> Result<()> {
-        let mut connection = self.connection.write(); let tx = connection.transaction()?;
+        let mut connection = self.connection.write();
+        let tx = custody_transaction(&mut connection, &grant.membership_id, false)?;
         let mut member = read(&tx, &grant.membership_id)?; fenced(&tx, &member, grant)?;
         let previous = member.state.clone();
         update(&mut member)?; write(&tx, &member)?; tx.commit()?;

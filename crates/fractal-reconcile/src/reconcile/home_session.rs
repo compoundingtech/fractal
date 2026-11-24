@@ -1,7 +1,6 @@
-//! The first session slice controls existing native custody; it cannot launch work.
+//! Native session custody and immutable home-admitted, graph-free physical launches.
 use super::*;
-use crate::model::FractalError;
-use fractal_peer::light_node::journal::{Command, Journal, Operation, Outcome, Recovery, Selection};
+use fractal_peer::light_node::journal::{Command, Journal, Operation, Outcome, Recovery, Selection, StartWorkspaceAdmission, require_start};
 use fractal_peer::light_node::session::Executor;
 use crate::store::local_sessions::{LocalSession, SessionCustody};
 use crate::store::run_credentials::{ExecutionBinding, local};
@@ -14,6 +13,7 @@ use std::pin::Pin;
 enum NativeProof {
     Complete { outcome: Outcome },
     Stop { binding: LocalSession, retired: bool },
+    Start,
 }
 
 type RetirementResult = Option<std::result::Result<(), Arc<str>>>;
@@ -25,9 +25,55 @@ type RetirementWaits = BTreeMap<(String, String), tokio::sync::watch::Receiver<R
 pub struct NativeSessionExecutor {
     reconciler: Arc<Reconciler>,
     waits: Mutex<RetirementWaits>,
+    native_watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    native_generation: Arc<tokio::sync::watch::Sender<u64>>,
+    #[cfg(test)]
+    recovery_failures: tokio::sync::watch::Sender<u64>,
 }
 impl NativeSessionExecutor {
-    pub fn new(reconciler: Arc<Reconciler>) -> Self { Self { reconciler, waits: Mutex::new(BTreeMap::new()) } }
+    pub fn new(reconciler: Arc<Reconciler>) -> Self {
+        Self { reconciler, waits: Mutex::new(BTreeMap::new()), native_watcher: Mutex::new(None),
+            native_generation: Arc::new(tokio::sync::watch::channel(0).0),
+            #[cfg(test)]
+            recovery_failures: tokio::sync::watch::channel(0).0,
+        }
+    }
+
+    pub fn watch_native_custody(&self) -> Result<()> {
+        let mut slot = self.native_watcher.lock().map_err(|_| anyhow::anyhow!("native custody watcher poisoned"))?;
+        if slot.is_some() { return Ok(()); }
+        let changed = self.reconciler.home_session_journal.get()
+            .context("native custody watcher requires installed session journal")?.authority_changed.clone();
+        let recovery_changed = self.reconciler.home_session_journal.get()
+            .context("native custody watcher requires installed session journal")?.changed.clone();
+        let reconciler = self.reconciler.clone();
+        let generation = self.native_generation.clone();
+        let mut previous = native_recovery_evidence(&reconciler)?;
+        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else { return; };
+            // Reading registry evidence emits Access events on Linux. Re-reading on
+            // those events feeds the watcher itself, starving real native mutations.
+            if matches!(event.kind, notify::EventKind::Access(_)) { return; }
+            // Registry notifications include repeated writes. Only changed physical
+            // incarnation/liveness/provenance can reopen a failed Start recovery.
+            if let Ok(current) = native_recovery_evidence(&reconciler)
+                && current != previous {
+                    previous = current;
+                    generation.send_modify(|value| *value = value.saturating_add(1));
+                    // SeatClient waits on command progress, separately from the
+                    // native authority revalidator. Wake it for physical evidence
+                    // even when that revalidator has no SQL mutation to perform.
+                    recovery_changed.notify_one();
+                }
+            changed.notify_one();
+        })?;
+        for directory in &self.reconciler.runtime.observation_paths {
+            std::fs::create_dir_all(directory)?;
+            watcher.watch(directory, notify::RecursiveMode::Recursive)?;
+        }
+        *slot = Some(watcher);
+        Ok(())
+    }
 
     async fn await_exec_retirement(&self, binding: &LocalSession) -> Result<()> {
         let key = (binding.runtime_id.clone(), binding.native_incarnation.clone());
@@ -55,7 +101,11 @@ impl NativeSessionExecutor {
         };
         loop {
             if let Some(result) = completion.borrow_and_update().clone() {
-                return result.map_err(|error| anyhow::anyhow!("native retirement remains unresolved: {error}"));
+                result.map_err(|error| anyhow::anyhow!("native retirement remains unresolved: {error}"))?;
+                if !self.reconciler.store.local_session_retirement_verified(binding)? {
+                    self.reconciler.store.verify_local_session_retirement(binding)?;
+                }
+                return Ok(());
             }
             completion.changed().await.context("native retirement worker lost its result")?;
         }
@@ -67,6 +117,9 @@ impl NativeSessionExecutor {
         let retired = stop_local_session_with_retirement_proof(&reconciler.store, reconciler.runtime.as_ref(),
             &binding.subject, &binding.incarnation, &command.execution_id)?;
         reconciler.start_changed(&binding.subject);
+        if let Some(journal) = reconciler.home_session_journal.get() {
+            journal.authority_changed.notify_one();
+        }
         Ok(if binding.custody == SessionCustody::Borrowed {
             NativeProof::Complete { outcome: Outcome::Detached { incarnation: binding.incarnation } }
         } else { NativeProof::Stop { binding, retired } })
@@ -86,12 +139,257 @@ impl NativeSessionExecutor {
         let NativeProof::Stop { binding, .. } = proof else { unreachable!("constructed stop proof") };
         let journal = reconciler.home_session_journal.get().context("session journal is not installed")?;
         journal.complete_requiring_local_finalization(&command.execution_id, outcome.clone(), &encoded)?;
+        if let Some(operation) = &binding.start_operation
+            && let Some(operation) = reconciler.store.remote_runtime_start(operation)? {
+                reconciler.retire_remote_start_resources(&operation, Some(&binding.native_incarnation))?;
+                reconciler.store.verify_remote_runtime_start_cleanup(&operation.id)?;
+            }
         reconciler.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
+        if let Some(operation) = &binding.start_operation {
+            reconciler.store.settle_remote_runtime_start(operation)?;
+        }
         journal.finish_local_finalization(&command.execution_id)?;
         self.waits.lock().map_err(|_| anyhow::anyhow!("native retirement wait ownership poisoned"))?
             .remove(&(binding.runtime_id.clone(), binding.native_incarnation.clone()));
         Ok(outcome)
     }
+
+    fn enter_start(&self, command: &Command, authority: &rusqlite::Connection) -> Result<NativeProof> {
+        let Operation::Start { authorization } = &command.operation else { unreachable!("Start dispatch") };
+        require_start(authority, command)?;
+        self.watch_native_custody()?;
+        let reconciler = &self.reconciler;
+        anyhow::ensure!(authorization.member.host == reconciler.host
+            && authorization.launch_member.host == reconciler.host
+            && authorization.member.runtime_id == command.binding.runtime
+            && authorization.launch_member.runtime_id == command.binding.runtime,
+            "Start payload names another physical runtime");
+        // An existing intent is recovery, never permission to repeat a backend call.
+        if let Some(prior) = reconciler.store.remote_runtime_start(&command.execution_id)? {
+            anyhow::ensure!(prior.body["remote_start"] == serde_json::to_value(authorization)?,
+                "native Start operation payload changed");
+            return Ok(NativeProof::Start);
+        }
+        let identity = match &authorization.workspace_admission {
+            StartWorkspaceAdmission::NonGit => start_jobs::WorkspaceAdmission::NonGit,
+            StartWorkspaceAdmission::Git { owner, repository } =>
+                start_jobs::WorkspaceAdmission::Git { owner: owner.into(), repository: repository.into() },
+        };
+        let checkout = authorization.checkout.as_ref().map(|checkout| Checkout {
+            repository: checkout.repository.clone().into(), base: checkout.base.clone(),
+            branch: checkout.branch.clone(), remove_at_run_end: checkout.remove_at_run_end,
+        });
+        let _permit = reconciler.store.admit_launch()?.context("native launch is frozen")?;
+        let _lock = reconciler.store.try_runtime_start_lock(&command.binding.subject)?
+            .context("native subject launch custody is busy")?;
+        let owner = command.execution_id.clone();
+        let operation = crate::store::RuntimeStartOperation {
+            id: command.execution_id.clone(), subject: command.binding.subject.clone(), owner: owner.clone(),
+            body: serde_json::json!({"remote_start": authorization}),
+            revoked_by: None, finished: false, result: None, applied: false,
+            cleanup_verified: false, dispatched: false, receipted: false,
+        };
+        anyhow::ensure!(reconciler.store.admit_remote_runtime_start(&operation, start_jobs::MAX_START_JOBS)?,
+            "native launch admission capacity or subject custody is busy");
+        anyhow::ensure!(reconciler.remote_seat_lane_fits(&command.execution_id, &authorization.launch_member)?,
+            "native agent lane does not fit the physical host envelope");
+        if let Some(request) = resource_lanes::request(&authorization.launch_member)? {
+            anyhow::ensure!(request.host == reconciler.host, "finite Start names another resource host");
+            reconciler.ensure_resource_authority()?;
+            let fit = reconciler.remote_resource_lane_fit(&request)?;
+            anyhow::ensure!(matches!(reconciler.store.request_native_resource_membership(&command.execution_id, &request, fit,
+                u64::try_from(now_ms()).unwrap_or(u64::MAX))?,
+                crate::store::resource_membership::Admission::Admitted(_)),
+                "native finite resource membership was not admitted");
+        }
+        let workspace = Path::new(&authorization.member.workspace);
+        let _preparation_lease = if !workspace.is_dir() {
+            require_start(authority, command)?;
+            match (&checkout, &identity) {
+                (Some(checkout), start_jobs::WorkspaceAdmission::Git { owner, repository }) => {
+                    let lease = reconciler.worktree_activation_lease(owner, repository)?;
+                    checkout.create_leased(workspace, &lease)?;
+                    Some(lease)
+                }
+                (Some(_), start_jobs::WorkspaceAdmission::NonGit) =>
+                    anyhow::bail!("checkout preparation requires immutable Git workspace admission"),
+                (None, identity) => {
+                    anyhow::ensure!(authorization.member.workspace_create,
+                        "workspace does not exist and creation was not authorized");
+                    let lease = match identity {
+                        start_jobs::WorkspaceAdmission::Git { owner, repository } =>
+                            Some(reconciler.worktree_activation_lease(owner, repository)?),
+                        start_jobs::WorkspaceAdmission::NonGit => None,
+                    };
+                    std::fs::create_dir_all(workspace)?;
+                    lease
+                }
+            }
+        } else { None };
+        let _activation = reconciler.admit_physical_workspace(&authorization.member, &identity, checkout.as_ref())?;
+        anyhow::ensure!(!Path::new(&authorization.member.cwd).is_absolute() || Path::new(&authorization.member.cwd).is_dir(),
+            "native Start working directory does not exist");
+        if let Some(observed) = reconciler.runtime.observe_start(&authorization.member)? {
+            anyhow::ensure!(observed.incarnation_id == authorization.expected_incarnation
+                && authorization.expected_incarnation.is_some(),
+                "Start cannot adopt or restart a preexisting native incarnation");
+        } else {
+            anyhow::ensure!(authorization.expected_incarnation.is_none(),
+                "Start predecessor incarnation is unavailable");
+        }
+        let mut launch_member = authorization.launch_member.clone();
+        crate::environment::normalize_aliases(&mut launch_member.environment);
+        overlay_runtime_environment(&command.binding.subject, &mut launch_member.environment,
+            &reconciler.runtime_environment);
+        crate::environment::remove_aliases(&mut launch_member.environment, "ST3_ACCOUNT");
+        if let Some(credentials) = &authorization.credentials {
+            anyhow::ensure!(authorization.member.driver.as_deref() == Some(credentials.driver.as_str()),
+                "Start credential driver differs from immutable member");
+            let variable = crate::accounts::login_environment_name(&credentials.driver)
+                .context("Start credential driver has no login directory")?;
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let directory = crate::accounts::expand_login(&credentials.login, home.as_deref())
+                .context("Start credential login selector cannot be expanded")?;
+            anyhow::ensure!(directory.is_dir(), "Start credential login directory is unavailable");
+            crate::environment::set(&mut launch_member.environment, variable, directory.to_string_lossy().into_owned());
+            if let Some(account) = &credentials.account {
+                crate::environment::set(&mut launch_member.environment, "ST3_ACCOUNT", account.clone());
+            }
+        }
+        crate::environment::remove_aliases(&mut launch_member.environment, crate::suspension::CONTINUE_ENV);
+        crate::environment::remove_aliases(&mut launch_member.environment, crate::suspension::CONTINUE_PATH_ENV);
+        if let Some(continuation) = &authorization.continuation {
+            crate::environment::set(&mut launch_member.environment, crate::suspension::CONTINUE_ENV, continuation.session.clone());
+            if let Some(path) = &continuation.path {
+                crate::environment::set(&mut launch_member.environment, crate::suspension::CONTINUE_PATH_ENV, path.clone());
+            }
+        }
+        crate::native_seed::omit_seed_for_native_resume(&mut launch_member);
+        let kind = command.binding.subject.split('/').next().context("Start subject has no kind")?;
+        reconciler.decorate_local_launch(&command.binding.subject, kind, command.binding.run.is_some(),
+            &authorization.member, &mut launch_member)?;
+        launch_member.tags.insert(start_jobs::OPERATION_TAG.into(), command.execution_id.clone());
+        crate::environment::set(&mut launch_member.environment, start_jobs::OPERATION_ENV, command.execution_id.clone());
+        crate::environment::set(&mut launch_member.environment, crate::suspension::LAUNCH_DESIRED_TOKEN_ENV,
+            authorization.desired_token.clone());
+        if let Some(render) = &authorization.render {
+            let (writes, _) = crate::render::prepare_render_with_documents(
+                &render.declaration, Path::new(&authorization.member.workspace),
+                &|_| require_start(authority, command),
+                &|name, hash| Ok(render.documents.get(&format!("{name}@{hash}")).cloned()))?;
+            require_start(authority, command)?;
+            crate::render::commit_transaction(&writes)?;
+        }
+        super::host_executor::StartCommand::dispatch_remote(command, authority, &reconciler.store,
+            reconciler.runtime.as_ref(), &reconciler.host_observations, &owner, &launch_member)?;
+        Ok(NativeProof::Start)
+    }
+
+    async fn recover_start(&self, recovery: &Recovery) -> Result<Outcome> {
+        let command = &recovery.command;
+        let Operation::Start { authorization } = &command.operation else { unreachable!("Start recovery") };
+        self.watch_native_custody()?;
+        let reconciler = &self.reconciler;
+        let Some(mut operation) = reconciler.store.remote_runtime_start(&command.execution_id)? else {
+            // The barrier was entered, but native admission did not create an operation.
+            return Ok(Outcome::Refused { reason: "native Start was not admitted".into() });
+        };
+        anyhow::ensure!(operation.body["remote_start"] == serde_json::to_value(authorization)?,
+            "retained native authorization differs");
+        let cancelled = recovery.cancellation_reason.as_ref().or(operation.revoked_by.as_ref());
+        if !operation.dispatched {
+            reconciler.retire_remote_start_resources(&operation, None)?;
+            reconciler.store.settle_remote_runtime_start(&operation.id)?;
+            return Ok(match cancelled {
+                Some(reason) => Outcome::Cancelled { reason: reason.clone() },
+                None => Outcome::Refused { reason: "native backend was never entered".into() },
+            });
+        }
+        let mut result = operation.result.clone().unwrap_or_else(|| serde_json::json!({}));
+        if result["verification"] != "operation-incarnation" {
+            // Reopening an entered unknown may discover positive native provenance,
+            // but a missing process is deliberately not a nonlaunch witness.
+            if let Some(observed) = reconciler.runtime.observe_start(&authorization.launch_member)?
+                && let Some(incarnation) = observed.incarnation_id
+                && reconciler.runtime.start_operation(&authorization.member.runtime_id, authorization.member.terminal, &incarnation)?
+                    .as_deref() == Some(operation.id.as_str())
+            {
+                result["incarnation"] = Value::from(incarnation);
+                result["verification"] = Value::from("operation-incarnation");
+                reconciler.store.finish_remote_runtime_start(&operation.id, &result)?;
+                operation.result = Some(result.clone());
+            }
+        }
+        let Some(incarnation) = result["incarnation"].as_str()
+            .filter(|_| result["verification"] == "operation-incarnation") else {
+            if result["producer_closed"] == true {
+                reconciler.retire_remote_start_resources(&operation, None)?;
+                reconciler.store.settle_remote_runtime_start(&operation.id)?;
+                return Ok(Outcome::Refused { reason: result["error"].as_str().unwrap_or("native launch refused").into() });
+            }
+            anyhow::bail!("entered native Start retains unresolved producer custody");
+        };
+        let binding = LocalSession {
+            subject: command.binding.subject.clone(), runtime_id: authorization.member.runtime_id.clone(),
+            incarnation: incarnation.into(), native_incarnation: incarnation.into(),
+            terminal: authorization.member.terminal, driver: authorization.member.driver.clone(),
+            lifecycle: authorization.member.lifecycle.clone(), custody: SessionCustody::Owned,
+            start_operation: Some(operation.id.clone()), invocation: None,
+        };
+        // Durable custody must exist before exposing actual native success to home.
+        if reconciler.store.local_session_at(&binding.subject, &binding.incarnation)?.as_ref() != Some(&binding) {
+            reconciler.store.bind_local_session(&binding)?;
+        }
+        if let Some(reason) = cancelled {
+            reconciler.store.revoke_remote_runtime_start(&operation.id, reason)?;
+            if !reconciler.store.local_session_retirement_verified(&binding)? {
+                let retired = reconciler.runtime.stop_with_retirement_proof(
+                    &binding.runtime_id, binding.terminal, &binding.native_incarnation)?;
+                if retired { reconciler.store.verify_local_session_retirement(&binding)?; }
+                if !retired {
+                    anyhow::ensure!(!binding.terminal, "native terminal producer retirement remains unresolved");
+                    self.await_exec_retirement(&binding).await?;
+                }
+            }
+            reconciler.retire_remote_start_resources(&operation, Some(&binding.native_incarnation))?;
+            reconciler.store.verify_remote_runtime_start_cleanup(&operation.id)?;
+            reconciler.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
+            reconciler.store.settle_remote_runtime_start(&operation.id)?;
+            self.waits.lock().map_err(|_| anyhow::anyhow!("native retirement wait ownership poisoned"))?
+                .remove(&(binding.runtime_id.clone(), binding.native_incarnation.clone()));
+            return Ok(Outcome::Stopped { incarnation: binding.incarnation });
+        }
+        reconciler.refresh_session_bindings()?;
+        Ok(Outcome::Started { incarnation: binding.incarnation })
+    }
+
+}
+
+type NativeRecoveryEvidence = (
+    Vec<RuntimeObservation>,
+    HashMap<String, (String, String)>,
+    BTreeMap<String, fractal_runtime::ExecObservation>,
+);
+
+/// Compare physical facts, not registry file timestamps or local SQL revisions.
+fn native_recovery_evidence(reconciler: &Reconciler) -> Result<NativeRecoveryEvidence> {
+    let mut snapshot = reconciler.runtime.snapshot_ptys_with_provenance()?;
+    snapshot.observations.sort_by(|left, right| left.runtime_id.cmp(&right.runtime_id));
+    let mut executions = BTreeMap::new();
+    // Enumerate the native exec registry itself, not SQL's operation list: settling
+    // a local row must never manufacture a new recovery generation.
+    let directory = &reconciler.runtime.observation_paths[1];
+    if directory.is_dir() {
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|extension| extension != "json") { continue; }
+            let Some(id) = path.file_stem().and_then(|name| name.to_str()) else { continue; };
+            if let Some(observed) = reconciler.runtime.exec.observe(id)? {
+                executions.insert(id.to_owned(), observed);
+            }
+        }
+    }
+    Ok((snapshot.observations, snapshot.start_operations, executions))
 }
 
 fn execution_binding(selection: &Selection, binding: &LocalSession) -> Result<ExecutionBinding> {
@@ -103,7 +401,137 @@ fn execution_binding(selection: &Selection, binding: &LocalSession) -> Result<Ex
     })
 }
 
+pub(super) fn require_start_helper<R: RuntimeControl>(
+    store: &Store, runtime: &R, authorization: &fractal_peer::light_node::journal::StartAuthorization,
+) -> Result<()> {
+    if let Some(helper) = &authorization.helper {
+        // Use logical custody to resolve a borrowed launcher, then let local_session
+        // verify its actual native generation. No graph observation can substitute.
+        local_session(store, runtime, &helper.subject, Some(&helper.lifetime))
+            .context("Start helper launcher custody has ended")?;
+    }
+    Ok(())
+}
+
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Native custody, including entered producers with no visible registry entry,
+    /// holds its immutable envelope until positive physical cleanup.
+    fn remote_held_lanes(&self, candidate: &str, candidate_lane: Option<fractal_runtime::Capacity>)
+        -> Result<(u64, seat_admission_queue::BurstReserve)>
+    {
+        let mut held = 0_u64;
+        let mut smallest = candidate_lane.map(|lane| lane.memory);
+        let mut burst_raise = 0_u64;
+        let mut accounted = BTreeSet::new();
+        let mut ordinary = BTreeMap::<String, fractal_runtime::Capacity>::new();
+        for (operation, member) in self.store.unretired_native_start_members()? {
+            if member.host != self.host { continue; }
+            // Finite reservations are charged once by the membership accountant,
+            // never a second time through the runtime's live lane.
+            if resource_lanes::request(&member)?.is_some() {
+                accounted.insert(member.runtime_id);
+                continue;
+            }
+            // Only this operation is excluded, never an unresolved predecessor
+            // merely because it has the same logical subject or runtime name.
+            if operation == candidate { continue; }
+            if member.kind != crate::model::MemberKind::Agent { continue; }
+            let Some(base) = member.capacity else { continue; };
+            ordinary.entry(member.runtime_id).and_modify(|prior| {
+                prior.memory = prior.memory.max(base.memory);
+                prior.cores = prior.cores.max(base.cores);
+            }).or_insert(base);
+        }
+        for (runtime, base) in ordinary {
+            if !accounted.insert(runtime.clone()) { continue; }
+            let live = self.runtime.live_lane(&runtime).unwrap_or(base);
+            held = held.checked_add(base.memory.max(live.memory)).context("native lane capacity overflow")?;
+            smallest = Some(smallest.map_or(base.memory, |memory| memory.min(base.memory)));
+            burst_raise = burst_raise.max(live.memory.saturating_sub(base.memory));
+        }
+        for observed in self.runtime.snapshot_ptys()? {
+            if !accounted.insert(observed.runtime_id.clone()) { continue; }
+            if let Some(lane) = self.runtime.live_lane(&observed.runtime_id) {
+                held = held.checked_add(lane.memory).context("native lane capacity overflow")?;
+                smallest = Some(smallest.map_or(lane.memory, |memory| memory.min(lane.memory)));
+            }
+        }
+        let reserve = self.seat_admission.lanes.and_then(|host| host.burst_lane.filter(|burst|
+            burst.cores <= host.room.cores && burst.memory <= host.room.memory))
+            .map_or(seat_admission_queue::BurstReserve { full: 0, kept: 0 },
+                |burst| seat_admission_queue::reserved_burst(smallest, burst.memory, burst_raise));
+        Ok((held, reserve))
+    }
+
+    fn remote_seat_lane_fits(&self, candidate: &str, member: &MemberSpec) -> Result<bool> {
+        if member.kind != crate::model::MemberKind::Agent || resource_lanes::request(member)?.is_some() {
+            return Ok(true);
+        }
+        let (Some(host), Some(lane)) = (self.seat_admission.lanes, member.capacity) else { return Ok(true); };
+        let (held, reserve) = self.remote_held_lanes(candidate, Some(lane))?;
+        let finite = self.store.held_resource_membership_bytes(&self.host, candidate)?;
+        // Same physical fit as ordinary fullnode seats: individual CPU envelope,
+        // aggregate memory, outside memory, and both full/remaining burst reserve.
+        let outside = (host.outside)().context("outside-lane host observation unavailable")?.outside_bytes;
+        let free = host.room.memory.saturating_sub(held).saturating_sub(finite)
+            .saturating_sub(outside).saturating_sub(reserve.kept);
+        Ok(lane.cores <= host.room.cores && lane.memory <= host.room.memory.saturating_sub(reserve.full)
+            && lane.memory <= free)
+    }
+
+    fn remote_resource_lane_fit(&self, request: &crate::store::resource_membership::LaneRequest)
+        -> Result<crate::store::resource_membership::Fit>
+    {
+        self.resource_lane_fit_with_accounting(request, &|_| {
+            let (held, reserve) = self.remote_held_lanes(&request.id, None)?;
+            Ok((held, reserve.kept))
+        })
+    }
+
+    /// The sealed subject owns either the membership or one inherited execution root.
+    /// Never infer membership ownership from the inherited (unchanged) lane request.
+    pub(super) fn retire_remote_start_resources(
+        &self, operation: &crate::store::RuntimeStartOperation, native_incarnation: Option<&str>,
+    ) -> Result<()> {
+        let authorization: fractal_peer::light_node::journal::StartAuthorization =
+            serde_json::from_value(operation.body["remote_start"].clone())?;
+        let Some(request) = resource_lanes::request(&authorization.launch_member)? else { return Ok(()); };
+        let Some(record) = self.store.resource_memberships_for_host(&self.host)?.into_iter()
+            .find(|record| record.request == request) else {
+                anyhow::ensure!(!operation.dispatched, "dispatched native finite Start lost resource custody");
+                return Ok(());
+            };
+        if request.owner.invocation.as_deref() == Some(operation.subject.as_str()) {
+            anyhow::ensure!(self.runtime.retire_resource_lane(&self.store, &request)?,
+                "native finite Start producer custody remains unresolved");
+            return Ok(());
+        }
+        let runtime_id = &authorization.launch_member.runtime_id;
+        let Some(root) = record.roots.iter().find(|root| root.runtime_id == *runtime_id) else {
+            // Before dispatch there was no acquisition; a backend refusal may also
+            // positively reject its preparation. Neither grants parent cancellation.
+            anyhow::ensure!(!operation.dispatched
+                || operation.result.as_ref().is_some_and(|result| result["producer_closed"] == true),
+                "inherited native Start has no positive root closure");
+            return Ok(());
+        };
+        let execution = root.execution.as_ref().context("inherited native preparation retains unresolved producer custody")?;
+        let incarnation = native_incarnation.context("inherited native root lacks exact retirement evidence")?;
+        anyhow::ensure!(execution.generation_id == incarnation
+            && operation.result.as_ref().is_some_and(|result|
+                result["verification"] == "operation-incarnation" && result["incarnation"].as_str() == Some(incarnation)),
+            "inherited native retirement names another execution generation");
+        let binding = self.store.local_session_at(&operation.subject, incarnation)?
+            .context("inherited native retirement lost local custody")?;
+        anyhow::ensure!(binding.runtime_id == *runtime_id && binding.native_incarnation == incarnation
+            && binding.start_operation.as_deref() == Some(operation.id.as_str())
+            && self.store.local_session_retirement_verified(&binding)?,
+            "inherited native root retirement is not positively verified");
+        let grant = record.grant.as_ref().context("inherited native root lost membership grant")?;
+        self.store.end_resource_execution(grant, runtime_id, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
+        Ok(())
+    }
+
     /// Admit only exact, already-owned native sessions, never graph status or a launch.
     pub fn session_bindings(&self, selection: &Selection) -> Result<Vec<ExecutionBinding>> {
         anyhow::ensure!(selection.host == self.host, "session grant names another physical host");
@@ -140,7 +568,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && binding.subject == command.binding.subject && binding.runtime_id == command.binding.runtime
                 && binding.incarnation == incarnation && binding.custody == SessionCustody::Owned,
                 "pending native stop receipt names another custody owner");
+            if let Some(operation) = &binding.start_operation
+                && let Some(operation) = self.store.remote_runtime_start(operation)? {
+                    self.retire_remote_start_resources(&operation, Some(&binding.native_incarnation))?;
+                    self.store.verify_remote_runtime_start_cleanup(&operation.id)?;
+                }
             self.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
+            if let Some(operation) = &binding.start_operation {
+                self.store.settle_remote_runtime_start(operation)?;
+            }
             journal.finish_local_finalization(&command.execution_id)?;
         }
         // A new daemon cannot adopt the previous in-memory program VM. Permission is
@@ -200,6 +636,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.program_run_authority_changed();
         if let Some(journal) = self.home_session_journal.get() {
             for subject in &journal.selection()?.grant.subjects { self.start_changed(subject); }
+            for command in journal.live_start_commands()? {
+                let Operation::Start { authorization } = &command.operation else { unreachable!("live Start snapshot") };
+                if let Err(error) = require_start_helper(&self.store, self.runtime.as_ref(), authorization) {
+                    journal.cancel_or_revoke(&command.execution_id, format!("{error:#}"),
+                        |command, _, reason| self.store.revoke_remote_runtime_start(&command.execution_id, reason))?;
+                }
+            }
         }
         self.refresh_session_bindings()
     }
@@ -212,11 +655,13 @@ impl<R: RuntimeControl> Reconciler<R> {
 }
 
 impl Executor for NativeSessionExecutor {
+    fn recovery_generation(&self) -> u64 { *self.native_generation.borrow() }
+
     fn enter(&self, command: &Command, authority: &rusqlite::Connection) -> Result<String> {
         let reconciler = &self.reconciler;
         anyhow::ensure!(command.binding.host == reconciler.host, "command names another physical host");
-        if matches!(command.operation, Operation::Start) {
-            return Err(FractalError::new("light-node-start-not-supported", "this native session supports observe and stop only").into());
+        if matches!(command.operation, Operation::Start { .. }) {
+            return Ok(serde_json::to_string(&self.enter_start(command, authority)?)?);
         }
         local::require_execution(authority, &command.binding)?;
         let binding = match reconciler.session_live(command) {
@@ -229,14 +674,15 @@ impl Executor for NativeSessionExecutor {
         let proof = match command.operation {
             Operation::Observe => NativeProof::Complete { outcome: Outcome::Observed { incarnation: binding.incarnation, state: "running".into() } },
             Operation::Stop => self.stop_proof(command, binding)?,
-            Operation::Start => unreachable!("remote start was refused before native resolution"),
+            Operation::Start { .. } => unreachable!("Start uses native admission before session resolution"),
         };
         Ok(serde_json::to_string(&proof)?)
     }
 
-    fn cancel(&self, _command: &Command, _authority: &rusqlite::Connection, _reason: &str) -> Result<()> {
-        // A completed observation cannot be undone; an already-signaled Stop retains its
-        // native retirement waiter. Cancellation never invents physical closure.
+    fn cancel(&self, command: &Command, _authority: &rusqlite::Connection, reason: &str) -> Result<()> {
+        if matches!(command.operation, Operation::Start { .. }) {
+            self.reconciler.store.revoke_remote_runtime_start(&command.execution_id, reason)?;
+        }
         Ok(())
     }
 
@@ -244,6 +690,14 @@ impl Executor for NativeSessionExecutor {
         Box::pin(async move {
             let reconciler = &self.reconciler;
             let mut recovery = recovery;
+            if matches!(recovery.command.operation, Operation::Start { .. }) {
+                let result = self.recover_start(&recovery).await;
+                #[cfg(test)]
+                if result.is_err() {
+                    self.recovery_failures.send_modify(|value| *value += 1);
+                }
+                return result;
+            }
             if recovery.custody_proof.is_none() && matches!(recovery.command.operation, Operation::Stop) {
                 match reconciler.session_live(&recovery.command) {
                     Ok(_) => {
@@ -274,10 +728,11 @@ impl Executor for NativeSessionExecutor {
                         }
                         return self.finish_stop(&recovery.command, binding);
                     }
+                    NativeProof::Start => anyhow::bail!("native Start proof names another operation"),
                 }
             }
             match recovery.command.operation {
-                Operation::Start => Err(FractalError::new("light-node-start-not-supported", "remote start is not enabled").into()),
+                Operation::Start { .. } => unreachable!("Start recovery uses native operation provenance"),
                 Operation::Observe => Ok(Outcome::Cancelled { reason: "observation interrupted before its durable result".into() }),
                 Operation::Stop => {
                     let live = &recovery.command.binding;
@@ -303,3 +758,6 @@ impl Executor for NativeSessionExecutor {
 #[cfg(test)]
 #[path = "home_session_tests.rs"]
 mod tests;
+
+#[path = "home_session_stop.rs"]
+mod ordinary_stop;
