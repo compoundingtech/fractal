@@ -141,6 +141,9 @@ pub(super) async fn run_replication(
             if let Some(fallbacks) = &status.stream_fallbacks {
                 println!("stream-fallbacks\t{}", render_stream_fallbacks(fallbacks));
             }
+            if let Some(retention) = &status.retention {
+                print!("{}", render_retention(retention));
+            }
             print!(
                 "{}",
                 render_replication_peers(&status.peers, &status.graph_digest, now_ms())
@@ -325,6 +328,132 @@ pub(super) async fn run_replication(
             println!("migration phase {}, fault {}", migration["phase"].as_str().unwrap_or("?"), migration["fault"].as_str().unwrap_or("none"));
             Ok(())
         }
+    }
+}
+
+/// Each retention pass on one line or two: what the checkpoint trim, the valid-record bytes pass,
+/// the settled judging prune and the legacy receipt cleanup have done, and the passes this build
+/// keeps off, with why (`docs/st3/retention.md`).
+fn render_retention(retention: &smallclaims::store::retention::RetentionStatus) -> String {
+    let count = |value: Option<u64>| value.map_or("?".to_owned(), |value| value.to_string());
+    let switch = |switch: &smallclaims::store::retention::PassSwitch| {
+        if switch.enabled {
+            "on".to_owned()
+        } else {
+            format!("off: {}", switch.off_because.as_deref().unwrap_or("no reason given"))
+        }
+    };
+    let trim = &retention.trim;
+    let mut output = format!(
+        "retention-trim\t{} daily={} deleted-today={} newest-cut={} unfinished={}\n",
+        if trim.local { "on" } else { "off" },
+        trim.daily_claims,
+        trim.deleted_today,
+        trim.newest_cut.as_ref().map_or("none".to_owned(), |cut| format!(
+            "{} ({}, eligible envelopes={} claims={})",
+            cut.id,
+            cut.state,
+            count(cut.eligible_envelopes),
+            count(cut.eligible_claims)
+        )),
+        trim.unfinished_cut.as_deref().unwrap_or("none"),
+    );
+    if let Some(pass) = &trim.last_pass {
+        let stop = serde_json::to_value(pass.stop).ok().and_then(|stop| stop.as_str().map(str::to_owned));
+        output.push_str(&format!(
+            "retention-trim-last-pass\tstop={} trimmed={} deferred={} deleted envelopes={} claims={}\n",
+            stop.as_deref().unwrap_or("?"),
+            pass.trimmed_cuts,
+            pass.deferred_cuts,
+            pass.deleted_envelopes,
+            pass.deleted_claims
+        ));
+    }
+    let since = &trim.since_start;
+    output.push_str(&format!(
+        "retention-trim-since-start\tpasses={} trimmed={} deferred={} deleted envelopes={} claims={}\n",
+        since.passes, since.trimmed_cuts, since.deferred_cuts, since.deleted_envelopes, since.deleted_claims
+    ));
+    let bytes = &retention.valid_record_bytes;
+    output.push_str(&format!(
+        "retention-valid-record-bytes\t{} cursor={}/{} since-start pages={} emptied={} bytes={}\n",
+        if bytes.done { "done" } else { "in progress" },
+        bytes.cursor_rowid,
+        bytes.newest_rowid,
+        bytes.since_start.pages,
+        bytes.since_start.emptied_records,
+        bytes.since_start.emptied_bytes
+    ));
+    let judging = &retention.settled_judging;
+    output.push_str(&format!(
+        "retention-settled-judging\t{} since-start pages={} examined={} deleted={}\n",
+        match judging.cursor.as_deref() {
+            None => "not started".to_owned(),
+            Some("done") => "done".to_owned(),
+            Some(claim) => format!("after {claim}"),
+        },
+        judging.since_start.pages,
+        judging.since_start.examined,
+        judging.since_start.deleted
+    ));
+    let receipts = &retention.legacy_receipts;
+    output.push_str(&format!(
+        "retention-legacy-receipts\t{} boundary={} oldest={} cleanup-since-start chunks={} examined={} deleted={} extended={}\n",
+        if receipts.pending { "pending" } else { "none left" },
+        receipts.boundary_rowid.map_or("none".to_owned(), |rowid| rowid.to_string()),
+        receipts.oldest_rowid.map_or("none".to_owned(), |rowid| rowid.to_string()),
+        receipts.since_start.chunks,
+        receipts.since_start.examined,
+        receipts.since_start.deleted,
+        receipts.since_start.extended
+    ));
+    output.push_str(&format!("retention-envelope-release\t{}\n", switch(&retention.envelope_release)));
+    output.push_str(&format!("retention-valid-record-deletion\t{}\n", switch(&retention.valid_record_deletion)));
+    output
+}
+
+#[test]
+fn replication_status_renders_each_retention_pass() {
+    use smallclaims::store::retention::{
+        JudgingRetention, PassSwitch, RetentionStatus, TrimCut, TrimPass, TrimRetention, TrimStop,
+    };
+    let retention = RetentionStatus {
+        trim: TrimRetention {
+            local: true,
+            daily_claims: 100_000,
+            newest_cut: Some(TrimCut {
+                id: "cut-1".into(),
+                state: "trimming".into(),
+                eligible_envelopes: Some(3),
+                eligible_claims: None,
+            }),
+            unfinished_cut: Some("cut-1".into()),
+            last_pass: Some(TrimPass {
+                at_unix_ms: 1,
+                stop: TrimStop::DailyCap,
+                trimmed_cuts: 0,
+                deferred_cuts: 1,
+                deleted_envelopes: 2,
+                deleted_claims: 5,
+            }),
+            ..TrimRetention::default()
+        },
+        settled_judging: JudgingRetention { cursor: Some("done".into()), ..JudgingRetention::default() },
+        envelope_release: PassSwitch { enabled: false, off_because: Some("not yet".into()) },
+        valid_record_deletion: PassSwitch { enabled: true, off_because: None },
+        ..RetentionStatus::default()
+    };
+    let rendered = render_retention(&retention);
+    for line in [
+        "retention-trim\ton daily=100000 deleted-today=0 newest-cut=cut-1 (trimming, eligible envelopes=3 claims=?) unfinished=cut-1\n",
+        "retention-trim-last-pass\tstop=daily_cap trimmed=0 deferred=1 deleted envelopes=2 claims=5\n",
+        "retention-valid-record-bytes\tin progress cursor=0/0",
+        "retention-settled-judging\tdone since-start",
+        "retention-legacy-receipts\tnone left boundary=none oldest=none",
+        "retention-envelope-release\toff: not yet\n",
+        "retention-valid-record-deletion\ton\n",
+    ] {
+        assert!(rendered.contains(line), "{line:?} missing from:\n{rendered}");
     }
 }
 
