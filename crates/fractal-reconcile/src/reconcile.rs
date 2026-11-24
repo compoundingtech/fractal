@@ -806,12 +806,22 @@ pub fn local_session<R: RuntimeControl>(
 pub fn stop_local_session<R: RuntimeControl>(
     store: &Store, runtime: &R, subject: &str, incarnation: &str, operation: &str,
 ) -> Result<()> {
-    if store.local_session_detached(subject, incarnation)? { return Ok(()); }
+    stop_local_session_with_retirement_proof(store, runtime, subject, incarnation, operation).map(|_| ())
+}
+
+/// True is positive exact-generation whole-scope retirement, never signal acceptance.
+/// The caller must durably receipt that proof before settling owned local custody.
+/// Borrowed detach is journaled but never claims physical retirement.
+pub fn stop_local_session_with_retirement_proof<R: RuntimeControl>(
+    store: &Store, runtime: &R, subject: &str, incarnation: &str, operation: &str,
+) -> Result<bool> {
+    if store.local_session_detached(subject, incarnation)? { return Ok(false); }
     let binding = local_session(store, runtime, subject, Some(incarnation))?;
     if binding.custody == crate::store::local_sessions::SessionCustody::Borrowed {
-        store.detach_local_session(subject, incarnation, operation)
+        store.detach_local_session(subject, incarnation, operation)?;
+        Ok(false)
     } else {
-        runtime.stop(&binding.runtime_id, binding.terminal, Some(&binding.native_incarnation))
+        runtime.stop_with_retirement_proof(&binding.runtime_id, binding.terminal, &binding.native_incarnation)
     }
 }
 
@@ -8607,6 +8617,28 @@ impl<R: RuntimeControl> Reconciler<R> {
                 fields.insert("restarting_from".into(), Value::Null);
             }
             self.record_once_with_evidence(subject, "runtime.observed", fields, evidence)?;
+            // The stopped projection can be written for absence, but absence is not native
+            // custody closure. Release local routing only for this exact positive generation
+            // witness and whole-scope proof, after the observation receipt is durable.
+            if let Some(incarnation) = incarnation
+                && observation.is_some_and(|observed| observed.runtime_id == runtime_id
+                    && observed.incarnation_id.as_deref() == Some(incarnation)
+                    && matches!(observed.status.as_str(), "exited" | "stopped"))
+                && self.store.local_session(subject)?.is_some_and(|binding|
+                    binding.incarnation == incarnation
+                    && binding.custody == crate::store::local_sessions::SessionCustody::Owned
+                    && binding.runtime_id == runtime_id && binding.terminal == terminal
+                    && binding.native_incarnation == incarnation)
+            {
+                let closed = if terminal {
+                    self.runtime.stop_with_retirement_proof(runtime_id, terminal, incarnation)?
+                } else {
+                    self.store.runtime_cleanup_settled(runtime_id, incarnation)?
+                };
+                if closed {
+                    self.store.settle_local_session_custody(subject, incarnation)?;
+                }
+            }
             return Ok(true);
         }
         let incarnation = incarnation.unwrap_or("unknown");
@@ -8647,8 +8679,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("stop:{subject}"),
                 deadline.min(now_ms().saturating_add(100)),
             );
+            let local_owned = self.store.local_session(subject)?.is_some_and(|binding|
+                binding.incarnation == incarnation
+                && binding.custody == crate::store::local_sessions::SessionCustody::Owned
+                && binding.runtime_id == runtime_id && binding.terminal == terminal
+                && binding.native_incarnation == incarnation);
             evidence.record(
-                if retirement_operation.is_some() {
+                if retirement_operation.is_some() || local_owned {
                     "stop_with_retirement_proof"
                 } else {
                     "stop"
@@ -8659,7 +8696,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let stopped = host_executor::StopCommand::new(
                 &request, runtime_id, terminal, Some(incarnation),
                 host_executor::StopAction::Terminate {
-                    retirement_proof: retirement_operation.is_some(),
+                    retirement_proof: retirement_operation.is_some() || local_owned,
                 },
             ).dispatch(self.runtime.as_ref(), &self.host_observations);
             let receipt = match stopped {
@@ -8682,16 +8719,34 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             if receipt.retirement_verified {
                 evidence.record("apply_retirement", "allow_native_retirement_verified", true);
-                let operation =
-                    retirement_operation.context("retirement proof has no operation")?;
-                anyhow::ensure!(
-                    self.store.apply_runtime_start_retirement(
-                        operation,
-                        incarnation,
-                        receipt.request
-                    )?,
-                    "native retirement proof did not match its operation/request"
-                );
+                if let Some(operation) = retirement_operation {
+                    anyhow::ensure!(
+                        self.store.apply_runtime_start_retirement(operation, incarnation, receipt.request)?,
+                        "native retirement proof did not match its operation/request"
+                    );
+                } else {
+                    self.store.append_claim(&ClaimInput {
+                        subject: subject.into(), kind: "runtime.action.succeeded".into(), actor: None,
+                        fields: BTreeMap::from([
+                            ("action".into(), Value::from("terminate")),
+                            ("runtime_id".into(), Value::from(runtime_id)),
+                            ("terminal".into(), Value::from(terminal)),
+                            ("incarnation_id".into(), Value::from(incarnation)),
+                        ]),
+                        evidence: vec![receipt.request.into()], expected_subject: None,
+                        idempotency_key: Some(format!("local-session-stop:{subject}:{incarnation}")),
+                    })?;
+                    let mut fields = BTreeMap::from([
+                        ("status".into(), Value::from("stopped")),
+                        ("runtime_id".into(), Value::from(runtime_id)),
+                        ("terminal".into(), Value::from(terminal)),
+                        ("incarnation_id".into(), Value::from(incarnation)),
+                        ("host".into(), Value::from(self.host.clone())),
+                    ]);
+                    self.retain_exit_evidence(subject, runtime_id, terminal, Some(incarnation), &mut fields)?;
+                    self.record_once(subject, "runtime.observed", fields)?;
+                }
+                self.store.settle_local_session_custody(subject, incarnation)?;
                 self.start_changed(subject);
                 return Ok(true);
             }

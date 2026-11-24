@@ -301,3 +301,105 @@ fn committed_drains_survive_a_later_action_refusal() {
     ).unwrap();
     assert!(!action_persisted);
 }
+
+#[test]
+fn authenticated_scope_crosses_the_batched_writer_thread_and_does_not_leak() {
+    let store = Store::open_memory("node").unwrap();
+    let step = store.start_program_step_for_tests();
+    let secret = store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let authenticated = store.run_binding(&secret).unwrap();
+    assert_eq!(pending_count(&store.readers.get()), 0);
+    let submitter = std::thread::current().id();
+    let (writer, captured) = run_credentials::request_context::with(Some(authenticated.clone()), || {
+        execute(&store.graph, None, None, |_| -> Result<_, FractalError> {
+            Ok((std::thread::current().id(), run_credentials::request_context::capture()))
+        })
+    }).unwrap();
+    assert_ne!(writer, submitter, "exercise SQLite's queued batched writer, not the submitter");
+    assert_eq!(captured, Some(authenticated));
+    let next = execute(&store.graph, None, None, |_| -> Result<_, FractalError> {
+        Ok(run_credentials::request_context::capture())
+    }).unwrap();
+    assert_eq!(next, None, "the shared writer must not retain a prior request's identity");
+}
+
+#[test]
+fn a_previously_authenticated_claim_cannot_outlive_cancellation_or_attempt_replacement() {
+    for (status, attempt) in [("completed", 1), ("working", 2)] {
+        let store = Store::open_memory("node").unwrap();
+        let step = store.start_program_step_for_tests();
+        let secret = store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+        // Real credential authentication precedes the competing mutation.
+        let authenticated = store.run_binding(&secret).unwrap();
+        assert_eq!(pending_count(&store.readers.get()), 0);
+        let request = ClaimInput {
+            subject: "custom/example/late-authenticated-write".into(),
+            kind: "custom.example.recorded".into(), actor: Some(authenticated.run.clone()),
+            fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        };
+        let (submitting, submitted) = std::sync::mpsc::sync_channel(0);
+        // A real writer loan prevents the queued batched writer from admitting the request
+        // until this competing transaction has committed and the connection is returned.
+        let result = std::thread::scope(|threads| {
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            let graph = &store;
+            let request = &request;
+            let caller = threads.spawn(move || {
+                run_credentials::request_context::with(Some(authenticated), || {
+                    submitting.send(()).unwrap();
+                    graph.append_client_claim(request)
+                })
+            });
+            submitted.recv().unwrap();
+            transaction.execute(
+                "UPDATE step_runs SET status=?2,attempt=?3 WHERE subject=?1",
+                params![step.subject, status, attempt],
+            ).unwrap();
+            transaction.commit().unwrap();
+            drop(writer);
+            caller.join().unwrap()
+        });
+        assert_eq!(result.unwrap_err().code, "run-credential-ended");
+        assert_eq!(pending_count(&store.readers.get()), 0, "exercise the no-projection batched path");
+        assert!(store.claims_for_subject_kind_at(&request.subject, &request.kind, None, false, 10).unwrap().claims.is_empty());
+    }
+}
+
+#[test]
+fn authenticated_scope_is_rechecked_after_projection_drain_before_the_direct_action() {
+    for replace_during_drain in [false, true] {
+        let (store, aggregates) = fixture(1);
+        let step = store.start_program_step_for_tests();
+        let secret = store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+        let authenticated = store.run_binding(&secret).unwrap();
+        mark_all_pending(&store, &aggregates);
+        let actions = AtomicUsize::new(0);
+        let submitter = std::thread::current().id();
+        let outcome = run_credentials::request_context::with(Some(authenticated.clone()), || {
+            execute_with_turn_hook(
+                &store.graph, Some(RunMutationFence::All), None,
+                |_| -> Result<(), FractalError> {
+                    assert_eq!(std::thread::current().id(), submitter, "the drained path loans the writer to the caller");
+                    assert_eq!(run_credentials::request_context::capture(), Some(authenticated.clone()));
+                    actions.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                || {
+                    if replace_during_drain {
+                        store.set_step_run_state_for_tests(&step.subject, "working", 2);
+                    }
+                },
+            )
+        });
+        if replace_during_drain {
+            assert_eq!(outcome.unwrap_err().code, "run-credential-ended");
+            assert_eq!(actions.load(Ordering::SeqCst), 0);
+        } else {
+            outcome.unwrap();
+            assert_eq!(actions.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(run_credentials::request_context::capture(), None);
+        assert_eq!(pending_count(&store.readers.get()), 0);
+    }
+}

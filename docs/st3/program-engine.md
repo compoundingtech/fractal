@@ -352,6 +352,9 @@ so an effect cannot replace it. See [light-node authorization](light-node.md#aut
 beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon
 binds a request to `mission-run/RUN` only while its authority is live. Full nodes retain the
 current graph-attempt check and recheck authenticated run scope in the actual claim transaction.
+That scope travels with the queued SQLite writer action, not just the submitting blocking thread.
+Both the batched writer and the direct writer after projection drain recheck it before the effect;
+the shared writer's previous identity is restored on success, refusal or unwinding.
 Light nodes resolve durable local admission without a graph lookup and explicitly revoke it before
 forgetting an ended or replaced engine attempt. One that no longer binds leaves the caller
 unverifiable. A run-bound request follows bound-agent attribution: no general internal routes,

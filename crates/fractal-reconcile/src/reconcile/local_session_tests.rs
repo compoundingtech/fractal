@@ -38,6 +38,7 @@ fn owned_exec_resolves_after_restart_without_graph_and_stop_is_generation_fenced
     assert!(stop_local_session(&store, &runtime, &live.subject, "reused-generation", "wrong-stop").is_err());
     assert!(matches!(runtime.exec.observe("local-owned").unwrap(), Some(fractal_runtime::ExecObservation::Running(_))));
     stop_local_session(&store, &runtime, &live.subject, &live.incarnation, "owned-stop").unwrap();
+    runtime.exec.wait_for_exit("local-owned", &live.native_incarnation).unwrap();
     assert!(local_session(&store, &runtime, &live.subject, Some(&live.incarnation)).is_err());
     let replacement = runtime.exec.spawn("local-owned", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
         root.path(), &std::env::vars().collect()).unwrap();
@@ -45,6 +46,57 @@ fn owned_exec_resolves_after_restart_without_graph_and_stop_is_generation_fenced
     assert_ne!(replacement.generation_id, live.native_incarnation);
     assert!(local_session(&store, &runtime, &live.subject, Some(&live.incarnation)).is_err(),
         "a reused runtime ID must not inherit the retired native generation");
+}
+
+#[tokio::test]
+async fn a_managed_stopped_projection_from_absence_does_not_release_native_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("executor").unwrap());
+    let subject = "agent/example/missing-native";
+    let incarnation = "unproven-native-generation";
+    store.bind_local_session(&LocalSession {
+        subject: subject.into(), runtime_id: "missing-native".into(),
+        incarnation: incarnation.into(), native_incarnation: incarnation.into(),
+        terminal: false, driver: None, lifecycle: MemberLifecycle::Service,
+        custody: SessionCustody::Owned, start_operation: None, invocation: None,
+    }).unwrap();
+    let runtime = Arc::new(NativeRuntime::new(root.path(), None, Path::new("unused-pty")));
+    let reconciler = Reconciler::new(store.clone(), runtime, "executor".into(), Arc::new(Notify::new()));
+    assert!(reconciler.reconcile_runtime_stop(subject, "missing-native", false, Some(incarnation), 0, None).unwrap());
+    assert!(store.has_current_local_session(subject).unwrap(),
+        "the stopped projection is not an exact native closure witness");
+    assert!(store.local_session_at(subject, incarnation).unwrap().is_some());
+}
+
+#[test]
+fn offline_owned_stop_proves_native_retirement_but_waits_for_a_durable_receipt_to_settle() {
+    let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    let Ok(binary) = fractal_runtime::resolve_executable("pty", &environment) else {
+        assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "hosted custody fixtures require pty");
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let runtime = NativeRuntime::new(root.path(), None, &binary);
+    runtime.pty().unwrap().spawn("owned-proof", &fractal_runtime::Launch::Shell("sleep 600 & wait".into()),
+        root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
+    struct Cleanup<'a>(&'a NativeRuntime);
+    impl Drop for Cleanup<'_> { fn drop(&mut self) { let _ = self.0.pty().and_then(|pty| pty.stop("owned-proof")); } }
+    let _cleanup = Cleanup(&runtime);
+    let observed = runtime.snapshot_ptys().unwrap().into_iter().find(|o| o.runtime_id == "owned-proof").unwrap();
+    let incarnation = observed.incarnation_id.unwrap();
+    let store = Store::open_memory("executor").unwrap();
+    let subject = "agent/example/owned-proof";
+    store.bind_local_session(&LocalSession {
+        subject: subject.into(), runtime_id: "owned-proof".into(),
+        incarnation: incarnation.clone(), native_incarnation: incarnation.clone(),
+        terminal: true, driver: None, lifecycle: MemberLifecycle::Service,
+        custody: SessionCustody::Owned, start_operation: None, invocation: None,
+    }).unwrap();
+    without_graph(&store);
+    assert!(stop_local_session_with_retirement_proof(&store, &runtime, subject, &incarnation, "offline-owned-stop").unwrap());
+    assert!(local_session(&store, &runtime, subject, Some(&incarnation)).is_err());
+    assert!(store.has_current_local_session(subject).unwrap(),
+        "native proof alone must not settle custody before the caller's durable completion receipt");
 }
 
 #[test]
