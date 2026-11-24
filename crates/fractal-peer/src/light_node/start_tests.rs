@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn start_draft(selected: &Selection, decision: &str, revision: u64) -> CommandDraft {
+pub(in crate::light_node) fn start_draft(selected: &Selection, decision: &str, revision: u64) -> CommandDraft {
     let mut draft = tests::draft(selected, decision);
     draft.binding.authorization_revision = revision.to_string();
     let member: crate::model::MemberSpec = serde_json::from_value(serde_json::json!({
