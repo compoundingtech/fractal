@@ -34,11 +34,15 @@ async fn simulated_mail_retirement_advances_the_signed_claim_forget_clock() {
         ids.push(store.append_claim(&crate::model::ClaimInput {
             subject: "message/retirement-clock".into(),
             kind: kind.into(),
-            actor: Some("agent/retirement-sender".into()),
-            fields: serde_json::from_value(json!({
-                "from": "agent/retirement-sender", "to": "agent/retirement-reader",
-                "content": "signed retirement clock", "status": kind.trim_start_matches("message."),
-            })).unwrap(),
+            actor: Some(if kind == "message.sent" { "agent/retirement-sender" } else { "agent/retirement-reader" }.into()),
+            fields: serde_json::from_value(if kind == "message.sent" {
+                json!({
+                    "from": "agent/retirement-sender", "to": "agent/retirement-reader",
+                    "content": "signed retirement clock", "status": "sent",
+                })
+            } else {
+                json!({"status": kind.trim_start_matches("message.")})
+            }).unwrap(),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap().id);
     }
