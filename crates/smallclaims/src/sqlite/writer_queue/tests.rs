@@ -318,6 +318,7 @@ fn foreground_only_fifo_and_batched_durable_answers_are_unchanged() {
             true
         }),
         profile: None,
+        charged: None,
         wait: None,
         holder: crate::windows::holds::Holder::current(),
         done,
@@ -393,6 +394,7 @@ fn foreground_batched_write_gets_a_bounded_turn_during_a_long_verdict_loop() {
             true
         }),
         profile: None,
+        charged: None,
         wait: None,
         holder: crate::windows::holds::Holder::current(),
         done,

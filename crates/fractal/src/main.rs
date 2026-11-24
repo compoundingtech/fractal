@@ -13305,17 +13305,25 @@ fn render_performance(view: &Value) -> String {
         "PERFORMANCE  last {} seconds · sorted by total wall time\n",
         view["window_seconds"]
     );
+    if let Some(note) = view["sqlite_cache_miss_bytes_note"].as_str() {
+        let _ = writeln!(out, "SQLite cache-miss bytes: {note}");
+    }
+    if let Some(note) = view["mmap_major_faults_note"].as_str() {
+        let _ = writeln!(out, "mmap major faults: {note}");
+    }
     for (key, title) in [("requests", "REQUESTS AND TASKS"), ("queries", "QUERIES")] {
-        let _ = writeln!(out, "{title}  count · total ms · max ms · CPU ms · kind");
+        let _ = writeln!(out, "{title}  count · total ms · max ms · CPU ms · SQLite cache-miss bytes · mmap major faults · kind");
         if let Some(rows) = view[key].as_array() {
             for row in rows {
                 let _ = writeln!(
                     out,
-                    "  {}  {:.1}  {:.1}  {:.1}  {}",
+                    "  {}  {:.1}  {:.1}  {:.1}  {}  {}  {}",
                     row["count"],
                     row["total_ms"].as_f64().unwrap_or(0.0),
                     row["max_ms"].as_f64().unwrap_or(0.0),
                     row["cpu_ms"].as_f64().unwrap_or(0.0),
+                    row["sqlite_cache_miss_bytes"].as_u64().unwrap_or(0),
+                    row["mmap_major_faults"],
                     row["kind"].as_str().unwrap_or("?")
                 );
             }
@@ -13330,10 +13338,10 @@ fn render_performance(view: &Value) -> String {
         );
     }
     for (key, title) in [
-        ("clients", "CLIENTS  count · total ms · CPU ms · client"),
+        ("clients", "CLIENTS  count · total ms · CPU ms · SQLite cache-miss bytes · mmap major faults · client"),
         (
             "client_requests",
-            "CLIENT REQUESTS  count · total ms · CPU ms · client · kind",
+            "CLIENT REQUESTS  count · total ms · CPU ms · SQLite cache-miss bytes · mmap major faults · client · kind",
         ),
     ] {
         let Some(rows) = view[key].as_array() else {
@@ -13343,10 +13351,12 @@ fn render_performance(view: &Value) -> String {
         for row in rows {
             let _ = write!(
                 out,
-                "  {}  {:.1}  {:.1}  {}",
+                "  {}  {:.1}  {:.1}  {}  {}  {}",
                 row["count"],
                 row["total_ms"].as_f64().unwrap_or(0.0),
                 row["cpu_ms"].as_f64().unwrap_or(0.0),
+                row["sqlite_cache_miss_bytes"].as_u64().unwrap_or(0),
+                row["mmap_major_faults"],
                 row["client"].as_str().unwrap_or("?")
             );
             if let Some(kind) = row["kind"].as_str() {

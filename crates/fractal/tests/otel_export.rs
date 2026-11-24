@@ -1576,6 +1576,7 @@ fn storage_stage_gates_export_detached_roots() {
         let (done, answer) = std::sync::mpsc::sync_channel(1);
         writer.send(smallclaims::sqlite::WriterJob::Batched {
             run: Box::new(|_| true), profile: None, wait: None,
+            charged: None,
             holder: smallclaims::windows::holds::Holder::current(),
             enqueued: Instant::now(), done,
         });

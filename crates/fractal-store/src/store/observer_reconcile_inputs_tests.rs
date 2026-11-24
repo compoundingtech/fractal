@@ -136,3 +136,42 @@ fn projection_marker_changes_evaluate_only_owning_run_fence() {
     assert!(inputs.pending_subjects(&store).unwrap().is_empty());
     assert_eq!(store.reconcile_input_work()["projection_fences_rebuilt"].as_u64(), initial["projection_fences_rebuilt"].as_u64().map(|count| count + 2));
 }
+
+#[test]
+fn pending_projection_batch_probes_distinct_owners_and_matches_individual_decisions() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let store = fixture();
+    for index in 0..300 {
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hbc6ac9552c51 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run)
+             VALUES(?1,'resource','test',(SELECT id FROM claims LIMIT 1),?2,?3)",
+            params![format!("resource/shared-{index}"), "{}",
+                format!("mission-run/{}", ["first", "second", "third"][index % 3])],
+        ).unwrap();
+    }
+    let desired = store.desired_subjects().unwrap();
+    let owners = || desired.iter().filter_map(|declaration| declaration.owner_run.as_deref());
+    let probes = store.extension::<PendingProbeCount>();
+    assert!(store.pending_projection_runs(owners()).unwrap().is_empty());
+    assert_eq!(probes.0.load(Relaxed), 0, "no markers short-circuit every owner");
+
+    let aggregate = Aggregate::RunPart("first".into());
+    let key = pending_run_rebuild_key(&aggregate).unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h4699cce4b4b9 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+        params![key, serde_json::to_string(&aggregate).unwrap()],
+    ).unwrap();
+    let pending = store.pending_projection_runs(owners()).unwrap();
+    assert_eq!(probes.0.load(Relaxed), 3, "one pending probe per distinct owner");
+    assert_eq!(pending, BTreeSet::from(["mission-run/first".into()]));
+    for declaration in &desired {
+        let owner = declaration.owner_run.as_deref().unwrap();
+        assert_eq!(pending.contains(owner), store.run_projection_pending(owner).unwrap(),
+            "batch preserves the individual decision for {}", declaration.subject);
+    }
+
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2f207f725563 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [&key]).unwrap();
+    assert!(store.pending_projection_runs(owners()).unwrap().is_empty(),
+        "the next planning snapshot observes projection completion");
+    assert_eq!(probes.0.load(Relaxed), 3, "the clear fast path needs no owner probes");
+}

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
 use anyhow::{Context as _, Result};
-use rusqlite::{Connection, OpenFlags, Transaction};
+use rusqlite::{Connection, OpenFlags, Transaction, ffi};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::read_budget::ReadBudget;
@@ -444,6 +444,8 @@ pub enum WriterJob {
     Batched {
         run: Box<dyn FnOnce(&Transaction<'_>) -> bool + Send>,
         profile: Option<crate::profile::Op>,
+        /// Captured by `send` before this callback crosses to the writer thread.
+        charged: Option<crate::performance::Charged>,
         /// When profiling, when its caller began to wait and who held the writer then.
         wait: Option<crate::profile::WriterWait>,
         /// Who asked for this write, charged for the hold when it runs longest in its batch.
@@ -766,7 +768,8 @@ impl WriterConnection {
 
     #[track_caller]
     pub fn send(&self, mut job: WriterJob) {
-        if let WriterJob::Batched { wait, .. } = &mut job {
+        if let WriterJob::Batched { wait, charged, .. } = &mut job {
+            *charged = crate::performance::current();
             *wait = crate::profile::WriterWait::with_writer_operation(wait.take());
         }
         if let (Some(writer), WriterJob::Batched { wait, .. }) = (&self.telemetry, &mut job) {
@@ -995,6 +998,7 @@ impl WriterConnection {
         self.send(WriterJob::Batched {
             run,
             profile: crate::profile::current(),
+            charged: None,
             wait: crate::profile::writer_waiting(),
             holder: crate::windows::holds::Holder::current(),
             done,
@@ -1202,6 +1206,8 @@ fn run_write_batch(
     let prepare_started = std::time::Instant::now();
     let (transaction, mut failure) = {
         let _scope = crate::task_cpu::blocking_scope("writer.batch.setup");
+        let _performance = crate::performance::current().is_none()
+            .then(|| crate::performance::task_scope("writer.batch.setup"));
         {
             let (transaction, mut failure) =
                 match connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
@@ -1227,6 +1233,7 @@ fn run_write_batch(
         let WriterJob::Batched {
             run,
             profile,
+            charged,
             mut wait,
             holder,
             done,
@@ -1270,10 +1277,12 @@ fn run_write_batch(
                     crate::receive_metrics::WriterSample::start(context, enqueued.elapsed()));
                 hold.running(&holder);
                 // Include SQLite savepoint bookkeeping, not only the submitted callback.
-                // The captured profile remains current; nested CPU wrappers leave their CPU
-                // to this bounded aggregate job scope rather than counting it twice.
-                let savepoint = (|| {
+                // Restore the submitter before the optional aggregate CPU scope enters.
+                // Shared setup/commit work remains outside this per-caller charge.
+                let savepoint = crate::performance::with_charged(charged, || {
                     let _scope = crate::task_cpu::blocking_scope("writer.batch.job");
+                    let _performance = crate::performance::current().is_none()
+                        .then(|| crate::performance::task_scope("writer.batch.job"));
                     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0699ddd36c05 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "SAVEPOINT batched_write")?;
                     if run(transaction) {
                         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h883bdee42fa8 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "RELEASE batched_write")
@@ -1281,7 +1290,7 @@ fn run_write_batch(
                         transaction
                             .execute_batch(/* sqlite-large-value: allow-for-now lv-h2013f7d4439f owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK TO batched_write; RELEASE batched_write")
                     }
-                })();
+                });
                 drop(receive_hold);
                 crate::profile::writer_released(acquired);
                 hold.ran(&holder, running.elapsed());
@@ -1327,6 +1336,8 @@ fn run_write_batch(
         // A lexical guard does not capture connection while transaction still borrows it.
         // Consume the transaction first, then borrow connection for postcommit observers.
         let _scope = crate::task_cpu::blocking_scope("writer.batch.commit");
+        let _performance = crate::performance::current().is_none()
+            .then(|| crate::performance::task_scope("writer.batch.commit"));
         let committed = match (transaction, failure) {
             (Some(transaction), None) => {
                 let finalize_started = attribution.as_ref().map(|_| std::time::Instant::now());
@@ -2189,10 +2200,14 @@ pub static SQLITE_COMMITS: AtomicU64 = AtomicU64::new(0);
 pub static SQLITE_COMMIT_NANOS: AtomicU64 = AtomicU64::new(0);
 
 pub fn record_sqlite_time(statement: &str, duration: std::time::Duration) {
+    record_sqlite_time_with_reads(statement, duration, 0);
+}
+
+fn record_sqlite_time_with_reads(statement: &str, duration: std::time::Duration, bytes: u64) {
     #[cfg(any(test, feature = "test-support"))]
     STATEMENTS_RUN.with(|run| run.set(run.get() + 1));
     crate::profile::sql(statement, duration);
-    crate::performance::record_query(statement, duration);
+    crate::performance::record_query_with_reads(statement, duration, bytes);
     crate::windows::record_store(crate::windows::StoreWork::Statement, duration);
     #[cfg(any(test, feature = "test-support"))]
     histogram::record(statement, duration);
@@ -2207,9 +2222,65 @@ pub fn record_sqlite_time(statement: &str, duration: std::time::Duration) {
 /// its work in [`work`].
 pub fn observe(connection: &mut Connection) {
     census_files::register(connection);
-    #[cfg(any(test, feature = "test-support"))]
-    work::count(connection);
-    connection.profile(Some(record_sqlite_time));
+    let page_size = performance_page_size(connection);
+    // The context is an integer, not an allocated pointer. SQLite retains it unchanged.
+    // SAFETY: SQLite owns the live statement passed to this synchronous callback.
+    unsafe {
+        ffi::sqlite3_trace_v2(
+            connection.handle(),
+            (ffi::SQLITE_TRACE_STMT | ffi::SQLITE_TRACE_PROFILE) as std::ffi::c_uint,
+            Some(performance_trace),
+            page_size as *mut std::ffi::c_void,
+        );
+    }
+}
+
+fn performance_page_size(connection: &Connection) -> usize {
+    connection.pragma_query_value(None, "page_size", |row| row.get(0))
+        .expect("SQLite exposes the main database page size")
+}
+
+/// One O(1) counter read/reset per completed statement, without allocation or locking.
+/// Nested statements/triggers consume the shared counter only once.
+/// This measures SQLite pager misses, not physical disk reads; mmap bypasses it.
+unsafe fn performance_reads(database: *mut ffi::sqlite3, page_size: usize) -> u64 {
+    let mut misses = 0;
+    let mut highwater = 0;
+    // SAFETY: the trace callback supplies its live database; both outputs are valid.
+    let status = unsafe {
+        ffi::sqlite3_db_status(database, ffi::SQLITE_DBSTATUS_CACHE_MISS, &mut misses, &mut highwater, 1)
+    };
+    let bytes = if status == ffi::SQLITE_OK {
+        (misses.max(0) as u64).saturating_mul(page_size as u64)
+    } else {
+        0
+    };
+    crate::performance::sqlite_reads(bytes);
+    bytes
+}
+
+unsafe extern "C" fn performance_trace(
+    event: std::ffi::c_uint,
+    context: *mut std::ffi::c_void,
+    statement: *mut std::ffi::c_void,
+    detail: *mut std::ffi::c_void,
+) -> std::ffi::c_int {
+    // SAFETY: SQLite supplies live pointers for this synchronous callback. Never
+    // unwind through C. The context carries only the page-size integer.
+    let _ = std::panic::catch_unwind(|| unsafe {
+        #[cfg(any(test, feature = "test-support"))]
+        work::traced(event, std::ptr::null_mut(), statement, detail);
+        let statement = statement.cast::<ffi::sqlite3_stmt>();
+        if event == ffi::SQLITE_TRACE_PROFILE as std::ffi::c_uint {
+            let bytes = performance_reads(ffi::sqlite3_db_handle(statement), context as usize);
+            let sql = ffi::sqlite3_sql(statement);
+            if !sql.is_null() {
+                let sql = std::ffi::CStr::from_ptr(sql).to_string_lossy();
+                record_sqlite_time_with_reads(&sql, std::time::Duration::from_nanos(*detail.cast::<u64>()), bytes);
+            }
+        }
+    });
+    0
 }
 
 /// Every statement this process ran since the last [`histogram::take`], by normalized text, so a
@@ -2270,7 +2341,9 @@ pub mod work {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, PoisonError};
 
-    use rusqlite::{Connection, ffi};
+    #[cfg(test)]
+    use rusqlite::Connection;
+    use rusqlite::ffi;
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct SqliteWork {
@@ -2401,6 +2474,7 @@ pub mod work {
         }
     }
 
+    #[cfg(test)]
     /// Count `connection`'s statements. SQLite reports each one when it starts and when it
     /// finishes, also when a trigger or a foreign-key check did the work inside it.
     pub(super) fn count(connection: &Connection) {
@@ -2706,6 +2780,7 @@ mod tests {
                     true
                 }),
                 profile: None,
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
@@ -2770,6 +2845,7 @@ mod tests {
                     true
                 }),
                 profile: None,
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
@@ -3076,6 +3152,7 @@ mod tests {
                     index == 0 // The second job rolls back only its own savepoint.
                 }),
                 profile: Some(operation.clone()),
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
@@ -3173,6 +3250,7 @@ mod tests {
                     true
                 }),
                 profile: None, wait: None, holder: crate::windows::holds::Holder::current(), enqueued, done,
+                charged: None,
             }).map_err(Box::new)).unwrap();
             answers.push(answer);
         }
@@ -3377,6 +3455,7 @@ mod commit_observer_tests {
                 true
             }),
             profile: None,
+            charged: None,
             wait: None,
             holder: crate::windows::holds::Holder::current(),
             done,

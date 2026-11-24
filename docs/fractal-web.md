@@ -308,6 +308,14 @@ The settings:
 - `WF_HOST` must be a loopback address.
 - `WF_PORT` is required; use `7411` to keep it separate from the daemon's local browser port.
 - `WF_DEPLOYMENT_ID` defaults to the published host.
+- `WF_USAGE_HISTORY_URL` is optional and interim: a loopback usage-hub base URL such as
+  `http://127.0.0.1:PORT`. When set, the publisher (and the Vite development gateway) answers
+  `GET /v1/client/usage/history?account=<ledgerAccountId>` itself, because the client gateway
+  serves quota but not history yet. It reads only the hub's `/api/v1/quota` and one account's
+  `usage_over_time` day series, refuses accounts that quota answer does not publish, and requires
+  the request's gateway credential to hold `read.projections`. Quota stays on the gateway. Unset
+  registers no route. Removal is tracked in
+  [#7115](https://github.com/compoundingtech/fractal/issues/7115).
 
 Before relying on a published endpoint, prove that the ingress strips a forged
 login and forged tag header: an unknown user or unknown tagged node must still
