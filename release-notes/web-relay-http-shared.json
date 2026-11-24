@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Move the usage-history relay's loopback producer parsing and bounded HTTP reads into a shared web-server module, with no behaviour change.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of persisted state." },
+  "schema": { "status": "none", "detail": "No database, wire or client-v0 schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Routes, responses, deadlines, size limits and WF_USAGE_HISTORY_URL validation are unchanged. Only module-internal exports moved: the producer parser is now loopbackProducer(value, name) in server/relayHttp.mts." },
+  "downtime": { "status": "none", "detail": "No startup or request-path work changes." },
+  "manual": { "status": "none", "detail": "No operator action." },
+  "recovery": { "status": "none", "detail": "Revert the commit; no persistent state changes." }
+}

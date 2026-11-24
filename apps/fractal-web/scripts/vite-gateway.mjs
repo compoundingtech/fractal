@@ -3,7 +3,7 @@ import { Tracer } from 'effect'
 import { createFractalWebMiddleware } from '../server/core.mts'
 import { devAdmission } from '../server/devAdmission.mts'
 import { readAuthorization } from '../server/authorization.mts'
-import { usageHistoryProducer } from '../server/usageHistory.mts'
+import { loopbackProducer } from '../server/relayHttp.mts'
 
 /**
  * Enable live data only when explicitly configured; Storybook remains credential-free.
@@ -42,7 +42,7 @@ export function webfractalGateway({ edgeHost, edgeAliases = [] } = {}) {
           timeoutMs: 30_000,
         },
         tracer: Tracer.make({ span: (options) => new Tracer.NativeSpan(options) }),
-        usageHistory: usageHistoryProducer(process.env.WF_USAGE_HISTORY_URL),
+        usageHistory: loopbackProducer(process.env.WF_USAGE_HISTORY_URL, 'WF_USAGE_HISTORY_URL'),
       })
       vite.middlewares.use(boundary.middleware)
       vite.httpServer.once('close', boundary.close)
