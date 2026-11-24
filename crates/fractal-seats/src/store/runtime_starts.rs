@@ -375,8 +375,8 @@ pub trait RuntimeStartsStore {
     fn revoke_remote_runtime_start(&self, id: &str, reason: &str) -> Result<()>;
     /// Called only after native whole-scope retirement or positive nonlaunch proof.
     fn settle_remote_runtime_start(&self, id: &str) -> Result<()>;
-    /// Physical admission snapshots retain capacity until positive producer closure,
-    /// even after graph adoption or daemon loss. Absence does not free a lane.
+    /// Immutable `(operation_id, member)` envelopes remain held until positive
+    /// physical cleanup, including after graph adoption, daemon loss, or missing registry evidence.
     fn unretired_native_start_members(&self) -> Result<Vec<(String, crate::model::MemberSpec)>>;
     /// Point-read the exact admitted request snapshot at the physical boundary.
     /// Trim pins do not authorize launching after a repair or source retraction.
@@ -459,12 +459,12 @@ impl RuntimeStartsStore for Store {
     fn unretired_native_start_members(&self) -> Result<Vec<(String, crate::model::MemberSpec)>> {
         let connection = self.readers.get();
         let mut query = connection.prepare(
-            "SELECT subject,COALESCE(json_extract(body,'$.remote_start.member'),json_extract(body,'$.member'))
+            "SELECT id,COALESCE(json_extract(body,'$.remote_start.member'),json_extract(body,'$.member'))
              FROM local_runtime_starts WHERE cleanup_verified=0 ORDER BY id")?;
         let members = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
             .map(|row| {
-                let (subject, member) = row?;
-                Ok((subject, serde_json::from_str(&member)?))
+                let (operation, member) = row?;
+                Ok((operation, serde_json::from_str(&member)?))
             }).collect::<Result<Vec<_>>>()?;
         Ok(members)
     }

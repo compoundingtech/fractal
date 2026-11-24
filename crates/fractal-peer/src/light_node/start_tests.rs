@@ -176,3 +176,48 @@ fn automatic_withdrawal_retains_first_intent_atomically_without_duplicate_writes
     deliver(&home, &seat);
     assert!(home.enqueue(start_draft(&selected, "decision/after-receipt", 2)).is_ok());
 }
+
+#[test]
+fn exact_stop_defers_associated_start_closure_until_local_finalization_commits() {
+    let root=tempfile::tempdir().unwrap(); let (selected,home,seat)=pair(root.path());
+    let start=home.enqueue(start_draft(&selected,"decision/barrier-start",1)).unwrap();
+    seat.admit(&start).unwrap();
+    seat.enter(&start.execution_id,|_,_|Ok("native-operation/barrier-start".into())).unwrap();
+    seat.complete(&start.execution_id,Outcome::Started {incarnation:"native-generation/barrier".into()}).unwrap();
+    deliver(&home,&seat);
+    let mut binding=start.binding.clone(); binding.incarnation="native-generation/barrier".into();
+    binding.authorization_revision="native-authority/barrier".into();
+    seat.offer_execution(&binding).unwrap();
+    for change in seat.pending_authority().unwrap() {
+        let sequence=home.accept_authority(&change,|_,_|Ok(())).unwrap(); seat.acknowledge_authority(sequence).unwrap();
+    }
+    let stop=home.enqueue(CommandDraft {decision_id:"decision/barrier-stop".into(),binding,operation:Operation::Stop}).unwrap();
+    seat.admit(&stop).unwrap(); seat.enter(&stop.execution_id,|_,_|Ok("native-stop/barrier".into())).unwrap();
+    deliver(&home,&seat);
+    let outcome=Outcome::Stopped {incarnation:"native-generation/barrier".into()};
+    seat.complete_requiring_local_finalization(&stop.execution_id,outcome.clone(),"retired/barrier").unwrap();
+    assert!(seat.pending_receipts().unwrap().is_empty(),"neither Stop nor associated Start closure may escape");
+    assert!(matches!(seat.admit(&start).unwrap(),Admission::Duplicate(Receipt {state:ReceiptState::Settled {outcome:Outcome::Started {..}},..})));
+    assert_eq!(seat.settled_prefix("seat",1).unwrap(),0);
+    assert!(seat.checkpoint("seat",1,start.sequence).is_err());
+    assert!(home.enqueue(start_draft(&selected,"decision/barrier-successor",2)).is_err());
+    drop(seat);
+    let seat=Journal::open(&root.path().join("seat.sqlite3"),Limits::default()).unwrap();
+    assert!(seat.pending_receipts().unwrap().is_empty());
+    assert_eq!(seat.pending_terminal_results().unwrap().len(),1);
+    assert_eq!(seat.live_start_commands().unwrap()[0].execution_id,start.execution_id);
+    // A failed Store finalization leaves this exact durable state unchanged; only the
+    // explicit successful-finalization transaction may append associated Start closure.
+    seat.complete_requiring_local_finalization(&stop.execution_id,outcome,"retired/barrier").unwrap();
+    assert!(seat.pending_receipts().unwrap().is_empty());
+    seat.finish_local_finalization(&stop.execution_id).unwrap();
+    let receipts=seat.pending_receipts().unwrap();
+    assert_eq!(receipts.len(),2);
+    assert_eq!(receipts[0].execution_id,stop.execution_id);
+    assert_eq!(receipts[1].execution_id,start.execution_id);
+    seat.finish_local_finalization(&stop.execution_id).unwrap();
+    assert_eq!(seat.pending_receipts().unwrap(),receipts,"barrier release is idempotent");
+    deliver(&home,&seat);
+    assert_eq!(seat.settled_prefix("seat",1).unwrap(),stop.sequence);
+    assert!(home.enqueue(start_draft(&selected,"decision/barrier-successor",2)).is_ok());
+}

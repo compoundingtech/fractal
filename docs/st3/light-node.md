@@ -121,6 +121,10 @@ control epoch, exact subjects and explicit `start`/`observe`/`stop` operations. 
 the existing admitted fleet identity and fleet authentication configuration.
 Unencrypted `ws` is restricted to literal loopback or tailnet addresses; other
 routes require `wss`. Version, key, grant and epoch mismatches fail closed.
+Configuration and both session constructors also check the encoded signed Hello
+against the 64-KiB frame budget, including JSON escaping, capabilities and actual
+fleet authentication. Individually valid subject counts and lengths are not a
+proof that the complete handshake fits; an oversized grant is refused before use.
 
 Both upgrade verifiers require a valid asymmetric member signature as well as
 the exact advertised pin; the shared fleet HMAC alone is not identity proof.
@@ -130,8 +134,9 @@ signed over this channel transcript, its direction and its strictly increasing
 sequence before any journal/native effect. Replayed upgrade headers cannot
 reserve the seat lease without a fresh signed Hello, whose wait has a deadline.
 
-Start additionally requires the negotiated `start-authorizations-v1` capability
-and a sealed immutable home authorization; a grant-shaped claim or bare Start
+Start additionally requires negotiated `start-authorizations-v1` and
+`retained-withdrawal-v1` capabilities and a sealed immutable home authorization;
+a grant-shaped claim or bare Start
 operation is not launch authority. Native Observe/Stop resolves exact current
 local custody and generation without a seat graph read; a borrowed terminal Stop
 detaches the invocation and never signals its shell or harness. These commands
@@ -253,6 +258,13 @@ cleanup and its terminal receipt. The home cannot admit a conflicting successor
 until that receipt. A disconnect is not withdrawal and cannot mint a successor.
 Unknown entry recovers the original native operation, never respawns from absence.
 Live Start payloads and unresolved custody block checkpoint reclamation.
+Initial command delivery and replay atomically carry any retained home withdrawal,
+so an already-withdrawn queued launch cannot enter before a later Cancel frame.
+Concurrent valid seat/home withdrawal sources preserve the first durable reason.
+Unknown Start recovery retries only on changed actual native provenance/liveness
+or new cancellation progress, not unrelated frames or its own SQL writes. An exact
+Stop's associated Start closure shares its positive local-finalization obligation;
+neither terminal receipt can expose replacement authority before that completes.
 
 Existing authoritative session rows survive the additive authorization-table
 upgrade. Native producer custody remains in `local_runtime_starts`; current readers

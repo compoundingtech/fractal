@@ -110,7 +110,7 @@ async fn reconnect_recovers_lost_receipt_ack_without_readmitting_or_reidentifyin
         f.seat_journal.acknowledge_authority(sequence).unwrap();
     }
     client_send(&mut socket,Frame::Drained {}).await.unwrap();
-    let Frame::Command {command:delivered}=next(&mut socket).await else {panic!("expected durable command")};
+    let Frame::Command {command:delivered,..}=next(&mut socket).await else {panic!("expected durable command")};
     assert_eq!(delivered.execution_id,command.execution_id);
     let Admission::Accepted(receipt)=f.seat_journal.admit(&delivered).unwrap() else {panic!("first durable admission")};
     client_send(&mut socket,Frame::Receipt {receipt:receipt.clone()}).await.unwrap();
@@ -133,7 +133,7 @@ async fn reconnect_recovers_lost_receipt_ack_without_readmitting_or_reidentifyin
     client_send(&mut socket,Frame::Receipt {receipt:receipt.clone()}).await.unwrap();
     assert!(matches!(next(&mut socket).await,Frame::ReceiptAck {through} if through==receipt.receipt_sequence));
     client_send(&mut socket,Frame::Drained {}).await.unwrap();
-    let Frame::Command {command:replayed}=next(&mut socket).await else {panic!("expected original uncompleted outbox replay")};
+    let Frame::Command {command:replayed,..}=next(&mut socket).await else {panic!("expected original uncompleted outbox replay")};
     assert_eq!(replayed.execution_id,command.execution_id);
     assert_eq!(f.seat_journal.admit(&replayed).unwrap(),Admission::Duplicate(receipt));
     assert_eq!(f.seat_journal.undispatched().unwrap().len(),1);
@@ -204,7 +204,7 @@ async fn paired_epoch_rollover_delivers_terminal_custody_before_retired_only_res
                     Frame::Closing {}=>f.seat_journal.begin_closing().unwrap(),
                     Frame::AuthorityAck {through}=>f.seat_journal.acknowledge_authority(through).unwrap(),
                     Frame::ReceiptAck {through}=>f.seat_journal.acknowledge_receipts(through).unwrap(),
-                    Frame::Command {command:received}=>{
+                    Frame::Command {command:received,..}=>{
                         assert_eq!(received.execution_id,command.execution_id);
                         assert!(matches!(f.seat_journal.admit(&received).unwrap(),Admission::Accepted(_) | Admission::Duplicate(_)));
                         assert!(f.seat_journal.undispatched().unwrap().is_empty(),"closing admission is terminalized without entering a native backend");
@@ -463,7 +463,7 @@ async fn signed_start_replay_and_ordered_withdrawal_retain_sqlite_custody() {
     let command=f.home_journal.enqueue(super::super::journal::start_tests::start_draft(&f.selected,"decision/signed-start",1)).unwrap();
     let mut socket=f.connect().await; f.hello(&mut socket).await;
     client_send(&mut socket,Frame::Drained {}).await.unwrap();
-    let Frame::Command {command:delivered}=next(&mut socket).await else {panic!("expected signed Start")};
+    let Frame::Command {command:delivered,..}=next(&mut socket).await else {panic!("expected signed Start")};
     assert_eq!(delivered.execution_id,command.execution_id);
     f.seat_journal.admit(&delivered).unwrap();
     f.home_journal.request_cancel(&command.execution_id,"graph withdrawal").unwrap();
@@ -480,4 +480,116 @@ async fn signed_start_replay_and_ordered_withdrawal_retain_sqlite_custody() {
     assert!(matches!(f.seat_journal.admit(&command).unwrap(),Admission::Duplicate(_)));
     assert!(f.home_journal.enqueue(super::super::journal::start_tests::start_draft(&f.selected,"decision/next",2)).is_ok());
     socket.socket.close(None).await.unwrap(); f.stop().await;
+}
+
+#[tokio::test]
+async fn home_only_withdrawal_is_carried_on_initial_and_explicit_replay_admission() {
+    let f=Fixture::new().await;
+    let command=f.home_journal.enqueue(super::super::journal::start_tests::start_draft(&f.selected,"decision/offline-withdrawal",1)).unwrap();
+    f.home_journal.request_cancel(&command.execution_id,"withdrawn while offline").unwrap();
+    let mut socket=f.connect().await; f.hello(&mut socket).await;
+    client_send(&mut socket,Frame::Drained {}).await.unwrap();
+    let Frame::Command {command:delivered,cancellation_reason}=next(&mut socket).await else {panic!("expected withdrawn command")};
+    assert_eq!(delivered.execution_id,command.execution_id);
+    assert_eq!(cancellation_reason.as_deref(),Some("withdrawn while offline"));
+    assert!(matches!(f.seat_journal.admit_withdrawal(&delivered,cancellation_reason.as_deref()).unwrap(),Admission::Accepted(_)));
+    assert!(f.seat_journal.undispatched().unwrap().is_empty());
+    assert!(f.seat_journal.recoverable().unwrap().is_empty());
+    assert!(f.seat_journal.enter(&command.execution_id,|_,_|panic!("withdrawn admission cannot enter backend")).is_err());
+    let Frame::Cancel {execution_id,reason}=next(&mut socket).await else {panic!("expected retained cancellation")};
+    f.seat_journal.cancel_or_revoke(&execution_id,reason,|_,_,_|panic!("terminal withdrawal needs no native cancellation")).unwrap();
+    client_send(&mut socket,Frame::Replay {next_sequence:1}).await.unwrap();
+    let Frame::Command {command:replayed,cancellation_reason}=next(&mut socket).await else {panic!("expected withdrawn replay")};
+    assert_eq!(replayed.execution_id,command.execution_id);
+    assert_eq!(cancellation_reason.as_deref(),Some("withdrawn while offline"));
+    assert!(matches!(f.seat_journal.admit_withdrawal(&replayed,cancellation_reason.as_deref()).unwrap(),Admission::Duplicate(_)));
+    // Lost ACK/reconnect keeps the same durable terminal identity, not fresh entry.
+    drop(socket);
+    let mut socket=f.connect().await; f.hello(&mut socket).await;
+    client_send(&mut socket,Frame::Drained {}).await.unwrap();
+    let Frame::Command {command:replayed,cancellation_reason}=next(&mut socket).await else {panic!("expected reconnect replay")};
+    assert_eq!(replayed.execution_id,command.execution_id);
+    assert!(matches!(f.seat_journal.admit_withdrawal(&replayed,cancellation_reason.as_deref()).unwrap(),Admission::Duplicate(_)));
+    assert!(f.seat_journal.undispatched().unwrap().is_empty());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn unresolved_start_recovery_retries_only_new_native_evidence_or_first_withdrawal() {
+    let f=Fixture::new().await;
+    let command=f.home_journal.enqueue(super::super::journal::start_tests::start_draft(&f.selected,"decision/unknown-proof",1)).unwrap();
+    let mut socket=f.connect().await; f.hello(&mut socket).await;
+    client_send(&mut socket,Frame::Drained {}).await.unwrap();
+    let Frame::Command {command:delivered,cancellation_reason}=next(&mut socket).await else {panic!("expected connected Start")};
+    assert!(cancellation_reason.is_none());
+    f.seat_journal.admit_withdrawal(&delivered,cancellation_reason.as_deref()).unwrap();
+    assert!(f.seat_journal.enter(&command.execution_id,|_,_|anyhow::bail!("entry proof not visible yet")).is_err());
+    let mut attempted=BTreeMap::new();
+    let id=&command.execution_id;
+    assert!(may_attempt_start_recovery(&attempted,id,(0,false)));
+    attempted.insert(id.clone(),(0,false));
+    // A journal wake, unrelated authenticated frame, or identical native snapshot
+    // does not change this token and therefore cannot spin recovery.
+    f.seat_journal.changed.notify_waiters();
+    assert!(!may_attempt_start_recovery(&attempted,id,(0,false)));
+    assert!(may_attempt_start_recovery(&attempted,id,(1,false)));
+    attempted.insert(id.clone(),(1,false));
+    assert!(!may_attempt_start_recovery(&attempted,id,(1,false)));
+    f.home_journal.request_cancel(id,"operator withdrew").unwrap();
+    let Frame::Cancel {execution_id,reason}=next(&mut socket).await else {panic!("expected ordered connected withdrawal")};
+    assert_eq!(&execution_id,id);
+    f.seat_journal.cancel_or_revoke(&execution_id,reason,|_,_,_|Ok(())).unwrap();
+    assert!(may_attempt_start_recovery(&attempted,id,(1,true)));
+    attempted.insert(id.clone(),(1,true));
+    f.seat_journal.cancel_or_revoke(id,"helper exited concurrently".into(),|_,_,_|panic!("first cancellation already applied")).unwrap();
+    assert_eq!(f.seat_journal.recoverable().unwrap()[0].cancellation_reason.as_deref(),Some("operator withdrew"));
+    assert!(!may_attempt_start_recovery(&attempted,id,(1,true)));
+    assert!(may_attempt_start_recovery(&attempted,id,(2,true)));
+    assert!(f.seat_journal.undispatched().unwrap().is_empty(),"recovery never grants backend re-entry");
+    assert_eq!(f.seat_journal.settled_prefix("seat",1).unwrap(),0);
+    assert!(!f.seat_journal.drained().unwrap());
+    f.stop().await;
+}
+
+#[test]
+fn accepted_hello_budget_bounds_real_signed_channel_encoding_at_limit() {
+    let home_key=Arc::new(MemberKey::generate().unwrap().0);
+    let seat_key=Arc::new(MemberKey::generate().unwrap().0);
+    let fleet="fleet-\"escaped\"-\\-identity";
+    let auth=FleetAuth::test(fleet,&[7;32]).with_member_key(Some(seat_key.clone()));
+    let mut selected=Selection {
+        home:format!("home-{}","h".repeat(250)),home_key:home_key.public().into(),
+        host:format!("seat-{}","s".repeat(250)),host_key:seat_key.public().into(),
+        epoch:i64::MAX as u64,
+        grant:Scope {subjects:vec!["agent/example/first".into()],operations:vec![OperationKind::Start,OperationKind::Observe,OperationKind::Stop]},
+    };
+    // Fill legal exact subjects to the encoded budget, including escaped fleet
+    // authentication headers. This exercises real signatures, not a size-only frame.
+    for index in 0..256 {
+        let subject=format!("agent/example/budget-{index}");
+        selected.grant.subjects.push(subject);
+        if selected.validate_hello_budget(fleet).is_err() {
+            selected.grant.subjects.pop(); break;
+        }
+        let bound=selected.signed_hello_max_bytes(fleet).unwrap();
+        let subject=selected.grant.subjects.last_mut().unwrap();
+        let padding=(1024-subject.len()).min(MAX_FRAME-bound);
+        subject.extend(std::iter::repeat_n('x',padding));
+        if selected.signed_hello_max_bytes(fleet).unwrap()==MAX_FRAME {break;}
+    }
+    selected.validate().unwrap();
+    selected.validate_hello_budget(fleet).unwrap();
+    let bound=selected.signed_hello_max_bytes(fleet).unwrap();
+    assert_eq!(bound,MAX_FRAME,"fixture reaches the accepted signed-envelope boundary");
+    let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch={}",selected.epoch);
+    let mut channel=Channel::new(auth,&selected,true,&path,"request-digest",&"a".repeat(32)).unwrap();
+    let encoded=channel.encode(Frame::Hello {version:VERSION,selection:selected.clone(),capabilities:capabilities()}).unwrap();
+    assert!(encoded.len()<=bound);
+    assert!(encoded.len()<=MAX_FRAME);
+    let mut oversized=selected;
+    oversized.grant.subjects.push("agent/example/overflow".into());
+    assert!(oversized.validate_hello_budget(fleet).is_err());
+    let mut old_capabilities=capabilities();
+    old_capabilities.retain(|capability|capability!="retained-withdrawal-v1");
+    assert!(check_capabilities(VERSION,&old_capabilities).is_err(),"old peers cannot negotiate away atomic withdrawal");
 }

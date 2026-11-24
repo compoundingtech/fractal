@@ -362,6 +362,14 @@ impl Journal {
         Ok(())
     }
 
+    /// Snapshot withdrawal at the same durable send boundary as initial/replay delivery.
+    pub fn prepare_delivery(&self, command: &Command) -> Result<Option<String>> {
+        let connection = self.lock()?;
+        validate(&current(&connection)?, command)?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h11b731d64a83 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='sent' WHERE side='home' AND execution=?1 AND state='queued'", [&command.execution_id])?;
+        Ok(connection.query_row("SELECT cancel_reason FROM commands WHERE side='home' AND execution=?1", [&command.execution_id], |row| row.get(0))?)
+    }
+
     pub fn acknowledged_high_water(&self) -> Result<u64> {
         Ok(self.lock()?.query_row("SELECT value FROM counters WHERE name='acknowledged'", [], |row| row.get(0))?)
     }
@@ -389,6 +397,13 @@ impl Journal {
     }
 
     pub fn admit(&self, command: &Command) -> Result<Admission> {
+        self.admit_withdrawal(command, None)
+    }
+
+    /// Retained withdrawal is admitted with the original identity and contiguous receipt
+    /// sequence, but never exposes fresh backend entry permission.
+    pub fn admit_withdrawal(&self, command: &Command, cancellation: Option<&str>) -> Result<Admission> {
+        ensure!(cancellation.is_none_or(|reason|reason.len()<=4096),"cancellation reason too large");
         command.operation.require_supported()?;
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -400,6 +415,20 @@ impl Journal {
         validate(&selection, command)?;
         if let Some(existing) = load_command(&tx, "seat", command.binding.epoch, command.sequence)? {
             ensure!(same(&existing, command)?, "conflicting command sequence reuse");
+            if let Some(reason)=cancellation {
+                let state:String=tx.query_row("SELECT state FROM commands WHERE side='seat' AND execution=?1",[&command.execution_id],|row|row.get(0))?;
+                if state=="admitted" {
+                    tx.execute(/* sqlite-large-value: allow-for-now lv-h8657669b49f1 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=COALESCE(cancel_reason,?2) WHERE side='seat' AND execution=?1",params![command.execution_id,reason])?;
+                    let retained:String=tx.query_row("SELECT cancel_reason FROM commands WHERE side='seat' AND execution=?1",[&command.execution_id],|row|row.get(0))?;
+                    local::revoke_execution_tx(&tx,&command.binding.host,&command.binding.authorization_revision)?;
+                    settle(&tx,command,Outcome::Cancelled {reason:retained},&self.limits)?;
+                    let receipt=last_receipt(&tx,command)?;
+                    tx.commit()?;
+                    self.changed.notify_waiters();
+                    self.authority_changed.notify_waiters();
+                    return Ok(Admission::Duplicate(receipt));
+                }
+            }
             return Ok(Admission::Duplicate(last_receipt(&tx, command)?));
         }
         let next: u64 = tx.query_row("SELECT MAX(COALESCE((SELECT MAX(sequence) FROM commands WHERE side='seat' AND epoch=?1),0),(SELECT seat_floor FROM epochs WHERE epoch=?1))+1", [selection.epoch], |row| row.get(0))?;
@@ -407,11 +436,16 @@ impl Journal {
         install_start(&tx, "seat", command, &self.limits)?;
         self.insert(&tx, "seat", command, "admitted")?;
         let receipt = append_receipt(&tx, &selection, command, ReceiptState::Accepted, &self.limits)?;
-        if let Some(outcome)=entry_refusal(&tx,command)? {
+        if let Some(reason)=cancellation {
+            local::revoke_execution_tx(&tx,&command.binding.host,&command.binding.authorization_revision)?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hc3cd8ed405bc owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1",params![command.execution_id,reason])?;
+            settle(&tx,command,Outcome::Cancelled {reason:reason.to_owned()},&self.limits)?;
+        } else if let Some(outcome)=entry_refusal(&tx,command)? {
             settle(&tx,command,outcome,&self.limits)?;
         }
         tx.commit()?;
         self.changed.notify_waiters();
+        if cancellation.is_some() {self.authority_changed.notify_waiters();}
         Ok(Admission::Accepted(receipt))
     }
 
@@ -547,7 +581,7 @@ impl Journal {
         if matches!(&outcome,Outcome::Stopped { .. } | Outcome::Detached { .. }) {
             let binding=&command.binding;
             local::revoke_execution_tx(&tx,&binding.host,&binding.authorization_revision)?;
-            if matches!(&command.operation, Operation::Stop) {
+            if matches!(&command.operation, Operation::Stop) && final_proof.is_none() {
                 close_starts_stopped_by(&tx, &command, &outcome, &self.limits)?;
             }
         }
@@ -573,6 +607,16 @@ impl Journal {
             return Ok(());
         };
         ensure!(state=="settled" && marker!=0,"no terminal local finalization obligation");
+        if marker>0 {
+            let command=by_execution(&tx,execution)?;
+            if matches!(&command.operation,Operation::Stop) {
+                let receipt=last_receipt(&tx,&command)?;
+                let ReceiptState::Settled {outcome}=receipt.state else {bail!("local finalization lacks terminal proof");};
+                // Associated Start closure must not escape before exact native Store
+                // finalization. Commit all its terminal receipts with barrier release.
+                close_starts_stopped_by(&tx,&command,&outcome,&self.limits)?;
+            }
+        }
         let changed=tx.execute(/* sqlite-large-value: allow-for-now lv-h9bef278ec2f7 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET local_finalization=-1 WHERE side='seat' AND execution=?1 AND local_finalization>0",[execution])?;
         tx.commit()?;
         if changed!=0 {self.changed.notify_waiters();}
@@ -595,7 +639,9 @@ impl Journal {
             "entered".to_string()
         } else { state };
         tx.execute(/* sqlite-large-value: allow-for-now lv-h2fcfecf8755f owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE start_authorizations SET revoked=1 WHERE side='seat' AND execution=?1", [execution])?;
-        if let Some(previous) = previous { ensure!(previous == reason, "conflicting cancellation intent"); }
+        // Independent valid revokers may race. Withdrawal is monotonic; retain the
+        // first durable intent rather than terminating the authenticated session.
+        let reason=previous.unwrap_or(reason);
         let authority_before=tx.total_changes();
         let binding=&command.binding;
         local::revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision)?;
