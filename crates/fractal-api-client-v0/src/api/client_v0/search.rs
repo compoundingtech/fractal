@@ -56,8 +56,8 @@ struct IndexState {
     stamps: BTreeMap<String, String>,
     sizes: BTreeMap<String, (usize, usize)>,
     incomplete: Vec<String>,
-    /// When each remote source's newest page was last read, in Unix milliseconds.
-    remote_pages: BTreeMap<String, u128>,
+    /// When each remote source's newest page was last read.
+    remote_pages: BTreeMap<String, Instant>,
     indexed_at: Option<String>,
     revision: String,
     checked: Instant,
@@ -377,13 +377,18 @@ fn inventory(
 }
 
 /// A digest of a remote entry for its source stamp. The whole entry is hashed, so an entry
-/// that grew in place counts as changed, except owner references (`ref`): each read seals
-/// them with a fresh random nonce.
+/// that grew in place counts as changed, except the owner-reference handles that
+/// `conversation_blocks::continuation` generates: each read seals their `ref` with a fresh
+/// random nonce. Any other `ref` is payload and stays in the digest.
 fn remote_mark(entry: Option<&Value>) -> String {
     fn stable(value: &mut Value) {
         match value {
             Value::Object(fields) => {
-                fields.remove("ref");
+                let handle = fields.get("ref").and_then(Value::as_str).is_some_and(|reference| reference.starts_with("v2."))
+                    && fields.keys().all(|key| matches!(key.as_str(), "ref" | "media_type" | "reason" | "size"));
+                if handle {
+                    fields.remove("ref");
+                }
                 fields.values_mut().for_each(stable);
             }
             Value::Array(values) => values.iter_mut().for_each(stable),
@@ -564,8 +569,7 @@ fn refresh(
         let mut newest = None;
         if let Some(remote) = &remote {
             let read_at = old_pages.get(&id).copied();
-            let now = client_now_ms();
-            let can_keep = read_at.is_some_and(|at| now.saturating_sub(at) < REMOTE_PAGE_MAX_AGE.as_millis())
+            let can_keep = read_at.is_some_and(|at| at.elapsed() < REMOTE_PAGE_MAX_AGE)
                 && old_size.0 <= budget
                 && old_size.1 <= slots;
             let base = stamps.get(&id).cloned().unwrap_or_default();
@@ -594,7 +598,7 @@ fn refresh(
                 Ok((stamp, page)) => {
                     stamp_unchanged = page.is_none();
                     stamps.insert(id.clone(), stamp);
-                    remote_pages.insert(id.clone(), read_at.filter(|_| page.is_none()).unwrap_or(now));
+                    remote_pages.insert(id.clone(), read_at.filter(|_| page.is_none()).unwrap_or_else(Instant::now));
                     newest = page;
                 }
                 Err(error) => {
@@ -1382,7 +1386,8 @@ mod tests {
         (0..count)
             .map(|n| {
                 let text = if n + 1 == count { last_text.to_owned() } else { format!("text {n}") };
-                json!({"id": format!("entry/{n}"), "type": "content", "body": {"text": text}})
+                let timestamp = format!("2026-10-06T12:{:02}:{:02}Z", n / 60, n % 60);
+                json!({"id": format!("entry/{n}"), "type": "content", "timestamp": timestamp, "body": {"text": text}})
             })
             .collect()
     }
@@ -1420,6 +1425,13 @@ mod tests {
             assert_ne!(next, stamp);
             assert_eq!((page.is_some(), reads.as_slice()), (true, &[1, REMOTE_PAGE_ITEMS][..]));
         }
+        // An ordinary payload `ref` is content; only a sealed continuation handle is not.
+        let branch = |reference: &str| json!({"id": "entry/branch", "revision": 1, "body": {"ref": reference}});
+        assert_ne!(remote_mark(Some(&branch("old-branch"))), remote_mark(Some(&branch("new-branch"))));
+        let handle = |reference: &str| json!({"id": "entry/image", "body": {"content": {"ref": reference, "media_type": "image/png", "reason": "on-demand"}}});
+        assert_eq!(remote_mark(Some(&handle("v2.first-nonce"))), remote_mark(Some(&handle("v2.second-nonce"))));
+        let payload = |reference: &str| json!({"id": "entry/tool", "body": {"payload": {"ref": reference, "path": "/work"}}});
+        assert_ne!(remote_mark(Some(&payload("v2.one"))), remote_mark(Some(&payload("v2.two"))));
     }
 
     type Shared<T> = std::rc::Rc<std::cell::RefCell<T>>;
@@ -1470,14 +1482,16 @@ mod tests {
         assert_eq!(refreshed(&state, &held, &runtime, &reads, id), (vec![1], first));
         assert!(held.lock().unwrap().incomplete.contains(&older));
         // A new newest entry: the newest page again.
-        items.borrow_mut().push(json!({"id": "entry/later", "type": "content", "body": {"text": "a later entry"}}));
+        items.borrow_mut().push(json!({"id": "entry/later", "type": "content", "timestamp": "2026-10-06T13:00:00Z", "body": {"text": "a later entry"}}));
         let (later_reads, later) = refreshed(&state, &held, &runtime, &reads, id);
         assert_eq!(later_reads, [1, REMOTE_PAGE_ITEMS]);
         // An older entry replaced in place keeps the newest entry, so the probe misses it...
         items.borrow_mut()[3 * REMOTE_PAGE_ITEMS - 10]["body"]["text"] = json!("a much longer replacement of an older entry");
         assert_eq!(refreshed(&state, &held, &runtime, &reads, id), (vec![1], later));
-        // ...until the indexed page is an hour old.
-        let hour_ago = client_now_ms() - REMOTE_PAGE_MAX_AGE.as_millis();
+        // ...until the indexed page is an hour old (when this clock can represent that).
+        let Some(hour_ago) = Instant::now().checked_sub(REMOTE_PAGE_MAX_AGE) else {
+            return;
+        };
         held.lock().unwrap().remote_pages.insert(id.into(), hour_ago);
         let (replaced_reads, replaced) = refreshed(&state, &held, &runtime, &reads, id);
         assert_eq!(replaced_reads, [1, REMOTE_PAGE_ITEMS]);
