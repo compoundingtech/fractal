@@ -23888,8 +23888,8 @@ pub fn cancel_mission_run_tx(
             AND json_type(body,'$.fields.native_turn')='object')",
         [format!("mission-run/{run_id}")], |row| row.get::<_, bool>(0),
     ).map_err(internal)?;
-    let final_paths = if native_turn {
-        BTreeSet::new()
+    let (final_paths, program_paths) = if native_turn {
+        (BTreeSet::new(), BTreeSet::new())
     } else {
         let revision: String = transaction.query_row(
             "SELECT revision FROM run_generations WHERE id=?1", [&generation_id], |row| row.get(0),
@@ -23898,8 +23898,11 @@ pub fn cancel_mission_run_tx(
             "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
             params![mission_id, revision], |row| row.get::<_, String>(0),
         ).map_err(internal).and_then(|body| serde_json::from_str(&body).map_err(internal))?;
-        flatten_mission_step_specs(&mission).into_iter().filter(|step| step.finally)
-            .map(|step| step.path.clone()).collect::<BTreeSet<_>>()
+        let steps = flatten_mission_step_specs(&mission);
+        (
+            steps.iter().filter(|step| step.finally).map(|step| step.path.clone()).collect::<BTreeSet<_>>(),
+            steps.iter().filter(|step| step.program.is_some()).map(|step| step.path.clone()).collect::<BTreeSet<_>>(),
+        )
     };
     let mut statement = transaction
         .prepare(
@@ -23922,6 +23925,15 @@ pub fn cancel_mission_run_tx(
     drop(statement);
     for (subject, path, claimant) in steps {
         if final_paths.contains(&path) {
+            continue;
+        }
+        // The daemon interrupts the current program and lets its Effect finalizers
+        // finish before ending this attempt. Keeping the step live preserves the
+        // existing credential contract; no credential validity is widened.
+        if program_paths.contains(&path) && transaction.query_row(
+            "SELECT status IN ('ready','working','blocked','waiting-person') FROM step_runs WHERE subject=?1",
+            [&subject], |row| row.get::<_, bool>(0),
+        ).map_err(internal)? {
             continue;
         }
         if let Some(claimant) = claimant {

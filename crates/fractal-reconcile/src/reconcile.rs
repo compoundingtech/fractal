@@ -13800,6 +13800,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(changed) = self.unresolved_effect_run_fence(run)? {
             return Ok(changed);
         }
+        // Keep the program attempt and its credential live until its Effect
+        // finalizers finish or exhaust the configured grace.
+        {
+            let engine = self.program_engine();
+            if !engine.finalize_cleanup(run)? {
+                return Ok(false);
+            }
+        }
         // A child can still own execution after its superseded parent ended.
         // Preserve its cleanup confirmation and recovery path as well.
         let mut supersession_cleanup = run.superseded_by.is_some();

@@ -281,9 +281,32 @@ impl Fixture {
 
 #[test]
 fn a_subscription_starts_a_program_with_a_kind_checked_pinned_resource() {
+    subscription_program(false);
+}
+
+#[test]
+fn a_subscription_started_program_runs_its_finalizer_when_cancelled() {
+    subscription_program(true);
+}
+
+fn subscription_program(cancel: bool) {
     let f = fixture();
     let bundle = f.dir.path().join("program.mjs");
-    let hash = f.store.put_blob(BUNDLE.as_bytes()).unwrap();
+    let cancellation_bundle = r#"
+export default {
+  [Symbol.for('fractal.program.v1')]: async (ctx) => {
+    await ctx.record({ key: 'ready', status: 'completed', value: ctx.payload.source })
+    await new Promise(resolve => {
+      if (ctx.signal.aborted) resolve()
+      else ctx.signal.addEventListener('abort', resolve, { once: true })
+    })
+    ctx.started('release')
+    await ctx.record({ key: 'release', status: 'completed', value: ctx.payload.source })
+    return { _tag: 'Failure', error: { _tag: 'Interrupted' } }
+  },
+}
+"#;
+    let hash = f.store.put_blob(if cancel { cancellation_bundle.as_bytes() } else { BUNDLE.as_bytes() }).unwrap();
     apply_source(&f.store, &format!(r#"version 2
 mission "program-resource" state="ready" {{
   goal "Consume one observed issue."
@@ -319,8 +342,17 @@ subscription "program-resource" {{
     let pinned = run.inputs["source"].value.clone();
     assert!(pinned.starts_with("resource/program-repo/issue/7@"));
     let step = run.steps.iter().find(|step| step.step == "program").unwrap();
-    f.until("resource program completes", || f.run_status(&run.subject) == "completed");
-    assert_eq!(f.result(&step.subject, RESULT_KEY, 1), Some(("completed".into(), json!(pinned))));
+    if cancel {
+        f.until("resource program is ready", || f.result(&step.subject, "ready", 1).is_some());
+        f.store.request_mission_run_cancellation(&run.subject, "subscription program cancelled").unwrap();
+        f.until("resource program finalizes", || f.run_status(&run.subject) == "cancelled");
+        assert_eq!(f.result(&step.subject, "release", 1), Some(("completed".into(), json!(pinned))));
+        assert_eq!(f.result(&step.subject, "$finalizers", 1).unwrap().1["outcome"], "completed");
+        assert!(f.result(&step.subject, RESULT_KEY, 1).is_none());
+    } else {
+        f.until("resource program completes", || f.run_status(&run.subject) == "completed");
+        assert_eq!(f.result(&step.subject, RESULT_KEY, 1), Some(("completed".into(), json!(pinned))));
+    }
     assert_eq!(f.store.claims_for("subscription/program-resource", Some("subscription.mission-started")).unwrap().len(), 1);
     f.reconciler.reconcile_subscription_missions(&f.store.desired_subjects().unwrap()).unwrap();
     assert_eq!(f.store.claims_for("subscription/program-resource", Some("subscription.mission-started")).unwrap().len(), 1);
