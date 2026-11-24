@@ -209,9 +209,11 @@ impl Store {
     /// off the request path.
     pub fn checkpoint_step(&self, context: &CheckpointContext) -> Result<Vec<CheckpointAction>> {
         self.checkpoint_worker_phase(CheckpointPhase::Sweep);
+        self.retention.begin_trim_pass();
         let result = self.checkpoint_step_inner(context);
-        if let Err(error) = &result {
-            self.checkpoint_worker_error(format!("{error:#}"));
+        match &result {
+            Ok(actions) => self.retention.finish_trim_pass(actions, context.now_unix_ms),
+            Err(error) => self.checkpoint_worker_error(format!("{error:#}")),
         }
         result
     }
@@ -242,12 +244,14 @@ impl Store {
         self.rebuild_deferred_paced()?;
         if self.replication_catching_up() {
             self.checkpoint_worker_phase(CheckpointPhase::CatchingUp);
+            self.retention.note_trim_stop(super::retention::TrimStop::CatchingUp);
             return Ok(actions);
         }
         // Every member trims on its own: it finishes a trim it had already committed, then trims
         // its own due cut. No member agrees on a checkpoint with another or waits for one.
         if !self.trims_locally() {
             self.checkpoint_worker_phase(CheckpointPhase::Disabled);
+            self.retention.note_trim_stop(super::retention::TrimStop::Disabled);
             return Ok(actions);
         }
         self.checkpoint_worker_phase(CheckpointPhase::LocalTrim);
@@ -262,6 +266,10 @@ impl Store {
         self.finish_interrupted_trims(&mut actions)?;
         self.trim_local_cut(context, &mut actions)?;
         self.trim_peer_retired(&mut actions)?;
+        // A cut left `trimming` names why it stopped, ahead of what the cut steps noted.
+        if actions.iter().any(|action| matches!(action, CheckpointAction::TrimDeferred { .. })) {
+            self.retention.note_trim_stop(self.trim_deferral_stop()?);
+        }
         Ok(actions)
     }
 

@@ -187,3 +187,42 @@ python3 -c 'import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("PR
 The VACUUM also gives back every page already free, so run it after the trims have caught up.
 `PRAGMA auto_vacuum` then answers 2, and from then on the hourly pass keeps the file close to its
 pages in use.
+
+## Retention passes
+
+Each member runs these passes on its own copy. `fractal replication status` prints one line per
+pass, and `--json` gives them under `retention`. Counts since start cover the running daemon only.
+The status reads a few `meta` keys, the newest rows of the `checkpoints` ledger (one row per daily
+cut) and the first or last rowid of a table. It never counts the rows of a large table.
+
+- **Checkpoint trim.** Each daily cut is trimmed under the rules and budget in
+  [Checkpoints and trimming](checkpoints.md#the-trim-budget). The status shows the newest cut, its
+  state, and the envelopes and claims its plan made eligible. It also shows the claims deleted
+  today against `[trim] daily_claims`, plus what the last pass deleted or deferred and why it
+  stopped:
+  - `catching_up`: replication is catching up with a peer.
+  - `disabled`: `[trim] local` is off.
+  - `halted_cut`: a trim stopped because the graph would change, and waits for
+    `fractal replication checkpoint resume`.
+  - `unfinished_cut`: an earlier cut is still `trimming`.
+  - `daily_cap`: the day's paced allowance is spent.
+  - `wal_restart`: the trim stopped to restart the WAL.
+  - `graph_changed`: this pass halted a cut.
+  - `nothing_due`: every due cut is trimmed.
+- **Valid record bytes.** A valid replica record keeps an empty `raw`. This pass empties the bytes
+  earlier builds kept, a bounded page at a time, and the pages go back as described in
+  [Giving space back](#giving-space-back). The status shows the pass's cursor against the newest
+  record.
+- **Settled judging rows.** A settled signature judgment drops its `claim_signature_judging` row.
+  Once the signature migration is done, a paced prune drops the rows that earlier releases kept.
+  The status shows its cursor: not started, the last claim it passed, or `done`. See the
+  table list in [Fractal data authority](data-authority.md#retention-and-local-observations).
+- **Legacy receipts.** Receipts stored before expiry was recorded sit at or below
+  `idempotency_legacy_rowid`. The cleanup treats them as due. It deletes a receipt when no live work
+  uses it and either the operation it answered is recorded in a claim or a checkpoint tombstone, or
+  a retry may simply repeat it. Any other receipt gets a new expiry and moves past the boundary. The
+  status shows whether any legacy receipts remain.
+- **Off in this build.** Envelope release and valid-record row deletion do not run, and the status
+  says why for each. Envelope release waits until the claim-set transport can serve a released
+  envelope's claims to a peer that lacks them. Row deletion waits until the signature-reference
+  writer has its own flag.

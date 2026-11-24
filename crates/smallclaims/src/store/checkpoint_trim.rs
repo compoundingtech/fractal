@@ -55,7 +55,7 @@ fn trim_burst(daily: u64) -> u64 {
 
 /// Stay below the day's linear budget plus one worker interval's burst. The existing daily
 /// deletion counter makes this deterministic across restarts without another metadata write.
-fn trim_allowance(daily: u64, now_ms: u64, deleted: u64) -> u64 {
+pub(super) fn trim_allowance(daily: u64, now_ms: u64, deleted: u64) -> u64 {
     let elapsed = u128::from(now_ms % TRIM_DAY_MS);
     let accrued = (u128::from(daily) * elapsed).div_ceil(u128::from(TRIM_DAY_MS));
     let allowed = (accrued + u128::from(trim_burst(daily))).min(u128::from(daily));
@@ -559,7 +559,9 @@ impl Store {
         context: &super::checkpoint_agreement::CheckpointContext,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
+        use super::retention::TrimStop;
         if self.checkpoint_halted()? {
+            self.retention.note_trim_stop(TrimStop::HaltedCut);
             return Ok(());
         }
         let cut = super::checkpoint::newest_due_cut(context.now_unix_ms);
@@ -570,6 +572,7 @@ impl Store {
             |row| row.get(0),
         )?;
         if cut == 0 || trimmed.is_some_and(|trimmed| u128::try_from(trimmed).unwrap_or(0) >= cut) {
+            self.retention.note_trim_stop(TrimStop::NothingDue);
             return self.remove_checkpoint_staging(&context.scratch);
         }
         // An earlier cut the daily cap stopped finishes first, and a cut that could delete
@@ -580,6 +583,7 @@ impl Store {
             |row| row.get(0),
         )?;
         if trimming || self.local_trim_left_today()? == 0 {
+            self.retention.note_trim_stop(if trimming { TrimStop::UnfinishedCut } else { TrimStop::DailyCap });
             return Ok(());
         }
         let checkpoint = checkpoint_name(cut);
@@ -1238,7 +1242,7 @@ impl Store {
 }
 
 /// The claims a local trim deleted on `day`, as `LOCAL_TRIM_DAY` records them.
-fn deleted_on(connection: &Connection, day: u64) -> Result<u64> {
+pub(super) fn deleted_on(connection: &Connection, day: u64) -> Result<u64> {
     let saved: Option<String> = connection
         .prepare_cached("SELECT value FROM meta WHERE key=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h70b39bb4733d owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [LOCAL_TRIM_DAY], |row| row.get(0))
