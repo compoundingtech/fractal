@@ -49,7 +49,7 @@ it.each([token, authorization])('keeps preview credentials out of the child envi
       export default {
         root: ${JSON.stringify(root)},
         logLevel: 'silent',
-        plugins: [webfractalGateway(), {
+        plugins: [webfractalGateway(${credential === token ? "{ edgeHost: 'preview.example.test', edgeAliases: ['alias.example.test'] }" : ''}), {
           name: 'preview-environment-proof',
           configureServer(vite) {
             vite.httpServer.once('listening', () => {
@@ -102,6 +102,12 @@ it.each([token, authorization])('keeps preview credentials out of the child envi
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ paired: true })
     expect(received).toEqual([authorization])
+    for (const host of ['preview.example.test', 'alias.example.test', 'unknown.example.test']) {
+      const edgeResponse = await fetch(`http://127.0.0.1:${port}/v1/client/status`, {
+        headers: { 'x-forwarded-host': host, 'x-forwarded-proto': 'https', origin: `https://${host}` },
+      })
+      expect(edgeResponse.status).toBe(credential === token && host !== 'unknown.example.test' ? 200 : 403)
+    }
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
     await exited
