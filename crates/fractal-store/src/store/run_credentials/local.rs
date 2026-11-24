@@ -21,38 +21,38 @@ pub struct AuthorityChange {
 pub fn initialize_local_authority(connection: &Connection) -> Result<(), FractalError> {
     connection.execute_batch(
         /* sqlite-large-value: allow-for-now lv-hfca990733a00 owner=fractal_store::store::run_credentials::local TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_execution_authority_v1 (
-                     host TEXT NOT NULL, revision TEXT NOT NULL, binding_json TEXT NOT NULL,
-                     subject TEXT NOT NULL, runtime TEXT NOT NULL, epoch INTEGER NOT NULL,
-                     revoked INTEGER NOT NULL DEFAULT 0, admission_sequence INTEGER NOT NULL DEFAULT 0,
-                     PRIMARY KEY(host, revision)
-                 );
-                 CREATE INDEX IF NOT EXISTS local_execution_authority_subject_v1
-                     ON local_execution_authority_v1(host, subject) WHERE revoked=0;
-                 CREATE INDEX IF NOT EXISTS local_execution_authority_runtime_v1
-                     ON local_execution_authority_v1(host, runtime) WHERE revoked=0;
-                 CREATE TABLE IF NOT EXISTS local_execution_credentials_v1 (
-                     secret_hash TEXT PRIMARY KEY, host TEXT NOT NULL, revision TEXT NOT NULL,
-                     expires_at_unix_ms TEXT NOT NULL CHECK(
-                         expires_at_unix_ms<>'' AND expires_at_unix_ms NOT GLOB '*[^0-9]*'
-                         AND (expires_at_unix_ms='0' OR substr(expires_at_unix_ms,1,1)<>'0')),
-                     FOREIGN KEY(host, revision) REFERENCES local_execution_authority_v1(host, revision)
-                 );
-                 CREATE TABLE IF NOT EXISTS local_authority_epochs_v1 (
-                     epoch INTEGER PRIMARY KEY, last_sequence INTEGER NOT NULL DEFAULT 0,
-                     ack_through INTEGER NOT NULL DEFAULT 0
-                 );
-                 CREATE TABLE IF NOT EXISTS local_authority_changes_v1 (
-                     epoch INTEGER NOT NULL, sequence INTEGER NOT NULL, binding_json TEXT NOT NULL,
-                     host TEXT NOT NULL, subject TEXT NOT NULL, runtime TEXT NOT NULL,
-                     revoked INTEGER NOT NULL, PRIMARY KEY(epoch, sequence)
-                 );
-                 CREATE INDEX IF NOT EXISTS local_authority_changes_conflict_v1
-                     ON local_authority_changes_v1(host, subject, runtime) WHERE revoked=1;
-                 CREATE TABLE IF NOT EXISTS local_authority_proposals_v1 (
-                     host TEXT NOT NULL, revision TEXT NOT NULL, binding_json TEXT NOT NULL,
-                     subject TEXT NOT NULL, runtime TEXT NOT NULL, epoch INTEGER NOT NULL,
-                     PRIMARY KEY(host, revision)
-                 );"
+             host TEXT NOT NULL, revision TEXT NOT NULL, binding_json TEXT NOT NULL,
+             subject TEXT NOT NULL, runtime TEXT NOT NULL, epoch INTEGER NOT NULL,
+             revoked INTEGER NOT NULL DEFAULT 0, admission_sequence INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY(host, revision)
+         );
+         CREATE INDEX IF NOT EXISTS local_execution_authority_subject_v1
+             ON local_execution_authority_v1(host, subject) WHERE revoked=0;
+         CREATE INDEX IF NOT EXISTS local_execution_authority_runtime_v1
+             ON local_execution_authority_v1(host, runtime) WHERE revoked=0;
+         CREATE TABLE IF NOT EXISTS local_execution_credentials_v1 (
+             secret_hash TEXT PRIMARY KEY, host TEXT NOT NULL, revision TEXT NOT NULL,
+             expires_at_unix_ms TEXT NOT NULL CHECK(
+                 expires_at_unix_ms<>'' AND expires_at_unix_ms NOT GLOB '*[^0-9]*'
+                 AND (expires_at_unix_ms='0' OR substr(expires_at_unix_ms,1,1)<>'0')),
+             FOREIGN KEY(host, revision) REFERENCES local_execution_authority_v1(host, revision)
+         );
+         CREATE TABLE IF NOT EXISTS local_authority_epochs_v1 (
+             epoch INTEGER PRIMARY KEY, last_sequence INTEGER NOT NULL DEFAULT 0,
+             ack_through INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS local_authority_changes_v1 (
+             epoch INTEGER NOT NULL, sequence INTEGER NOT NULL, binding_json TEXT NOT NULL,
+             host TEXT NOT NULL, subject TEXT NOT NULL, runtime TEXT NOT NULL,
+             revoked INTEGER NOT NULL, PRIMARY KEY(epoch, sequence)
+         );
+         CREATE INDEX IF NOT EXISTS local_authority_changes_conflict_v1
+             ON local_authority_changes_v1(host, subject, runtime) WHERE revoked=1;
+         CREATE TABLE IF NOT EXISTS local_authority_proposals_v1 (
+             host TEXT NOT NULL, revision TEXT NOT NULL, binding_json TEXT NOT NULL,
+             subject TEXT NOT NULL, runtime TEXT NOT NULL, epoch INTEGER NOT NULL,
+             PRIMARY KEY(host, revision)
+         );"
     ).map_err(internal)
 }
 
@@ -95,7 +95,7 @@ fn append_change(tx: &Transaction<'_>, binding: &ExecutionBinding, revoked: bool
         .ok_or_else(|| backpressure("the authority sequence space is exhausted"))?;
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-h23bb01dbd333 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_authority_changes_v1(epoch, sequence, binding_json, host, subject, runtime, revoked)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![binding.epoch, sequence, serde_json::to_string(binding).map_err(internal)?, binding.host, binding.subject, binding.runtime, revoked],
     ).map_err(internal)?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7be9a2b9416c owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_authority_epochs_v1 SET last_sequence=?2 WHERE epoch=?1", params![binding.epoch, sequence]).map_err(internal)?;
@@ -136,7 +136,7 @@ pub fn admit_execution_tx(tx: &Transaction<'_>, binding: &ExecutionBinding) -> R
     }
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-h7ef13aff7482 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_execution_authority_v1(host, revision, binding_json, subject, runtime, epoch)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![binding.host, binding.authorization_revision, encoded, binding.subject, binding.runtime, binding.epoch],
     ).map_err(internal)?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-hd29ab23563f2 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_authority_proposals_v1 WHERE host=?1 AND revision=?2", params![binding.host, binding.authorization_revision]).map_err(internal)?;
@@ -310,7 +310,7 @@ pub fn issue_local_credential_tx(tx: &Transaction<'_>, binding: &ExecutionBindin
     let expires = ((now_ms as u128) + (lifetime_ms as u128)).to_string();
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-h7082b3f480c9 owner=fractal_store::store::run_credentials::local TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_execution_credentials_v1 WHERE length(expires_at_unix_ms)<length(?1)
-                 OR (length(expires_at_unix_ms)=length(?1) AND expires_at_unix_ms<=?1)",
+         OR (length(expires_at_unix_ms)=length(?1) AND expires_at_unix_ms<=?1)",
         [&now],
     ).map_err(internal)?;
     let count: usize = tx.query_row("SELECT COUNT(*) FROM local_execution_credentials_v1", [], |row| row.get(0)).map_err(internal)?;
