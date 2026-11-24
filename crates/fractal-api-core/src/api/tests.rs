@@ -21,6 +21,8 @@ async fn performance_exports_native_writer_work_counts() {
     let root = tempfile::tempdir().unwrap();
     let (status, report) = get_request(router(state(root.path())), "/v1/performance").await;
     assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["mailbox_streams"]["open_streams"], 0);
+    assert_eq!(report["mailbox_streams"]["streams"], json!([]));
     for counter in [
         "boundaries", "noops", "rollbacks", "index_refreshes",
         "global_evaluations", "scoped_evaluations",

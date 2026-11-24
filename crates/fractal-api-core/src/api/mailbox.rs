@@ -222,6 +222,7 @@ pub struct FixtureDirtyGate {
     pub notifications: std::sync::atomic::AtomicUsize,
     pub replay_proofs: std::sync::atomic::AtomicUsize,
     pub attachment_evaluations: std::sync::atomic::AtomicUsize,
+    pub before_snapshot: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[cfg(test)]
