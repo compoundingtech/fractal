@@ -11,10 +11,11 @@ import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packa
 import type { ObjectivesSource } from '../data/objectivesSource.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, credentialNotice, waiting, type Feed } from '../data/source.ts'
+import { UsageAccounts } from './UsageAccounts.tsx'
 import { bars, chartSummary, creditsText, forecastOf, leftText, safeLink, secondLine, sloGroups, spanText, toneOf } from './usageModel.ts'
 
 // The Usage screen: objectives and budgets from Fractal's served rows, as the phone and the terminal UI's
-// Usage tab show them, beside the declared accounts. A row opens to its words and a chart of the last day.
+// Usage tab show them, beside the declared accounts, under the selected quota account. A row opens to its words and a chart of the last day.
 
 const CHART_STEPS = 48
 type Unobserved = Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>
@@ -35,7 +36,7 @@ export const UsagePane = ({ label = 'Usage' }: { readonly label?: string } = {})
   return (
     <section aria-label={label} data-testid="usage-pane" {...stylex.props(styles.pane)}>
       {objectives === undefined
-        ? <SystemNotice kind="error" title="Objectives and budgets not supported" detail="This connection does not offer them" />
+        ? <div {...stylex.props(styles.body)}><UsageAccounts label={label} /><SystemNotice kind="error" title="Objectives and budgets not supported" detail="This connection does not offer them" /></div>
         : <Usage source={objectives} label={label} />}
     </section>
   )
@@ -59,6 +60,7 @@ const Usage = ({ source, label }: { readonly source: ObjectivesSource; readonly 
       {!unauthorized ? <Aria.Button onPress={source.refresh} {...stylex.props(styles.button)}>Refresh</Aria.Button> : null}
     </header>
     <div {...stylex.props(styles.body)}>
+      <UsageAccounts label={label} />
       <Stale feed={list} />
       {list._tag !== 'Observed' ? <Unread feed={list} what="objectives and budgets" onRetry={source.refresh} />
         : rows.length === 0 ? <SystemNotice kind="empty" title="No objectives or budgets" detail="Fractal declares none on this computer" />
