@@ -55,6 +55,9 @@ pub struct TrimPass {
     pub trimmed_cuts: u64,
     /// Cuts this pass left `trimming`, to go on in a later pass.
     pub deferred_cuts: u64,
+    /// Cuts this pass set aside: resuming them would delete a signed claim still inside the
+    /// freshness window's forget bound, so the next day's cut goes on instead.
+    pub set_aside_cuts: u64,
     pub deleted_envelopes: u64,
     pub deleted_claims: u64,
 }
@@ -65,6 +68,7 @@ pub struct TrimSinceStart {
     pub passes: u64,
     pub trimmed_cuts: u64,
     pub deferred_cuts: u64,
+    pub set_aside_cuts: u64,
     pub deleted_envelopes: u64,
     pub deleted_claims: u64,
 }
@@ -186,10 +190,12 @@ pub struct RetentionStatus {
 #[derive(Default)]
 pub(crate) struct Tally {
     counts: Mutex<Counts>,
-    /// Rows the trim's committed chunks deleted, in the running pass and since start. A chunk
-    /// adds to them while the writer is still on loan, so they take no lock.
+    /// Rows the trim's committed chunks deleted, in the running pass and since start, and cuts
+    /// the running pass set aside. They are added while the writer is still on loan, so they
+    /// take no lock.
     pass_envelopes: AtomicU64,
     pass_claims: AtomicU64,
+    pass_set_aside: AtomicU64,
     deleted_envelopes: AtomicU64,
     deleted_claims: AtomicU64,
 }
@@ -215,6 +221,7 @@ impl Tally {
         self.counts().noted = None;
         self.pass_envelopes.store(0, Ordering::Relaxed);
         self.pass_claims.store(0, Ordering::Relaxed);
+        self.pass_set_aside.store(0, Ordering::Relaxed);
     }
 
     pub(crate) fn note_trim_stop(&self, stop: TrimStop) {
@@ -232,46 +239,39 @@ impl Tally {
         }
     }
 
-    /// A checkpoint pass returned `actions`, or failed (`None`). A cut that would change the
-    /// graph is the stop; otherwise the reason the step noted, or nothing left due. The deleted
-    /// counts are the committed chunks', so a pass that halts or fails partway still reports
-    /// what it deleted. A cut that stopped without an action carrying its counts (graph changed,
-    /// set aside) shows as more deleted than the actions report: the pass is partial.
-    pub(crate) fn finish_trim_pass(&self, actions: Option<&[CheckpointAction]>, at_unix_ms: u128) {
+    /// A cut was set aside.
+    pub(crate) fn set_aside_cut(&self) {
+        self.pass_set_aside.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A checkpoint pass ended with the `actions` it recorded, which stop at the failure if
+    /// it `failed`. A cut that would change the graph is the stop; otherwise the reason the
+    /// step noted, or nothing left due. The deleted counts are the committed chunks', so a
+    /// pass that halts or fails partway still reports what it deleted. A pass that halted on
+    /// the graph, deferred or set aside a cut is partial.
+    pub(crate) fn finish_trim_pass(&self, actions: &[CheckpointAction], failed: bool, at_unix_ms: u128) {
         let mut pass = TrimPass {
             at_unix_ms,
             stop: TrimStop::NothingDue,
             outcome: TrimOutcome::Complete,
             trimmed_cuts: 0,
             deferred_cuts: 0,
+            set_aside_cuts: self.pass_set_aside.swap(0, Ordering::Relaxed),
             deleted_envelopes: self.pass_envelopes.swap(0, Ordering::Relaxed),
             deleted_claims: self.pass_claims.swap(0, Ordering::Relaxed),
         };
-        let (mut reported_envelopes, mut reported_claims) = (0, 0);
         let mut graph_changed = false;
-        for action in actions.unwrap_or_default() {
+        for action in actions {
             match action {
-                CheckpointAction::Trimmed { envelopes, claims, .. } => {
-                    pass.trimmed_cuts += 1;
-                    reported_envelopes += *envelopes as u64;
-                    reported_claims += *claims as u64;
-                }
-                CheckpointAction::TrimDeferred { envelopes, claims, .. } => {
-                    pass.deferred_cuts += 1;
-                    reported_envelopes += *envelopes as u64;
-                    reported_claims += *claims as u64;
-                }
+                CheckpointAction::Trimmed { .. } => pass.trimmed_cuts += 1,
+                CheckpointAction::TrimDeferred { .. } => pass.deferred_cuts += 1,
                 CheckpointAction::TrimGraphChanged { .. } => graph_changed = true,
                 CheckpointAction::SweptTrimmedClaimRows { .. } => {}
             }
         }
-        pass.outcome = if actions.is_none() {
+        pass.outcome = if failed {
             TrimOutcome::Failed
-        } else if graph_changed
-            || pass.deferred_cuts > 0
-            || pass.deleted_envelopes > reported_envelopes
-            || pass.deleted_claims > reported_claims
-        {
+        } else if graph_changed || pass.deferred_cuts > 0 || pass.set_aside_cuts > 0 {
             TrimOutcome::Partial
         } else {
             TrimOutcome::Complete
@@ -282,6 +282,7 @@ impl Tally {
         counts.trim.passes += 1;
         counts.trim.trimmed_cuts += pass.trimmed_cuts;
         counts.trim.deferred_cuts += pass.deferred_cuts;
+        counts.trim.set_aside_cuts += pass.set_aside_cuts;
         counts.last_pass = Some(pass);
     }
 
@@ -497,19 +498,15 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn a_failed_pass_reports_what_its_committed_chunks_deleted() {
-        let scratch = tempfile::tempdir().unwrap();
-        let store = local_store();
-        store.trim_locally(true).unwrap();
-        // A cut whose tombstones committed, as a crash leaves it: the next pass finishes it.
-        let checkpoint = "checkpoint/1970-01-02";
-        store.set_checkpoint_state(checkpoint, 1, "trimming").unwrap();
+    /// A cut whose tombstones committed, as a crash leaves it, holding `count` notes: the next
+    /// pass finishes it.
+    fn interrupted_cut(store: &Store, checkpoint: &str, cut_unix_ms: u128, count: u64) {
+        store.set_checkpoint_state(checkpoint, cut_unix_ms, "trimming").unwrap();
         let mut tombstones = Vec::new();
-        for n in 0..3 {
+        for n in 0..count {
             let claim = store
                 .append_claim(&ClaimInput {
-                    subject: format!("note/{n}"),
+                    subject: format!("note/{checkpoint}/{n}"),
                     kind: "example.note".into(),
                     actor: None,
                     fields: BTreeMap::from([("text".into(), json!(n))]),
@@ -523,7 +520,7 @@ mod tests {
                 operation_id: claim.operation_id,
                 writer: "writer".into(),
                 sequence: n,
-                envelope_hash: format!("envelope-{n}"),
+                envelope_hash: format!("envelope-{checkpoint}-{n}"),
                 subject: claim.subject,
                 kind: claim.kind,
                 actor: claim.actor,
@@ -532,38 +529,48 @@ mod tests {
                 accepted_at_unix_ms: claim.accepted_at_unix_ms,
             });
         }
-        {
-            let mut writer = store.connection.write();
-            let transaction = writer.transaction().unwrap();
-            super::super::checkpoint::record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], &tombstones)
-                .unwrap();
-            transaction.commit().unwrap();
-        }
-        // One claim a chunk; the pass fails after its first chunk committed.
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        super::super::checkpoint::record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], &tombstones).unwrap();
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn a_failed_pass_keeps_the_cuts_it_finished_and_what_its_chunks_deleted() {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = local_store();
+        store.trim_locally(true).unwrap();
+        // Interrupted cuts finish in id order: the first in one chunk, then the second fails
+        // after its second chunk committed.
+        interrupted_cut(&store, "checkpoint/1970-01-02", 1, 1);
+        interrupted_cut(&store, "checkpoint/1970-01-03", 2, 3);
         store.set_trim_chunk_envelopes(1);
-        store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
+        store.set_trim_fault(Some(TrimFault::AfterChunk(2)));
         let now = 30 * super::super::checkpoint_agreement::DAY_MS;
         assert!(store.checkpoint_step(&context(scratch.path(), now)).is_err());
         let trim = store.retention_status().unwrap().trim;
         let pass = trim.last_pass.unwrap();
         assert_eq!(pass.outcome, TrimOutcome::Failed);
-        assert_eq!((pass.trimmed_cuts, pass.deferred_cuts), (0, 0));
-        assert_eq!((pass.deleted_envelopes, pass.deleted_claims), (0, 1));
-        assert_eq!(notes(&store), 2, "the pass reports what it deleted");
-        assert_eq!((trim.since_start.passes, trim.since_start.deleted_claims), (1, 1));
+        assert_eq!((pass.trimmed_cuts, pass.deferred_cuts), (1, 0), "the cut finished before the failure counts");
+        assert_eq!((pass.deleted_envelopes, pass.deleted_claims), (0, 3));
+        assert_eq!(notes(&store), 1, "the pass reports what it deleted");
+        assert_eq!(
+            (trim.since_start.passes, trim.since_start.trimmed_cuts, trim.since_start.deleted_claims),
+            (1, 1, 3)
+        );
 
-        // The next pass finishes the cut and counts only its own chunks.
+        // The next pass finishes the second cut and counts only its own chunks.
         store.checkpoint_step(&context(scratch.path(), now)).unwrap();
         let trim = store.retention_status().unwrap().trim;
         let pass = trim.last_pass.unwrap();
-        assert_eq!((pass.outcome, pass.deleted_claims), (TrimOutcome::Complete, 2));
+        assert_eq!((pass.outcome, pass.deleted_claims), (TrimOutcome::Complete, 1));
         assert!(pass.trimmed_cuts >= 1, "{pass:?}");
         assert_eq!(notes(&store), 0);
-        assert_eq!((trim.since_start.passes, trim.since_start.deleted_claims), (2, 3));
+        assert_eq!((trim.since_start.passes, trim.since_start.deleted_claims), (2, 4));
     }
 
     #[test]
-    fn a_pass_the_graph_halts_partway_keeps_what_its_chunks_deleted() {
+    fn a_pass_that_halts_or_sets_a_cut_aside_is_partial_and_keeps_what_it_deleted() {
         let store = local_store();
         let chunk = |phase: &str, envelopes: usize, claims: usize| {
             let zero = std::time::Duration::ZERO;
@@ -576,7 +583,7 @@ mod tests {
         chunk("envelopes", 1, 3);
         chunk("claims", 0, 2);
         let halted = [CheckpointAction::TrimGraphChanged { checkpoint: "checkpoint/cut".into() }];
-        store.retention.finish_trim_pass(Some(&halted[..]), 7);
+        store.retention.finish_trim_pass(&halted, false, 7);
         let trim = store.retention_status().unwrap().trim;
         assert_eq!(
             trim.last_pass,
@@ -586,28 +593,37 @@ mod tests {
                 outcome: TrimOutcome::Partial,
                 trimmed_cuts: 0,
                 deferred_cuts: 0,
+                set_aside_cuts: 0,
                 deleted_envelopes: 1,
                 deleted_claims: 5,
             })
         );
         assert_eq!((trim.since_start.deleted_envelopes, trim.since_start.deleted_claims), (1, 5));
 
-        // A cut set aside mid-way pushes no action at all, and is partial too.
+        // A cut set aside before any chunk committed pushes no action and deletes nothing; the
+        // pass is partial all the same.
         store.retention.begin_trim_pass();
-        chunk("claims", 0, 1);
-        store.retention.finish_trim_pass(Some(&[][..]), 8);
+        store.set_checkpoint_state("checkpoint/young", 0, "set-aside").unwrap();
+        store.retention.finish_trim_pass(&[], false, 8);
         let pass = store.retention_status().unwrap().trim.last_pass.unwrap();
-        assert_eq!((pass.outcome, pass.deleted_claims), (TrimOutcome::Partial, 1));
+        assert_eq!(
+            (pass.outcome, pass.set_aside_cuts, pass.deleted_envelopes, pass.deleted_claims),
+            (TrimOutcome::Partial, 1, 0, 0)
+        );
 
         // A cut finished in the pass reports what its chunks deleted: complete.
         store.retention.begin_trim_pass();
         chunk("claims", 0, 2);
         let finished = [CheckpointAction::Trimmed { checkpoint: "checkpoint/cut".into(), envelopes: 0, claims: 2 }];
-        store.retention.finish_trim_pass(Some(&finished[..]), 9);
+        store.retention.finish_trim_pass(&finished, false, 9);
         let trim = store.retention_status().unwrap().trim;
         let pass = trim.last_pass.unwrap();
-        assert_eq!((pass.outcome, pass.stop, pass.deleted_claims), (TrimOutcome::Complete, TrimStop::NothingDue, 2));
-        assert_eq!((trim.since_start.passes, trim.since_start.deleted_claims), (3, 8));
+        assert_eq!((pass.outcome, pass.stop, pass.set_aside_cuts), (TrimOutcome::Complete, TrimStop::NothingDue, 0));
+        assert_eq!(pass.deleted_claims, 2);
+        assert_eq!(
+            (trim.since_start.passes, trim.since_start.set_aside_cuts, trim.since_start.deleted_claims),
+            (3, 1, 7)
+        );
     }
 
     #[test]

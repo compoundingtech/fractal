@@ -210,13 +210,15 @@ impl Store {
     pub fn checkpoint_step(&self, context: &CheckpointContext) -> Result<Vec<CheckpointAction>> {
         self.checkpoint_worker_phase(CheckpointPhase::Sweep);
         self.retention.begin_trim_pass();
-        let result = self.checkpoint_step_inner(context);
-        // A failed pass still reports what its committed chunks deleted.
-        self.retention.finish_trim_pass(result.as_ref().ok().map(Vec::as_slice), context.now_unix_ms);
+        // The pass records its actions as it goes, so a failure keeps the cuts it finished
+        // before, and its committed chunks report what they deleted.
+        let mut actions = Vec::new();
+        let result = self.checkpoint_step_inner(context, &mut actions);
+        self.retention.finish_trim_pass(&actions, result.is_err(), context.now_unix_ms);
         if let Err(error) = &result {
             self.checkpoint_worker_error(format!("{error:#}"));
         }
-        result
+        result.map(|()| actions)
     }
 
     pub fn checkpoint_worker_phase(&self, phase: CheckpointPhase) {
@@ -232,9 +234,8 @@ impl Store {
         }
     }
 
-    fn checkpoint_step_inner(&self, context: &CheckpointContext) -> Result<Vec<CheckpointAction>> {
+    fn checkpoint_step_inner(&self, context: &CheckpointContext, actions: &mut Vec<CheckpointAction>) -> Result<()> {
         self.runtime.checkpoint_preflight()?;
-        let mut actions = Vec::new();
         // Local rows outside every digest, so this does not wait for a peer.
         let rows = self.sweep_trimmed_claim_rows()?;
         if rows > 0 {
@@ -246,14 +247,14 @@ impl Store {
         if self.replication_catching_up() {
             self.checkpoint_worker_phase(CheckpointPhase::CatchingUp);
             self.retention.note_trim_stop(super::retention::TrimStop::CatchingUp);
-            return Ok(actions);
+            return Ok(());
         }
         // Every member trims on its own: it finishes a trim it had already committed, then trims
         // its own due cut. No member agrees on a checkpoint with another or waits for one.
         if !self.trims_locally() {
             self.checkpoint_worker_phase(CheckpointPhase::Disabled);
             self.retention.note_trim_stop(super::retention::TrimStop::Disabled);
-            return Ok(actions);
+            return Ok(());
         }
         self.checkpoint_worker_phase(CheckpointPhase::LocalTrim);
         self.trim_day.store(
@@ -264,14 +265,14 @@ impl Store {
             u64::try_from(context.now_unix_ms)?,
             std::sync::atomic::Ordering::Relaxed,
         );
-        self.finish_interrupted_trims(&mut actions)?;
-        self.trim_local_cut(context, &mut actions)?;
-        self.trim_peer_retired(&mut actions)?;
+        self.finish_interrupted_trims(actions)?;
+        self.trim_local_cut(context, actions)?;
+        self.trim_peer_retired(actions)?;
         // A cut left `trimming` names why it stopped, ahead of what the cut steps noted.
         if actions.iter().any(|action| matches!(action, CheckpointAction::TrimDeferred { .. })) {
             self.retention.note_trim_stop(self.trim_deferral_stop()?);
         }
-        Ok(actions)
+        Ok(())
     }
 
     /// Whether a trim stopped because the graph would change. Trimming then waits for a person;

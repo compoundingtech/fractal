@@ -363,19 +363,25 @@ fn render_retention(retention: &smallclaims::store::retention::RetentionStatus) 
             value.ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_else(|| "?".to_owned())
         };
         output.push_str(&format!(
-            "retention-trim-last-pass\t{} stop={} trimmed={} deferred={} deleted envelopes={} claims={}\n",
+            "retention-trim-last-pass\t{} stop={} trimmed={} deferred={} set-aside={} deleted envelopes={} claims={}\n",
             name(serde_json::to_value(pass.outcome)),
             name(serde_json::to_value(pass.stop)),
             pass.trimmed_cuts,
             pass.deferred_cuts,
+            pass.set_aside_cuts,
             pass.deleted_envelopes,
             pass.deleted_claims
         ));
     }
     let since = &trim.since_start;
     output.push_str(&format!(
-        "retention-trim-since-start\tpasses={} trimmed={} deferred={} deleted envelopes={} claims={}\n",
-        since.passes, since.trimmed_cuts, since.deferred_cuts, since.deleted_envelopes, since.deleted_claims
+        "retention-trim-since-start\tpasses={} trimmed={} deferred={} set-aside={} deleted envelopes={} claims={}\n",
+        since.passes,
+        since.trimmed_cuts,
+        since.deferred_cuts,
+        since.set_aside_cuts,
+        since.deleted_envelopes,
+        since.deleted_claims
     ));
     let bytes = &retention.valid_record_bytes;
     output.push_str(&format!(
@@ -437,6 +443,7 @@ fn replication_status_renders_each_retention_pass() {
                 outcome: TrimOutcome::Partial,
                 trimmed_cuts: 0,
                 deferred_cuts: 1,
+                set_aside_cuts: 0,
                 deleted_envelopes: 2,
                 deleted_claims: 5,
             }),
@@ -450,7 +457,7 @@ fn replication_status_renders_each_retention_pass() {
     let rendered = render_retention(&retention);
     for line in [
         "retention-trim\ton daily=100000 deleted-today=0 newest-cut=cut-1 (trimming, eligible envelopes=3 claims=?) unfinished=cut-1\n",
-        "retention-trim-last-pass\tpartial stop=daily_cap trimmed=0 deferred=1 deleted envelopes=2 claims=5\n",
+        "retention-trim-last-pass\tpartial stop=daily_cap trimmed=0 deferred=1 set-aside=0 deleted envelopes=2 claims=5\n",
         "retention-valid-record-bytes\tin progress cursor=0/0",
         "retention-settled-judging\tdone since-start",
         "retention-legacy-receipts\tnone left boundary=none oldest=none",

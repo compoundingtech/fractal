@@ -836,6 +836,9 @@ impl Store {
             ],
         )?;
         transaction.commit()?;
+        if state == "set-aside" {
+            self.retention.set_aside_cut();
+        }
         Ok(())
     }
 
