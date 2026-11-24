@@ -247,6 +247,7 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         let mut program_node = text("program", &program.bundle);
         property(&mut program_node, "sha256", program.bundle_hash.as_str());
         if let Some(ms) = program.stalled_after_ms { property(&mut program_node, "stalled-after", format!("{ms}ms")); }
+        if let Some(ms) = program.finalizer_grace_ms { property(&mut program_node, "finalizer-grace", format!("{ms}ms")); }
         children.push(program_node);
     }
     if let Some(nested) = nested_mission { children.push(mission_node(nested)?); }
@@ -506,11 +507,12 @@ mod tests {
     fn program_step_round_trips_and_owns_its_outcome() {
         let sha = "ab".repeat(32);
         let source = format!(r#"mission "test" state="ready" {{ goal "Land."; input "change" kind="text"
-            step "program" timeout="1h" {{ program "/bundles/land.mjs" sha256="{sha}" stalled-after="10m"; }} }}"#);
+            step "program" timeout="1h" {{ program "/bundles/land.mjs" sha256="{sha}" stalled-after="10m" finalizer-grace="5m"; }} }}"#);
         round_trip(&source);
         let step = &parse(&source).steps["program"];
         let program = step.program.as_ref().unwrap();
         assert_eq!((program.bundle_hash.as_str(), program.stalled_after_ms), (sha.as_str(), Some(600_000)));
+        assert_eq!(program.finalizer_grace_ms, Some(300_000));
         assert_eq!(step.work_selector, Some(crate::model::WorkSelector::Agentless));
         // The definition names the blob by `bundle_hash`, so publishing it promotes the blob.
         assert_eq!(serde_json::to_value(step).unwrap()["program"]["bundle_hash"], sha.as_str());
@@ -527,6 +529,10 @@ mod tests {
         assert_eq!(error(r#"program "/b.mjs" sha256="ABC";"#), "invalid-program");
         assert_eq!(error(&format!(r#"program "b.mjs" sha256="{sha}";"#)), "invalid-program");
         assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}" stalled-after="0s";"#)), "invalid-program");
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}" finalizer-grace="0s";"#)), "invalid-finalizer-grace");
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}" finalizer-grace="16m";"#)), "invalid-finalizer-grace");
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}" finalizer-grace="bad";"#)), "invalid-finalizer-grace");
+        round_trip(&format!(r#"mission "test" state="ready" {{ goal "Land."; step "program" {{ program "/b.mjs" sha256="{sha}" finalizer-grace="15m"; }} }}"#));
         let in_finally = format!(r#"mission "test" state="ready" {{ goal "Land."; step "work" {{ agentless; }}
             finally {{ step "program" {{ program "/b.mjs" sha256="{sha}"; }} }} }}"#);
         assert_eq!(crate::mission::parse_missions(&in_finally.parse().unwrap(), "node").unwrap_err().code, "program-step-outcome");

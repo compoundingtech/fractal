@@ -10,7 +10,7 @@
  * again. Asks, child runs and pull request waits wait in the host until the daemon resolves them;
  * it journals their result under the same key.
  */
-import { Cause, Context, Effect, Exit, Option, Schema, SchemaGetter, SchemaIssue } from 'effect'
+import { Cause, Context, Effect, Exit, Option, Schema, SchemaGetter, SchemaIssue, Scope } from 'effect'
 import { Workflow, WorkflowEngine } from 'effect/workflow'
 import type { LaneMembership } from './resources.ts'
 
@@ -149,6 +149,7 @@ export type ProgramServices =
   | Program
   | WorkflowEngine.WorkflowEngine
   | WorkflowEngine.WorkflowInstance
+  | Scope.Scope
 
 /**
  * Runs `use` under the next key of `id`: `id`, then `id#2`, `id#3`… in one execution. Only one
@@ -214,6 +215,7 @@ const notInPrograms = (what: string) =>
 const hostEngine = (
   program: Program['Service'],
   refuse: (key: string, cause: unknown) => void,
+  finalized: (cause: Cause.Cause<unknown>) => void,
 ): WorkflowEngine.Encoded => {
   const { host, requests } = program
   /** Waits for the ack; a refused entry ends the attempt and never resumes the step. */
@@ -221,6 +223,9 @@ const hostEngine = (
     Effect.promise(() =>
       host.record(entry).catch((cause: unknown) => {
         refuse(entry.key, cause)
+        // Finalizers are uninterruptible: fail this write rather than wait for
+        // another interrupt that cannot release the refused acknowledgement.
+        if (host.signal.aborted) throw cause
         return new Promise<never>(() => {})
       }),
     )
@@ -247,7 +252,19 @@ const hostEngine = (
     ) => {
       const execute = workflows.get(workflow._tag)
       if (execute === undefined || options.discard) return notInPrograms('Workflow.execute')
-      return execute(options.payload, options.executionId).pipe(
+      return Effect.suspend(() => {
+        // Own the program scope and observe its close independently of the body's
+        // exit. A preexisting body failure is not a failed resource release.
+        const scope = Scope.makeUnsafe()
+        return execute(options.payload, options.executionId).pipe(
+          Effect.provideService(Scope.Scope, scope),
+          Effect.onExit((exit) => Scope.close(scope, exit).pipe(
+            Effect.onExit((cleanup) => Effect.sync(() => {
+              if (Exit.isFailure(cleanup)) finalized(cleanup.cause)
+            })),
+          )),
+        )
+      }).pipe(
         Workflow.intoResult,
         Effect.provideService(
           WorkflowEngine.WorkflowInstance,
@@ -276,8 +293,14 @@ const hostEngine = (
         const instance = yield* WorkflowEngine.WorkflowInstance
         host.started(key)
         const started = Date.now()
-        const result: Workflow.Result<unknown, unknown> = yield* activity.executeEncoded.pipe(
-          Workflow.intoResult,
+        const result: Workflow.Result<unknown, unknown> = yield* Effect.suspend(() =>
+          // Workflow.intoResult explicitly restores interruptibility for suspension.
+          // A finalizer activity must instead inherit its caller's interrupt mask;
+          // otherwise the pending root interrupt skips the command and its journal.
+          host.signal.aborted
+            ? Effect.map(Effect.exit(Effect.scoped(activity.executeEncoded)), (exit) => new Workflow.Complete({ exit }))
+            : Workflow.intoResult(activity.executeEncoded),
+        ).pipe(
           Effect.provideService(
             WorkflowEngine.WorkflowInstance,
             WorkflowEngine.WorkflowInstance.initial(instance.workflow, instance.executionId),
@@ -334,6 +357,7 @@ export const programEntry =
     // not durable.
     const stop = new AbortController()
     const cancel = () => stop.abort()
+    let finalizerCause: Cause.Cause<unknown> | undefined
     host.signal.addEventListener('abort', cancel, { once: true })
     if (host.signal.aborted) stop.abort()
     let refused: string | undefined
@@ -347,7 +371,7 @@ export const programEntry =
       owners: new Map(),
       requests: new Map(),
     }
-    const engine = WorkflowEngine.makeUnsafe(hostEngine(program, refuse))
+    const engine = WorkflowEngine.makeUnsafe(hostEngine(program, refuse, (cause) => { finalizerCause = cause }))
     const workflow = Workflow.make(definition.id, {
       payload: definition.input,
       success: definition.output,
@@ -387,8 +411,12 @@ export const programEntry =
     const exit = await Effect.runPromiseExit(attempt, { signal: stop.signal }).finally(() =>
       host.signal.removeEventListener('abort', cancel),
     )
-    const message = Exit.isSuccess(exit) ? '' : Cause.pretty(exit.cause).slice(0, 2000)
-    if (host.signal.aborted) return { _tag: 'Failure', error: { _tag: 'Interrupted', message } }
+    const cause = finalizerCause ?? (Exit.isFailure(exit) ? exit.cause : undefined)
+    const message = cause === undefined ? '' : Cause.pretty(cause).slice(0, 2000)
+    if (host.signal.aborted) {
+      const failedFinalizer = refused !== undefined || finalizerCause !== undefined
+      return { _tag: 'Failure', error: { _tag: failedFinalizer ? 'FinalizerFailed' : 'Interrupted', message: refused ?? message } }
+    }
     if (refused !== undefined)
       return { _tag: 'Failure', error: { _tag: 'Defect', message: refused } }
     if (Exit.isSuccess(exit)) return exit.value

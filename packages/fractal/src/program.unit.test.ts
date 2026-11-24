@@ -762,6 +762,97 @@ describe('cancellation', () => {
       expect(host.recorded).toEqual([])
     }),
   )
+  it.effect('journals an ensuring finalizer step wrapping a command after root interruption', () =>
+    Effect.gen(function* () {
+      const host = fakeHost()
+      const waiting = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Drain on cancel.', reportTo, input: Change },
+        () => Fractal.step({ id: 'merge' },
+          Effect.sync(() => host.cancel()).pipe(Effect.andThen(Effect.never)),
+        ).pipe(Effect.ensuring(
+          Fractal.step({ id: 'drain', success: Schema.String },
+            Fractal.command(['sh', '-c', 'drain']).pipe(Effect.map((result) => result.stdout), Effect.orDie),
+          ).pipe(Effect.orDie),
+        )),
+      )
+      expect(yield* start(waiting, host)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'Interrupted' },
+      })
+      expect(host.started).toEqual(['merge', 'drain'])
+      expect(host.recorded).toMatchObject([
+        { key: 'drain', status: 'completed', value: 'sh -c drain' },
+      ])
+    }),
+  )
+  for (const nack of [undefined, 'finalizer journal refused']) {
+    it.effect(`preserves finalizer ${nack === undefined ? 'defects' : 'journal refusals'} after cancellation`, () =>
+      Effect.gen(function* () {
+        const host = fakeHost({ ...(nack === undefined ? {} : { nack }) })
+        const waiting = Fractal.mission(
+          { meta, id: 'factory/test', goal: 'Report failed cleanup.', reportTo, input: Change },
+          () => Effect.gen(function* () {
+            yield* Effect.addFinalizer(() =>
+              Fractal.step({ id: 'drain' },
+                nack === undefined ? Effect.die('drain failed') : Effect.void,
+              ).pipe(Effect.orDie),
+            )
+            yield* Fractal.step({ id: 'work' },
+              Effect.sync(() => host.cancel()).pipe(Effect.andThen(Effect.never)),
+            )
+          }),
+        )
+        expect(yield* start(waiting, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'FinalizerFailed' },
+        })
+      }),
+    )
+  }
+  it.effect('preserves acquireRelease finalizer defects across workflow interruption', () =>
+    Effect.gen(function* () {
+      const host = fakeHost()
+      const waiting = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Report failed resource release.', reportTo, input: Change },
+        () => Effect.acquireRelease(Effect.void, () =>
+          Fractal.step({ id: 'release' }, Effect.die('release failed')).pipe(Effect.orDie),
+        ).pipe(Effect.andThen(
+          Fractal.step({ id: 'work' },
+            Effect.sync(() => host.cancel()).pipe(Effect.andThen(Effect.never)),
+          ),
+        )),
+      )
+      expect(yield* start(waiting, host)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'FinalizerFailed', message: expect.stringContaining('release failed') },
+      })
+    }),
+  )
+  for (const defect of [false, true]) {
+    for (const releaseFails of [false, true]) {
+      it.effect(`separates a body ${defect ? 'defect' : 'typed failure'} from ${releaseFails ? 'failed' : 'successful'} registered cleanup on cancellation`, () =>
+        Effect.gen(function* () {
+          const host = fakeHost()
+          let released = false
+          const waiting = Fractal.mission(
+            { meta, id: 'factory/test', goal: 'Classify only registered cleanup.', reportTo, input: Change },
+            () => Effect.gen(function* () {
+              yield* Effect.acquireRelease(Effect.void, () =>
+                Effect.sync(() => host.cancel()).pipe(
+                  // Force cleanup to cross an asynchronous boundary after cancellation.
+                  Effect.andThen(Effect.yieldNow),
+                  Effect.andThen(Effect.sync(() => { released = true })),
+                  Effect.andThen(releaseFails ? Effect.die('release failed') : Effect.void),
+                ),
+              )
+              return yield* (defect ? Effect.die('body defect') : Effect.fail(new Refused({ reason: 'body failure' })))
+            }),
+          )
+          expect(yield* start(waiting, host)).toMatchObject({
+            _tag: 'Failure', error: { _tag: releaseFails ? 'FinalizerFailed' : 'Interrupted' },
+          })
+          expect(released).toBe(true)
+        }),
+      )
+    }
+  }
 })
 
 describe('commands', () => {
