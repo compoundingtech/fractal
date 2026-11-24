@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add a real-web fixture-instance routing proof using isolated loopback origins and browser contexts.",
+  "replay": { "status": "none", "detail": "The proof changes no stored claims or projections." },
+  "schema": { "status": "none", "detail": "No protocol schema changes." },
+  "rules": { "status": "none", "detail": "The proof exercises existing paired-client routing and privileged-route exclusion." },
+  "compatibility": { "status": "none", "detail": "Existing web deployments and their gateway selection are unchanged." },
+  "downtime": { "status": "none", "detail": "No service restart or deployment is required." },
+  "manual": { "status": "none", "detail": "The optional proof needs the web development environment and Playwright Chromium." },
+  "recovery": { "status": "none", "detail": "Removing the proof does not alter runtime state." }
+}
