@@ -49,7 +49,11 @@ impl NativeSessionExecutor {
         let reconciler = self.reconciler.clone();
         let generation = self.native_generation.clone();
         let mut previous = native_recovery_evidence(&reconciler)?;
-        let mut watcher = notify::recommended_watcher(move |_: notify::Result<notify::Event>| {
+        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else { return; };
+            // Reading registry evidence emits Access events on Linux. Re-reading on
+            // those events feeds the watcher itself, starving real native mutations.
+            if matches!(event.kind, notify::EventKind::Access(_)) { return; }
             // Registry notifications include repeated writes. Only changed physical
             // incarnation/liveness/provenance can reopen a failed Start recovery.
             if let Ok(current) = native_recovery_evidence(&reconciler)
@@ -138,9 +142,12 @@ impl NativeSessionExecutor {
         if let Some(operation) = &binding.start_operation
             && let Some(operation) = reconciler.store.remote_runtime_start(operation)? {
                 reconciler.retire_remote_start_resources(&operation, Some(&binding.native_incarnation))?;
-                reconciler.store.settle_remote_runtime_start(&operation.id)?;
+                reconciler.store.verify_remote_runtime_start_cleanup(&operation.id)?;
             }
         reconciler.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
+        if let Some(operation) = &binding.start_operation {
+            reconciler.store.settle_remote_runtime_start(operation)?;
+        }
         journal.finish_local_finalization(&command.execution_id)?;
         self.waits.lock().map_err(|_| anyhow::anyhow!("native retirement wait ownership poisoned"))?
             .remove(&(binding.runtime_id.clone(), binding.native_incarnation.clone()));
@@ -345,6 +352,7 @@ impl NativeSessionExecutor {
                 }
             }
             reconciler.retire_remote_start_resources(&operation, Some(&binding.native_incarnation))?;
+            reconciler.store.verify_remote_runtime_start_cleanup(&operation.id)?;
             reconciler.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
             reconciler.store.settle_remote_runtime_start(&operation.id)?;
             self.waits.lock().map_err(|_| anyhow::anyhow!("native retirement wait ownership poisoned"))?
@@ -563,9 +571,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(operation) = &binding.start_operation
                 && let Some(operation) = self.store.remote_runtime_start(operation)? {
                     self.retire_remote_start_resources(&operation, Some(&binding.native_incarnation))?;
-                    self.store.settle_remote_runtime_start(&operation.id)?;
+                    self.store.verify_remote_runtime_start_cleanup(&operation.id)?;
                 }
             self.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
+            if let Some(operation) = &binding.start_operation {
+                self.store.settle_remote_runtime_start(operation)?;
+            }
             journal.finish_local_finalization(&command.execution_id)?;
         }
         // A new daemon cannot adopt the previous in-memory program VM. Permission is

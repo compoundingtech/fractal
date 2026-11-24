@@ -373,7 +373,9 @@ pub trait RuntimeStartsStore {
     fn enter_remote_runtime_start(&self, id: &str, owner: &str) -> Result<()>;
     fn finish_remote_runtime_start(&self, id: &str, result: &Value) -> Result<()>;
     fn revoke_remote_runtime_start(&self, id: &str, reason: &str) -> Result<()>;
-    /// Called only after native whole-scope retirement or positive nonlaunch proof.
+    /// Retain physical closure independently of local session finalization.
+    fn verify_remote_runtime_start_cleanup(&self, id: &str) -> Result<()>;
+    /// Called only after physical closure and all resource/local session finalization.
     fn settle_remote_runtime_start(&self, id: &str) -> Result<()>;
     /// Immutable `(operation_id, member)` envelopes remain held until positive
     /// physical cleanup, including after graph adoption, daemon loss, or missing registry evidence.
@@ -519,6 +521,14 @@ impl RuntimeStartsStore for Store {
         self.connection.write().execute(
             /* sqlite-large-value: allow-for-now lv-h002e9cac6381 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,?2)
              WHERE id=?1 AND json_extract(body,'$.remote_start') IS NOT NULL", params![id, reason])?;
+        Ok(())
+    }
+
+    fn verify_remote_runtime_start_cleanup(&self, id: &str) -> Result<()> {
+        let changed = self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h3598f60bbf2a owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1
+             WHERE id=?1 AND json_extract(body,'$.remote_start') IS NOT NULL", [id])?;
+        anyhow::ensure!(changed == 1, "remote native producer custody is missing");
         Ok(())
     }
 

@@ -271,6 +271,12 @@ Unknown Start recovery retries only on changed actual native provenance/liveness
 or new cancellation progress, not unrelated frames or its own SQL writes. An exact
 Stop's associated Start closure shares its positive local-finalization obligation;
 neither terminal receipt can expose replacement authority before that completes.
+Registry observation ignores access-only notifications: reading native evidence
+must not generate a recursive recovery wake. Mutation events still compare exact
+physical facts before changing the recovery generation. Positive resource cleanup
+is retained independently from applied custody; local-session finalization must
+succeed before the remote start is applied or either associated terminal receipt
+can be transmitted, including during reopened-journal recovery.
 
 Existing authoritative session rows survive the additive authorization-table
 upgrade. Native producer custody remains in `local_runtime_starts`; current readers
