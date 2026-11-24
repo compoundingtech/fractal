@@ -5,7 +5,7 @@ import { devAdmission } from '../server/devAdmission.mts'
 import { readAuthorization } from '../server/authorization.mts'
 
 /** Enable live data only when explicitly configured; Storybook remains credential-free. */
-export function webfractalGateway() {
+export function webfractalGateway({ edgeHost, edgeAliases = [] } = {}) {
   return {
     name: 'wf:shared-client-gateway',
     apply: 'serve',
@@ -23,10 +23,13 @@ export function webfractalGateway() {
       const server = vite.httpServer
       const boundary = createFractalWebMiddleware({
         server,
-        // Dev admission: loopback Host plus the exact Vite Origin; no deployment identity is assumed.
-        admit: devAdmission(() => {
-          const address = server.address()
-          return typeof address === 'object' && address !== null ? address.port : undefined
+        admit: devAdmission({
+          edgeHost,
+          edgeAliases,
+          port: () => {
+            const address = server.address()
+            return typeof address === 'object' && address !== null ? address.port : undefined
+          },
         }),
         gateway: {
           socketPath: socket.replace(/^unix:/, ''),
