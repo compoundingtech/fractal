@@ -10074,7 +10074,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             )?;
                             if let Some(operation) = suspension.suspend_operation_id.as_deref() {
                                 crate::seat_snapshot::remove(
-                                    self.driver_state_dir.parent().unwrap(), operation,
+                                    self.driver_state_dir.parent().unwrap(), &self.store, operation,
                                 )?;
                             }
                             Ok(())

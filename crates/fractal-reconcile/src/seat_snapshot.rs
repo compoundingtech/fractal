@@ -159,10 +159,18 @@ pub fn directory(state: &Path, operation: &str) -> PathBuf {
         .join(hex::encode(Sha256::digest(operation.as_bytes())))
 }
 
+// Limit both writer-fenced renames and recursive deletion work between yields.
+const GC_BATCH_ENTRIES: usize = 32;
+const GC_BATCH_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Reclaim unreferenced host-local snapshots before reconciliation starts writing them.
-/// The writer transaction fences new suspension references through the physical deletion.
-/// Failed resumes project back to suspended, and manual holds use the same protection.
+/// Only reference checks and atomic renames hold the writer. Trash is unreachable
+/// through `directory`, and survives interruption for the next startup to finish.
 pub fn sweep(state: &Path, store: &Store) -> Result<()> {
+    sweep_with(state, store, || Ok(()))
+}
+
+fn sweep_with(state: &Path, store: &Store, mut before_delete_batch: impl FnMut() -> Result<()>) -> Result<()> {
     let root = state.join("suspended");
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -171,6 +179,43 @@ pub fn sweep(state: &Path, store: &Store) -> Result<()> {
     };
     anyhow::ensure!(!fs::symlink_metadata(&root)?.file_type().is_symlink(),
         "suspended store must not be a symlink");
+    let mut candidates = Vec::with_capacity(GC_BATCH_ENTRIES);
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.len() != 64 || !name.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            candidates.push(entry.path());
+        }
+        if candidates.len() == GC_BATCH_ENTRIES {
+            condemn(state, store, &candidates)?;
+            candidates.clear();
+            std::thread::yield_now();
+        }
+    }
+    if !candidates.is_empty() {
+        condemn(state, store, &candidates)?;
+    }
+    drain_trash(state, &mut before_delete_batch)
+}
+
+fn trash(state: &Path) -> Result<PathBuf> {
+    let root = state.join("suspended");
+    fs::create_dir_all(&root)?;
+    anyhow::ensure!(!fs::symlink_metadata(&root)?.file_type().is_symlink(),
+        "suspended store must not be a symlink");
+    let trash = root.join(".trash");
+    fs::create_dir_all(&trash)?;
+    anyhow::ensure!(!fs::symlink_metadata(&trash)?.file_type().is_symlink(),
+        "suspended trash must not be a symlink");
+    Ok(trash)
+}
+
+fn condemn(state: &Path, store: &Store, candidates: &[PathBuf]) -> Result<()> {
+    let trash = trash(state)?;
     let mut writer = store.connection.write();
     let transaction = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let subjects = transaction.prepare("SELECT subject FROM desired WHERE kind='agent'")?
@@ -188,28 +233,78 @@ pub fn sweep(state: &Path, store: &Store) -> Result<()> {
                 .unwrap_or(&hold.operation_id)));
         }
     }
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.len() != 64 || !name.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    let started = std::time::Instant::now();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if live.contains(candidate) {
             continue;
         }
-        if entry.file_type()?.is_dir() && !live.contains(&entry.path()) {
-            fs::remove_dir_all(entry.path())?;
+        // Unique containers allow an operation's name to be reused without ever
+        // aliasing a previous condemned payload, even after a partial deletion.
+        let container = tempfile::tempdir_in(&trash)?.keep();
+        match fs::rename(candidate, container.join("snapshot")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        // All candidates must be fenced; release between bounded rename groups.
+        // The caller caps the group size, so a single slow filesystem call is
+        // the only non-preemptible work within a batch.
+        if started.elapsed() >= GC_BATCH_BUDGET {
+            transaction.commit()?;
+            drop(writer);
+            let remaining = &candidates[index + 1..];
+            return if remaining.is_empty() { Ok(()) } else { condemn(state, store, remaining) };
         }
     }
     transaction.commit()?;
     Ok(())
 }
 
-/// Call only after the operation-bound native-session verification receipt commits.
-pub fn remove(state: &Path, operation: &str) -> Result<()> {
-    match fs::remove_dir_all(directory(state, operation)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
+/// Delete at most 32 directory entries or 10ms per batch, whichever comes first.
+/// Keep directory iterators rather than collecting an arbitrarily large tree.
+/// Symlinks are unlinked, never followed. A restart can rediscover any remainder.
+fn drain_trash(state: &Path, before_batch: &mut impl FnMut() -> Result<()>) -> Result<()> {
+    let root = trash(state)?;
+    let mut stack = vec![(root.clone(), fs::read_dir(&root)?)];
+    while !stack.is_empty() {
+        before_batch()?;
+        let started = std::time::Instant::now();
+        for _ in 0..GC_BATCH_ENTRIES {
+            let Some((path, entries)) = stack.last_mut() else { break };
+            if let Some(entry) = entries.next() {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    stack.push((entry.path(), fs::read_dir(entry.path())?));
+                } else {
+                    match fs::remove_file(entry.path()) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            } else {
+                if path != &root {
+                    match fs::remove_dir(&*path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                stack.pop();
+            }
+            if started.elapsed() >= GC_BATCH_BUDGET {
+                break;
+            }
+        }
+        std::thread::yield_now();
     }
+    Ok(())
+}
+
+/// Call only after the operation-bound native-session verification receipt commits.
+pub fn remove(state: &Path, store: &Store, operation: &str) -> Result<()> {
+    condemn(state, store, &[directory(state, operation)])?;
+    drain_trash(state, &mut || Ok(()))
 }
 pub fn sessions(drivers: &Path, subject: &str, harness: &str) -> PathBuf {
     drivers
@@ -930,6 +1025,76 @@ pub async fn transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_store_deletion_batches_release_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let payload = directory(root.path(), "orphan");
+        fs::create_dir_all(&payload).unwrap();
+        for index in 0..GC_BATCH_ENTRIES * 3 {
+            fs::write(payload.join(index.to_string()), b"snapshot").unwrap();
+        }
+        let mut batches = 0;
+        sweep_with(root.path(), &store, || {
+            // This real writer transaction would deadlock if recursive deletion
+            // still owned the writer. It runs before every bounded delete batch.
+            let mut writer = store.connection.write();
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS gc_writer_probe (value INTEGER)")?;
+            tx.execute("INSERT INTO gc_writer_probe VALUES (?1)", [batches])?;
+            tx.commit()?;
+            assert!(!payload.exists(), "deletion only sees condemned paths");
+            batches += 1;
+            Ok(())
+        }).unwrap();
+        assert!(batches > 2, "large trees must span bounded batches");
+        assert_eq!(fs::read_dir(trash(root.path()).unwrap()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn suspended_store_restart_finishes_condemned_and_partial_trash() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("store.db");
+        let store = Store::open(&database, "node").unwrap();
+        let payload = directory(root.path(), "orphan");
+        fs::create_dir_all(payload.join("nested")).unwrap();
+        for index in 0..GC_BATCH_ENTRIES * 3 {
+            fs::write(payload.join("nested").join(index.to_string()), b"snapshot").unwrap();
+        }
+        // Interrupt immediately after condemnation, before the first delete.
+        assert!(sweep_with(root.path(), &store, || anyhow::bail!("interrupted")).is_err());
+        assert!(!payload.exists());
+        assert_eq!(fs::read_dir(trash(root.path()).unwrap()).unwrap().count(), 1);
+        drop(store);
+        let store = Store::open(&database, "node").unwrap();
+        // A second interruption after one deletion batch leaves partial trash.
+        let mut batches = 0;
+        assert!(sweep_with(root.path(), &store, || {
+            batches += 1;
+            anyhow::ensure!(batches == 1, "interrupted");
+            Ok(())
+        }).is_err());
+        drop(store);
+        let store = Store::open(&database, "node").unwrap();
+        sweep(root.path(), &store).unwrap();
+        sweep(root.path(), &store).unwrap();
+        assert_eq!(fs::read_dir(trash(root.path()).unwrap()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn suspended_store_condemned_name_reuse_does_not_delete_new_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let payload = directory(root.path(), "operation");
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(payload.join("old"), b"old").unwrap();
+        condemn(root.path(), &store, std::slice::from_ref(&payload)).unwrap();
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(payload.join("new"), b"new").unwrap();
+        drain_trash(root.path(), &mut || Ok(())).unwrap();
+        assert_eq!(fs::read(payload.join("new")).unwrap(), b"new");
+    }
 
     #[test]
     fn git_resume_validates_captured_evidence_but_preserves_legacy_without_it() {
