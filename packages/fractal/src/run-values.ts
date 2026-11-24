@@ -30,11 +30,16 @@ const Name = Schema.String.pipe(
 )
 const Scalar = Schema.Union([Schema.String, Schema.Boolean, Schema.Finite])
 
-/** Fractal's mission input grammar carries text/resource kind, not a resource schema. */
+/** A native text input or a pinned resource observation, optionally constrained by kind. */
 export const MissionInputSchema = Schema.Struct({
   name: Name,
   kind: Schema.Literals(['text', 'resource']),
-})
+  resourceKind: Schema.optionalKey(Schema.String.pipe(
+    Schema.refine((value): value is string => value.trim().length > 0),
+  )),
+}).pipe(Schema.refine(
+  (value): value is typeof value => value.resourceKind === undefined || value.kind === 'resource',
+))
 /** A product is a required graph subject plus scalar field constraints. */
 export const ProductSchema = Schema.Struct({
   subject: Schema.String.pipe(

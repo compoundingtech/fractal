@@ -888,6 +888,24 @@ value. The success value is encoded with `intent.output` and journaled under the
 a failed result, and fails the step with it. Retry classification reads this attempt's durable
 failure rather than an inner effect's possibly caught error.
 
+Required string-encoded fields normally lower to `input "name" kind="text"`. For a native
+subscription resource binding, use `Schema.Struct({ source: Fractal.resourceInput('vcs.pull-request') })`.
+This field lowers to `input "source" kind="resource" resource-kind="vcs.pull-request"`, the same
+resource input convention used by native missions. Use the helper directly as the Struct field;
+it carries declaration metadata in addition to the pinned-reference string schema. Optional fields
+are not admitted. The existing subscription `delivery "mission" { ...; resource "source" }` starts
+the program without a dispatch mission or a separate program delivery protocol.
+
+Run admission resolves and pins the observation before the worker starts. Both explicit
+`resource/NAME@CLAIM` and unpinned `resource/NAME` starts check the resolved claim's resource kind,
+not the subject's latest kind; `vcs.item.state` pins use their `item_kind`. A mismatch returns the
+typed native error code `resource-input-kind-mismatch` and creates no run. The program receives
+the unchanged `resource/NAME@CLAIM` string, preserving native observation identity and replay.
+Constraints are optional for existing native declarations; declarations without one retain their
+previous behavior and serialized revision identity. Deploy supporting daemons to every member
+that can admit runs before publishing constrained inputs; older binaries do not enforce the new
+constraint in replicated structured revisions.
+
 A program waiting on an ask, a child run or a pull-request outcome stays loaded in the host.
 A replaced host replays the program to the same wait.
 

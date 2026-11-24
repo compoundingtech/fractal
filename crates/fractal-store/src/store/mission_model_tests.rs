@@ -1240,3 +1240,28 @@ goal "Allow concurrent runs."
         assert!(crate::graph::parse_intent(source, "node").is_err());
     }
 }
+
+#[test]
+fn resource_input_kind_constraints_are_native_declaration_data() {
+    let intent = crate::graph::parse_intent(r#"version 2
+mission "typed" state="ready" {
+  input "source" kind="resource" resource-kind="vcs.issue"
+  goal "Consume an issue."
+  step "consume" { agentless }
+}"#, "node").unwrap();
+    assert_eq!(intent.missions["typed"].inputs["source"].resource_kind.as_deref(), Some("vcs.issue"));
+    for declaration in [
+        r#"input "source" kind="text" resource-kind="vcs.issue""#,
+        r#"input "source" kind="resource" resource-kind=" ""#,
+    ] {
+        let error = crate::graph::parse_intent(&format!(
+            "version 2\nmission \"bad\" state=\"ready\" {{ {declaration}; goal \"Refuse invalid constraint.\" }}"
+        ), "node").unwrap_err();
+        assert_eq!(error.code, "invalid-mission-input-resource-kind");
+    }
+    let previous: crate::model::MissionInputSpec = serde_json::from_value(
+        serde_json::json!({"name": "source", "kind": "resource"}),
+    ).unwrap();
+    assert_eq!(previous.resource_kind, None);
+    assert_eq!(serde_json::to_value(previous).unwrap(), serde_json::json!({"name": "source", "kind": "resource"}));
+}
