@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Revoked terminal and exec starts report unverified cleanup on their owning agent instead of faulting on an invalid diagnostic subject.",
+  "replay": {"status": "none", "detail": "No graph replay or stored-data migration."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "Existing agent-only diagnostic admission is preserved. Starts without an owning agent log the error without a harness claim; cleanup evidence and retirement safety fences are retained."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting restores the previous diagnostic targeting behavior."}
+}
