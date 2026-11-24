@@ -11,7 +11,7 @@ const fixture = fileURLToPath(new URL('../fixtures/cancel-finalizers.ts', import
 const host = fileURLToPath(new URL('../../../crates/fractal-reconcile/src/reconcile/program_host.mjs', import.meta.url))
 
 for (const hang of ['no', 'yes', 'fail']) {
-  it(`real registered finalizer step and command: ${hang === 'yes' ? 'explicit timeout' : hang === 'fail' ? 'preserved finalizer failure' : 'journaled cleanup'}`, async () => {
+  it(`real Effect ensuring step and command: ${hang === 'yes' ? 'explicit timeout' : hang === 'fail' ? 'preserved finalizer failure' : 'journaled cleanup'}`, async () => {
     const root = fileURLToPath(new URL('../../../tmp/', import.meta.url))
     mkdirSync(root, { recursive: true })
     const dir = mkdtempSync(join(root, 'program-finalizers-'))

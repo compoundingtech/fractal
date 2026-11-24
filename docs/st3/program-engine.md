@@ -209,15 +209,15 @@ Only finalizer outcomes, not queued normal root success or failure, may settle c
 The `$finalizers` result is tagged `Finalizers`, with `outcome: completed | failed | timed-out |
 interrupted-by-restart | worker-failed` and the effective `grace_ms`. Incomplete finalization is
 a failed journal entry with that typed error, visible in `missions show`, not a failed run.
-`FinalizerFailed` reflects only engine-registered finalizers: use `Effect.addFinalizer` or
-`Effect.acquireRelease` in the program's provided scope. The engine observes that scope's
-close exit separately from the body exit, so an earlier typed body failure or defect does
-not turn successful cleanup into a cleanup failure. Journal refusals also produce
-`FinalizerFailed`. Arbitrary user `Effect.ensuring` and nested user-owned scopes remain
-part of the body: their failures are body failures, not classified as engine cleanup failures.
-They still run under Effect's interruption semantics. Register cleanup whose failure must
-raise finalizer attention in the engine-provided program scope.
-The result's optional `cause` preserves cleanup failure across the SDK/worker boundary.
+Finalizer defects and journal refusals remain `FinalizerFailed` across the SDK/worker boundary.
+The SDK conservatively classifies any failure or defect in the final cause after cancellation
+as `FinalizerFailed`, including failures from user `ensuring` and nested user-owned scopes.
+Known limitation: if the body has already failed and cancellation arrives while its cleanup
+runs successfully, that earlier body failure also produces `FinalizerFailed`. This false
+positive raises operator attention rather than silently reporting failed cleanup as successful.
+Precise body-versus-cleanup attribution is not provided by this contract; changing it must
+preserve failure reporting for existing programs and their user-owned finalizers.
+The result's optional `cause` preserves that failure across the SDK/worker boundary.
 `$finalizers` is reserved for both steps and request-backed operations.
 A timed-out worker is forcibly terminated,
 and its command groups are killed. Worker-thread termination can still await blocking native

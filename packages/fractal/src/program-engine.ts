@@ -10,7 +10,7 @@
  * again. Asks, child runs and pull request waits wait in the host until the daemon resolves them;
  * it journals their result under the same key.
  */
-import { Cause, Context, Effect, Exit, Option, Schema, SchemaGetter, SchemaIssue, Scope } from 'effect'
+import { Cause, Context, Effect, Exit, Option, Schema, SchemaGetter, SchemaIssue } from 'effect'
 import { Workflow, WorkflowEngine } from 'effect/workflow'
 import type { LaneMembership } from './resources.ts'
 
@@ -149,7 +149,6 @@ export type ProgramServices =
   | Program
   | WorkflowEngine.WorkflowEngine
   | WorkflowEngine.WorkflowInstance
-  | Scope.Scope
 
 /**
  * Runs `use` under the next key of `id`: `id`, then `id#2`, `id#3`… in one execution. Only one
@@ -252,19 +251,13 @@ const hostEngine = (
     ) => {
       const execute = workflows.get(workflow._tag)
       if (execute === undefined || options.discard) return notInPrograms('Workflow.execute')
-      return Effect.suspend(() => {
-        // Own the program scope and observe its close independently of the body's
-        // exit. A preexisting body failure is not a failed resource release.
-        const scope = Scope.makeUnsafe()
-        return execute(options.payload, options.executionId).pipe(
-          Effect.provideService(Scope.Scope, scope),
-          Effect.onExit((exit) => Scope.close(scope, exit).pipe(
-            Effect.onExit((cleanup) => Effect.sync(() => {
-              if (Exit.isFailure(cleanup)) finalized(cleanup.cause)
-            })),
-          )),
-        )
-      }).pipe(
+      return execute(options.payload, options.executionId).pipe(
+        // Close the program's resource scope in its body fiber and preserve its
+        // full exit before Workflow.intoResult's interrupted join discards it.
+        Effect.scoped,
+        Effect.onExit((exit) => Effect.sync(() => {
+          if (host.signal.aborted && Exit.isFailure(exit)) finalized(exit.cause)
+        })),
         Workflow.intoResult,
         Effect.provideService(
           WorkflowEngine.WorkflowInstance,
@@ -414,7 +407,8 @@ export const programEntry =
     const cause = finalizerCause ?? (Exit.isFailure(exit) ? exit.cause : undefined)
     const message = cause === undefined ? '' : Cause.pretty(cause).slice(0, 2000)
     if (host.signal.aborted) {
-      const failedFinalizer = refused !== undefined || finalizerCause !== undefined
+      const failedFinalizer = refused !== undefined || (cause !== undefined
+        && (Cause.hasDies(cause) || Option.isSome(Cause.findErrorOption(cause))))
       return { _tag: 'Failure', error: { _tag: failedFinalizer ? 'FinalizerFailed' : 'Interrupted', message: refused ?? message } }
     }
     if (refused !== undefined)
