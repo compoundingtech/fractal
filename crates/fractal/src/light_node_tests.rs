@@ -87,7 +87,7 @@ export default {
 struct Tasks(Vec<tokio::task::JoinHandle<()>>);
 impl Drop for Tasks { fn drop(&mut self) { for task in &self.0 { task.abort(); } } }
 
-async fn until(reconciler: &Reconciler, notify: &Notify, done: impl Fn() -> bool) {
+async fn until(reconciler: &Reconciler, notify: &Notify, step: &str, phase: &str, done: impl Fn() -> bool) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let changed = notify.notified();
@@ -105,7 +105,8 @@ async fn until(reconciler: &Reconciler, notify: &Notify, done: impl Fn() -> bool
             }
             changed.await;
         }
-    }).await.expect("actual program/session event must wake the reconciler");
+    }).await.unwrap_or_else(|error| panic!("program/session phase {phase} timed out: {error}; step={}",
+        json!(reconciler.store.step_run(step).unwrap())));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -162,7 +163,7 @@ mission "program-session" state="ready" {{
     // Run creation and ready-step dispatch are distinct reconciler transitions.
     // Drive the real notifications to durable enrollment while the home is still
     // offline, rather than assuming one pass already dispatched the program.
-    until(&reconciler, &notify, || journal.reported_executions().unwrap().iter()
+    until(&reconciler, &notify, &step, "offline admission enrollment", || journal.reported_executions().unwrap().iter()
         .any(|binding| binding.run.as_ref().is_some_and(|bound| bound.step_run == step))).await;
     assert!(store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().is_empty(), "no program effect or trace may run before its own admission ACK");
     assert!(journal.reported_executions().unwrap().iter().any(|binding| binding.run.as_ref().is_some_and(|bound| bound.step_run == step)));
@@ -205,12 +206,12 @@ mission "program-session" state="ready" {{
             changed.await;
         }
     }));
-    until(&reconciler, &notify, || store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().iter()
+    until(&reconciler, &notify, &step, "forwarded effect durable acceptance", || store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().iter()
         .any(|claim| claim.body["fields"]["key"] == "forwarded" && claim.body["fields"]["status"] == "completed")).await;
     assert!(journal.run_result("program-session-effect").unwrap().is_some(),
         "sending the HTTP response and durably accepting it must not implicitly acknowledge custody");
     writeln!(gate_writer, "acknowledge").unwrap();
-    until(&reconciler, &notify, || store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().iter()
+    until(&reconciler, &notify, &step, "explicit ACK reclaims capacity", || store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().iter()
         .any(|claim| claim.body["fields"]["key"] == "capacity-released" && claim.body["fields"]["status"] == "completed")).await;
     assert!(journal.run_result("program-session-effect").unwrap_err().to_string().contains("result-expired"));
     assert!(journal.run_result("program-capacity-probe").unwrap_err().to_string().contains("result-expired"));
@@ -222,7 +223,7 @@ mission "program-session" state="ready" {{
         .find(|claim| claim.body["fields"]["key"] == "credential").unwrap().body["fields"]["value"].as_str().unwrap().to_owned();
     assert_eq!(authority.resolve(&credential).unwrap().run.unwrap().step_run, step);
     writeln!(gate_writer, "complete").unwrap();
-    until(&reconciler, &notify, || store.step_run(&step).unwrap().unwrap().status == "completed").await;
+    until(&reconciler, &notify, &step, "program completion and revocation", || store.step_run(&step).unwrap().unwrap().status == "completed").await;
     assert!(authority.resolve(&credential).is_err(), "native end revokes permission before its VM is forgotten");
     stop.send_replace(true);
     home.shutdown();
