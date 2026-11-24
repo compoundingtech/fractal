@@ -3,7 +3,7 @@
  * the reading is as old as it is. Limits read with the sidebar's tiers (`limitReading`); staleness is
  * the producer's `retained` flag, never reclassified here.
  */
-import { bankedResets, type QuotaRow, type QuotaState } from './model.ts'
+import { bankedResets, effectiveUnit, formatUnitValue, type HistoryDay, type HistoryState, type HistoryUnit, type QuotaRow, type QuotaState } from './model.ts'
 import { spanText } from './usageModel.ts'
 import { ageText, limitReading, type UsageLevel, type UsageSectionView } from './usageSectionView.ts'
 
@@ -85,4 +85,72 @@ export const selectedRow = ({ state, view, selected }: {
 }): QuotaRow | undefined => {
   const rows = state._tag === 'declared' ? state.last?.rows ?? [] : []
   return rows.find(row => row.accountId === selected) ?? rows.find(row => row.accountId === view.rows[0]?.id)
+}
+
+/** Days the history chart spans, the open day included. */
+export const HISTORY_DAYS = 30
+
+export interface HistoryBarView {
+  readonly day: string
+  /** 0–100 of the window's largest day; `undefined` when the day has no value in this unit. */
+  readonly fill: number | undefined
+  /** The open day: still accumulating, drawn as partial. */
+  readonly open: boolean
+  readonly words: string
+}
+
+export type HistoryView =
+  | { readonly _tag: 'not-configured' }
+  | { readonly _tag: 'loading' }
+  | { readonly _tag: 'unavailable'; readonly reason: string }
+  | { readonly _tag: 'incompatible'; readonly reason: string }
+  | {
+      readonly _tag: 'chart'
+      /** Names the unit: "Daily spend, USD · last 30 days" or "Daily tokens · last 30 days". */
+      readonly caption: string
+      readonly bars: readonly HistoryBarView[]
+      readonly summary: string
+      /** What the bars leave out: tokens below USD coverage, days the producer dropped, a failed refresh. */
+      readonly notes: readonly string[]
+    }
+
+/** A source with no history for the account (no relay, or none published) reads as not configured. */
+const failureView = ({ kind, reason }: Extract<HistoryState['attempt'], { _tag: 'failed' }>): HistoryView =>
+  kind === 'unavailable' ? { _tag: 'not-configured' } : kind === 'incompatible' ? { _tag: 'incompatible', reason } : { _tag: 'unavailable', reason }
+
+/** The selected account's last `HISTORY_DAYS` days, in USD only where the producer's coverage admits it. */
+export const historyView = ({ ledgerAccountId, history, preferred }: {
+  readonly ledgerAccountId: string | undefined
+  readonly history: HistoryState
+  readonly preferred: HistoryUnit
+}): HistoryView => {
+  if (ledgerAccountId === undefined) return { _tag: 'not-configured' }
+  const { last, attempt } = history
+  if (last === undefined) return attempt._tag === 'failed' ? failureView(attempt) : { _tag: 'loading' }
+  const { unit, belowCoverage } = effectiveUnit({ preferred, series: last.series })
+  const days = last.series.days.slice(-HISTORY_DAYS)
+  const valueOf = (day: HistoryDay) => unit === 'usd' ? day.usd : day.tokens
+  const text = (value: number | undefined) => value === undefined ? 'no rate' : formatUnitValue({ value, unit })
+  const max = Math.max(0, ...days.map(day => valueOf(day) ?? 0))
+  const peak = max === 0 ? undefined : days.find(day => valueOf(day) === max)
+  const open = days.find(day => day.open)
+  const closed = days.filter(day => !day.open)
+  return {
+    _tag: 'chart',
+    caption: `${unit === 'usd' ? 'Daily spend, USD' : 'Daily tokens'} · last ${days.length} days`,
+    bars: days.map(day => {
+      const value = valueOf(day)
+      return { day: day.day, open: day.open, fill: value === undefined ? undefined : max === 0 ? 0 : value / max * 100, words: `${day.day}${day.open ? ' so far' : ''}: ${text(value)}` }
+    }),
+    summary: [
+      `${text(closed.reduce((sum, day) => sum + (valueOf(day) ?? 0), 0))} over ${countOf(closed.length, 'full day', 'full days')}`,
+      ...(peak === undefined ? [] : [`peak ${text(max)} on ${peak.day}`]),
+      ...(open === undefined ? [] : [`today so far ${text(valueOf(open))}`]),
+    ].join(' · '),
+    notes: [
+      ...(belowCoverage ? ['USD coverage is below the producer’s gate, so this shows tokens'] : []),
+      ...(last.series.omittedDays > 0 ? [`${countOf(last.series.omittedDays, 'older day', 'older days')} not reported`] : []),
+      ...(attempt._tag === 'failed' ? [`Refresh failed: ${attempt.reason}; showing the last good reading`] : []),
+    ],
+  }
 }
