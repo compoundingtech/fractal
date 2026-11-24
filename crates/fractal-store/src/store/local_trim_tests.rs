@@ -29,6 +29,20 @@ fn context(scratch: &Path, days_later: u128) -> CheckpointContext {
     }
 }
 
+/// Release judges envelope age on a reader as well as writing through the store clock.
+fn release_envelopes_at(store: &Store, now: u128) {
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    store.set_write_clock_at(now).unwrap();
+    let _reset = ResetClock;
+    smallclaims::store::set_thread_clock(Some(now));
+    while !store.release_envelopes(0).unwrap().done {}
+}
+
 fn step(store: &Store, context: &CheckpointContext) -> Vec<smallclaims::store::checkpoint_agreement::CheckpointAction> {
     store.set_write_clock_at(context.now_unix_ms).unwrap();
     store.checkpoint_step(context).unwrap()
@@ -334,7 +348,7 @@ fn a_local_cut_trims_the_claims_of_released_envelopes() {
     while !store.sign_own_claims().unwrap().done {}
     let before = answers(&store, context.now_unix_ms);
     let digest = store.replication_snapshot().unwrap().authority_digest.clone();
-    while !store.release_envelopes(0).unwrap().done {}
+    release_envelopes_at(&store, context.now_unix_ms);
     let count = |sql: &str| -> i64 { store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-h12ee733e233d owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
     let released_observations = count(
         "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'",
@@ -375,7 +389,7 @@ fn a_cut_trims_the_claims_a_member_received_as_signed_claims() {
     }
     alder.replication_snapshot().unwrap();
     while !alder.sign_own_claims().unwrap().done {}
-    while !alder.release_envelopes(0).unwrap().done {}
+    release_envelopes_at(&alder, context.now_unix_ms);
     let count = |store: &Store, sql: &str| -> i64 { store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-ha80fdc3a19b9 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
     assert!(count(&alder, "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'") > 30);
     let birch = declared(Store::open_memory("birch").unwrap(), true);
