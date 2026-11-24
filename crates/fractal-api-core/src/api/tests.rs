@@ -17,6 +17,50 @@ use axum::http::Request;
 use std::path::PathBuf;
 
 #[tokio::test]
+async fn simulated_mail_retirement_advances_the_signed_claim_forget_clock() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    store.bind_fleet("7b6c5d4e-3f20-4b1c-8d9e-0f1a2b3c4d5e").unwrap();
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    // Always exercise the signed-claim guard, even before its calendar activation.
+    let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    store.set_write_clock_at(written).unwrap();
+    let mut ids = Vec::new();
+    for kind in ["message.sent", "message.delivered", "message.read", "message.closed"] {
+        ids.push(store.append_claim(&crate::model::ClaimInput {
+            subject: "message/retirement-clock".into(),
+            kind: kind.into(),
+            actor: Some("agent/retirement-sender".into()),
+            fields: serde_json::from_value(json!({
+                "from": "agent/retirement-sender", "to": "agent/retirement-reader",
+                "content": "signed retirement clock", "status": kind.trim_start_matches("message."),
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap().id);
+    }
+    let later = u64::try_from(written).unwrap() + FORGET_SIGNED_AFTER_MS + 1;
+    let step = store.retire_closed_mail_step(later).unwrap();
+    assert_eq!(step.threads, 0, "the write-clock backstop must still protect fresh signatures");
+    assert!(ids.iter().all(|id| store.claim_by_id(id).unwrap().is_some()));
+    store.set_write_clock_offset(0).unwrap();
+
+    let Json(retired) = test_retire_closed_mail(
+        State(state.clone()), Json(TestMailRetirement { now_ms: later }),
+    ).await.unwrap();
+    assert_eq!(retired, json!({"threads": 1, "claims": 4}));
+    assert!(ids.iter().all(|id| store.claim_by_id(id).unwrap().is_none()));
+    // The simulated deletion must not move the daemon's shared writer clock.
+    let clock: (i64, Option<i64>) = store.connection.write().query_row(
+        "SELECT offset_ms, at_ms FROM temp.write_clock", [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(clock, (0, None));
+}
+
+#[tokio::test]
 async fn performance_exports_native_writer_work_counts() {
     let root = tempfile::tempdir().unwrap();
     let (status, report) = get_request(router(state(root.path())), "/v1/performance").await;
