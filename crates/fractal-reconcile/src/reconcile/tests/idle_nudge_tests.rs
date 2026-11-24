@@ -94,6 +94,25 @@ impl Idle {
             .unwrap();
     }
 
+    fn wait(&self, step: &str, duration: u128) {
+        self.seat
+            .store
+            .work_action(
+                step,
+                "wait",
+                &crate::model::WorkRequest {
+                    wait_ms: Some(u64::try_from(duration).unwrap()),
+                    actor: Some(SEAT.into()),
+                    incarnation: Some("seat-one".into()),
+                    summary: Some("Waiting for the soil report".into()),
+                    reason: None,
+                    evidence: Vec::new(),
+                    idempotency_key: format!("wait-{duration}-{}", self.now.get()),
+                },
+            )
+            .unwrap();
+    }
+
     /// The harness reports `state`, quiet unless it is working.
     fn harness(&self, state: &str) {
         let quiet = state != "working";
@@ -632,6 +651,61 @@ fn a_person_ask_gate_or_scheduled_retry_holds_an_otherwise_idle_seat() {
             .unwrap();
         assert_eq!(idle.nudges().len(), 1, "{status}");
     }
+}
+
+#[test]
+fn an_active_declared_wait_holds_an_otherwise_idle_seat() {
+    let idle = fixture();
+    let step = idle.hold("queued", "declared-wait");
+    idle.wait(&step, HOUR);
+    idle.harness("idle");
+
+    idle.at(31 * MINUTE);
+    idle.evaluate();
+    assert!(idle.nudges().is_empty(), "the declared wait will wake the seat");
+    assert!(idle.nudged(&step).is_empty());
+}
+
+#[test]
+fn an_expired_declared_wait_allows_the_idle_nudge() {
+    let idle = fixture();
+    let step = idle.hold("queued", "expired-wait");
+    idle.wait(&step, HOUR);
+    idle.harness("idle");
+
+    idle.at(HOUR - 1);
+    idle.evaluate();
+    assert!(idle.nudges().is_empty(), "hold until the exact deadline");
+
+    idle.at(HOUR);
+    idle.evaluate();
+    assert_eq!(idle.nudges().len(), 1);
+    assert_eq!(idle.nudged(&step).len(), 1);
+}
+
+#[test]
+fn a_renewed_declared_wait_extends_the_idle_nudge_hold() {
+    let idle = fixture();
+    let step = idle.hold("queued", "renewed-wait");
+    idle.wait(&step, HOUR);
+    idle.harness("idle");
+
+    idle.at(31 * MINUTE);
+    idle.evaluate();
+    assert!(idle.nudges().is_empty());
+    idle.wait(&step, HOUR);
+
+    idle.at(HOUR);
+    idle.evaluate();
+    assert!(idle.nudges().is_empty(), "the renewed deadline supersedes the old one");
+    idle.at(91 * MINUTE - 1);
+    idle.evaluate();
+    assert!(idle.nudges().is_empty(), "hold until the renewed deadline");
+
+    idle.at(91 * MINUTE);
+    idle.evaluate();
+    assert_eq!(idle.nudges().len(), 1);
+    assert_eq!(idle.nudged(&step).len(), 1);
 }
 
 #[test]
