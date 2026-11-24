@@ -364,6 +364,7 @@ pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
     });
     report["relayed_close_work"] = super::relayed_close_maintenance::work_counts(&state.store);
     report["reconcile_inputs"] = state.store.reconcile_input_work();
+    report["slo_history_inputs"] = state.store.slo_history_input_work();
     report["fault_families"] = state.store.fault_family_work();
     report["published_list_work"] = json!({
         "work": { "refolded": state.store.published_work_list().refolded() },

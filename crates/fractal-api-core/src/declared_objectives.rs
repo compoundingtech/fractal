@@ -263,7 +263,14 @@ fn objective_series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds:
 
 /// The declared objectives' rows, evaluated at `now`.
 pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Vec<Value>> {
-    rows_selected(store, now, native_rows, None)
+    rows_selected(store, now, native_rows, None, store.declared_objectives()?.iter())
+}
+
+pub fn rows_from_declarations<'a>(
+    store: &Store, now: u64, native_rows: &[Value],
+    declared: impl Iterator<Item = &'a DeclaredObjective> + Clone,
+) -> anyhow::Result<Vec<Value>> {
+    rows_selected(store, now, native_rows, None, declared)
 }
 
 /// Evaluate and report declarations bound to this producer's native source.
@@ -279,16 +286,18 @@ pub(crate) fn check_native_and_report(store: &Store, now: u64, source: &str, nat
         check(store, &rows)?;
         return Ok(());
     }
-    let rows = rows_selected(store, now, native_rows, Some(source))?;
+    let rows = rows_selected(store, now, native_rows, Some(source), store.declared_objectives()?.iter())?;
     check_selected(store, &rows, Some(source))?;
     Ok(())
 }
 
-fn rows_selected(store: &Store, now: u64, native_rows: &[Value], native_scope: Option<&str>) -> anyhow::Result<Vec<Value>> {
-    let declared = store.declared_objectives()?;
+fn rows_selected<'a>(
+    store: &Store, now: u64, native_rows: &[Value], native_scope: Option<&str>,
+    declared: impl Iterator<Item = &'a DeclaredObjective> + Clone,
+) -> anyhow::Result<Vec<Value>> {
     let evaluations = store.fractal.extensions.get::<Evaluations>();
     let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
-    tracked.retain(|subject, _| declared.iter().any(|declaration| &declaration.subject == subject));
+    tracked.retain(|subject, _| declared.clone().any(|declaration| &declaration.subject == subject));
     let mut rows = Vec::new();
     for declaration in declared {
         if let Some(scope) = native_scope
@@ -298,9 +307,9 @@ fn rows_selected(store: &Store, now: u64, native_rows: &[Value], native_scope: O
         }
         let entry = tracked
             .entry(declaration.subject.clone())
-            .or_insert_with(|| Tracked::new(&declaration));
+            .or_insert_with(|| Tracked::new(declaration));
         if entry.revision != declaration.revision {
-            *entry = Tracked::new(&declaration);
+            *entry = Tracked::new(declaration);
         }
         let name = declaration.name();
         if entry.objective.as_ref().is_ok_and(|objective| objective.declarable() &&
@@ -432,13 +441,19 @@ fn rows_selected(store: &Store, now: u64, native_rows: &[Value], native_scope: O
 /// Source-backed objectives use only the committed domain projection, never the generic
 /// earliest-claim-wins interval/count cache. The state directory belongs to the caller.
 pub fn github_rows(store: &Store, state_dir: &std::path::Path, now: u64) -> anyhow::Result<Vec<Value>> {
-    let declared = store.declared_objectives()?;
+    github_rows_from_declarations(store, state_dir, now, store.declared_objectives()?.iter())
+}
+
+pub fn github_rows_from_declarations<'a>(
+    store: &Store, state_dir: &std::path::Path, now: u64,
+    declared: impl Iterator<Item = &'a DeclaredObjective>,
+) -> anyhow::Result<Vec<Value>> {
     let evaluations = store.fractal.extensions.get::<Evaluations>();
     let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
     let mut rows = Vec::new();
     for declaration in declared {
-        let entry = tracked.entry(declaration.subject.clone()).or_insert_with(|| Tracked::new(&declaration));
-        if entry.revision != declaration.revision { *entry = Tracked::new(&declaration); }
+        let entry = tracked.entry(declaration.subject.clone()).or_insert_with(|| Tracked::new(declaration));
+        if entry.revision != declaration.revision { *entry = Tracked::new(declaration); }
         let Ok(objective) = &entry.objective else { continue; };
         if !objective.declarable() || !matches!(objective.indicator, Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_)) { continue; }
         let row = github::row(store, state_dir, objective, &declaration.revision, now);
