@@ -122,6 +122,39 @@ mission "example/report" state="ready" {
                 && fault.item.person == WORKER).count(), 1);
         }
     }
+    #[test]
+    fn cleanup_stops_schedules_even_while_an_unresolved_effect_holds_the_run() {
+        let fixture = Fixture::new("node");
+        let effect = fixture.admit();
+        fixture.store.unresolved_message_effect(
+            &effect, "delivery is unknown", "daemon/runtime",
+        ).unwrap();
+        let mut intent = crate::graph::parse_execution_intent(&format!(r#"version 2
+schedule "reminder" {{
+  at "2020-01-01T00:00:00Z"
+  work {{ mission "example/report"; workspace {:?} }}
+}}"#, fixture.root.path().display().to_string()), "node", &fixture.run.id).unwrap();
+        for desired in intent.subjects.values_mut() {
+            desired.owner_generation = Some(fixture.run.generation.clone());
+        }
+        fixture.store.apply_internal(&intent, "effect-owned-schedule").unwrap();
+        fixture.store.set_mission_run_state(
+            &fixture.run.id, "running", "cleanup-cancelled", None,
+        ).unwrap();
+        let run = fixture.store.mission_run(&fixture.run.subject).unwrap().unwrap();
+        let mission = fixture.store.mission_spec("example/report", None).unwrap().unwrap();
+        fixture.reconciler.evaluate_mission_run(&run, &mission).unwrap();
+        let schedule = fixture.store.desired_subjects_for_owner_run(&run.subject).unwrap()
+            .into_iter().find(|desired| desired.kind == "schedule").unwrap();
+        assert!(owned_schedule_spec(&fixture.store, &schedule).unwrap().unwrap().stopped);
+        let held = fixture.store.mission_run(&run.subject).unwrap().unwrap();
+        assert_eq!(held.phase, "cleanup-cancelled");
+        assert_eq!(held.status, "blocked");
+        let revision = fixture.store.selected_desired_revision(&schedule.subject).unwrap();
+        fixture.reconciler.evaluate_mission_run(&held, &mission).unwrap();
+        assert_eq!(fixture.store.selected_desired_revision(&schedule.subject).unwrap(), revision);
+    }
+
 
     #[test]
     fn unrelated_wakes_do_not_read_completed_effect_history() {
@@ -15071,6 +15104,227 @@ schedule "daily" {{
             late_calendar_timer(monday + 24 * HOUR + 1_000, true).await,
             (vec![20270105], vec![20270104])
         );
+    }
+
+    fn owned_schedule_store_fixture() -> (
+        tempfile::TempDir, Arc<Store>, MissionRunView, DesiredSubject,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let revision = scheduled_mission_revision(&store);
+        apply_source(&store, r#"version 2
+mission "schedule-owner" state="ready" {
+  goal "Own a schedule until this run ends."
+  step "hold" {
+    agentless
+    gate "hold" { field "state" "resource/never" is "ready" }
+  }
+}"#, "schedule-owner");
+        let run = store.create_mission_run(&MissionRunRequest {
+            mission: "schedule-owner".into(), revision: None,
+            workspace: root.path().to_string_lossy().into_owned(),
+            requester: None, mode: None, inputs: BTreeMap::new(),
+            idempotency_key: "schedule-owner-run".into(),
+        }).unwrap();
+        let source = format!(r#"version 2
+schedule "owned" {{
+  at "2020-01-01T00:00:00Z"
+  work {{ mission "scheduled-cycle@{revision}"; workspace {:?} }}
+}}"#, root.path().display().to_string());
+        let mut intent = crate::graph::parse_execution_intent(&source, "node", &run.id).unwrap();
+        for desired in intent.subjects.values_mut() {
+            desired.owner_generation = Some(run.generation.clone());
+            desired.owner_step = Some(run.steps[0].subject.clone());
+        }
+        store.apply_internal(&intent, "owned-schedule").unwrap();
+        let schedule = store.desired_subjects_for_owner_run(&run.subject).unwrap()
+            .into_iter().find(|desired| desired.kind == "schedule").unwrap();
+        (root, store, run, schedule)
+    }
+
+    fn owned_schedule_fixture() -> (
+        tempfile::TempDir, Arc<Store>, Reconciler<FakeRuntime>, MissionRunView, DesiredSubject,
+    ) {
+        let (root, store, run, schedule) = owned_schedule_store_fixture();
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        (root, store, reconciler, run, schedule)
+    }
+
+    #[tokio::test]
+    async fn cancellation_durably_stops_owned_schedules_but_not_root_schedules() {
+        let (root, store, reconciler, run, schedule) = owned_schedule_fixture();
+        let revision = store.mission_spec("scheduled-cycle", None).unwrap().unwrap().revision;
+        apply_source(&store, &format!(r#"version 2
+schedule "independent" {{
+  at "2020-01-01T00:00:00Z"
+  work {{ mission "scheduled-cycle@{revision}"; workspace {:?} }}
+}}"#, root.path().display().to_string()), "independent-schedule");
+        // Explicit ownership also covers names that do not embed the owner's run ID.
+        let mut unscoped = crate::graph::parse_internal_intent(&format!(r#"version 2
+schedule "owned-exact" {{
+  at "2020-01-01T00:00:00Z"
+  work {{ mission "scheduled-cycle@{revision}"; workspace {:?} }}
+}}"#, root.path().display().to_string()), "node").unwrap();
+        for desired in unscoped.subjects.values_mut() {
+            desired.owner_run = Some(run.subject.clone());
+        }
+        store.apply_internal(&unscoped, "owned-exact-schedule").unwrap();
+        store.request_mission_run_cancellation(&run.id, "operator cancelled").unwrap();
+        let cancelling = store.mission_run(&run.subject).unwrap().unwrap();
+        reconciler.evaluate_active_mission_run(
+            &cancelling, store.mission_spec("schedule-owner", None).unwrap(),
+        ).unwrap();
+        let cleanup = store.mission_run(&run.subject).unwrap().unwrap();
+        assert_eq!(cleanup.phase, "cleanup-cancelled");
+        reconciler.reconcile_mission_run_cleanup(&cleanup).unwrap();
+        let stopped_revision = store.selected_desired_revision(&schedule.subject).unwrap();
+        reconciler.reconcile_mission_run_cleanup(&cleanup).unwrap();
+        assert_eq!(store.selected_desired_revision(&schedule.subject).unwrap(), stopped_revision);
+        let reopened = Store::open(&root.path().join("graph.db"), "node").unwrap();
+        let stopped = reopened.desired_subjects_named(&[schedule.subject.clone()]).unwrap().pop().unwrap();
+        assert!(owned_schedule_spec(&reopened, &stopped).unwrap().unwrap().stopped);
+        let exact = reopened.desired_subjects_named(&["schedule/owned-exact".into()])
+            .unwrap().pop().unwrap();
+        assert!(owned_schedule_spec(&reopened, &exact).unwrap().unwrap().stopped);
+        assert_eq!(exact.owner_run.as_deref(), Some(run.subject.as_str()));
+        let independent = reopened.desired_subjects_named(&["schedule/independent".into()])
+            .unwrap().pop().unwrap();
+        assert!(independent.owner_run.is_none());
+        assert!(!owned_schedule_spec(&reopened, &independent).unwrap().unwrap().stopped);
+        reconciler.reconcile_schedule(&independent).unwrap();
+        finish_armed_schedules(&reconciler).await;
+        assert_eq!(store.claims_for(&independent.subject, Some("schedule.occurrence-reached"))
+            .unwrap().len(), 1);
+        assert!(store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))
+            .unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn armed_schedules_refuse_terminal_run_and_step_owners_without_cleanup() {
+        for (run_terminal, status) in [
+            (true, "completed"), (true, "failed"), (true, "cancelled"),
+            (false, "completed"), (false, "failed"), (false, "cancelled"), (false, "skipped"),
+        ] {
+            let (_root, store, reconciler, run, schedule) = owned_schedule_fixture();
+            // The due timer cannot run until this task yields. End the owner after arming
+            // without cleanup or any change to the schedule declaration.
+            reconciler.reconcile_schedule(&schedule).unwrap();
+            let revision = store.selected_desired_revision(&schedule.subject).unwrap();
+            let code = if run_terminal {
+                store.set_mission_run_state(&run.id, status, "terminal", None).unwrap();
+                "schedule-owner-run-terminal"
+            } else {
+                store.set_step_state(&run.steps[0].subject, status, None).unwrap();
+                "schedule-owner-step-terminal"
+            };
+            finish_armed_schedules(&reconciler).await;
+            assert_eq!(store.selected_desired_revision(&schedule.subject).unwrap(), revision);
+            assert!(store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))
+                .unwrap().is_empty(), "{run_terminal} {status}");
+            assert!(store.claims_for(&schedule.subject, Some("schedule.work-requested"))
+                .unwrap().is_empty(), "{run_terminal} {status}");
+            let cancelled = store.claims_for(&schedule.subject, Some("schedule.occurrence-cancelled"))
+                .unwrap();
+            assert_eq!(cancelled.len(), 1);
+            assert_eq!(cancelled[0].body["fields"]["code"], code);
+            // A subsequent pass also durably retires pre-fix leftovers.
+            reconciler.reconcile_schedule(&schedule).unwrap();
+            let stopped = store.desired_subjects_named(&[schedule.subject.clone()])
+                .unwrap().pop().unwrap();
+            assert!(owned_schedule_spec(&store, &stopped).unwrap().unwrap().stopped);
+            let decisions = store.claims_for(&schedule.subject, Some("runtime.reconcile-decision"))
+                .unwrap();
+            assert!(decisions.iter().any(|claim| claim.body["fields"]["code"] == code));
+        }
+    }
+
+    #[test]
+    fn terminal_owner_schedules_neither_arm_nor_start_previously_requested_work() {
+        let (root, store, reconciler, run, schedule) = owned_schedule_fixture();
+        let revision = store.mission_spec("scheduled-cycle", None).unwrap().unwrap().revision;
+        request_test_schedule_work(&store, &schedule.subject, &revision, root.path());
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", None).unwrap();
+        reconciler.reconcile_schedule_work_with_start(&schedule, |_, _, _, _| {
+            panic!("terminal owner must not start queued work")
+        }).unwrap();
+        let failed = store.claims_for(&schedule.subject, Some("schedule.work-failed")).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].body["fields"]["code"], "schedule-owner-run-terminal");
+        reconciler.reconcile_schedule(&schedule).unwrap();
+        assert!(store.claims_for(&schedule.subject, Some("schedule.occurrence-scheduled"))
+            .unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_terminal_owner_keeps_firing_across_upgrade_reopen_and_late_replication() {
+        let (root, store, run, schedule) = owned_schedule_store_fixture();
+        // This transition was authored before the daemon enabled the new lifetime epoch.
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", None).unwrap();
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let epoch = store.enable_schedule_owner_guard().unwrap();
+        let owner = store.schedule_terminal_owner(
+            schedule.owner_run.as_deref(), schedule.owner_step.as_deref(),
+        ).unwrap().unwrap();
+        assert!(owner.legacy);
+        assert_eq!(owner.code, "schedule-owner-run-terminal");
+        assert!(schedule_owner_terminal(&store, &schedule).unwrap().is_none());
+        assert!(!reconciler.stop_owned_intake(&[&schedule], None, "legacy-cleanup").unwrap());
+        reconciler.reconcile_schedule(&schedule).unwrap();
+        finish_armed_schedules(&reconciler).await;
+        assert_eq!(store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))
+            .unwrap().len(), 1);
+        assert_eq!(store.claims_for(&schedule.subject, Some("schedule.work-requested"))
+            .unwrap().len(), 1);
+        // An ordinary reassertion must not silently migrate the old lifecycle.
+        store.append_claim(&ClaimInput {
+            subject: run.subject.clone(), kind: "mission-run.state".into(), actor: None,
+            fields: BTreeMap::from([("status".into(), Value::String("cancelled".into())),
+                ("phase".into(), Value::String("terminal".into()))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(store.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        let replica = Store::open_memory("replica").unwrap();
+        replica.enable_schedule_owner_guard().unwrap();
+        // Import after activation: arrival time must not turn old source history into new policy.
+        replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        assert!(replica.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        drop(reconciler);
+        drop(store);
+        let reopened = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let _restarted = Reconciler::new(reopened.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        assert_eq!(reopened.enable_schedule_owner_guard().unwrap(), epoch);
+        assert!(reopened.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        let desired = reopened.desired_subjects_named(&[schedule.subject])
+            .unwrap().pop().unwrap();
+        assert!(!owned_schedule_spec(&reopened, &desired).unwrap().unwrap().stopped);
+    }
+
+    #[test]
+    fn new_terminal_source_epoch_survives_replication_and_daemon_restart() {
+        let (root, store, reconciler, run, schedule) = owned_schedule_fixture();
+        let epoch = store.enable_schedule_owner_guard().unwrap();
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", None).unwrap();
+        let terminal = store.latest_claim(&run.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(terminal.body["schedule_owner_guard_epoch"], epoch);
+        assert!(!store.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        let replica = Store::open_memory("replica").unwrap();
+        assert_ne!(replica.enable_schedule_owner_guard().unwrap(), epoch);
+        replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        assert!(!replica.schedule_terminal_owner(Some(&run.subject), None).unwrap().unwrap().legacy);
+        drop(reconciler);
+        drop(store);
+        let reopened = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let restarted = Reconciler::new(reopened.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        assert_eq!(reopened.enable_schedule_owner_guard().unwrap(), epoch);
+        assert_eq!(schedule_owner_terminal(&reopened, &schedule).unwrap().unwrap().code,
+            "schedule-owner-run-terminal");
+        restarted.reconcile_schedule(&schedule).unwrap();
+        let stopped = reopened.desired_subjects_named(&[schedule.subject]).unwrap().pop().unwrap();
+        assert!(owned_schedule_spec(&reopened, &stopped).unwrap().unwrap().stopped);
     }
 
     #[test]

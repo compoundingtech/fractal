@@ -17,12 +17,28 @@ publication definitions. Anonymous local sessions and limited observation pairin
 that scope. Existing tokens and devices retain their recorded scopes. A remote client uses its
 existing paired Fabric credential; this adds no listener or transport.
 
-Rows show the recorded owner run, generation and step when present; legacy ownership is explicitly
-not recorded. PRIMARY resolves `host "local"` against the declaration's origin, never against the
-member serving the list. STANDBY NODE reports only whether a raw `standby` node is present. The
-JSON keeps that node and unfamiliar declaration fields; it assigns no takeover meaning and adds
-no run-twice warning in this declaration-only read. Opaque, unfamiliar,
-stopped and oversized declarations remain visible rows rather than disappearing.
+Rows show the recorded owner run, generation and step when present; missing ownership is explicitly
+not recorded. A terminal owner is reported separately as `owner.state: "owner-terminal"`, with
+`owner.legacy_leftover`, `owner.terminal_code` and `owner.terminal_owner_id`. Owner IDs remain
+visible in the CLI. This is current local owner knowledge, not a change to the declaration.
+PRIMARY resolves `host "local"` against the declaration's origin, never against the member serving
+the list. STANDBY NODE reports only whether a raw `standby` node is present. The JSON keeps that
+node and unfamiliar declaration fields; it assigns no takeover meaning and adds no run-twice
+warning. Opaque, unfamiliar, stopped and oversized declarations remain visible rows.
+
+**Owner-terminal legacy leftovers remain active and may keep firing.** A terminal owner recorded
+before the owner-lifetime guard has no source lifetime marker; `legacy_leftover: true` makes that
+policy explicit. Listing preserves the declaration state, primary host and nominal next tick;
+it must not imply the schedule is paused or stopped. There is no automatic stop or migration.
+Migrate independently: inspect with `fractal show SCHEDULE`, deliberately publish an independently
+owned replacement if needed, and explicitly stop the old declaration when appropriate. The list
+and show commands do not perform those writes. A guarded terminal owner instead reports
+`legacy_leftover: false`; its declaration's nominal tick still does not promise execution.
+
+`fractal show schedule/NAME` uses the existing exact-subject status read and exposes the same
+terminal-owner metadata as `schedule_owner` (also under the subject's `actual`). Legacy leftovers
+include an explicit migration warning. Run, generation and step IDs are retained. Historical
+status cuts do not attach current owner-lifetime observations to an old declaration.
 
 NEXT (DECLARED) is a nominal tick computed from the declaration at the page's `as_of`. It does not
 predict admission, actual execution, completion, catch-up, current ownership or whether a prior
@@ -54,8 +70,8 @@ Remaining schedules show `outcome: not loaded`. Each request selects six claims,
 The API and store each look ahead one row for pagination, so the underlying indexed query has
 `LIMIT 8`. The CLI never follows its history cursor. These reads occur separately from the
 declaration snapshot and carry only this member's local knowledge. The client-v0 schedules
-response and `--json` output remain declaration-only, with no new wire fields. To inspect older
-outcomes and complete reasons:
+response and `--json` output do not include recent outcomes; the additive owner-lifetime metadata
+is included in both. To inspect older outcomes and complete reasons:
 
 ```sh
 fractal claims ls --subject schedule/example/daily --order desc --limit 20 --json
@@ -92,9 +108,11 @@ read cut, so edits between pages can change what remains; this is not a frozen c
 or a fleet-wide inventory. A cursor cannot be moved to another host/session.
 
 The SQL reader seeks the applied `desired` schedule prefix and joins only selected claim IDs for
-origin metadata. It does not fold history, inspect runs or rebuild membership. Raw declaration JSON
-is materialized up to 64 KiB per row; larger declarations have a visible `read_problem`, byte count
-and unknown display fields. This is a read limit, not a new stored payload limit or a physical-cost
+origin metadata. It also makes bounded current-owner lookups for each selected row under the same
+read snapshot, including the terminal state's source lifetime marker; it does not fold history or
+rebuild membership. Raw declaration JSON is materialized up to 64 KiB per row; larger declarations
+have a visible `read_problem`, byte count and unknown declaration display fields, while owner
+metadata remains visible. This is a read limit, not a new stored payload limit or a physical-cost
 claim about SQLite. Pages stay within the existing 1 MiB client response ceiling and continue after
 the actual last returned row. Metadata too large for a row/cursor returns a visible size error.
 

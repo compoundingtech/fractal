@@ -70,6 +70,11 @@ fn age(knowledge: &Value) -> String {
         None=>"unknown".into(),
     }
 }
+/// The generic subject show route renders this additive observation alongside its raw status.
+pub(super) fn show_owner(status: &Value) -> Option<Value> {
+    status["subjects"].as_array()?.iter()
+        .find_map(|subject| subject.pointer("/actual/schedule_owner")).cloned()
+}
 // Both the generic claims reader and store reader look ahead one row for pagination:
 // requesting six returns at most six claims from one indexed SQL read with LIMIT 8.
 const RECENT_CLAIMS: usize = 6;
@@ -167,11 +172,21 @@ fn render(page: &Value, actor: &str, outcomes: &BTreeMap<String, String>) -> Res
     let mut out=String::from("SCHEDULE\tOWNER RUN / GENERATION / STEP\tPRIMARY\tSTANDBY NODE\tSTATE\tNEXT (DECLARED)\tLATEST OUTCOME\tKNOWLEDGE AGE\n");
     for item in page["items"].as_array().context("schedule page items missing")? {
         let owner=&item["owner"];
-        let owner=if owner["state"]=="recorded" { format!("{} / {} / {}",cell(&owner["run_id"]),cell(&owner["generation_id"]),cell(&owner["step_id"])) } else { cell(&owner["state"]) };
+        let owner=if owner["state"]=="recorded" || owner["state"]=="owner-terminal" {
+            let ids=format!("{} / {} / {}",cell(&owner["run_id"]),cell(&owner["generation_id"]),cell(&owner["step_id"]));
+            if owner["state"]=="owner-terminal" {
+                format!("{ids} (owner-terminal{})",if owner["legacy_leftover"]==true {" legacy leftover"} else {""})
+            } else { ids }
+        } else { cell(&owner["state"]) };
         let outcome=outcomes.get(item["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("outcome: not loaded");
         writeln!(out,"{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",cell(&item["id"]),owner,cell(&item["primary_host_id"]),cell(&item["standby_state"]),cell(&item["state"]),
             item["next_declared_fire_at"].as_str().map(str::to_owned).unwrap_or_else(||cell(&item["next_fire_state"])),outcome,age(&item["knowledge"]))?;
         if let Some(problem)=item["read_problem"].as_str() { writeln!(out,"  read limit: {}",cell(&Value::String(problem.into())))?; }
+        if item["owner"]["legacy_leftover"]==true {
+            let fire_state=if item["state"]=="stopped" {"declaration is explicitly stopped"} else {"active declarations may keep firing"};
+            writeln!(out,"  WARNING: owner-terminal legacy leftover; {fire_state}. Migrate independently; no automatic stop or migration.")?;
+            writeln!(out,"  fix: fractal show {}",presentation::shell_argument(item["id"].as_str().unwrap_or("")))?;
+        }
     }
     writeln!(out,"Next declared is a nominal tick from the declaration only; it does not predict admission, catch-up or completion.")?;
     writeln!(out,"Latest outcome uses only the newest {RECENT_CLAIMS} local claims, separately from declarations (first {OUTCOME_SCHEDULE_LIMIT} schedules, {OUTCOME_CONCURRENCY} concurrent reads, {}s per read); none means no outcome in that tail. Older history: fractal claims ls --subject SCHEDULE --order desc --json.",OUTCOME_TIMEOUT.as_secs())?;
@@ -193,6 +208,38 @@ fn render(page: &Value, actor: &str, outcomes: &BTreeMap<String, String>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_owner_listing_and_show_keep_ids_and_legacy_policy() {
+        let owner = json!({"state":"owner-terminal","run_id":"mission-run/owner",
+            "generation_id":"run-generation/owner","step_id":"step-run/owner/hold","legacy_leftover":true,
+            "warning":"Owner-terminal legacy leftover: declaration remains active. Migrate independently."});
+        let page = json!({"items":[{"id":"schedule/owned","owner":owner,"state":"declared",
+            "next_declared_fire_at":"2030-01-01T00:00:00Z"}],"page":{"has_more":false},
+            "coverage":{"unheard_after_ms":300000,"unheard_hosts":[],"covered_host_count":1,
+                "omitted_configured_peer_count":0,"omitted_covered_host_count":0}});
+        let rendered = render(&page,"person/ada",&BTreeMap::new()).unwrap();
+        for text in ["mission-run/owner","run-generation/owner","step-run/owner/hold",
+            "owner-terminal legacy leftover","active declarations may keep firing","Migrate independently",
+            "no automatic stop or migration","2030-01-01T00:00:00Z"] {
+            assert!(rendered.contains(text),"{rendered}");
+        }
+        let decoded: fractal_client::ScheduleOwner = serde_json::from_value(owner.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap()["legacy_leftover"],true);
+        let status = json!({"subjects":[{"actual":{"schedule_owner":owner}}]});
+        let shown = show_owner(&status).unwrap();
+        assert_eq!(shown,owner);
+        assert!(shown["warning"].as_str().unwrap().contains("Migrate independently"));
+        let mut guarded = page.clone();
+        let rendered = render_human_value(&json!({"schedule_owner":shown}),OutputStyle::stdout());
+        for text in ["mission-run/owner","run-generation/owner","step-run/owner/hold",
+            "owner-terminal","legacy","Migrate independently"] {
+            assert!(rendered.contains(text),"{rendered}");
+        }
+        guarded["items"][0]["owner"]["legacy_leftover"] = json!(false);
+        let rendered = render(&guarded,"person/ada",&BTreeMap::new()).unwrap();
+        assert!(rendered.contains("(owner-terminal)"));
+        assert!(!rendered.contains("legacy leftover"));
+    }
     #[test]
     fn empty_page_keeps_unheard_footer_and_never_says_the_fleet_is_complete() {
         let rendered=render(&json!({"items":[],"page":{"has_more":false},"coverage":{"unheard_after_ms":300000,"unheard_hosts":[{"host_id":"host/laptop","reason":"never-recorded","age_ms":null}],"covered_host_count":2,"omitted_configured_peer_count":0,"omitted_covered_host_count":0}}),"person/ada",&BTreeMap::new()).unwrap();

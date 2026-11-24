@@ -9973,6 +9973,9 @@ async fn run_inspect(client: &Client, args: InspectArgs, json_output: bool) -> R
         let standby = standby.clone();
         shown["schedule_standby"] = standby;
     }
+    if let Some(owner) = schedules_cli::show_owner(&shown["status"]) {
+        shown["schedule_owner"] = owner;
+    }
 
     // Who signed a message a person wrote, and whether that checks.
     if args.subject.starts_with("message/")

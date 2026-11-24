@@ -220,6 +220,18 @@ fn owned_schedule_spec(
     Ok(crate::graph::schedule_spec(&schedule.desired, &origin))
 }
 
+/// Enforce source-stamped ownership lifetimes without stopping historical fleet duties.
+fn schedule_owner_terminal(
+    store: &Store,
+    schedule: &DesiredSubject,
+) -> Result<Option<crate::model::FractalError>> {
+    Ok(store.schedule_terminal_owner(
+        schedule.owner_run.as_deref(), schedule.owner_step.as_deref(),
+    )?.filter(|owner| !owner.legacy).map(|owner| crate::model::FractalError::new(
+        owner.code, format!("schedule owner {} is terminal", owner.owner),
+    )))
+}
+
 /// The largest occurrence reached by this schedule's stable identity: whole history, which
 /// both hosts write and catch-up can skip. A run that supersedes another starts under a new
 /// run subject, so its schedule continues the history of the same-named schedule in every
@@ -2006,6 +2018,7 @@ impl Reconciler<NativeRuntime> {
         recorder: Option<PathBuf>,
         unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
     ) -> Result<Self> {
+        store.enable_schedule_owner_guard()?;
         let selected_pty_root = pty_root
             .map(Path::to_path_buf)
             .unwrap_or_else(|| state_dir.join("pty"));
@@ -2271,6 +2284,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// The daemon builds its reconciler with [`Reconciler::native`], which opens the database in
     /// the state directory.
     pub fn new(store: Arc<Store>, runtime: Arc<R>, host: String, notify: Arc<Notify>) -> Self {
+        store.enable_schedule_owner_guard().expect("enable schedule owner lifetime guard");
         Self {
             store,
             runtime,
@@ -12991,13 +13005,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         if run.phase == "supersession-waiting" {
             return self.evaluate_active_mission_run(run, None);
         }
-        // A durable unresolved effect blocks the run before mission-level dependency
-        // completion, final-phase selection, and cleanup can bypass the per-step fence.
-        if let Some(changed) = self.unresolved_effect_run_fence(run)? {
-            return Ok(changed);
-        }
         if run.phase.starts_with("cleanup-") {
             return self.reconcile_mission_run_cleanup(run);
+        }
+        // A durable unresolved effect blocks the run before mission-level dependency
+        // completion and final-phase selection can bypass the per-step fence. Cleanup
+        // enforces the same fence after stopping owned intake.
+        if let Some(changed) = self.unresolved_effect_run_fence(run)? {
+            return Ok(changed);
         }
         let mut changed = false;
         let flat = flatten_mission_steps(mission);
@@ -13797,8 +13812,27 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_mission_run_cleanup(&self, run: &MissionRunView) -> Result<bool> {
+        // Descendants are terminalized by the same traversal during cancellation.
+        // Include their owners here so ordinary cleanup emits the existing exact stops.
+        let mut owner_runs = BTreeSet::from([run.subject.clone()]);
+        owner_runs.extend(self.store.descendant_mission_run_subjects(&run.generation)?);
+        smallclaims::touched::note_read(|| format!("children:{}", run.root_mission_run));
+        let mut owned = owner_runs
+            .iter()
+            .map(|owner| self.store.desired_subjects_for_owner_run(owner))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let intake_stopped = self.stop_owned_intake(
+            &owned.iter().collect::<Vec<_>>(),
+            None,
+            &format!("cleanup-mission-run-intake:{}", run.generation),
+        )?;
+        // Stop intake before an unresolved effect can hold cleanup. Resolving an effect
+        // must not be required to stop creating new scheduled work.
         if let Some(changed) = self.unresolved_effect_run_fence(run)? {
-            return Ok(changed);
+            return Ok(changed || intake_stopped);
         }
         // A child can still own execution after its superseded parent ended.
         // Preserve its cleanup confirmation and recovery path as well.
@@ -13813,11 +13847,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             supersession_cleanup = parent.superseded_by.is_some();
             parent_step = parent.parent_step_run;
         }
-        // Descendants are terminalized by the same traversal during cancellation.
-        // Include their owners here so ordinary cleanup emits the existing exact stops.
-        let mut owner_runs = BTreeSet::from([run.subject.clone()]);
-        owner_runs.extend(self.store.descendant_mission_run_subjects(&run.generation)?);
-        smallclaims::touched::note_read(|| format!("children:{}", run.root_mission_run));
         // Shell drivers are durable resource executions, not desired subjects. Their
         // cancellation and receipts are driven by the execution host's shell sweep.
         // Bound the run's wait, but retain unconfirmed execution custody for later sweeps.
@@ -13838,13 +13867,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         if shells_cancelled { self.signal_changed(); }
-        let mut owned = owner_runs
-            .iter()
-            .map(|owner| self.store.desired_subjects_for_owner_run(owner))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
         owned.extend(
             self.store
                 .mission_gate_runners()?
@@ -13861,11 +13883,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                     owner_step: None,
                 }),
         );
-        let intake_stopped = self.stop_owned_intake(
-            &owned.iter().collect::<Vec<_>>(),
-            None,
-            &format!("cleanup-mission-run-intake:{}", run.generation),
-        )?;
         let owned = owned
             .into_iter()
             .filter(|subject| subject.member.is_some() || subject.kind == "stop")
@@ -17149,14 +17166,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             {
                 continue;
             }
+            // Upgrading must not retire existing duties merely because their historical
+            // owner is terminal. They remain visible as legacy leftovers for manual migration.
+            if subject.kind == "schedule"
+                && self.store.schedule_terminal_owner(
+                    subject.owner_run.as_deref(), subject.owner_step.as_deref(),
+                )?.is_some_and(|owner| owner.legacy)
+            {
+                continue;
+            }
             let Some(owner) = subject.owner_run.as_deref() else {
                 continue;
             };
             let owner_id = owner.strip_prefix("mission-run/").unwrap_or(owner);
-            let Some(name) = subject
-                .subject
-                .strip_prefix(&format!("{}/{owner_id}/", subject.kind))
-            else {
+            // Ownership is stored explicitly; it need not be encoded in the subject's name.
+            let Some(name) = subject.subject.strip_prefix(&format!("{}/", subject.kind)) else {
                 continue;
             };
             by_owner
@@ -17167,8 +17191,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut changed = false;
         for (owner_id, stops) in by_owner {
             let source = format!("version 2\n\n{}\n", stops.join("\n"));
-            let mut intent = crate::graph::parse_execution_intent(&source, &self.host, owner_id)?;
+            // Parse exact identities, rather than scoping already-owned names a second time.
+            let mut intent = crate::graph::parse_internal_intent(&source, &self.host)?;
             for subject in intent.subjects.values_mut() {
+                subject.owner_run = Some(format!("mission-run/{owner_id}"));
                 subject.owner_generation = generation.map(str::to_owned);
             }
             changed |= self
@@ -18500,6 +18526,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
+        if let Some(reason) = schedule_owner_terminal(&self.store, schedule)? {
+            self.record_once(
+                &schedule.subject,
+                "runtime.reconcile-decision",
+                BTreeMap::from([
+                    ("decision".into(), Value::String("skip".into())),
+                    ("code".into(), Value::String(reason.code.into())),
+                    ("reason".into(), Value::String(reason.to_string())),
+                ]),
+            )?;
+            // Retire leftovers from owners that ended before this lifetime fence existed.
+            self.stop_owned_intake(
+                &[schedule], None, &format!("terminal-schedule-owner:{}", schedule.subject),
+            )?;
+            return Ok(());
+        }
         if self.schedule_has_open_work(&schedule.subject, spec.host != self.host)? {
             if self.store.schedule_has_active_started_run(&schedule.subject)? {
                 self.clear_schedule_replication_block(schedule)?;
@@ -18728,6 +18770,33 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&operation);
+                    signal_changed(&notify, &event_notify);
+                    return;
+                }
+                // Recheck after sleeping: an owner can end without changing the declaration.
+                let owner_terminal = match schedule_owner_terminal(&store, &schedule_declaration) {
+                    Ok(Some(reason)) => {
+                        let _ = store.append_claim(&ClaimInput {
+                            subject: schedule_subject.clone(),
+                            kind: "schedule.occurrence-cancelled".into(),
+                            actor: None,
+                            fields: BTreeMap::from([
+                                ("revision".into(), Value::String(revision.clone())),
+                                ("occurrence".into(), Value::from(occurrence)),
+                                ("code".into(), Value::String(reason.code.into())),
+                                ("reason".into(), Value::String(reason.to_string())),
+                            ]),
+                            evidence: vec![request.id.clone()],
+                            expected_subject: None,
+                            idempotency_key: Some(format!("clock-cancel:{operation}")),
+                        });
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(_) => true,
+                };
+                if owner_terminal {
+                    armed.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -18974,6 +19043,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         // A stopped schedule's queued work is cancelled, so declaring the schedule again does not
         // start work that was requested before it stopped.
+        if let Some(reason) = schedule_owner_terminal(&self.store, schedule)? {
+            for request in requests {
+                self.fail_schedule_work(
+                    schedule, &request.id, reason.code, &reason.to_string(),
+                )?;
+            }
+            return Ok(());
+        }
         if spec.stopped {
             self.schedule_workspace_retries
                 .lock()

@@ -940,10 +940,26 @@ pub async fn status(
         if !query.history && query.at_index.is_none() {
             response.seat_admission = Some(admission.snapshot(admission_now()));
         }
-        // Exact schedule reads gain an optional local observation. Keep broad/agent reads and
-        // primary-only schedules on their existing path; this is never a persisted projection.
+        // Exact schedule reads gain local owner-lifetime and standby observations. These do
+        // not rewrite declarations; current owner state is never attached to historical cuts.
         if query.subject.as_deref().is_some_and(|subject| subject.starts_with("schedule/")) {
             for subject in &mut response.subjects {
+                if !query.history && query.at_index.is_none() {
+                    let owner = store.read_snapshot(|_| {
+                        let desired = store.desired_subjects_named(&[subject.subject.clone()])?.pop();
+                        let Some(desired) = desired else { return Ok(None) };
+                        let terminal = store.schedule_terminal_owner(desired.owner_run.as_deref(), desired.owner_step.as_deref())?;
+                        Ok(terminal.map(|terminal| json!({
+                            "run_id":desired.owner_run,"generation_id":desired.owner_generation,"step_id":desired.owner_step,
+                            "state":"owner-terminal","legacy_leftover":terminal.legacy,
+                            "terminal_code":terminal.code,"terminal_owner_id":terminal.owner,
+                            "warning":terminal.legacy.then_some("Owner-terminal legacy leftover: active declarations may keep firing. Migrate independently; no automatic stop or migration.")
+                        })))
+                    })?;
+                    if let Some(owner) = owner {
+                        subject.actual.get_or_insert_with(|| json!({}))["schedule_owner"] = owner;
+                    }
+                }
                 let origin = store.selected_desired_origin(&subject.subject)?.unwrap_or_else(|| store.origin.clone());
                 let Some(spec) = subject.desired.as_ref().and_then(|desired| crate::graph::schedule_spec(desired, &origin)) else { continue };
                 if let Some(mut shown) = crate::schedule_standby::display(&store, &subject.subject, &spec) {

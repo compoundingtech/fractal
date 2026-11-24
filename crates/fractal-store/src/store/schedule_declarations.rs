@@ -1,4 +1,4 @@
-//! Bounded reads of the applied declaration projection. No run/history reduction or writes.
+//! Bounded reads of declarations and their current owner lifetime. No history reduction or writes.
 use super::*;
 
 pub const MAX_SCHEDULE_DECLARATIONS: usize = 200;
@@ -16,6 +16,7 @@ pub struct ScheduleDeclarationRow {
     pub owner_run: Option<String>,
     pub owner_generation: Option<String>,
     pub owner_step: Option<String>,
+    pub terminal_owner: Option<crate::store::schedule_owner_lifetime::ScheduleTerminalOwner>,
 }
 
 impl Store {
@@ -45,9 +46,14 @@ impl Store {
                 body: row.get(3)?, body_bytes: row.get::<_, i64>(4)?.max(0) as u64,
                 origin: row.get(5)?, owner_run: row.get(6)?,
                 owner_generation: row.get(7)?, owner_step: row.get(8)?,
+                terminal_owner: None,
             }),
         )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for row in &mut rows {
+            row.terminal_owner = self.schedule_terminal_owner(row.owner_run.as_deref(), row.owner_step.as_deref())?;
+        }
+        Ok(rows)
     }
 
     /// Existing direct-exchange receipt times, not an applied frontier or a freshness proof.
