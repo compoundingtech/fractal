@@ -50,7 +50,10 @@ pub mod transport_bench {
 }
 
 pub(crate) mod writer_observer;
+mod commit_scope;
+pub use commit_scope::{WriterObserverStats, writer_observer_stats};
 pub use writer_observer::WriterObserver;
+pub use writer_observer::observe_transaction_resolution;
 
 use crate::store::current_index;
 
@@ -179,6 +182,7 @@ pub struct CommitObserver {
 
 struct CommitObserverCallback {
     state: Mutex<CommitObserverState>,
+    tables: Option<&'static [&'static str]>,
     completed: Condvar,
 }
 
@@ -220,9 +224,11 @@ struct CommitObservers {
 impl CommitObservers {
     fn register(
         self: &Arc<Self>,
+        tables: Option<&'static [&'static str]>,
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
         let callback = Arc::new(CommitObserverCallback {
+            tables,
             state: Mutex::new(CommitObserverState {
                 run: Some(Arc::new(callback)),
                 running: None,
@@ -241,7 +247,7 @@ impl CommitObservers {
         }
     }
 
-    fn notify(&self, connection: &Connection) {
+    fn notify(&self, connection: &Connection, changes: &commit_scope::Changes) {
         // The common case takes no lock and allocates nothing.
         if !self.active.load(Ordering::Acquire) {
             return;
@@ -253,6 +259,9 @@ impl CommitObservers {
             .clone();
         let current = std::thread::current().id();
         for callback in callbacks.iter() {
+            if callback.tables.is_some_and(|tables| !changes.matches(tables)) {
+                continue;
+            }
             let run = {
                 let mut state = callback
                     .state
@@ -266,6 +275,11 @@ impl CommitObservers {
                 run
             };
             let _invocation = CommitObserverInvocation { callback };
+            if callback.tables.is_some() {
+                commit_scope::SCOPED_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                commit_scope::GLOBAL_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            }
             run(connection);
         }
     }
@@ -491,6 +505,26 @@ pub struct WriterGuard<'a> {
 }
 
 impl WriterConnection {
+    /// A read-only store has no writer connection, queue, or background thread.
+    pub(crate) fn read_only(committed_index: Arc<AtomicU64>) -> Self {
+        Self {
+            jobs: Mutex::new(None),
+            thread: Mutex::new(None),
+            committed_index,
+            observers: Arc::new(CommitObservers::default()),
+            finalizers: Arc::new(TransactionFinalizers::default()),
+            background: Arc::new(writer_queue::BackgroundAdmission::default()),
+            deferred: Arc::new(Mutex::new(None)),
+            workers: Arc::new(Semaphore::new(writer_admission::constructor_write_limit())),
+            worker_queue: writer_admission::WorkerQueue::new(),
+            handler_policy: Arc::new(Mutex::new(None)),
+            mutation_observer: None,
+            batches: Arc::new((AtomicU64::new(0), AtomicU64::new(0))),
+            fifo: crate::fifo::Queue::new(crate::fifo::Kind::Writer),
+            telemetry: None,
+        }
+    }
+
     pub fn new(connection: Connection, committed_index: Arc<AtomicU64>) -> Self {
         Self::new_inner(connection, committed_index, None, None)
             .expect("writer without an observer needs no schema check")
@@ -550,9 +584,10 @@ impl WriterConnection {
             policy.install(&connection)?;
         }
         let handler_policy = Arc::new(Mutex::new(policy.map(Arc::new)));
-        let mutation_observer = observer
-            .map(|observer| writer_observer::MutationState::new(&connection, observer))
-            .transpose()?;
+        let mutation_observer = Some(writer_observer::MutationState::new(
+            &connection,
+            observer.unwrap_or_else(|| Arc::new(writer_observer::NoPhysicalObserver)),
+        )?);
         let mutations = mutation_observer.clone();
         let (jobs, queue) = std::sync::mpsc::channel::<WriterJob>();
         let index = committed_index.clone();
@@ -611,8 +646,9 @@ impl WriterConnection {
         })
     }
 
-    /// Observe every successfully committed batch and every returned lent writer, synchronously
-    /// after its committed index is updated and before its write can acknowledge success.
+    /// Observe boundaries containing committed DML/DDL, synchronously after the committed
+    /// index is updated and before the write can acknowledge success. Empty/read-only work
+    /// and rolled-back mutations do not evaluate callbacks; lost native coverage fails closed.
     /// A callback may read authority from this same connection, but must not write or acquire the
     /// writer. Dropping its own observer handle is safe and disables future invocations.
     /// Batched callbacks run on the writer thread; lent callbacks run on the returning thread.
@@ -629,7 +665,19 @@ impl WriterConnection {
         &self,
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
-        self.observers.register(callback)
+        self.observers.register(None, callback)
+    }
+
+    /// Observe committed mutations of declared main-database tables, including WITHOUT
+    /// ROWID tables. DDL and a native-hook coverage gap conservatively invalidate all
+    /// dependencies. Read-only loans, zero-row writes and rolled-back mutations do not
+    /// evaluate callbacks. Registration and handle lifetime match `observe_commits`.
+    pub fn observe_tables(
+        &self,
+        tables: &'static [&'static str],
+        callback: impl Fn(&Connection) + Send + Sync + 'static,
+    ) -> CommitObserver {
+        self.observers.register(Some(tables), callback)
     }
 
     /// Install exactly one transaction-owned adapter, explicitly and before attesting source
@@ -909,6 +957,7 @@ impl WriterConnection {
         // The job runs on the writer thread; what it wrote is handed back to this one.
         let capture = crate::touched::recording_wrote();
         let clock = crate::store::ClockContext::capture();
+        let stages = crate::windows::holds::BatchStages::capture();
         let wrote_rows = Mutex::new(Vec::new());
         let wrote = &wrote_rows;
         // Counts this caller until its write begins, or the writer drops it unrun.
@@ -918,6 +967,7 @@ impl WriterConnection {
             let before = tx.total_changes();
             let job = || {
                 let _clock = clock.enter();
+                let _stages = stages.enter();
                 job(tx)
             };
             let (result, written) = if capture {
@@ -1048,13 +1098,7 @@ fn write_queue(
                     }
                 };
                 if run {
-                    if let Ok(index) = current_index(&connection) {
-                        committed_index.store(index, Ordering::Release);
-                    }
-                    if let Some(observer) = callbacks.2 {
-                        observer.resolved(&connection);
-                    }
-                    callbacks.0.notify(&connection);
+                    publish_writer_boundary(&connection, committed_index, callbacks.0, callbacks.2);
                 }
                 // Rest outside every writer loan. Foreground dispatch continues during this
                 // interval; a busy queue cannot postpone a due maintenance turn forever.
@@ -1321,15 +1365,7 @@ fn run_write_batch(
         }
         telemetry::METRICS.batch.record(started.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
         telemetry::METRICS.batch_size.record(answers.len() as u64, telemetry::SQLITE.as_slice());
-        if let Ok(index) = current_index(connection) {
-            committed_index.store(index, Ordering::Release);
-        }
-        if let Some(observer) = mutation_observer {
-            observer.resolved(connection);
-        }
-        if committed.is_ok() {
-            observers.notify(connection);
-        }
+        publish_writer_boundary(connection, committed_index, observers, mutation_observer);
         if let (Some(batch), Some(post_commit_started)) = (attribution, post_commit_started) {
             batch.finish(started.elapsed(), post_commit_started.elapsed(), op_count);
         }
@@ -1424,13 +1460,7 @@ impl Drop for WriterGuard<'_> {
                 eprintln!("the writer's synchronous level was not put back to {level}: {error:#}");
             }
         }
-        if let Ok(index) = current_index(&connection) {
-            self.committed_index.store(index, Ordering::Release);
-        }
-        if let Some(observer) = self.mutation_observer {
-            observer.resolved(&connection);
-        }
-        self.observers.notify(&connection);
+        publish_writer_boundary(&connection, self.committed_index, self.observers, self.mutation_observer);
         crate::touched::note_writes(
             connection
                 .total_changes()
@@ -1446,6 +1476,36 @@ impl Drop for WriterGuard<'_> {
     }
 }
 
+/// Native coverage publication is unconditional. Confirmed write commits also check the
+/// claims index: SQLite can advance AUTOINCREMENT without row hooks or total_changes.
+/// Read-only loans and rollbacks do not probe it; callbacks require committed changes.
+fn publish_writer_boundary(
+    connection: &Connection,
+    committed_index: &AtomicU64,
+    observers: &CommitObservers,
+    mutations: Option<&Arc<writer_observer::MutationState>>,
+) {
+    let Some(mutations) = mutations else { return; };
+    mutations.resolved(connection);
+    let mut changes = mutations.take_committed(connection);
+    if changes.changed() || changes.committed {
+        commit_scope::INDEX_REFRESHES.fetch_add(1, Ordering::Relaxed);
+        match current_index(connection) {
+            Ok(index) => {
+                if index != committed_index.load(Ordering::Acquire) {
+                    changes.index_changed();
+                }
+                committed_index.store(index, Ordering::Release);
+            }
+            Err(_) => changes.unknown = true,
+        }
+    }
+    commit_scope::boundary(&changes);
+    if changes.changed() {
+        observers.notify(connection, &changes);
+    }
+}
+
 /// Read connections, with separate admission and idle-retention ceilings. Top-level API
 /// workers enter admitted request scopes before acquiring a connection or other store locks.
 /// Cross-pool nested scopes never wait for admission, like legacy raw `get`/`try_get`:
@@ -1458,6 +1518,7 @@ pub struct ReadPool {
     pub returned: Condvar,
     pub path: PathBuf,
     pub shared_memory: bool,
+    immutable: bool,
     counts: Arc<ReaderCounts>,
     admission: Arc<Semaphore>,
     diagnostic_id: u64,
@@ -1685,19 +1746,25 @@ impl Drop for PinnedRead<'_> {
 
 impl ReadPool {
     pub fn new(path: &Path, shared_memory: bool) -> Result<Self> {
-        Self::new_with(path, shared_memory, None,
+        Self::new_with(path, shared_memory, false, None,
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    /// Readers of a cleanly stopped offline source never create or update WAL/SHM files.
+    pub(crate) fn new_immutable(path: &Path) -> Result<Self> {
+        Self::new_with(path, false, true, None,
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
     pub(crate) fn new_admitted(admitted: Arc<crate::store::AdmittedStore>) -> Result<Self> {
         let path = admitted.database_path().to_path_buf();
-        Self::new_with(&path, false, Some(admitted),
+        Self::new_with(&path, false, false, Some(admitted),
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_temporary(path: &Path, directory: Option<Arc<tempfile::TempDir>>) -> Result<Self> {
-        Self::new_with(path, false, None, directory)
+        Self::new_with(path, false, false, None, directory)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1716,6 +1783,7 @@ impl ReadPool {
     fn new_with(
         path: &Path,
         shared_memory: bool,
+        immutable: bool,
         admitted: Option<Arc<crate::store::AdmittedStore>>,
         #[cfg(any(test, feature = "test-support"))]
         temporary_directory: Option<Arc<tempfile::TempDir>>,
@@ -1725,6 +1793,7 @@ impl ReadPool {
             returned: Condvar::new(),
             path: path.to_path_buf(),
             shared_memory,
+            immutable,
             counts: Arc::new(ReaderCounts::default()),
             admission: Arc::new(Semaphore::new(constructor_read_limit())),
             diagnostic_id: read_lifetime::next_pool_id(),
@@ -1760,8 +1829,10 @@ impl ReadPool {
     fn open_connection(&self) -> Result<ReadConnection> {
         let connection = if let Some(admitted) = &self.admitted {
             let connection = admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            crate::store::blob_file::attach_reader(&connection, admitted.database_path())?;
+            crate::store::blob_file::attach_reader(&connection, admitted.database_path(), false)?;
             configure_open_read_connection(connection)?
+        } else if self.immutable {
+            open_immutable_read_connection(&self.path)?
         } else {
             open_read_connection(&self.path, self.shared_memory)?
         };
@@ -2268,6 +2339,51 @@ pub mod work {
         }) };
     }
 
+    thread_local! {
+        /// The capture this thread started, if any. `traced` copies a statement's expanded
+        /// SQL into it, so no per-statement allocation happens unless a capture is running.
+        static CAPTURED_SQL: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The expanded SQL of every statement this thread starts while the guard lives, with the
+    /// same thread attribution as [`SqliteWorkScope`]: writer loans and readers this thread
+    /// runs are captured, and other threads' work is not. Layered into `traced`, it keeps
+    /// working under the native mutation dispatcher, which installs and reinstalls that one
+    /// callback; a raw `Connection::trace` would be clobbered by it.
+    pub struct SqlCapture {
+        buffer: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        previous: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    }
+
+    impl SqlCapture {
+        pub fn start() -> Self {
+            let buffer = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let previous = CAPTURED_SQL
+                .with(|capture| capture.borrow_mut().replace(std::rc::Rc::clone(&buffer)));
+            Self { buffer, previous }
+        }
+
+        /// The statements captured so far, emptying the buffer and leaving the capture running.
+        pub fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.buffer.borrow_mut())
+        }
+    }
+
+    impl Drop for SqlCapture {
+        fn drop(&mut self) {
+            CAPTURED_SQL.with(|capture| {
+                let mut capture = capture.borrow_mut();
+                if capture
+                    .as_ref()
+                    .is_some_and(|active| std::rc::Rc::ptr_eq(active, &self.buffer))
+                {
+                    *capture = self.previous.take();
+                }
+            });
+        }
+    }
+
     /// Completed traced statements on this thread within one explicit scope. It counts every
     /// traced connection used by this thread (including writer-return callbacks), not work
     /// done by other threads while this caller waits for a lend. Start before the first phase
@@ -2338,7 +2454,7 @@ pub mod work {
     /// its runs until someone resets them, and tests read them too, so this never resets them.
     static STARTED: Mutex<BTreeMap<usize, [u64; 4]>> = Mutex::new(BTreeMap::new());
 
-    unsafe extern "C" fn traced(
+    pub(super) unsafe extern "C" fn traced(
         event: c_uint,
         _context: *mut c_void,
         statement: *mut c_void,
@@ -2351,6 +2467,18 @@ pub mod work {
         let now = COUNTERS.map(|counter| u64::try_from(read(counter)).unwrap_or(0));
         let mut started = STARTED.lock().unwrap_or_else(PoisonError::into_inner);
         if event == ffi::SQLITE_TRACE_STMT as c_uint {
+            if let Some(captured) = CAPTURED_SQL.with(|capture| capture.borrow().as_ref().map(std::rc::Rc::clone)) {
+                // SQLITE_TRACE_STMT detail contains unexpanded SQL (or a trigger
+                // comment). Expand the live statement explicitly for EXPLAIN fixtures.
+                // SAFETY: SQLite owns the live statement; its allocated expansion is
+                // copied while valid and released with SQLite's matching allocator.
+                let raw = unsafe { ffi::sqlite3_expanded_sql(statement) };
+                if !raw.is_null() {
+                    let sql = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+                    unsafe { ffi::sqlite3_free(raw.cast()) };
+                    captured.borrow_mut().push(sql);
+                }
+            }
             // A trigger's start reports the statement again; the first start counts.
             started.entry(key).or_insert(now);
             return 0;
@@ -2438,12 +2566,19 @@ pub mod work {
                 statement.query_row([],|row|row.get::<_,u64>(0)).unwrap();
                 capture.store(statement.get_status(rusqlite::StatementStatus::VmStep) as u64,Ordering::Relaxed);
             });
+            // The native contract publishes nothing for an unchanged loan, so the fixture
+            // commits an actual mutation; the loan's whole return, including the observer
+            // the dispatcher publishes at guard return, stays inside the one scope.
             let scope = SqliteWorkScope::start();
-            drop(writer.write());
+            let guard = writer.write();
+            guard
+                .execute("INSERT INTO claims(store_index) VALUES (1)", [])
+                .unwrap();
+            drop(guard);
             let work = scope.finish();
             assert_eq!(
-                work.statements, 2,
-                "committed index read plus returned-guard observer"
+                work.statements, 3,
+                "the committed mutation, its index read and the returned-guard observer"
             );
             assert!(observed_vm.load(Ordering::Relaxed) > 0);
             assert!(work.vm_steps > observed_vm.load(Ordering::Relaxed));
@@ -2494,8 +2629,55 @@ pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connecti
     };
     let connection = Connection::open_with_flags(path, flags)
         .with_context(|| format!("open st read connection {}", path.display()))?;
-    crate::store::blob_file::attach_reader(&connection, path)?;
+    crate::store::blob_file::attach_reader(&connection, path, false)?;
     configure_open_read_connection(connection)
+}
+
+/// Encode a native filename, not a caller-supplied SQLite URI. In particular, `?`, `#`
+/// and `%` in source paths must not become URI options or change the opened database.
+pub(crate) fn immutable_database_uri(path: &Path) -> Result<String> {
+    let mut uri = String::from("file:");
+    use std::fmt::Write as _;
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'/' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(char::from(byte));
+            }
+            _ => write!(uri, "%{byte:02X}")?,
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    Ok(uri)
+}
+
+/// Immutable SQLite ignores WAL, so refuse any nonempty WAL before opening the file.
+/// This is an offline contract: the caller must keep the source stopped throughout export.
+pub(crate) fn open_immutable_read_connection(path: &Path) -> Result<Connection> {
+    let path = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve offline backup database {}", path.display()))?;
+    require_checkpointed_backup_database(&path)?;
+    let uri = immutable_database_uri(&path)?;
+    let connection = Connection::open_with_flags(
+        uri, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    ).with_context(|| format!("open immutable backup read connection {}", path.display()))?;
+    crate::store::blob_file::attach_reader(&connection, &path, true)?;
+    configure_open_read_connection(connection)
+}
+
+pub(crate) fn require_checkpointed_backup_database(path: &Path) -> Result<()> {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let wal = PathBuf::from(wal);
+    match std::fs::metadata(&wal) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.len() == 0,
+            "read-only backup refuses nonempty WAL {}; source must be cleanly stopped and checkpointed before exporting",
+            wal.display(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspect offline backup WAL {}", wal.display())),
+    }
+    Ok(())
 }
 
 fn configure_open_read_connection(mut connection: Connection) -> Result<Connection> {

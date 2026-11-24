@@ -167,7 +167,9 @@ pub(super) async fn bind_request(
         request.extensions().get::<BoundAgent>().is_some()
             || request.extensions().get::<BoundRun>().is_some()
     ) && resources::allows_bound_request(request.method(), request.uri().path());
-    if (request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) && !native_resource_request)
+    let native_run_request = request.extensions().get::<BoundRun>().is_some()
+        && super::run_requests::allows_bound_request(request.method(), request.uri().path());
+    if (request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) && !native_resource_request && !native_run_request)
         || request.uri().path() == "/v1/repair/apply"
         || request.uri().path() == "/v1/replication/replay"
     {

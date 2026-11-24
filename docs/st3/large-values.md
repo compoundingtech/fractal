@@ -98,6 +98,38 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Changed-key reconciliation inputs
+
+Inventory review: [reconciliation input maintenance](https://github.com/compoundingtech/fractal/pull/7062).
+The `fractal_store::store::attention_snapshot` maintainer owns
+`lv-hc01ae9454288`, `lv-h5210e0457dfb`, `lv-h8f9121f82761` and
+`lv-h17ae5bb9d200`: existing claim, desired-member and mission-deadline reads
+now choose a trusted optional subject predicate. They retain the existing inline
+claim bodies, declaration JSON and subject keys; no producer format or value
+limit changes. Trace the dynamic templates to those representations before
+replacing their variable-sized values or index keys.
+
+The `fractal_store::store::observer_reconcile_inputs` maintainer owns
+`lv-hd10d6847d3fd`, an integer-rowid probe reading one existing desired input row.
+Its execution sink remains conservatively inventoried despite the fixed query:
+trace the bound integer and returned subject to the existing subject-key
+representation rather than treating a single row as a byte-size proof.
+
+The source maintainers of `mail_delivery_objectives_tests`,
+`observer_mail_inputs_tests` and `observer_reconcile_inputs_tests` own their
+new fixture-only entries. These insert, mutate or delete invented desired,
+mail-ledger, replica-record and projection-marker values to prove changed-key
+routing, deletion safety and work counts. They do not add production writers.
+`observer_reconcile_inputs_tests` also owns journal-retention fixtures
+`lv-hab0cd697de5c`, `lv-h58a0560e9304`, `lv-h13caf0b5c1cf` and `lv-h403d3ff20c2a`.
+They create and delete synthetic desired keys beyond the retained journal limit,
+then prove that an evicted cursor rebuilds the small live roster. The claim ID,
+subject bindings and declaration bodies remain fixture-only inline values.
+Their inline test values preserve the existing storage contracts; representation
+work must keep equivalent authority/reset/deletion regressions when those
+contracts change. The inventory records identify each fixture statement and
+its concrete producer/cleanup category.
+
 ### Roster paging and read-budget probe inventory repair
 
 The `fractal_api_core::api` maintainer owns `lv-hc92b1baa7e5f`; the
@@ -516,8 +548,10 @@ duplicate, malformed, orphaned or changed exceptions and altered column catalogs
 The guard compares exact template bytes and comment-free dynamic argument tokens;
 it does not infer receiver types or evaluate Rust/SQL.
 
-Explicit inline `#[cfg(test)]` items are excluded. Arbitrary cfg expressions are
-not evaluated; separate test-only source files and diagnostic strings may be
+Explicit inline `#[cfg(test)]` items and struct fields are excluded. A field's
+comma or enclosing brace ends its exclusion; it must not hide later production
+schema initialization. Arbitrary cfg expressions are not evaluated; separate
+test-only source files and diagnostic strings may be
 conservatively included. This makes the manifest a candidate source inventory,
 not a count of production writers. The column parser handles literal CREATE
 TABLE/INDEX lists and ALTER TABLE ADD COLUMN declarations, not an evaluated SQL grammar: generated table/column names,
@@ -1200,3 +1234,30 @@ sink retains `trace-statement-and-value-representation`. Neither the idle-only
 admission policy nor its restart-rate bound proves a physical SQLite value-size
 bound. Any later representation change must preserve episode, incarnation and
 declaration fencing and replay-safe admission identity.
+
+### Local session custody and run authority (#7104)
+
+The reviewed inventory adds 36 SQL/source sites and 13 table/index catalog records for
+the Phase 1 local custody and run-authority producers. These remain explicit
+transitional exceptions, not value-size or statement-cost proof.
+The additional `legacy_handler_guard_tests` included-source site scans the new
+`run_requests` route family for removed legacy handlers. It is source inspection,
+not a production SQLite producer or a value-size proof; its owner and unresolved
+representation review follow the existing route-family inventory convention.
+
+`fractal_store::store::local_sessions` owns the native subject/incarnation keys,
+serialized custody/invocation metadata and detach/retirement receipt updates.
+`fractal_store::store::run_credentials::local` owns hashed credentials, exact
+execution JSON, ordered authority changes, proposal tombstones and ACK floors.
+`fractal_store::store::run_credentials::assertions` owns home admission keys,
+closed-epoch fences and exact retry-response JSON. Their row-count limits and
+hashed credentials do not bound every inline TEXT key, JSON cell or reclamation
+statement. Schema sites retain `chunk-or-reference-variable-columns`; write and
+retirement sites retain `bound-or-reference-values-and-reclamation`.
+
+The actual SQLite graph-unavailable, credential-capacity and writer-fence
+fixtures retain their separate test-module ownership and concrete source-site
+registrations. A later representation change must preserve native-generation
+custody, borrowed detach, ordered revocation and exact effect/retry identity;
+it cannot discard an unacknowledged witness to reduce storage.
+

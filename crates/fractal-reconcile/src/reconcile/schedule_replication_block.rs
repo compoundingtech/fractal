@@ -90,15 +90,40 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let peers = schedule_admission_peers(&self.store, &self.host, &self.schedule_peers)?;
             let sync = self.store.replication_peer_sync(&peers);
-            let peers = peers.iter().map(|peer| match sync.get(peer) {
-                Some(progress) => format!("{peer}: peer_only_envelopes={}, local_only_envelopes={}, stale={}, measured_at_unix_ms={}",
-                    progress.peer_only_envelopes, progress.local_only_envelopes, progress.stale, progress.measured_at_unix_ms),
-                None => format!("{peer}: peer_only_envelopes=unknown, local_only_envelopes=unknown (no comparison)"),
+            // Name the admission inputs that can hold the tick, read as schedule_admission_ready reads them.
+            let admission_healthy = self.store.replication_admission_healthy()?;
+            let strict = schedule_requires_complete_history(&self.store, schedule)?;
+            let membership = self.store.fleet_membership()?;
+            let inventory_generation = self.store.replication_snapshot()?.inventory_generation;
+            let progress = self.store.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+            let peers = peers.iter().map(|peer| {
+                let counts = match sync.get(peer) {
+                    Some(sync) => format!("peer_only_envelopes={}, local_only_envelopes={}, stale={}, measured_at_unix_ms={}",
+                        sync.peer_only_envelopes, sync.local_only_envelopes, sync.stale, sync.measured_at_unix_ms),
+                    None => "peer_only_envelopes=unknown, local_only_envelopes=unknown (no comparison)".into(),
+                };
+                let fallback = match progress.get(peer) {
+                    Some(sample) => {
+                        let member = match membership.state(peer) {
+                            crate::fleet::MemberState::Current(member) =>
+                                (sample.measured_member_key.as_deref() == Some(member.member_key.as_str())).to_string(),
+                            crate::fleet::MemberState::NotMember => sample.measured_member_key.is_none().to_string(),
+                            _ => "false (membership not current)".into(),
+                        };
+                        format!("progressing={}, healthy_streak={}, member_matches={member}, basis_matches={}",
+                            sample.schedule_progress_since(self.started_at_unix_ms),
+                            sample.schedule_measurements.iter().filter(|at| **at != 0).count(),
+                            sample.window_basis.local_inventory_generation == inventory_generation)
+                    },
+                    None => "progressing=false (no sample)".into(),
+                };
+                format!("{peer}: {counts}, {fallback}")
             }).collect::<Vec<_>>().join("; ");
+            drop(progress);
             self.store.record_operational_failure(&attention, &AttentionRequest {
                 reviewer: "person/operator".into(),
                 title: "A due schedule tick is blocked by replication".into(),
-                reason: format!("{} on {}: occurrence {occurrence}, due at {scheduled_at}, has remained replication-blocked for at least 15 minutes. Peer comparisons: [{peers}]. projection_deferred={}, catching_up={}, first_sync_syncing={}. Inspect replication status and restore the blocking peer's exchange; this warning does not grant admission or takeover.",
+                reason: format!("{} on {}: occurrence {occurrence}, due at {scheduled_at}, has remained replication-blocked for at least 15 minutes. Peer comparisons: [{peers}]. admission_healthy={admission_healthy}, strict_history={strict}, projection_deferred={}, catching_up={}, first_sync_syncing={}. Inspect replication status and restore the blocking peer's exchange; this warning does not grant admission or takeover.",
                     schedule.subject, self.host, self.store.replication_projection_deferred(), self.store.replication_catching_up(),
                     self.store.first_sync()?.is_some_and(|sync| sync.state == "syncing")),
                 severity: "warning".into(), targets: vec![schedule.subject.clone()],
@@ -168,6 +193,9 @@ schedule "orchard" {{ {clock}
         let warning = store.operational_failure(&attention).unwrap().unwrap();
         assert_eq!(warning.status, "pending");
         assert!(warning.reason.contains("peer: peer_only_envelopes=7, local_only_envelopes=3"));
+        assert!(warning.reason.contains("progressing=false, healthy_streak=0, member_matches=true, basis_matches="),
+            "{}", warning.reason);
+        assert!(warning.reason.contains("admission_healthy=true, strict_history="), "{}", warning.reason);
         assert!(warning.reason.contains("occurrence 0"));
         reconciler.observe_schedule_replication_gate(&schedule, false, wall + 900_001).unwrap();
         assert_eq!(store.operational_failure(&attention).unwrap().unwrap().request, warning.request);

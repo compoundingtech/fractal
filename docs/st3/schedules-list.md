@@ -24,7 +24,7 @@ JSON keeps that node and unfamiliar declaration fields; it assigns no takeover m
 no run-twice warning in this declaration-only read. Opaque, unfamiliar,
 stopped and oversized declarations remain visible rows rather than disappearing.
 
-NEXT DECLARED is a nominal tick computed from the declaration at the page's `as_of`. It does not
+NEXT (DECLARED) is a nominal tick computed from the declaration at the page's `as_of`. It does not
 predict admission, actual execution, completion, catch-up, current ownership or whether a prior
 occurrence ran. A past one-shot has no future declared tick; stopped declarations stay listed
 without a tick. A declaration the scheduler rejects, including invalid standby settings, has an
@@ -33,6 +33,33 @@ otherwise the tick is unknown. Calendar ticks
 use the scheduler's existing timezone calculation: the first real minute after a DST gap and the
 first instant of a repeated local minute. An exact tick is included. This read changes no scheduler,
 arming, catch-up, role, heartbeat or occurrence identity behavior.
+
+The human-readable CLI also shows LATEST OUTCOME for the highest observed occurrence number in
+a small local tail: reached, work requested, started (with run ID), failed (with code and reason),
+or cancelled. Late observations for older occurrences do not replace the newer occurrence's
+outcome. Failure and cancellation reasons are terminal-safe and capped at 120 characters,
+including an ellipsis when shortened. Future arming does not hide the preceding work outcome.
+`none` means no outcome in that tail, not that the schedule has never run. Started/failed claims
+are attributed through their linked work-requested or occurrence-reached claim within the tail;
+when a newer observation cannot be attributed, the displayed occurrence's outcome is explicitly
+unknown rather than guessed. The display considers only the newest claims in that bounded tail,
+not the full history: if an outcome claim falls outside it, an earlier state can be shown.
+Use `fractal claims ls --subject SCHEDULE --order desc --json` to read full history, following
+its history cursor explicitly when needed.
+
+This CLI-only enrichment uses the existing exact-subject `GET /v1/claims` route for at most the
+first 50 displayed schedules, with at most four reads in flight. Each read has a two-second
+deadline; failure or timeout shows `outcome: unavailable` without failing the declaration list.
+Remaining schedules show `outcome: not loaded`. Each request selects six claims, newest first.
+The API and store each look ahead one row for pagination, so the underlying indexed query has
+`LIMIT 8`. The CLI never follows its history cursor. These reads occur separately from the
+declaration snapshot and carry only this member's local knowledge. The client-v0 schedules
+response and `--json` output remain declaration-only, with no new wire fields. To inspect older
+outcomes and complete reasons:
+
+```sh
+fractal claims ls --subject schedule/example/daily --order desc --limit 20 --json
+```
 
 KNOWLEDGE AGE is the age of the last successful **direct exchange with the declaration origin**
 recorded on this member, even if the exchange was partial. It is not declaration freshness or proof

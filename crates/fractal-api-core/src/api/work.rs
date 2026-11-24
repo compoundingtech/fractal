@@ -2,7 +2,6 @@ use crate::AdhocWorkStore;
 use crate::MissionsStore;
 use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
-use crate::SeatsStoreCore;
 use super::*;
 use super::client_v0::{ClientSession, require_scope};
 

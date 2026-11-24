@@ -6343,6 +6343,9 @@ fn remote_terminal_live_session(
     expected_incarnation: &str,
 ) -> Result<LiveSession, ApiError> {
     let _span = crate::profile::span("terminal/live-fence");
+    if state.store.has_current_local_session(subject).map_err(ApiError::internal)? {
+        return terminal_live_session(state, subject, Some(expected_incarnation));
+    }
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
@@ -6385,6 +6388,8 @@ fn remote_terminal_live_session(
     Ok(LiveSession {
         runtime_id: runtime_id.into(),
         incarnation_id: incarnation.into(),
+        native_incarnation_id: incarnation.into(),
+        custody: crate::store::local_sessions::SessionCustody::Owned,
         owner_host_id,
         terminal: fields
             .get("terminal")
@@ -12421,7 +12426,7 @@ mission "differential" state="ready" {
         let edge = Store::open_memory("edge").unwrap();
         edge.bind_fleet(FLEET).unwrap();
         let mut recorded = crate::api::roster_stage_recorded().subscribe();
-        let subject = "agent/fresh-pause";
+        let subject = "agent/fresh-in-flight";
         let append = |fields: Value| {
             state.store.append_claim(&ClaimInput {
                 subject: subject.into(), kind: "harness.observed".into(), actor: None,
@@ -12433,7 +12438,7 @@ mission "differential" state="ready" {
         state.store.append_claim(&ClaimInput {
             subject: subject.into(), kind: "runtime.observed".into(), actor: None,
             fields: serde_json::from_value(json!({"status":"running",
-                "runtime_id":"fresh-pause", "incarnation_id":"one"})).unwrap(),
+                "runtime_id":"fresh-in-flight", "incarnation_id":"one"})).unwrap(),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
         let mut published = state.store.subscribe_agent_roster();
@@ -12447,15 +12452,16 @@ mission "differential" state="ready" {
                 .is_some_and(|(published, _, _)| published >= cut)
         };
 
-        // A plain read asks for a refresh; once it publishes, the refresher pauses a second.
+        // Establish a publication before holding the next reactive refresh at admission.
         let working = append(json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
         let _ = list(false).await;
         tokio::time::timeout(Duration::from_secs(5), published.wait_for(publishes(working)))
             .await.expect("the refresher publishes the asked-for cut").unwrap();
 
-        // Unchanged: plain reads during the pause answer from the publication and do not cut it
-        // short, however many ask. The change comes from a peer: a claim this node wrote would
-        // cut the pause itself.
+        // Replicated claims wake the reactive refresher immediately, just like local claims.
+        // Hold its admission explicitly so plain reads must serve the previous publication,
+        // independently of how quickly the owner would otherwise publish the peer's change.
+        let _admission = state.store.admit_agent_resources("other").await;
         edge.append_claim(&ClaimInput {
             subject: subject.into(), kind: "harness.observed".into(), actor: None,
             fields: serde_json::from_value(json!({"state":"idle", "driver":"codex",
@@ -12472,20 +12478,15 @@ mission "differential" state="ready" {
         let idle = state.store.index().unwrap();
         assert!(idle > working, "the peer's claim reached this node");
         for _ in 0..3 {
-            let (Extension(snapshot), Json(page)) = list(false).await.unwrap();
-            assert!(snapshot.store_index < idle, "a plain read answers from the publication");
+            let (Extension(snapshot), Json(page)) = tokio::time::timeout(
+                Duration::from_millis(500), list(false))
+                .await.expect("a plain read must not wait for the held refresh").unwrap();
+            assert_eq!(snapshot.store_index, working, "a plain read keeps the publication's cut");
             assert_eq!(page.items[0]["harness_state"], "working");
         }
-        assert!(
-            tokio::time::timeout(Duration::from_millis(250), published.wait_for(publishes(idle)))
-                .await.is_err(),
-            "plain reads must not shorten the refresher's minimum pause",
-        );
 
-        // A healthy attempt is already in flight; a fresh read must wait for its result.
-        let _admission = state.store.admit_agent_resources("other").await;
-        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one",
-            "observed_at_ms":2}));
+        // While owner admission is held, start a healthy attempt with an explicit release.
+        // Unlike the plain reads, a fresh read must wait for this attempt's publication.
         let store = state.store.clone();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -14281,70 +14282,116 @@ mission "differential" state="ready" {
     #[tokio::test]
     async fn fleet_operational_commands_are_bounded_and_report_slow_queries() {
         use crate::OperationsFixtureStore;
-        let root = tempfile::tempdir().unwrap();
-        let state = test_state(root.path());
-        state.store.seed_operational_fleet();
-        // The old card's complete run array would exceed the negotiated one-megabyte limit.
-        let app = super::super::router(state.clone());
-        let read = |uri: String| {
-            let app = app.clone();
-            async move {
-                let response = app
-                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-                    .await
-                    .unwrap();
-                let status = response.status();
-                let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES)
-                    .await
-                    .unwrap();
-                let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                    panic!("{status}: {error}: {}", String::from_utf8_lossy(&bytes))
-                });
-                assert_eq!(status, StatusCode::OK, "{value}");
-                value
+        use smallclaims::sqlite::work::{self, SqliteWork};
+
+        let mut baseline: Option<Vec<SqliteWork>> = None;
+        for background_claims in [501, 1002] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            state.store.seed_operational_fleet_with_background(background_claims);
+            // The old card's complete run array would exceed the negotiated one-megabyte limit.
+            let app = super::super::router(state.clone());
+            let read = |uri: String| {
+                let app = app.clone();
+                async move {
+                    let response = app
+                        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES)
+                        .await
+                        .unwrap();
+                    let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                        panic!("{status}: {error}: {}", String::from_utf8_lossy(&bytes))
+                    });
+                    assert_eq!(status, StatusCode::OK, "{value}");
+                    value
+                }
+            };
+            let missions = read("/v1/client/missions?history=true&limit=50".into()).await;
+            let item = &missions["value"]["items"][0];
+            assert_eq!(item["total_runs"], 2401);
+            assert_eq!(item["active_runs"], 601);
+            assert_eq!(item["runs"].as_array().unwrap().len(), 3);
+            assert_eq!(item["runs_truncated"], true);
+            let mut large = vec![item.clone(); 200];
+            for card in &mut large {
+                for run in card["run_details"].as_array_mut().unwrap() {
+                    run["requester"] = json!(format!("person/{}", "x".repeat(1990)));
+                }
             }
-        };
-        let missions = read("/v1/client/missions?history=true&limit=50".into()).await;
-        let item = &missions["value"]["items"][0];
-        assert_eq!(item["total_runs"], 2401);
-        assert_eq!(item["active_runs"], 601);
-        assert_eq!(item["runs"].as_array().unwrap().len(), 3);
-        assert_eq!(item["runs_truncated"], true);
-        let mut large = vec![item.clone(); 200];
-        for card in &mut large {
-            for run in card["run_details"].as_array_mut().unwrap() {
-                run["requester"] = json!(format!("person/{}", "x".repeat(1990)));
+            assert!(bound_mission_cards(&mut large).unwrap());
+            assert!(!large.is_empty() && large.len() < 200);
+            assert!(serde_json::to_vec(&large).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES - 120_000);
+            let overview = read("/v1/mission-overview?mission=mission%2Fexample%2Ffleet".into()).await;
+            assert_eq!(overview["value"]["total_runs"], 2401);
+            for collection in ["missions", "work"] {
+                let page = read(format!(
+                    "/v1/outcome-history?collection={collection}&since=0&status=failed&limit=50"
+                ))
+                .await;
+                assert_eq!(page["value"]["items"].as_array().unwrap().len(), 50);
+                assert_eq!(page["value"]["has_more"], true);
             }
+            // Sample a real query, then inject its duration through the existing recorder:
+            // testing the report must not depend on slow hardware or a large background log.
+            // Fixture queries can exhaust the meter's bounded label table and fold a
+            // new label into "(other)". Isolate report sampling from setup, then make
+            // a real request so the request report remains covered after the reset.
+            crate::performance::reset_for_test();
+            let _ = read("/v1/mission-overview?mission=mission%2Fexample%2Ffleet".into()).await;
+            let index = state.store.index().unwrap();
+            let _ = state
+                .store
+                .claims_page(None, None, 0, None, false, 500)
+                .unwrap();
+            let slow_sql = "SELECT store_index FROM claims ORDER BY store_index LIMIT 500";
+            crate::performance::record_query(slow_sql, std::time::Duration::from_secs(60));
+            let report = read("/v1/performance".into()).await;
+            assert_eq!(report["value"]["window_seconds"], 300);
+            assert!(!report["value"]["queries"].as_array().unwrap().is_empty());
+            assert!(!report["value"]["requests"].as_array().unwrap().is_empty());
+            assert!(report["value"]["queries"].as_array().unwrap().iter().any(|query|
+                query["kind"] == crate::performance::normalize_query(slow_sql)
+                    && query["max_ms"].as_f64().unwrap() >= 60_000.0));
+            assert_eq!(
+                state.store.index().unwrap(),
+                index,
+                "operational samples never write graph claims"
+            );
+            assert!(!report.to_string().contains("person/operator"));
+
+            // Nextest runs each test in its own process, so these process-wide counters include
+            // the endpoint's blocking worker without unrelated tests. test_state starts no
+            // reconciler or background tasks, and setup/verification are outside each measurement.
+            let mut measured = Vec::new();
+            for uri in [
+                "/v1/client/missions?history=true&limit=50",
+                "/v1/mission-overview?mission=mission%2Fexample%2Ffleet",
+                "/v1/outcome-history?collection=missions&since=0&status=failed&limit=50",
+                "/v1/outcome-history?collection=work&since=0&status=failed&limit=50",
+                "/v1/performance",
+            ] {
+                // Compare warm reads: cold cache initialization is not endpoint steady-state work.
+                let _ = read(uri.into()).await;
+                let before = work::total();
+                let _ = read(uri.into()).await;
+                let cost = work::total() - before;
+                if uri != "/v1/performance" {
+                    assert!(cost.statements > 0 && cost.vm_steps > 0, "{uri}: missing SQL accounting");
+                }
+                if let Some(baseline) = &baseline {
+                    let previous = baseline[measured.len()];
+                    assert_eq!(cost.fullscan_steps, previous.fullscan_steps,
+                        "{uri}: full scans grew with unrelated claims: {previous:?} -> {cost:?}");
+                    assert!(cost.vm_steps <= previous.vm_steps + 50,
+                        "{uri}: VM work grew with unrelated claims: {previous:?} -> {cost:?}");
+                }
+                measured.push(cost);
+            }
+            baseline = Some(measured);
         }
-        assert!(bound_mission_cards(&mut large).unwrap());
-        assert!(!large.is_empty() && large.len() < 200);
-        assert!(serde_json::to_vec(&large).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES - 120_000);
-        let overview = read("/v1/mission-overview?mission=mission%2Fexample%2Ffleet".into()).await;
-        assert_eq!(overview["value"]["total_runs"], 2401);
-        for collection in ["missions", "work"] {
-            let page = read(format!(
-                "/v1/outcome-history?collection={collection}&since=0&status=failed&limit=50"
-            ))
-            .await;
-            assert_eq!(page["value"]["items"].as_array().unwrap().len(), 50);
-            assert_eq!(page["value"]["has_more"], true);
-        }
-        // The SQL hook sees a real fleet-scale query, without file profiling or diagnostic claims.
-        let index = state.store.index().unwrap();
-        let _ = state
-            .store
-            .claims_page(None, None, 0, None, false, 500)
-            .unwrap();
-        let report = read("/v1/performance".into()).await;
-        assert_eq!(report["value"]["window_seconds"], 300);
-        assert!(!report["value"]["queries"].as_array().unwrap().is_empty());
-        assert!(!report["value"]["requests"].as_array().unwrap().is_empty());
-        assert_eq!(
-            state.store.index().unwrap(),
-            index,
-            "operational samples never write graph claims"
-        );
-        assert!(!report.to_string().contains("person/operator"));
     }
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
@@ -25111,6 +25158,143 @@ mission "example/zero-run" state="ready" {
             .unwrap_or_else(|error| panic!("{}: {}", error.code, error.message));
         assert_eq!(live.owner_host_id, "host/owner-node");
         assert_eq!(live.incarnation_id, "same-runtime-id:i1");
+    }
+
+    #[test]
+    fn retained_local_session_history_does_not_override_the_current_remote_owner() {
+        use crate::store::local_sessions::{LocalSession, SessionCustody};
+        for retained in ["exited", "inactive", "detached"] {
+            let owner_root = tempfile::tempdir().unwrap();
+            let follower_root = tempfile::tempdir().unwrap();
+            let owner = test_state_named(owner_root.path(), "owner-node");
+            let mut follower = test_state_named(follower_root.path(), "follower-node");
+            let secret = follower_root.path().join("fleet-secret");
+            std::fs::write(&secret, [7_u8; 32]).unwrap();
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+            follower.client_relay = crate::peer::ClientRelay::from_config(&crate::config::Config {
+                node: "follower-node".into(), fleet_id: Some("fleet-test".into()),
+                shared_secret_file: Some(secret),
+                peers: vec![crate::config::PeerConfig {
+                    name: "owner-node".into(), url: "http://127.0.0.1:9".into(),
+                }], ..Default::default()
+            }).unwrap();
+            let subject = "agent/fleet-terminal";
+            let mut old = LocalSession {
+                subject: subject.into(), runtime_id: "former-local-runtime".into(),
+                incarnation: "42:former".into(), native_incarnation: "42:former".into(),
+                terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
+                custody: SessionCustody::Owned, start_operation: None, invocation: None,
+            };
+            if retained == "detached" {
+                old.incarnation = "42:former:bound:019a0000-0000-7000-8000-000000000001".into();
+                old.invocation = Some(old.incarnation.clone());
+                old.lifecycle = crate::model::MemberLifecycle::TerminalBound;
+                old.custody = SessionCustody::Borrowed;
+            }
+            follower.store.bind_local_session(&old).unwrap();
+            match retained {
+                "exited" => follower.store.settle_local_session_custody(subject, &old.native_incarnation).unwrap(),
+                "inactive" => {
+                    follower.store.connection.write().execute(
+                        "UPDATE local_session_custody SET active=0 WHERE subject=?1", [subject]).unwrap();
+                }
+                "detached" => follower.store.detach_local_session(subject, &old.incarnation, "migration-detach").unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(follower.store.local_session_at(subject, &old.incarnation).unwrap().is_some());
+            assert!(!follower.store.has_current_local_session(subject).unwrap(), "{retained}");
+            owner.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({"runtime_id":"remote-runtime",
+                    "incarnation_id":"remote-current", "status":"running", "terminal":true})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: Some("remote-current".into()),
+            }).unwrap();
+            follower.store.import_replication("owner-node", &owner.store.export_replication(0).unwrap()).unwrap();
+            let live = remote_terminal_live_session(&follower, subject, "remote-current")
+                .unwrap_or_else(|error| panic!("{retained}: {}: {}", error.code, error.message));
+            assert_eq!(live.owner_host_id, "host/owner-node", "{retained}");
+            assert_eq!(live.runtime_id, "remote-runtime", "{retained}");
+            assert_eq!(live.incarnation_id, "remote-current", "{retained}");
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_native_stop_releases_local_routing_before_migration_to_a_remote_owner() {
+        use crate::store::local_sessions::{LocalSession, SessionCustody};
+        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        let Ok(binary) = fractal_runtime::resolve_executable("pty", &environment) else {
+            assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "hosted managed-stop fixtures require pty");
+            return;
+        };
+        let owner_root = tempfile::tempdir().unwrap();
+        let follower_root = tempfile::tempdir().unwrap();
+        let owner = test_state_named(owner_root.path(), "owner-node");
+        let mut follower = test_state_named(follower_root.path(), "follower-node");
+        follower.pty_binary = binary.clone();
+        let pty = fractal_runtime::PtyRuntime::new(follower.pty_root.clone()).with_binary(binary.to_string_lossy());
+        let runtime_id = "managed-migration";
+        pty.spawn(runtime_id, &fractal_runtime::Launch::Shell("sleep 600 & wait".into()),
+            follower_root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
+        struct Cleanup(fractal_runtime::PtyRuntime);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = self.0.stop("managed-migration"); } }
+        let _cleanup = Cleanup(pty.clone());
+        let native = pty.snapshot().unwrap().into_iter().find(|item| item.name == runtime_id).unwrap();
+        let incarnation = format!("{}:{}", native.pid.unwrap(), native.created_at.unwrap());
+        let subject = "agent/fleet-terminal";
+        follower.store.bind_local_session(&LocalSession {
+            subject: subject.into(), runtime_id: runtime_id.into(), incarnation: incarnation.clone(),
+            native_incarnation: incarnation.clone(), terminal: true, driver: None,
+            lifecycle: crate::model::MemberLifecycle::Service, custody: SessionCustody::Owned,
+            start_operation: None, invocation: None,
+        }).unwrap();
+        follower.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({"runtime_id":runtime_id,
+                "incarnation_id":incarnation, "status":"running", "terminal":true,
+                "host":"follower-node"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("local-before-stop".into()),
+        }).unwrap();
+        let stop = crate::graph::parse_internal_intent(
+            "version 2\nstop \"agent/fleet-terminal\"\n", "follower-node").unwrap();
+        follower.store.apply_internal(&stop, "managed-migration-stop").unwrap();
+        let runtime = Arc::new(crate::reconcile::NativeRuntime::new(
+            &follower.state_dir, Some(&follower.pty_root), &binary));
+        let reconciler = crate::reconcile::Reconciler::new(follower.store.clone(), runtime,
+            "follower-node".into(), follower.notify.clone());
+        // Exercise the actual desired-stop planner, native stop and receipt writer.
+        // No test calls the custody-settlement helper.
+        reconciler.reconcile_once().unwrap();
+        assert!(!follower.store.has_current_local_session(subject).unwrap());
+        assert!(follower.store.local_session_at(subject, &incarnation).unwrap().is_some());
+        assert!(follower.store.observations_for(subject, "runtime.action.succeeded").unwrap().iter()
+            .any(|claim| claim.body["fields"]["action"] == "terminate"
+                && claim.body["fields"]["incarnation_id"] == incarnation));
+        let secret = follower_root.path().join("fleet-secret");
+        std::fs::write(&secret, [7_u8; 32]).unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        follower.client_relay = crate::peer::ClientRelay::from_config(&crate::config::Config {
+            node: "follower-node".into(), fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            peers: vec![crate::config::PeerConfig {
+                name: "owner-node".into(), url: "http://127.0.0.1:9".into(),
+            }], ..Default::default()
+        }).unwrap();
+        let moved = crate::graph::parse_internal_intent(
+            "version 2\nagent \"fleet-terminal\" { host \"owner-node\"; command \"sleep 600\" }\n",
+            "owner-node").unwrap();
+        owner.store.apply_internal(&moved, "moved-to-owner").unwrap();
+        owner.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({"runtime_id":"remote-runtime",
+                "incarnation_id":"remote-current", "status":"running", "terminal":true,
+                "host":"owner-node"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("remote-after-managed-stop".into()),
+        }).unwrap();
+        follower.store.import_replication("owner-node", &owner.store.export_replication(0).unwrap()).unwrap();
+        let live = remote_terminal_live_session(&follower, subject, "remote-current")
+            .unwrap_or_else(|error| panic!("{}: {}", error.code, error.message));
+        assert_eq!(live.owner_host_id, "host/owner-node");
+        assert_eq!(live.runtime_id, "remote-runtime");
     }
 
     #[test]

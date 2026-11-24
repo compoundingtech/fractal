@@ -1,4 +1,3 @@
-use crate::SeatsStoreCore;
 use super::*;
 
 /// A work acknowledgement needs the selected seat's hierarchy, not the fleet's desired graph.

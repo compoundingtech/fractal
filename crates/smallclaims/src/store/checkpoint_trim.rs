@@ -38,14 +38,29 @@ pub fn local_trim_capture_kinds() -> Vec<&'static str> {
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 
-/// The claims a member that trims locally deletes in one day unless `[trim] daily_claims` says
-/// otherwise: about 1.7 h of paced deletion at the 16.6 claims a second measured on a 53 GB
-/// member, whose first cut dropped 390,000 claims.
+/// The claims a member that trims locally may delete per UTC day unless `[trim] daily_claims`
+/// says otherwise. The available daily budget advances evenly from UTC midnight.
 pub const LOCAL_TRIM_DAILY_CLAIMS: u64 = 100_000;
 
 /// `meta`: the day a member that trims locally last deleted on, and how many claims it deleted
 /// that day, as `DAY CLAIMS`. Each chunk updates it in the transaction that deletes.
 pub const LOCAL_TRIM_DAY: &str = "local_trim_day";
+
+const TRIM_DAY_MS: u64 = 86_400_000;
+
+/// One checkpoint-worker interval of credit, rounded up so even one claim per day works.
+fn trim_burst(daily: u64) -> u64 {
+    daily.div_ceil(144)
+}
+
+/// Stay below the day's linear budget plus one worker interval's burst. The existing daily
+/// deletion counter makes this deterministic across restarts without another metadata write.
+fn trim_allowance(daily: u64, now_ms: u64, deleted: u64) -> u64 {
+    let elapsed = u128::from(now_ms % TRIM_DAY_MS);
+    let accrued = (u128::from(daily) * elapsed).div_ceil(u128::from(TRIM_DAY_MS));
+    let allowed = (accrued + u128::from(trim_burst(daily))).min(u128::from(daily));
+    (allowed as u64).saturating_sub(deleted)
+}
 
 /// Stop starting new trim steps after this much work. A single step or COMMIT may take longer;
 /// this is not a hard bound on writer hold or foreground request latency.
@@ -745,12 +760,9 @@ impl Store {
         }
         self.replica_rows_changed();
         // A restore is not a day's trim: what is left of the cut is deleted whole.
-        let cap = self.local_trim_daily_claims();
-        self.trim_locally_at_most(u64::MAX);
         let mut actions = Vec::new();
-        let finished = self.finish_trim(checkpoint, &mut actions);
-        self.trim_locally_at_most(cap);
-        finished.map_err(internal)?;
+        self.finish_trim_paced(false, checkpoint, &mut actions, std::thread::sleep)
+            .map_err(internal)?;
         Ok(actions)
     }
 
@@ -1009,11 +1021,12 @@ impl Store {
     /// writer admission and rest outside the loan between commits. Each chunk checks, inside its own
     /// transaction, that the graph did not change, and stops at the first chunk that would.
     pub /* sqlite-large-value-flow: allow-for-now flow-h3f9bf57da525 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn finish_trim(&self, checkpoint: &str, actions: &mut Vec<CheckpointAction>) -> Result<()> {
-        self.finish_trim_paced(checkpoint, actions, std::thread::sleep)
+        self.finish_trim_paced(true, checkpoint, actions, std::thread::sleep)
     }
 
     /* sqlite-large-value-flow: allow-for-now flow-h4f2952c50e14 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn finish_trim_paced(
         &self,
+        paced: bool,
         checkpoint: &str,
         actions: &mut Vec<CheckpointAction>,
         mut pause: impl FnMut(std::time::Duration),
@@ -1026,15 +1039,22 @@ impl Store {
         let mut cursor = TrimCursor { envelopes_done: false, walk: self.local_walk(checkpoint)? };
         // A trim deletes at most the day's claims left.
         let day = self.trim_day.load(Ordering::Relaxed);
-        let mut left = self.local_trim_left_today()?;
+        let mut left = if paced {
+            trim_allowance(
+                self.local_trim_daily_claims(),
+                self.trim_now_ms.load(Ordering::Relaxed),
+                deleted_on(&self.readers.get(), day)?,
+            )
+        } else {
+            u64::MAX
+        };
         let mut views = TrimViews::new(self);
         let mut wal = TrimWalState::default();
         let delete = crate::profile::span("trim.delete");
         loop {
             if left == 0 || !self.trim_wal_allows(&mut wal, &mut pause)? {
-                // The cut stays `trimming`, and the next step goes on from here: the next day's
-                // after the day's cap, the next one after a WAL that would not restart. What its
-                // deletes deferred is rebuilt now, so a deferral outlasts no run.
+                // The cut stays `trimming`; a later checkpoint step resumes it when allowance
+                // accrues or the WAL can restart. Rebuild deferred work before returning.
                 views.stopped();
                 self.rebuild_deferred_paced()?;
                 actions.push(CheckpointAction::TrimDeferred {
@@ -1077,7 +1097,7 @@ impl Store {
                 && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET)
                 && (claims.len() as u64) < left
             {
-                let Some((envelope, envelope_claims)) = stages.time("walk", || next_trim_rows(&transaction, &mut cursor))? else {
+                let Some((envelope, envelope_claims)) = stages.time("walk", || next_trim_rows_bounded(&transaction, &mut cursor, left - claims.len() as u64))? else {
                     break;
                 };
                 body_bytes += stages.time("body_bytes", || claim_body_bytes(&transaction, &envelope_claims))?;
@@ -1357,11 +1377,21 @@ fn start_local_walk_tx(transaction: &Transaction<'_>, checkpoint: &str) -> Resul
 /// means progress, not exhaustion; only None proves that both ordered scans have ended.
 /// Keeping the existence probe outside the ordered seek prevents LIMIT 1 from scanning an
 /// arbitrarily long run of already-trimmed tombstones while holding the writer.
+#[cfg(test)]
 fn next_trim_rows(
     transaction: &Transaction<'_>,
     cursor: &mut TrimCursor,
 ) -> Result<Option<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)>> {
+    next_trim_rows_bounded(transaction, cursor, u64::MAX)
+}
+
+fn next_trim_rows_bounded(
+    transaction: &Transaction<'_>,
+    cursor: &mut TrimCursor,
+    most: u64,
+) -> Result<Option<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)>> {
     if !cursor.envelopes_done {
+        let before = cursor.walk.envelope;
         let envelope = next_local_envelope(transaction, &mut cursor.walk)?;
         if let Some(envelope) = envelope {
             // A released envelope is still held: its identity and claims go as a stored one's.
@@ -1374,18 +1404,26 @@ fn next_trim_rows(
             if !held {
                 return Ok(Some((None, Vec::new())));
             }
-            let claims = transaction
+            let mut claims = transaction
                 .prepare_cached(
                     "SELECT tombstone.id, tombstone.operation_id, tombstone.subject, tombstone.kind FROM checkpoint_claims AS tombstone
                      WHERE tombstone.writer=?1 AND tombstone.sequence=?2
                        AND tombstone.envelope_hash=?3
-                       AND EXISTS (SELECT 1 FROM claims WHERE claims.id=tombstone.id)",
+                       AND EXISTS (SELECT 1 FROM claims WHERE claims.id=tombstone.id)
+                     LIMIT ?4",
                 )?
                 .query_map(
-                    params![envelope.writer, envelope.sequence, envelope.envelope_hash],
+                    params![envelope.writer, envelope.sequence, envelope.envelope_hash, most.saturating_add(1).min(i64::MAX as u64)],
                     |row| Ok(deletable_claim(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            if claims.len() as u64 > most {
+                // Keep the envelope until all its claims are deleted. Revisiting its indexed
+                // tombstone lets even an envelope larger than the burst drain without overshoot.
+                claims.truncate(usize::try_from(most)?);
+                cursor.walk.envelope = before;
+                return Ok(Some((None, claims)));
+            }
             return Ok(Some((Some(envelope), claims)));
         }
         cursor.envelopes_done = true;

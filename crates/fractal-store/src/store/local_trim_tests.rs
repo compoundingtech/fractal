@@ -2,7 +2,7 @@
 //! the audited retention rules, and every reader answers the same from the full log and the
 //! trimmed one.
 use super::*;
-use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, kinds, step};
+use crate::store::checkpoint_agreement_tests_shared_attention_tests::kinds;
 use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +11,51 @@ use smallclaims::store::checkpoint_agreement::CheckpointContext;
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
 const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
+// Ordinary retention fixtures start after signed freshness activates and age past the
+// forget bound before trimming. The bound tests below choose their own earlier trim times.
+const FIXTURE_WRITTEN_MS: u128 = smallclaims::principal::FRESHNESS_FROM_UNIX_MS as u128 + 60_000;
+
+fn clocked(store: Store) -> Store {
+    store.set_write_clock_at(FIXTURE_WRITTEN_MS).unwrap();
+    store
+}
+
+/// The fixture's observations are before the due cut, independent of the wall clock.
+fn context(scratch: &Path, days_later: u128) -> CheckpointContext {
+    CheckpointContext {
+        now_unix_ms: FIXTURE_WRITTEN_MS + smallclaims::principal::FORGET_SIGNED_AFTER_MS as u128
+            + (3 + days_later) * smallclaims::store::checkpoint::DAY_MS,
+        scratch: scratch.to_path_buf(),
+    }
+}
+
+/// Preserve the chronology that wall-clock writes used to provide, including after a day jump.
+fn advance_clock(store: &Store) {
+    let now = smallclaims::store::checkpoint_agreement::write_time(
+        &store.connection.write(), store.origin(),
+    ).unwrap();
+    store.set_write_clock_at(now + 1).unwrap();
+}
+
+/// Release judges envelope age on a reader as well as writing through the store clock.
+fn release_envelopes_at(store: &Store, now: u128) {
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    store.set_write_clock_at(now).unwrap();
+    let _reset = ResetClock;
+    smallclaims::store::set_thread_clock(Some(now));
+    while !store.release_envelopes(0).unwrap().done {}
+}
+
+fn step(store: &Store, context: &CheckpointContext) -> Vec<smallclaims::store::checkpoint_agreement::CheckpointAction> {
+    store.set_write_clock_at(context.now_unix_ms).unwrap();
+    store.checkpoint_step(context).unwrap()
+}
+
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
     declared(Store::open_memory("node").unwrap(), trims_locally)
@@ -18,6 +63,7 @@ fn member(trims_locally: bool) -> Store {
 
 /// `store` with both seats declared.
 fn declared(store: Store, trims_locally: bool) -> Store {
+    let store = clocked(store);
     store.bind_fleet(TEST_FLEET).unwrap();
     let source = "version 2\nagent \"amber\" { command \"true\" }\nagent \"birch\" { command \"true\" }\n";
     let intent = crate::graph::parse_test_intent(source, "node").unwrap();
@@ -98,6 +144,7 @@ fn resource_fields(shape: u8, observer: &str) -> serde_json::Map<String, Value> 
 }
 
 fn apply(store: &Store, write: &Write, n: usize) {
+    advance_clock(store);
     if let Write::Poll { observer, status, resource, shape } = write {
         let observer = format!("observer/watch-{observer}");
         let status = ["ok", "changed", "failed"][usize::from(*status)];
@@ -310,7 +357,7 @@ fn a_local_cut_trims_the_claims_of_released_envelopes() {
     while !store.sign_own_claims().unwrap().done {}
     let before = answers(&store, context.now_unix_ms);
     let digest = store.replication_snapshot().unwrap().authority_digest.clone();
-    while !store.release_envelopes(0).unwrap().done {}
+    release_envelopes_at(&store, context.now_unix_ms);
     let count = |sql: &str| -> i64 { store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-h12ee733e233d owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
     let released_observations = count(
         "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'",
@@ -351,7 +398,7 @@ fn a_cut_trims_the_claims_a_member_received_as_signed_claims() {
     }
     alder.replication_snapshot().unwrap();
     while !alder.sign_own_claims().unwrap().done {}
-    while !alder.release_envelopes(0).unwrap().done {}
+    release_envelopes_at(&alder, context.now_unix_ms);
     let count = |store: &Store, sql: &str| -> i64 { store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-ha80fdc3a19b9 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
     assert!(count(&alder, "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'") > 30);
     let birch = declared(Store::open_memory("birch").unwrap(), true);
@@ -398,7 +445,7 @@ fn retiring_pair(scratch: &std::path::Path) -> (Store, Store, CheckpointContext)
     assert_eq!(kinds(&step(&alder, &context(scratch, 0))), ["trimmed"]);
     assert_eq!(claims_of(&alder, "observer.observed"), 1);
     birch.set_retirement_wins(true);
-    let quiet = CheckpointContext { now_unix_ms: now_ms(), scratch: scratch.to_path_buf() };
+    let quiet = CheckpointContext { now_unix_ms: FIXTURE_WRITTEN_MS, scratch: scratch.to_path_buf() };
     (alder, birch, quiet)
 }
 
@@ -575,7 +622,7 @@ fn unheld_retirements(scratch: &std::path::Path) -> (Store, Store, Store, Checkp
     sync_all(&[&alder, &oak]);
     assert_eq!(kinds(&step(&alder, &context(scratch, 0))), ["trimmed"]);
     birch.set_retirement_wins(true);
-    let quiet = CheckpointContext { now_unix_ms: now_ms(), scratch: scratch.to_path_buf() };
+    let quiet = CheckpointContext { now_unix_ms: FIXTURE_WRITTEN_MS, scratch: scratch.to_path_buf() };
     (alder, birch, oak, quiet)
 }
 
@@ -632,7 +679,7 @@ fn a_local_cut_preserves_publications_however_many_chunks_it_deletes() {
     // A capped day stops at TrimDeferred, and the next day's run reaches the final mark.
     store.trim_locally_at_most(15);
     for (day, outcome) in [(0, "deferred"), (1, "trimmed")] {
-        let context = context(scratch.path(), day);
+        let context = cap_context(scratch.path(), day);
         let before = answers(&store, context.now_unix_ms);
         let deleted = all.difference(&observer_ids(&store)).count();
         let generation = store.fractal.presented_agents.generation();
@@ -925,7 +972,7 @@ fn a_local_cut_keeps_the_replication_snapshot_and_a_peer_syncing_through_it_agre
     for n in 0..30 {
         apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
     }
-    let peer = Arc::new(Store::open_memory("birch").unwrap());
+    let peer = Arc::new(clocked(Store::open_memory("birch").unwrap()));
     peer.bind_fleet(TEST_FLEET).unwrap();
     while sync_into(&store, &peer) != 0 {}
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1110,7 +1157,7 @@ fn tail_member() -> (Arc<Store>, Arc<Store>, i64) {
         apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
     }
     let tail = last_dropped_observer_envelope_to_the_tail(&store);
-    let peer = Arc::new(Store::open_memory("birch").unwrap());
+    let peer = Arc::new(clocked(Store::open_memory("birch").unwrap()));
     peer.bind_fleet(TEST_FLEET).unwrap();
     while sync_into(&store, &peer) != 0 {}
     (store, peer, tail)
@@ -1174,7 +1221,7 @@ fn after_a_trim_s_stop_a_lagging_peer_is_not_listed_the_same_empty_page_twice() 
     store.set_trim_pause(std::time::Duration::ZERO);
     store.set_trim_chunk_envelopes(1);
     store.set_trim_view_refold_interval(std::time::Duration::from_secs(3_600));
-    let peer = Store::open_memory("birch").unwrap();
+    let peer = clocked(Store::open_memory("birch").unwrap());
     peer.bind_fleet(TEST_FLEET).unwrap();
     while sync_into(&store, &peer) != 0 {}
     // Enough that the newest fill a sequence range the peer holds nothing in.
@@ -1293,6 +1340,14 @@ fn cut_states(store: &Store) -> Vec<String> {
         .unwrap()
 }
 
+/// Daily-cap tests run at the end of the UTC day, when the whole paced budget is available.
+fn cap_context(scratch: &Path, days_later: u128) -> CheckpointContext {
+    use smallclaims::store::checkpoint::DAY_MS;
+    let mut context = context(scratch, days_later);
+    context.now_unix_ms = (context.now_unix_ms / DAY_MS + 1) * DAY_MS - 1;
+    context
+}
+
 /// A cut that drops more than the day's claims stops at the cap, stays `trimming`, and goes on
 /// the next day where it stopped; only what it deleted is retired, and the readers answer the
 /// same each day.
@@ -1306,7 +1361,7 @@ fn a_capped_local_cut_stops_at_the_day_s_claims_and_goes_on_the_next_day() {
     }
     let all = observer_ids(&store);
     // Each day's clock, and what the readers answer at it from the whole log.
-    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    let contexts: Vec<_> = (0..3).map(|day| cap_context(scratch.path(), day)).collect();
     let before: Vec<_> = contexts.iter().map(|context| answers(&store, context.now_unix_ms)).collect();
     for (day, deleted) in [(0_u128, 10), (1, 20), (2, 29)] {
         let context = &contexts[day as usize];
@@ -1338,13 +1393,16 @@ fn the_next_day_s_cut_follows_the_leftover_of_a_capped_one() {
         apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
     }
     let all_first = observer_ids(&store);
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 0))), ["deferred"]);
     // Observations of another observer after the first cut was recorded: the next cut's.
+    // These arrive late just after the first due cut, so only the next cut includes them.
+    let first_cut = smallclaims::store::checkpoint::newest_due_cut(cap_context(scratch.path(), 0).now_unix_ms);
+    store.set_write_clock_at(first_cut + 1).unwrap();
     for n in 16..24 {
         apply(&store, &Write::Observer { observer: 1, status: (n % 3) as u8, cursor: None }, n);
     }
     let all: BTreeSet<_> = all_first.union(&observer_ids(&store)).cloned().collect();
-    let next_day = context(scratch.path(), 1);
+    let next_day = cap_context(scratch.path(), 1);
     let before = answers(&store, next_day.now_unix_ms);
     // The leftover's five go first; then the new cut takes the five the day has left.
     assert_eq!(kinds(&step(&store, &next_day)), ["trimmed", "deferred"]);
@@ -1353,7 +1411,7 @@ fn the_next_day_s_cut_follows_the_leftover_of_a_capped_one() {
     assert_eq!(answers(&store, next_day.now_unix_ms), before);
     let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
     assert!(retired_exactly(&store, &gone));
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 2))).first(), Some(&"trimmed"));
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 2))).first(), Some(&"trimmed"));
     assert!(cut_states(&store).iter().all(|state| state == "trimmed"), "{:?}", cut_states(&store));
     assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
     let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
@@ -1370,7 +1428,8 @@ fn a_restart_during_a_capped_cut_goes_on_where_it_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claims.sqlite3");
     let open = |first: bool| {
-        let store = Store::open(&path, "node").unwrap();
+        // The writer clock is connection-local, so restore it on every open.
+        let store = clocked(Store::open(&path, "node").unwrap());
         store.bind_fleet(TEST_FLEET).unwrap();
         if first {
             store.import_retired_identities_paced(|_| {}).unwrap();
@@ -1385,17 +1444,17 @@ fn a_restart_during_a_capped_cut_goes_on_where_it_stopped() {
             apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
         }
         let all = observer_ids(&store);
-        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+        assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 0))), ["deferred"]);
         all
     };
     let store = open(false);
     assert_eq!(cut_states(&store), ["trimming"]);
     assert_eq!(claims_of(&store, "observer.observed"), 15);
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 0))), ["deferred"]);
     assert_eq!(claims_of(&store, "observer.observed"), 15, "the same day deletes no more");
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 1))), ["deferred"]);
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 1))), ["deferred"]);
     assert_eq!(claims_of(&store, "observer.observed"), 5);
-    assert_eq!(kinds(&step(&store, &context(scratch.path(), 2))).first(), Some(&"trimmed"));
+    assert_eq!(kinds(&step(&store, &cap_context(scratch.path(), 2))).first(), Some(&"trimmed"));
     let left = observer_ids(&store);
     assert_eq!(left.len(), 1, "the newest stays");
     assert!(retired_exactly(&store, &all.difference(&left).cloned().collect()));
@@ -1460,7 +1519,7 @@ fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
     for n in 0..27 {
         apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
     }
-    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    let contexts: Vec<_> = (0..3).map(|day| cap_context(scratch.path(), day)).collect();
     for (day, context) in contexts.iter().enumerate() {
         defer_a_resource_delete(&store, day as u8);
         let deferred = |store: &Store| -> i64 {
@@ -1797,7 +1856,7 @@ fn a_fresh_member_joining_from_one_that_split_envelopes_admits_them_whole_and_ag
             .unwrap()
     };
     for trims_locally in [false, true] {
-        let cedar = Store::open_memory("cedar").unwrap();
+        let cedar = clocked(Store::open_memory("cedar").unwrap());
         cedar.bind_fleet(TEST_FLEET).unwrap();
         cedar.import_retired_identities_paced(|_| {}).unwrap();
         cedar.trim_locally(trims_locally).unwrap();
@@ -2286,7 +2345,7 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
         Step::Seat { kind, seat, incarnation, state, old } => {
             let seat = SEATS[usize::from(*seat)];
             let incarnation = format!("{seat}-{incarnation}");
-            let observed_at = now_ms() - if *old { 9 * smallclaims::store::checkpoint::DAY_MS } else { 0 };
+            let observed_at = FIXTURE_WRITTEN_MS - if *old { 9 * smallclaims::store::checkpoint::DAY_MS } else { 0 };
             let (kind, fields) = match kind {
                 0 => ("harness.observed", BTreeMap::from([
                     ("state".into(), json!(STATES[usize::from(*state)])),
@@ -2415,13 +2474,16 @@ fn a_local_cut_s_scoped_capture_stages_every_kind_its_rules_read() {
 #[test]
 fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
     let scratch = tempfile::tempdir().unwrap();
-    let context = context(scratch.path(), 0);
+    // This plans history retention, not deletion: the restored prompt must still be
+    // inside the seven-day history window while its underlying observations are older.
+    let now = FIXTURE_WRITTEN_MS + 3 * smallclaims::store::checkpoint::DAY_MS;
     let store = local_member("alder");
     let seat = SEATS[0];
-    let old = (now_ms() - 9 * smallclaims::store::checkpoint::DAY_MS) as u64;
+    let old = (FIXTURE_WRITTEN_MS - 9 * smallclaims::store::checkpoint::DAY_MS) as u64;
     let mut n = 0;
     let mut append = |kind: &str, fields: Value| -> String {
         n += 1;
+        advance_clock(&store);
         store
             .append_claim(&ClaimInput {
                 subject: seat.into(),
@@ -2447,7 +2509,7 @@ fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
     append("harness.observed", harness("ready", old + 3));
     append("harness.observed", harness("working", old + 4));
     store.seal_local_batches().unwrap();
-    let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+    let cut = smallclaims::store::checkpoint::newest_due_cut(now);
     let full = local_plan(&store, cut, &scratch.path().join("full"), false);
     let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
     assert!(!full.0.contains(&before_prompt), "the whole capture keeps it");
@@ -2469,7 +2531,7 @@ proptest! {
         let scratch = tempfile::tempdir().unwrap();
         let context = context(scratch.path(), 0);
         let store = local_member("alder");
-        let peer = Store::open_memory("birch").unwrap();
+        let peer = clocked(Store::open_memory("birch").unwrap());
         for (n, step) in steps.iter().enumerate() {
             take_step(&store, &peer, step, n);
         }
@@ -2494,7 +2556,7 @@ fn a_retired_citer_leaves_what_the_others_cite() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
-    let peer = Store::open_memory("birch").unwrap();
+    let peer = clocked(Store::open_memory("birch").unwrap());
     for n in 0..2 {
         take_step(&store, &peer, &Step::Write(Write::Observer { observer: 0, status: n, cursor: None }), usize::from(n));
     }

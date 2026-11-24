@@ -2,9 +2,10 @@ import { Tracer } from 'effect'
 
 import { createFractalWebMiddleware } from '../server/core.mts'
 import { devAdmission } from '../server/devAdmission.mts'
+import { readAuthorization } from '../server/authorization.mts'
 
 /** Enable live data only when explicitly configured; Storybook remains credential-free. */
-export function webfractalGateway() {
+export function webfractalGateway({ edgeHost, edgeAliases = [] } = {}) {
   return {
     name: 'wf:shared-client-gateway',
     apply: 'serve',
@@ -18,17 +19,17 @@ export function webfractalGateway() {
       const socket = process.env.WF_ST_GATEWAY
       if (!socket) return
       if (!vite.httpServer) throw new Error('WF_ST_GATEWAY requires a Vite HTTP listener')
-      const authorization = process.env.WF_ST_AUTHORIZATION
-      if (authorization === undefined || authorization === '') {
-        throw new Error('WF_ST_GATEWAY requires WF_ST_AUTHORIZATION to carry the paired gateway bearer token')
-      }
+      const authorization = readAuthorization(process.env, 'WF_ST_CREDENTIAL_FILE')
       const server = vite.httpServer
       const boundary = createFractalWebMiddleware({
         server,
-        // Dev admission: loopback Host plus the exact Vite Origin; no deployment identity is assumed.
-        admit: devAdmission(() => {
-          const address = server.address()
-          return typeof address === 'object' && address !== null ? address.port : undefined
+        admit: devAdmission({
+          edgeHost,
+          edgeAliases,
+          port: () => {
+            const address = server.address()
+            return typeof address === 'object' && address !== null ? address.port : undefined
+          },
         }),
         gateway: {
           socketPath: socket.replace(/^unix:/, ''),

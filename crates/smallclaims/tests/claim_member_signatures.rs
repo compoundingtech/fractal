@@ -137,6 +137,47 @@ fn a_writer_signs_its_claims_and_a_peer_keeps_only_signatures_that_verify() {
     );
 }
 
+#[test]
+fn compact_range_pages_carry_the_same_writer_signatures_as_full_inventory_pages() {
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let source = node("alder", Some(&key), &key);
+    source.admit_fleet_anchor(FLEET, key.public(), "listening").unwrap();
+    note(&source, 0);
+    while !source.sign_own_claims().unwrap().done {}
+    let peer = node("birch", None, &key);
+    sync(&source, &peer);
+    while peer.promote_claim_member_signatures().unwrap() > 0 {}
+    assert_eq!(signed(&peer), signed(&source));
+
+    // Complete bounded range proofs identify one later gap in an occupied range.
+    let mut inventory = peer.export_replication_summary(FLEET).unwrap().inventory;
+    inventory.envelopes = peer.replication_inventory().unwrap().envelopes;
+    assert!(!inventory.buckets.is_empty());
+    note(&source, 1);
+    while !source.sign_own_claims().unwrap().done {}
+    let exchange = source.export_replication_exchange(FLEET, &inventory).unwrap();
+    assert!(!exchange.inventory.buckets.is_empty());
+    assert_eq!(exchange.envelopes.len(), 1);
+    assert_eq!(exchange.claim_member_signatures.len(), 1);
+    peer.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
+    peer.validate_replication_backlog().unwrap();
+    peer.project_replication_backlog().unwrap();
+    // Force the cursor beyond the new signature, independent of random claim hashes.
+    // Promotion must wrap and settle the waiting signature in the same call.
+    peer.connection
+        .write()
+        .execute(
+            "INSERT INTO meta(key,value) VALUES('claim_member_signature_pending_cursor',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [format!("{}\n{}", "f".repeat(64), key.public())],
+        )
+        .unwrap();
+    assert_eq!(peer.promote_claim_member_signatures().unwrap(), 1);
+    while peer.promote_claim_member_signatures().unwrap() > 0 {}
+    assert_eq!(signed(&peer), signed(&source));
+    assert_eq!(waiting(&peer), 0);
+}
+
 /// A signature that verifies for `writer` and `sequence` over `claim`, by a fresh key.
 fn fresh_signature(writer: &str, sequence: u64, claim: &str) -> ClaimMemberSignature {
     let key = MemberKey::generate().unwrap().0;

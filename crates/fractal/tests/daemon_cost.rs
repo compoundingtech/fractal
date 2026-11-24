@@ -152,6 +152,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "POST /v1/internal/native/run-request/claim",
+        "host-local Unix-only forwarding requires an explicitly configured run-authority session and an admitted native credential, absent from generated full-node cost stores; run_requests guards exact bound requests and closed admission, while run_fence tests actual atomic writer admission and retry receipts; this local forwarding route's transport and home-writer cost is not measured by this JSON graph cost client",
+    ),
+    (
         "GET /v1/source-blobs/{hash}",
         "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
     ),
@@ -404,6 +408,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/internal/replication/shard/{shard}/peers",
         "one indexed daemon.started lookup per member or configured peer; grows with the fleet, not the store",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/peers/revision",
+        "subscribes to the graph's store-local membership watch for shard advertisements; the generated fixture holds an empty messages shard, and the wait retains no read transaction",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/revision",
+        "subscribes to the shard's store-local authority or membership watch; the generated fixture holds no populated messages shard, and authority snapshot work is covered by the graph revision probe",
     ),
     (
         "POST /v1/internal/replication/shard/{shard}/export",
@@ -1601,6 +1613,11 @@ const PROBES: &[Probe] = &[
     }),
     // Replication, as the worker calls it: an in-step peer asks for a summary, and each side
     // answers the other's summary with what it lacks, here a few new claims.
+    post(
+        "POST /v1/internal/replication/revision",
+        "/v1/internal/replication/revision",
+        |_, _| json!({"kind": "authority", "after": null}),
+    ),
     post(
         "POST /v1/internal/replication/export",
         "/v1/internal/replication/export",

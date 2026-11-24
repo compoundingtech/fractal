@@ -3,6 +3,7 @@
 //! custody of every root through retirement.
 use super::*;
 use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+use super::host_executor::resource_commands as host_resources;
 
 use crate::model::RESOURCE_LANE_REQUEST_TAG as REQUEST_TAG;
 
@@ -52,7 +53,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             // An inherited root ends here; its owning program scope retains membership custody.
             return Ok(true);
         }
-        if !self.runtime.retire_resource_lane(&self.store, &request)? {
+        if !(host_resources::RetireCommand::Lane { request: &request })
+            .dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)? {
             // Unknown retirement retains custody; native events or explicit recovery wake it.
             return Ok(false);
         }
@@ -103,7 +105,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
             });
             if retained && active { continue; }
-            if self.runtime.retire_resource_lane(&self.store, &record.request)? {
+            if (host_resources::RetireCommand::Lane { request: &record.request })
+                .dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)? {
                 self.incremental.touch(&crate::store::resource_membership::dependency(&record.request.host, &record.request.name));
                 self.incremental.touch("seat-admission");
                 self.signal_changed();
@@ -599,6 +602,70 @@ mod tests {
             recovered.iter().all(|request| request.title != title),
             "{recovered:?}"
         );
+    }
+
+    #[test]
+    fn exchange_stale_alert_names_local_and_transport_failures_without_timing_churn() {
+        use super::super::tests::FakeRuntime;
+        use smallclaims::replication::{
+            ReplicationCarrier, ReplicationExchangeFailure, ReplicationFailurePhase,
+        };
+        for (phase, code, expected) in [
+            (
+                ReplicationFailurePhase::LocalReceive,
+                "replication-operation-failed",
+                "last failures: local-receive replication-operation-failed on 2/2 peers",
+            ),
+            (
+                ReplicationFailurePhase::Dial,
+                "replication-connect-failed",
+                "last failures: dial replication-connect-failed on 2/2 peers",
+            ),
+        ] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            store.bind_fleet("fleet/stalled").unwrap();
+            let now = smallclaims::store::now_ms();
+            store.replication_worker_observed_for_test(Some(now.saturating_sub(120_000)), Some(now));
+            let mut failure = ReplicationExchangeFailure::from_error(
+                &anyhow::anyhow!("operation failed"),
+                phase,
+                std::time::Duration::from_secs(120),
+                None,
+            );
+            failure.code = code.into();
+            for peer in ["peer-a", "peer-b"] {
+                store.record_replication_exchange_transport(
+                    peer, false, now, ReplicationCarrier::Unknown, Some(&failure),
+                );
+            }
+            let reconciler = Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            reconciler.reconcile_replication_health().unwrap();
+            let raised = store
+                .pending_operational_failures(crate::reconcile::RECONCILER_ACTOR, "node")
+                .unwrap();
+            assert_eq!(raised.len(), 1);
+            assert!(raised[0].reason.contains(expected), "{}", raised[0].reason);
+            assert!(!raised[0].reason.contains("inspect fleet routes"));
+            let health = store.replication_health(true).unwrap();
+            let message = store.replication_health_message(health).unwrap();
+            failure.elapsed_ms += 777;
+            store.record_replication_exchange_transport(
+                "peer-a", false, now + 1, ReplicationCarrier::Unknown, Some(&failure),
+            );
+            assert_eq!(store.replication_health_message(health).unwrap(), message);
+            reconciler.reconcile_replication_health().unwrap();
+            let repeated = store
+                .pending_operational_failures(crate::reconcile::RECONCILER_ACTOR, "node")
+                .unwrap();
+            assert_eq!(repeated.len(), 1);
+            assert_eq!(repeated[0].request, raised[0].request);
+            assert_eq!(repeated[0].reason, raised[0].reason);
+        }
     }
 
     #[cfg(target_os = "macos")]

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep preview gateway bearer credentials out of the development server environment by reading protected credential files in-process.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of persisted state." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Preview launchers and the Vite gateway now accept WF_ST_CREDENTIAL_FILE only. WF_ST_AUTHORIZATION is no longer read. The production host retains its existing file-reference configuration." },
+  "downtime": { "status": "none", "detail": "No service downtime is required by this change." },
+  "manual": { "status": "changed", "detail": "Configure preview callers with WF_ST_CREDENTIAL_FILE referencing a credential file owned by the development server user and unreadable by others. Remove the legacy WF_ST_AUTHORIZATION setting." },
+  "recovery": { "status": "none", "detail": "No persistent state changes or recovery steps." }
+}

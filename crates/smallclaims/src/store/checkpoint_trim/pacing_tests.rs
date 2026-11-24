@@ -139,7 +139,7 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
     store.set_trim_fault(Some(TrimFault::AfterChunk(1)));
     assert!(
         store
-            .finish_trim_paced(checkpoint, &mut actions, |_| panic!(
+            .finish_trim_paced(true, checkpoint, &mut actions, |_| panic!(
                 "fault must interrupt before resting"
             ))
             .is_err()
@@ -157,7 +157,7 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
     // It must yield progress, rather than declare this unfinished checkpoint exhausted.
     store.set_trim_fault(Some(TrimFault::ExpireChunkBudget));
     store
-        .finish_trim_paced(checkpoint, &mut actions, |pause| {
+        .finish_trim_paced(true, checkpoint, &mut actions, |pause| {
             assert!(pause >= Duration::from_millis(100));
             pauses += 1;
             let foreground_store = store.clone();
@@ -326,7 +326,7 @@ fn a_local_cut_trims_only_its_tombstones_and_goes_on_from_where_it_stopped() {
     store.set_trim_chunk_envelopes(1);
     store.set_trim_fault(Some(TrimFault::AfterChunk(2)));
     let mut actions = Vec::new();
-    assert!(store.finish_trim_paced(cut, &mut actions, |_| {}).is_err());
+    assert!(store.finish_trim_paced(true, cut, &mut actions, |_| {}).is_err());
     // Two chunks deleted two claims; the walk kept its place.
     assert_eq!(claims[1..].iter().filter(|claim| !exists(&claim.id)).count(), 2);
     let walk = store.local_walk(cut).unwrap();
@@ -336,7 +336,7 @@ fn a_local_cut_trims_only_its_tombstones_and_goes_on_from_where_it_stopped() {
         .query_row("SELECT rowid FROM checkpoint_claims WHERE id=?1", [&claims[2].id], |row| row.get(0))
         .unwrap();
     assert_eq!(walk.claim, second);
-    store.finish_trim_paced(cut, &mut actions, |_| {}).unwrap();
+    store.finish_trim_paced(true, cut, &mut actions, |_| {}).unwrap();
     assert!(matches!(actions.last(), Some(CheckpointAction::Trimmed { claims: 2, .. })), "{actions:?}");
     assert!(claims[1..].iter().all(|claim| !exists(&claim.id)));
     assert!(exists(&claims[0].id), "an earlier checkpoint's tombstone is not this cut's to walk");
@@ -348,4 +348,236 @@ fn a_local_cut_trims_only_its_tombstones_and_goes_on_from_where_it_stopped() {
         .optional()
         .unwrap();
     assert_eq!(left, None, "a finished walk leaves nothing behind");
+}
+
+#[test]
+fn daily_allowance_tracks_the_utc_clock_without_overflow_or_restart_credit() {
+    let daily = LOCAL_TRIM_DAILY_CLAIMS;
+    let burst = trim_burst(daily);
+    assert_eq!(burst, 695);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS, 0), burst);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS, burst), 0);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS / 2, 0), daily / 2 + burst);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS - 1, 0), daily);
+    assert_eq!(trim_allowance(daily, TRIM_DAY_MS - 1, daily), 0);
+    assert_eq!(trim_allowance(1, 0, 0), 1);
+    assert_eq!(trim_allowance(1, TRIM_DAY_MS - 1, 1), 0);
+    assert_eq!(trim_allowance(0, 0, 0), 0);
+    assert_eq!(trim_allowance(u64::MAX, TRIM_DAY_MS - 1, 0), u64::MAX);
+}
+
+#[test]
+fn a_paced_cut_uses_its_full_daily_budget_but_not_at_midnight() {
+    for daily in [1_u64, 144] {
+        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+        store.trim_locally_at_most(daily);
+        store.set_trim_chunk_envelopes(1);
+        let checkpoint = "checkpoint/2026-01-01";
+        store.set_checkpoint_state(checkpoint, 1, "trimming").unwrap();
+        let mut tombstones = Vec::new();
+        for n in 0..2 * daily + 2 {
+            let claim = store.append_claim(&ClaimInput {
+                subject: format!("note/{n}"),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::from([("text".into(), json!(n))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            tombstones.push(ClaimTombstone {
+                id: claim.id,
+                operation_id: claim.operation_id,
+                writer: "alder".into(),
+                sequence: n,
+                envelope_hash: format!("envelope-{n}"),
+                subject: claim.subject,
+                kind: claim.kind,
+                actor: claim.actor,
+                predecessors: claim.predecessors,
+                request_digest: claim.request_digest,
+                accepted_at_unix_ms: claim.accepted_at_unix_ms,
+            });
+        }
+        {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &tombstones).unwrap();
+            tx.commit().unwrap();
+        }
+        let mut actions = Vec::new();
+        // A new UTC day resets the old day's exhausted counter, not the pacing line.
+        store.trim_now_ms.store(TRIM_DAY_MS - 1, Ordering::Relaxed);
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 0).unwrap(), daily);
+        store.trim_day.store(1, Ordering::Relaxed);
+        store.trim_now_ms.store(TRIM_DAY_MS, Ordering::Relaxed);
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), trim_burst(daily));
+        assert!(matches!(actions.last(), Some(CheckpointAction::TrimDeferred { .. })));
+        // Re-entering at the same clock value grants no second burst.
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), trim_burst(daily));
+        for tick in 1..144_u64 {
+            store.trim_now_ms.store(TRIM_DAY_MS + tick * TRIM_DAY_MS / 144, Ordering::Relaxed);
+            store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        }
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), daily);
+        assert_eq!(
+            tombstones.iter().filter(|claim| store.claim_by_id(&claim.id).unwrap().is_none()).count(),
+            2 * daily as usize,
+        );
+        // The daily ceiling holds even at the final millisecond; tomorrow still makes progress.
+        store.trim_now_ms.store(2 * TRIM_DAY_MS - 1, Ordering::Relaxed);
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), daily);
+        store.trim_day.store(2, Ordering::Relaxed);
+        store.trim_now_ms.store(2 * TRIM_DAY_MS, Ordering::Relaxed);
+        store.finish_trim_paced(true, checkpoint, &mut actions, |_| {}).unwrap();
+        assert_eq!(deleted_on(&store.readers.get(), 2).unwrap(), trim_burst(daily));
+    }
+}
+
+fn paced_cut_fixture(
+    path: &std::path::Path,
+    daily: u64,
+    count: usize,
+    grouped: bool,
+) -> (Store, Vec<ClaimRecord>, Option<EnvelopeTombstone>) {
+    let store = Store::open(path, "alder", Arc::new(Plain)).unwrap();
+    // Complete startup migration before recording tombstones: before authority is enabled,
+    // legacy triggers retire every recorded tombstone, including claims still held.
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    assert!(super::super::retired::authoritative(&store.readers.get()).unwrap());
+    store.trim_locally_at_most(daily);
+    let mut claims: Vec<ClaimRecord> = Vec::new();
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        for n in 0..count {
+            let batch = if grouped { claims.first().map(|claim| claim.batch_id.as_str()) } else { None };
+            claims.push(append_claim_record_tx(
+                &tx, "alder", &format!("note/{n}"), "example.note", None,
+                &json!({"fields": {"text": n}}), &[], batch,
+            ).unwrap());
+        }
+        if grouped {
+            seed_replica_envelopes_tx(&tx, "alder", None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let envelope = grouped.then(|| {
+        store.readers.get().query_row(
+            "SELECT writer, sequence, envelope_hash FROM replica_envelopes WHERE batch_id=?1",
+            [&claims[0].batch_id],
+            |row| Ok(EnvelopeTombstone {
+                writer: row.get(0)?,
+                sequence: row.get(1)?,
+                envelope_hash: row.get(2)?,
+                accepted_at_unix_ms: claims[0].accepted_at_unix_ms,
+            }),
+        ).unwrap()
+    });
+    store.set_checkpoint_state("checkpoint/paced", 1, "trimming").unwrap();
+    let tombstones: Vec<_> = claims.iter().map(|claim| ClaimTombstone {
+        id: claim.id.clone(),
+        operation_id: claim.operation_id.clone(),
+        writer: envelope.as_ref().map_or_else(|| "alder".into(), |envelope| envelope.writer.clone()),
+        sequence: envelope.as_ref().map_or(0, |envelope| envelope.sequence),
+        envelope_hash: envelope.as_ref().map_or_else(String::new, |envelope| envelope.envelope_hash.clone()),
+        subject: claim.subject.clone(),
+        kind: claim.kind.clone(),
+        actor: claim.actor.clone(),
+        predecessors: claim.predecessors.clone(),
+        request_digest: claim.request_digest.clone(),
+        accepted_at_unix_ms: claim.accepted_at_unix_ms,
+    }).collect();
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        record_checkpoint_tombstones_tx(
+            &tx, "checkpoint/paced", envelope.as_slice(), &tombstones,
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+    (store, claims, envelope)
+}
+
+fn run_paced_cut_at(store: &Store, now: u64) {
+    store.trim_day.store(now / TRIM_DAY_MS, Ordering::Relaxed);
+    store.trim_now_ms.store(now, Ordering::Relaxed);
+    store.finish_trim_paced(true, "checkpoint/paced", &mut Vec::new(), |_| {}).unwrap();
+}
+
+#[test]
+fn a_same_day_backward_clock_neither_refills_nor_reduces_the_durable_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, claims, _) = paced_cut_fixture(&dir.path().join("claims.sqlite3"), 144, 40, false);
+    let quarter_day = TRIM_DAY_MS + TRIM_DAY_MS / 4;
+    run_paced_cut_at(&store, quarter_day);
+    assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), 37);
+    let cursor = store.local_walk("checkpoint/paced").unwrap().claim;
+    for now in [TRIM_DAY_MS + TRIM_DAY_MS / 8, quarter_day] {
+        assert_eq!(trim_allowance(144, now, 37), 0);
+        run_paced_cut_at(&store, now);
+        assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), 37);
+        assert_eq!(store.local_walk("checkpoint/paced").unwrap().claim, cursor);
+        assert_eq!(claims.iter().filter(|claim| store.claim_by_id(&claim.id).unwrap().is_none()).count(), 37);
+    }
+    run_paced_cut_at(&store, quarter_day + TRIM_DAY_MS / 144);
+    assert_eq!(deleted_on(&store.readers.get(), 1).unwrap(), 38);
+    assert_eq!(claims.iter().filter(|claim| store.claim_by_id(&claim.id).unwrap().is_none()).count(), 38);
+}
+
+#[test]
+fn an_oversized_envelope_keeps_its_rewind_cursor_across_reopen_until_its_claims_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let (store, claims, envelope) = paced_cut_fixture(&path, 288, 5, true);
+    let envelope = envelope.unwrap();
+    let before = store.local_walk("checkpoint/paced").unwrap().envelope;
+    let check = |store: &Store, deleted: usize, held: bool| {
+        let connection = store.readers.get();
+        let mut retired = 0;
+        for claim in &claims {
+            let absent = store.claim_by_id(&claim.id).unwrap().is_none();
+            let retired_claim = super::super::retired::claim_retired(&connection, &claim.id).unwrap();
+            assert_eq!(retired_claim, absent, "only a deleted claim is retired");
+            retired += usize::from(retired_claim);
+        }
+        assert_eq!(retired, deleted);
+        let retired_total: usize = connection.query_row(
+            "SELECT COUNT(*) FROM retired_claim_ids", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retired_total, deleted, "no other claim is retired");
+        let present: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_envelopes WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)",
+            params![envelope.writer, envelope.sequence, envelope.envelope_hash], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(present, held);
+        assert_eq!(
+            super::super::retired::envelope_retired(
+                &connection, &envelope.writer, envelope.sequence, &envelope.envelope_hash,
+            ).unwrap(),
+            !held,
+        );
+        assert_eq!(deleted_on(&connection, 1).unwrap(), deleted as u64);
+    };
+    run_paced_cut_at(&store, TRIM_DAY_MS);
+    check(&store, 2, true);
+    assert_eq!(store.local_walk("checkpoint/paced").unwrap().envelope, before);
+    drop(store);
+    let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+    store.trim_locally(true).unwrap();
+    store.trim_locally_at_most(288);
+    assert_eq!(store.local_walk("checkpoint/paced").unwrap().envelope, before);
+    run_paced_cut_at(&store, TRIM_DAY_MS);
+    check(&store, 2, true);
+    run_paced_cut_at(&store, TRIM_DAY_MS + TRIM_DAY_MS / 144);
+    check(&store, 4, true);
+    assert_eq!(store.local_walk("checkpoint/paced").unwrap().envelope, before);
+    run_paced_cut_at(&store, TRIM_DAY_MS + 2 * TRIM_DAY_MS / 144);
+    check(&store, 5, false);
+    assert_eq!(local_checkpoint(&store.readers.get(), "checkpoint/paced").unwrap().unwrap().0, "trimmed");
 }

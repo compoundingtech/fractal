@@ -1558,6 +1558,8 @@ pub trait MissionsStore {
     /// waits on: one primary-key read of the run and a range of `step_runs_run_index`. It reads
     /// no claims, so its cost is the run's own steps, never the store's history.
     fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>>;
+    /// Resolve a published step's pinned definition once for a diagnostic/report evaluation.
+    fn waiting_on_definition(&self, step: &StepRunView) -> Result<Option<MissionSpec>>;
     /// Return every current published mission definition, including definitions with no runs.
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>>;
     /// The definitions of the missions that have no run, as `mission_definitions` reads them,
@@ -2634,6 +2636,20 @@ impl MissionsStore for Store {
             })?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into)
+    }
+
+    fn waiting_on_definition(&self, step: &StepRunView) -> Result<Option<MissionSpec>> {
+        let body: Option<String> = self.readers.get().query_row(
+            "SELECT revision.body FROM step_runs step
+             JOIN run_generations generation ON generation.id=step.generation_id
+             JOIN mission_runs run ON run.id=step.run_id
+             JOIN mission_revisions revision ON revision.mission_id=run.mission_id
+               AND revision.revision=generation.revision
+             WHERE step.subject=?1 AND generation.id=?2",
+            params![step.subject, step.generation.strip_prefix("run-generation/").unwrap_or(&step.generation)],
+            |row| row.get(0),
+        ).optional()?;
+        body.map(|body| serde_json::from_str(&body).map_err(Into::into)).transpose()
     }
 
     fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>> {
@@ -5455,6 +5471,7 @@ impl MissionsStore for Store {
         ) -> Result<(MissionRunView, Option<MissionSpec>)> {
         self.read_snapshot_unindexed(|| {
             let connection = self.readers.get();
+            self.record_mission_read_reconstruction();
             let (view, mission) =
                 mission_run_view_and_definition_tx(&connection, id, MissionRunEnrichment::Evaluation)?;
             note_run_view_reads(&view);

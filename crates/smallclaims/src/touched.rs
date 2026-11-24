@@ -100,6 +100,23 @@ pub fn note_read(key: impl FnOnce() -> String) {
     });
 }
 
+/// Exact claim input, distinct from a subject-wide read. Length-prefix the subject so
+/// arbitrary subject/kind strings cannot alias another pair.
+pub fn claim_key(subject: &str, kind: &str) -> String {
+    format!("claim:{}:{subject}{kind}", subject.len())
+}
+
+/// Record the actual predicate of a claim read, including absence. A kind-filtered
+/// query does not depend on observations or other claim kinds on the same subject.
+pub fn note_claim_read(subject: &str, kind: Option<&str>) {
+    note_read(|| kind.map_or_else(|| subject.to_owned(), |kind| claim_key(subject, kind)));
+    if kind.is_some() {
+        // Only explicit out-of-feed subject invalidations emit this wildcard, not
+        // ordinary commits. Shard/file bridges do not always retain a claim kind.
+        note_read(|| format!("claim-subject:{subject}"));
+    }
+}
+
 /// Run `work`, returning what it read. Recording nests: an enclosing recording also gets these
 /// reads, even when `work` panics.
 pub fn record<T>(work: impl FnOnce() -> T) -> (T, BTreeSet<String>) {
@@ -153,5 +170,19 @@ mod tests {
         assert_eq!(inner, BTreeSet::from(["b".to_owned()]));
         assert_eq!(outer, BTreeSet::from(["a".to_owned(), "b".to_owned()]));
         note_read(|| unreachable!("recording ended"));
+    }
+
+    #[test]
+    fn kind_filtered_reads_record_only_their_predicate() {
+        let ((), reads) = record(|| {
+            note_claim_read("agent/example", Some("runtime.observed"));
+            note_claim_read("resource/example", None);
+        });
+        assert_eq!(reads, BTreeSet::from([
+            claim_key("agent/example", "runtime.observed"),
+            "claim-subject:agent/example".to_owned(),
+            "resource/example".to_owned(),
+        ]));
+        assert_ne!(claim_key("a", "bc"), claim_key("ab", "c"));
     }
 }
