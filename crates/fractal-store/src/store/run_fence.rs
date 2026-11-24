@@ -31,7 +31,7 @@ fn execute_with_turn_hook<T: Send, E: From<FractalError> + Send>(
     // the projection gate. No callback or persisted request preparation runs on NeedsDrain.
     // The batched attempt gets its own stage scope, so its stages never enter a caller's scope
     // and the caller's later lends record as before. Dropping it restores the caller's scope.
-    let stages = holds::Stages::begin();
+    let stages = holds::Stages::begin_batch();
     let attempt = graph.connection.batched(|transaction| {
         if holds::stage("fence-pending", || pending(transaction, fence)).map_err(E::from)?.is_some() {
             return Ok(Attempt::NeedsDrain);

@@ -420,12 +420,13 @@ impl WriterHold {
     }
 
     /// A batched write from `holder` ran for `took` in this hold. The longest write's stages are
-    /// the batch's.
+    /// the batch's, when that write was asked for in a batch scope.
     pub fn ran(&mut self, holder: &Holder, took: Duration) {
         self.writes += 1;
         if self.longest.as_ref().is_none_or(|(_, longest)| took > *longest) {
             self.longest = Some((holder.clone(), took));
             let clock = holder.0.stages.as_ref().map(|clock| clock.lock().unwrap_or_else(PoisonError::into_inner));
+            let clock = clock.filter(|clock| clock.batch);
             self.stages = clock.as_ref().map(|clock| clock.snapshot(Instant::now()));
             self.rebuilt = clock.map(|clock| clock.rebuilt.clone()).unwrap_or_default();
         }
@@ -623,6 +624,8 @@ struct StageClock {
     rebuilt: Vec<(&'static str, Rebuilt)>,
     closed: bool,
     progress: Option<(u64, u64)>,
+    /// Begun by `Stages::begin_batch`: a batched write asked for in it carries it.
+    batch: bool,
 }
 
 impl StageClock {
@@ -703,9 +706,10 @@ pub fn unstaged<T>(work: impl FnOnce() -> T) -> T {
 /// A scope whose writer lend records where its hold went. Begin it before asking for the writer,
 /// enter each stage as the borrower reaches it, and end it once the writer is given back: a lend
 /// asked for in the scope carries its clock, and the writer thread closes the stage still open
-/// when the hold ends. A batched write asked for in the scope runs its job inside the same scope
-/// on the writer thread, and a batch hold reports the stages of its longest write so far, without
-/// closing them. Holds asked for outside it are not staged.
+/// when the hold ends. A batched write asked for in a scope begun with `begin_batch` runs its job
+/// inside that scope on the writer thread, and a batch hold reports the stages of its longest
+/// write so far, without closing them. Holds asked for outside a scope, and batches asked for in
+/// a plain scope, are not staged.
 pub struct Stages {
     clock: Arc<Mutex<StageClock>>,
     previous: Option<Arc<Mutex<StageClock>>>,
@@ -722,6 +726,13 @@ impl Stages {
         }
         let previous = STAGES.with(|stages| stages.borrow_mut().replace(clock.clone()));
         Self { clock, previous }
+    }
+
+    /// A scope for one batched write: its job's stages are the batch hold's.
+    pub fn begin_batch() -> Self {
+        let stages = Self::begin();
+        stages.clock.lock().unwrap_or_else(PoisonError::into_inner).batch = true;
+        stages
     }
 
     /// End the open stage and begin `stage`, returning the stage it ended, so a callback can be
@@ -741,7 +752,8 @@ pub(crate) struct BatchStages(Option<Arc<Mutex<StageClock>>>);
 
 impl BatchStages {
     pub(crate) fn capture() -> Self {
-        Self(STAGES.with(|stages| stages.borrow().clone()))
+        let clock = STAGES.with(|stages| stages.borrow().clone());
+        Self(clock.filter(|clock| clock.lock().unwrap_or_else(PoisonError::into_inner).batch))
     }
 
     /// Install the captured scope on this thread until the guard drops, then restore its own.
@@ -1259,7 +1271,7 @@ mod tests {
 
     #[test]
     fn a_batched_write_asked_for_in_a_stage_scope_reports_its_job_stages_without_closing_them() {
-        let stages = Stages::begin();
+        let stages = Stages::begin_batch();
         let asked = Holder::current();
         let carried = BatchStages::capture();
         std::thread::scope(|scope| {
