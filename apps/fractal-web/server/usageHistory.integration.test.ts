@@ -9,7 +9,8 @@ import { Tracer } from 'effect'
 import { createServer as createViteServer } from 'vite'
 import { createFractalWebServer } from './core.mts'
 import type { MiddlewareOptions } from './core.mts'
-import { createUsageHistoryRelay, usageHistoryPath, usageHistoryProducer, usageHistoryRoute } from './usageHistory.mts'
+import { loopbackProducer } from './relayHttp.mts'
+import { createUsageHistoryRelay, usageHistoryPath, usageHistoryRoute } from './usageHistory.mts'
 import { webfractalGateway } from '../scripts/vite-gateway.mjs'
 
 // Assembled so the source itself never carries a literal bearer credential pair.
@@ -129,7 +130,9 @@ const expectFailure = async (response: Response, status: number, code: string) =
   return body
 }
 
-describe('usageHistoryProducer', () => {
+const usageHistoryProducer = (value: string | undefined) => loopbackProducer(value, 'WF_USAGE_HISTORY_URL')
+
+describe('loopbackProducer', () => {
   it('is off when unset and accepts only explicit loopback base URLs', () => {
     expect(usageHistoryProducer(undefined)).toBeUndefined()
     expect(usageHistoryProducer('  ')).toBeUndefined()
