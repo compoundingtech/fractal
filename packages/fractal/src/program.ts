@@ -171,7 +171,7 @@ export class AwaitPrFailed extends Schema.TaggedError<AwaitPrFailed>()('AwaitPrF
   message: Schema.String,
 }) {}
 
-/** The intent of a program mission; `input` fields become its native text inputs. */
+/** The intent of a program mission; `input` fields become its native inputs. */
 export interface ProgramIntent<
   I extends InputSchema,
   O extends Codec,
@@ -228,17 +228,28 @@ const encodesToString = (ast: SchemaAST.AST): boolean =>
   (SchemaAST.isUnion(ast) && ast.types.every(encodesToString))
 
 /**
- * The native inputs of a program mission: each field of `input` is one `input "name" kind="text"`,
- * and a run supplies every one, so a field must be required and encode to a string.
+ * A required pinned resource input. The native run-admission boundary validates the
+ * observation's kind before starting the run; the program receives `resource/NAME@CLAIM`.
  */
-export const programInputNames = (input: Workflow.AnyStructSchema): readonly string[] =>
+export const resourceInput = <TKind extends string>(kind: TKind) => {
+  if (kind.trim().length === 0) throw new TypeError('Resource input kind must be nonempty')
+  return Object.assign(Schema.String.pipe(Schema.refine(
+    (value): value is string => /^resource\/[^@]+@[^@]+$/u.test(value),
+    { message: 'expected a pinned resource observation' },
+  )), { resourceKind: kind })
+}
+
+/** Lower program schemas through the same text/resource input grammar as native missions. */
+export const programInputs = (input: Workflow.AnyStructSchema) =>
   Object.entries(input.fields).map(([name, field]) => {
     if (
       SchemaAST.isOptional(field.ast) ||
       encodesToString(SchemaAST.toEncoded(field.ast)) === false
     )
       throw new TypeError(`Program input ${name} must be required and encode to a string`)
-    return name
+    return 'resourceKind' in field && typeof field.resourceKind === 'string'
+      ? { name, kind: 'resource' as const, resourceKind: field.resourceKind }
+      : { name, kind: 'text' as const }
   })
 
 /**
@@ -272,7 +283,7 @@ export function mission(
 ): SubjectDefinition<'mission', unknown, never> {
   if (program === undefined) return dataMission(intent as Meta & MissionIntent)
   const { meta, ...rest } = intent as Meta & ProgramIntent<InputSchema, Codec, Codec | undefined>
-  programInputNames(rest.input)
+  programInputs(rest.input)
   const definition: ProgramMission<InputSchema, Codec, unknown> = {
     _tag: 'SubjectRef',
     kind: 'mission',

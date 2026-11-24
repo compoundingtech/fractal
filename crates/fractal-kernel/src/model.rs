@@ -1295,6 +1295,8 @@ pub enum MissionInputKind {
 pub struct MissionInputSpec {
     pub name: String,
     pub kind: MissionInputKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
