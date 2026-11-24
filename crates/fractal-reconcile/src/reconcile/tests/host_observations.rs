@@ -36,7 +36,10 @@ fn unrelated_fleet_writes_do_not_evaluate_physical_executor() {
     for index in 0..8 {
         reconciler.store.append_claim(&ClaimInput {
             subject: format!("resource/unrelated-{index}"), kind: "resource.observed".into(),
-            actor: None, fields: BTreeMap::from([("status".into(), Value::from("ready"))]),
+            actor: None, fields: BTreeMap::from([
+                ("kind".into(), Value::from("vcs.repository")),
+                ("status".into(), Value::from("ready")),
+            ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
         reconciler.reconcile_once().unwrap();
