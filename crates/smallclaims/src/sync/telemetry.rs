@@ -37,6 +37,7 @@ struct Instruments {
     batch_size: Histogram<u64>,
     errors: Counter<u64>,
     wakes: Counter<u64>,
+    exchanges: Counter<u64>,
 }
 static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
     let meter = opentelemetry::global::meter("smallclaims.replication");
@@ -62,6 +63,10 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
             .u64_counter("st.replication.wakes")
             .with_unit("{wake}")
             .build(),
+        exchanges: meter
+            .u64_counter("st.replication.exchanges")
+            .with_unit("{exchange}")
+            .build(),
     }
 });
 
@@ -80,6 +85,25 @@ pub fn record_wake(stage: WakeStage) {
             WakeStage::Membership => "membership",
         };
         METRICS.wakes.add(1, &[KeyValue::new("stage", stage)]);
+    }
+}
+
+/// Count each signed HTTP exchange using its negotiated capability class.
+/// Both labels are bounded; the disabled path constructs no labels or instruments.
+pub(super) fn exchange_outcome(capability: &'static str, success: bool) {
+    if METRICS_ENABLED.load(Ordering::Relaxed) {
+        let capability = match capability {
+            "legacy" => "legacy",
+            "root_first" => "root_first",
+            _ => "unknown",
+        };
+        METRICS.exchanges.add(
+            1,
+            &[
+                KeyValue::new("capability", capability),
+                KeyValue::new("outcome", if success { "success" } else { "failure" }),
+            ],
+        );
     }
 }
 
