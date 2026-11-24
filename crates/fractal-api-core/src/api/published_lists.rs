@@ -220,9 +220,7 @@ pub fn start_published_lists(state: &AppState) {
         "runtimes/refresh",
         fold_runtimes,
         true,
-        // Its fold has no change check: it rebuilds whenever the cut moves, so a local claim
-        // keeps the full pause rather than fold it on every write.
-        Wakes { roster: false, local: None },
+        Wakes { roster: false, local: None, tables: RUNTIME_TABLES },
     );
     if !enabled() {
         return;
@@ -235,7 +233,7 @@ pub fn start_published_lists(state: &AppState) {
         "published_list.missions",
         fold_missions,
         true,
-        Wakes { roster: true, local: Some(missions_local_commits) },
+        Wakes { roster: true, local: Some(missions_local_commits), tables: MISSION_TABLES },
     );
     spawn(
         state.store.clone(),
@@ -244,7 +242,7 @@ pub fn start_published_lists(state: &AppState) {
         "published_list.work",
         fold_work,
         true,
-        Wakes { roster: false, local: Some(work_local_commits) },
+        Wakes { roster: false, local: Some(work_local_commits), tables: WORK_TABLES },
     );
 }
 
@@ -252,7 +250,7 @@ pub fn start_published_lists(state: &AppState) {
 /// directly.
 #[cfg(any(test, feature = "test-support"))]
 pub fn start_published_work(state: &AppState) {
-    let wakes = Wakes { roster: false, local: Some(work_local_commits) };
+    let wakes = Wakes { roster: false, local: Some(work_local_commits), tables: WORK_TABLES };
     spawn(state.store.clone(), |store| store.published_work_list(), "work", "published_list.work", fold_work, true, wakes);
 }
 
@@ -305,6 +303,34 @@ fn fold_runtimes(
     })
 }
 
+// Each owner observes only the tables its fold reads. Claims still go through the
+// collection's semantic changed-key plan; projected writes without claims must wake too.
+const RUNTIME_TABLES: &[&str] = &[
+    "claims", "desired", "batches", "operations", "replica_records",
+    "identity_names", "identity_heads", "projection_health", "meta",
+];
+const WORK_TABLES: &[&str] = &[
+    "claims", "claim_positions", "batches", "replica_records", "desired",
+    "identity_names", "identity_heads", "meta", "local_observations",
+    "mission_definitions", "mission_runs", "run_generations", "step_runs",
+    "ivm_heads", "ivm_contributions", "local_agent_harness_rows",
+    "operations", "card_actual_revisions", "projection_health",
+    "projection_digest_repaired_claims", "documents", "blobs", "custom_sources",
+    "local_host_holds", "local_latest_slots", "local_stop_deferral_backfill",
+    "mission_run_after", "mission_run_deadlines", "ordered_reassignments", "stop_deferral_claims",
+];
+const MISSION_TABLES: &[&str] = &[
+    "claims", "claim_positions", "batches", "replica_records", "desired",
+    "identity_names", "identity_heads", "meta", "local_observations",
+    "mission_definitions", "mission_runs", "run_generations", "step_runs",
+    "ivm_heads", "ivm_contributions", "local_agent_harness_rows",
+    "operations", "card_actual_revisions", "projection_health",
+    "projection_digest_repaired_claims", "documents", "blobs", "custom_sources",
+    "local_host_holds", "local_latest_slots", "local_stop_deferral_backfill",
+    "mission_run_after", "mission_run_deadlines", "ordered_reassignments", "stop_deferral_claims",
+    "local_run_eta_mission_changes",
+];
+
 /// What wakes a refresher besides its own commits, deadlines and fresh reads.
 #[derive(Clone, Copy)]
 struct Wakes {
@@ -313,6 +339,7 @@ struct Wakes {
     /// Its hold on the local-commit scanner, when a claim this node writes that its fold reads
     /// cuts its pause.
     local: Option<fn(&Arc<Store>) -> local_commits::LocalCommits>,
+    tables: &'static [&'static str],
 }
 
 /// Keep one collection published: fold after commits, when a row's deadline passes, and again
@@ -340,7 +367,7 @@ fn spawn<R: Send + Sync + 'static>(
     tokio::spawn(crate::task_cpu::account(label, async move {
         // The writer's callback only wakes this task; it never reads.
         let commits = Arc::clone(&wake);
-        let _observer = store.observe_commits(move |_| commits.notify_one());
+        let _observer = store.observe_tables(wakes.tables, move |_| commits.notify_one());
         // A list whose rows read the agents roster also folds when a roster is published.
         let _roster = wakes.roster.then(|| {
             let mut published = store.subscribe_agent_roster();
@@ -782,6 +809,7 @@ fn refold(
         return Ok(());
     }
     note_refolded(missions.len());
+    store.published_missions_list().note_refolded(missions.len());
     let mut keys = store.mission_list_keys(Some(missions), now)?;
     let mut shown = Vec::new();
     for mission in missions {
@@ -872,7 +900,7 @@ fn missions_since(
         rows.frontier = frontier;
         rows.time_unix_ms = store.projection_time_at(cut)?;
         refold(store, &mut rows, &missions, now)?;
-        rows.sort();
+        rows.update_order(&missions);
         let valid_until = valid_until(&rows, now);
         Ok(Advance::Published(
             Publication { cut, published_at_unix_ms: now, valid_until_unix_ms: Some(valid_until), rows },
@@ -1013,6 +1041,7 @@ fn refold_work(
         return Ok(());
     }
     note_refolded(steps.len());
+    store.published_work_list().note_refolded(steps.len());
     let views = store.work_at_snapshot_selected(None, false, time, true, true, false, Some(steps))?;
     let subjects = views.iter().map(|view| view.subject.clone()).collect::<Vec<_>>();
     let desired = store.desired_subjects_for_owner_steps(&subjects)?;
@@ -1173,7 +1202,7 @@ fn work_since(store: &Store, base: &Publication<WorkRows>) -> anyhow::Result<Adv
         let changed = retime_work(&mut rows, time) || !steps.is_empty() || changes.reorder || reordered;
         rows.time_unix_ms = time;
         rows.frontier = frontier;
-        rows.sort();
+        rows.update_order(&steps);
         Ok(Advance::Published(
             Publication { cut, published_at_unix_ms: now_ms(), valid_until_unix_ms: None, rows },
             changed,

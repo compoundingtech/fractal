@@ -1915,8 +1915,15 @@ async fn daemon_request_id_and_roster_stages_match_response() {
     // The seeded undeclared seat appears only in history. Await that one-card cold
     // publication, not the startup diagnostic reader's unadmitted empty current roster.
     let cold_publication = daemon.await_span(root.path(), |span| {
-        span["name"] == "st.roster.rebuild"
-            && string_attribute(span, "st.roster.invalidation") == Some("cold")
+        if span["name"] != "st.roster.rebuild" {
+            return false;
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for attribute in span["attributes"].as_array().expect("exported rebuild attributes") {
+            assert!(keys.insert(attribute["key"].as_str().unwrap()),
+                "rebuild attribute keys must be unique: {span}");
+        }
+        string_attribute(span, "st.roster.invalidation") == Some("cold")
             && int_attribute(span, "st.roster.covered") == Some(1)
     });
     let spans = daemon.captured_spans(root.path());
@@ -2185,13 +2192,13 @@ async fn conversation_first_frames_link_collection_and_dedicated_upgrades() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
-async fn replication_projection_is_linked_root_only_for_new_data() {
+async fn replication_projection_attempts_link_receive_and_stop_after_completion() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     const TRACE: &str = "81af7651916cd43dd8448eb211c80319";
     const NEW: &str = "00-81af7651916cd43dd8448eb211c80319-b7ad6b7169203336-01";
     const DUPLICATE: &str = "00-91af7651916cd43dd8448eb211c80319-b7ad6b7169203337-01";
     const HEARTBEAT: &str = "00-a1af7651916cd43dd8448eb211c80319-b7ad6b7169203338-01";
-    let Some(collector) = otelite("replication_projection_is_linked_root_only_for_new_data") else { return };
+    let Some(collector) = otelite("replication_projection_attempts_link_receive_and_stop_after_completion") else { return };
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
@@ -2229,10 +2236,22 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     let receive = daemon.await_span(root.path(), |span| {
         span["traceId"] == TRACE && span["name"] == "POST /v1/internal/replication/receive"
     });
-    let projection = daemon.await_span(root.path(), |span| span["name"] == "st.replication.projection");
-    assert_upgrade_link(&projection, &receive);
-    assert_eq!(string_attribute(&projection, "st.replication.peer"), Some("otel-source"));
-    assert!(int_attribute(&projection, "st.replication.moved_envelopes").is_some_and(|count| count > 0), "{projection}");
+    // Receipt admission is durable, not a projection-completion barrier. Maintenance may
+    // win projection before the receive attempts it, or finish a deferred receive later.
+    // Wait for the real wake endpoint to report a completed, idle frontier before testing
+    // duplicate/heartbeat quietness; elapsed time and an attempted projection span say neither.
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let (wake, _) = daemon.request("POST", "/v1/internal/replication-wake",
+                None, "", None).await;
+            if wake["value"]["projected"] == true
+                && wake["value"]["projection_attempted"] == false
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.expect("replication projection completes before quiet exchanges");
     // Receive has no read budget: its mutation-dispatch polls must retain the route origin
     // for both queue waits and loan holds, including nested blocking store work.
     daemon.await_export(&root.path().join("capture/metrics.ndjson"), |request| {
@@ -2247,6 +2266,16 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
             })
         })
     });
+    let initial_spans = daemon.captured_spans(root.path());
+    let initial_projections: Vec<_> = initial_spans.iter()
+        .filter(|span| span["name"] == "st.replication.projection").collect();
+    assert!(initial_projections.len() <= 1, "at most one receive-owned attempt: {initial_projections:?}");
+    for projection in &initial_projections {
+        assert_upgrade_link(projection, &receive);
+        assert_eq!(string_attribute(projection, "st.replication.peer"), Some("otel-source"));
+        assert!(int_attribute(projection, "st.replication.moved_envelopes")
+            .is_some_and(|count| count > 0), "{projection}");
+    }
     for (body, traceparent, trace) in [
         (payload, DUPLICATE, "91af7651916cd43dd8448eb211c80319"),
         (serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":heartbeat}),
@@ -2261,8 +2290,11 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     }
     let spans = daemon.captured_spans(root.path());
     let projections: Vec<_> = spans.iter().filter(|span| span["name"] == "st.replication.projection").collect();
-    assert_eq!(projections.len(), 1, "no projection root for duplicate/heartbeat: {projections:?}");
-    assert_upgrade_link(projections[0], &receive);
+    assert_eq!(projections.len(), initial_projections.len(),
+        "no projection root for duplicate/heartbeat after completion: {projections:?}");
+    for projection in projections {
+        assert_upgrade_link(projection, &receive);
+    }
 }
 
 /// Contention is forced on the real roster admission, not timed: the waiter future is

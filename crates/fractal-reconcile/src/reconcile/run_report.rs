@@ -127,11 +127,56 @@ fn can_stall(run: &MissionRunView) -> bool {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Suppress silence only when every unfinished step positively declares an intentional wait.
+    /// Unknown/cold predicate evidence and mixed runs retain the existing reporting behavior.
+    fn intentionally_waiting(&self, run: &MissionRunView, now: u128) -> Result<bool> {
+        let mut any = false;
+        let mut definitions = crate::intentional_wait::PredicateDefinitions::default();
+        for step in &run.steps {
+            if matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped") {
+                continue;
+            }
+            any = true;
+            let predicate = step.agentless
+                && crate::intentional_wait::predicate_wait(&self.store, step, &mut definitions, |_, _, _, _, _, _| ())?.is_some();
+            let human = if step.agentless && !predicate {
+                if let Some(request) = self.store.gate_request_for_owner(&step.subject)? {
+                    smallclaims::touched::note_read(|| request.subject.clone());
+                    request.body.pointer("/fields/reviewer").and_then(Value::as_str).is_some()
+                        && request.body.pointer("/fields/mission_revision").and_then(Value::as_str)
+                            == Some(run.revision.as_str())
+                        && request.body.pointer("/fields/attempt").and_then(Value::as_u64)
+                            == Some(u64::from(step.attempt))
+                        && self.store.human_review_answer(&request.id)?.is_none()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let intentional = crate::intentional_wait::classify(step, now, human, predicate);
+            if intentional.is_none() {
+                return Ok(false);
+            }
+            // A parent's hold does not prove that its linked child work is healthy.
+            if !self.store.mission_run_children_for_step(&step.subject)?.is_empty() {
+                return Ok(false);
+            }
+            if intentional == Some(crate::intentional_wait::IntentionalWait::Declared) {
+                let Some(holder) = step.claimant.as_deref() else { return Ok(false) };
+                if !self.store.agent_is_live(holder)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(any)
+    }
+
     /// Linked child runs do the parent's work. Follow their indexed parent-step links and
     /// register every run and step read, including nested work, so progress moves the stall
     /// deadline on the next incremental evaluation rather than waiting for a scan.
     pub(super) fn run_report_activity(&self, run: &MissionRunView) -> Result<u128> {
-        let mut activity = run_activity(run).max(self.held_progress(run)?);
+        let mut activity = run_activity(run).max(self.held_progress(run)?).max(self.exec_progress(run)?);
         let mut pending = run
             .steps
             .iter()
@@ -145,7 +190,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 activity = activity
                     .max(run_activity(&child))
-                    .max(self.held_progress(&child)?);
+                    .max(self.held_progress(&child)?)
+                    .max(self.exec_progress(&child)?);
                 pending.extend(child.steps.into_iter().map(|step| step.subject));
             }
         }
@@ -170,6 +216,57 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         Ok(progress)
+    }
+
+    /// An agentless exec can spend its whole quiet interval in an external queue. Only a
+    /// physically live incarnation launched for this step's current declaration counts;
+    /// an absent observation, foreign process or superseded generation is not progress.
+    /// This does not renew or pause the step's independent execution timeout.
+    fn exec_progress(&self, run: &MissionRunView) -> Result<u128> {
+        for step in &run.steps {
+            if !step.agentless || step.status != "working" || step.generation != run.generation
+                || step.timeout_ms.is_some_and(|limit| {
+                    step.execution_elapsed_ms >= u128::from(limit.saturating_add(step.timeout_extension_ms))
+                })
+            {
+                continue;
+            }
+            for subject in self.store.desired_subjects_for_owner_step(&step.subject)? {
+                if subject.kind != "exec"
+                    || subject.owner_run.as_deref() != Some(run.subject.as_str())
+                    || subject.owner_generation.as_deref() != Some(step.generation.as_str())
+                    || subject.owner_step.as_deref() != Some(step.subject.as_str())
+                {
+                    continue;
+                }
+                let Some(member) = subject.member.as_ref().filter(|member| {
+                    member.host == self.host && !member.terminal
+                }) else { continue };
+                smallclaims::touched::note_read(|| format!("exec:{}", member.runtime_id));
+                let Some(observation) = self.runtime.observe_exec(&member.runtime_id)?
+                    .filter(|observation| observation.status == "running" && !observation.terminal
+                        && observation.runtime_id == member.runtime_id)
+                else { continue };
+                let Some(incarnation) = observation.incarnation_id.as_deref() else { continue };
+                let Some(receipt) = self.store.latest_observation(&subject.subject, "runtime.action.succeeded")?
+                else { continue };
+                let fields = &receipt.body["fields"];
+                let token = self.store.selected_desired_token(&subject.subject)?;
+                if fields["action"] != "start"
+                    || fields["incarnation_id"].as_str() != Some(incarnation)
+                    || token.as_deref().is_none_or(|token| fields["desired_token"] != token)
+                {
+                    continue;
+                }
+                let Some(operation) = fields["operation"].as_str() else { continue };
+                if self.runtime.start_operation(&member.runtime_id, false, incarnation)?.as_deref() == Some(operation)
+                    && !self.store.runtime_start_revoked(operation)?
+                {
+                    return Ok(now_ms());
+                }
+            }
+        }
+        Ok(0)
     }
 
     /// Who a run reports to: its latest `st missions report-to`, else what it was created with.
@@ -261,6 +358,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if run.parent_step_run.is_some() || !can_stall(run) {
             return Ok(None);
         }
+        if self.intentionally_waiting(run, now)? {
+            return Ok(None);
+        }
         // Work in linked child runs, such as loop rounds and nested work, is the run's work too.
         let mut stuck = stuck_agents(run);
         let mut pending = run.steps.iter().map(|step| step.subject.clone()).collect::<Vec<_>>();
@@ -329,6 +429,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(None);
         }
         if !report.stalls || !can_stall(run) {
+            return Ok(None);
+        }
+        if self.intentionally_waiting(run, now)? {
             return Ok(None);
         }
         let since = self.run_report_activity(run)?;

@@ -57,6 +57,12 @@ fn every_persistent_table_has_a_projection_scope() {
     // tables must be classified; shared tables automatically join the row/digest comparison.
     let exceptions = [
         "meta",
+        // Host-local physical custody and home-owned authenticated request admission
+        // are authoritative fences, not replicated claim-derived projections.
+        "local_session_custody",
+        "home_run_authority_v1",
+        "home_run_epoch_fences_v1",
+        "home_run_request_receipts_v1",
         "batches",
         "claims",
         "idempotency",
@@ -69,6 +75,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_positions",
         "claim_member_signatures",
         "claim_member_signature_pending",
+        // Member-local signing frontier and pending-key work queue, not replicated authority.
+        "claim_signature_frontiers",
+        "claim_signature_ready",
         "released_envelopes",
         "peer_retired_claims",
         "record_repair_lookups",
@@ -137,6 +146,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_message_marks",
         "local_message_staged",
         "local_message_mark_events",
+        "local_message_mark_scope_events",
         // Member-local messages a graph write queued for the messages shard.
         "local_message_outbox",
         // The messages shard's items and lifecycle, mirrored for the graph's mail indexes.
@@ -144,6 +154,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_stream_lifecycle",
         // A seat's host's closes as it relayed them: never replicated, outside every digest.
         "local_relayed_message_closes",
+        "local_relayed_message_closes_pending",
+        "local_relayed_close_work",
+        "local_relayed_close_candidates",
+        "local_relayed_close_bootstrap",
+        "local_relayed_close_reads",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",
@@ -180,9 +195,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_seat_accounts",
         "account_limit_readings",
         "account_limit_seats",
-        "local_usage_credit_heads",
-        "local_usage_credit_pending",
-        "local_usage_credit_progress",
+        // Rebuildable member-local usage boundary lookup and bounded backfill cursor.
+        "local_usage_period_v1",
+        "local_usage_period_v1_progress",
         "local_latest_slots",
         // Member-local timestamp seeks and capture queue, rebuilt from authoritative claim bodies.
         "local_objective_times_v1",
@@ -298,8 +313,6 @@ fn every_persistent_table_has_a_projection_scope() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let store = Store::open_memory("alder").unwrap();
-    // Exercise the lazily installed credit tables as well as the always-present schema.
-    store.wait_for_usage_credit_backfill().unwrap();
     let connection = store.readers.get();
     assert_eq!(
         SHARED_TABLES,

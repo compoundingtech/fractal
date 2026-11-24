@@ -510,7 +510,7 @@ impl SeatsStore for Store {
             let step = subject.starts_with("step-run/") && matches!(kind.as_str(),
                 "step-run.state" | "step-run.retried" | "step-run.carried"
                 | "work.claimed" | "work.renewed" | "work.progress" | "work.submitted"
-                | "work.failed" | "work.released" | "work.handoff-returned" | "work.extended"
+                | "work.failed" | "work.released" | "work.handoff-returned" | "work.extended" | "work.rebound"
                 | "work.person-asked" | "work.person-done" | "work.person-cancelled");
             // Any other kind on a run, generation or step (a fault, a nudge): a card sees these
             // subjects only through its owner and its queue, so refold the agents they own or
@@ -1010,8 +1010,8 @@ impl SeatsStore for Store {
             let _rebuild = self.start_roster_rebuild("historical_snapshot", index);
             let mut items = crate::performance::task("roster/card-projection",
                 || build(selected.map(|names| (names, &[][..]))))?;
-            #[cfg(any(test, feature = "test-support"))]
-            self.count_refolded_cards_for_test(items.len());
+            self.count_agent_roster_cards(items.len());
+            self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
                 .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
             crate::otel::record_roster("cold", items.len());
@@ -1025,10 +1025,9 @@ impl SeatsStore for Store {
             entry.idle_residency == idle_residency
                 && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         };
-        // Local agent timeline rows do not advance the graph index, but do change cards; the
-        // frontier ignores heartbeats and every other local kind, none of which a card reads.
-        // Read it inside the caller's SQLite snapshot, never from a future atomic generation
-        // that could race this cut.
+        // Every local append changes the snapshot token, including usage repeats clearing a
+        // pending slot. A bounded append-interval delta filters heartbeats and response spend,
+        // reusing all card rows when none of their inputs changed. Read inside this snapshot.
         let local = crate::performance::task("roster/frontier-read", || {
             roster_local_frontier(&self.readers.get(), index)
         })?;
@@ -1107,8 +1106,7 @@ impl SeatsStore for Store {
                 if previous.local != local {
                     let connection = self.readers.get();
                     let mut statement = connection.prepare_cached(
-                        "SELECT DISTINCT subject FROM local_observations WHERE id>?1 AND id<=?2
-                         AND after_store_index<=?3 AND kind='harness.timeline' AND subject LIKE 'agent/%'",
+                        /* sqlite-large-value: allow-for-now lv-h49951ea678c3 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS,
                     )?;
                     changed.extend(statement.query_map(params![previous.local, local, index],
                         |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<BTreeSet<_>>>()?);
@@ -1187,7 +1185,6 @@ impl SeatsStore for Store {
                         published_at_unix_ms: now_ms(),
                     });
                 }
-                #[cfg(any(test, feature = "test-support"))]
                 self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = previous.items.iter()
                     .filter(|item| {
@@ -1198,8 +1195,7 @@ impl SeatsStore for Store {
                 let rebuilt = crate::performance::task("roster/card-projection",
                     || build(Some((&changed, queue_metadata.as_deref().unwrap_or(&previous.items)))))?;
                 record_roster_counts(changed.len() + deferred.len(), covered.as_ref().map_or(items.len() + rebuilt.len(), BTreeSet::len), rebuilt.len());
-                #[cfg(any(test, feature = "test-support"))]
-                self.count_refolded_cards_for_test(rebuilt.len());
+                self.count_agent_roster_cards(rebuilt.len());
                 items.extend(rebuilt);
                 items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
                     .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
@@ -1214,12 +1210,10 @@ impl SeatsStore for Store {
             }
             None => {
                 let _rebuild = self.start_roster_rebuild(invalidation, index);
-                #[cfg(any(test, feature = "test-support"))]
                 self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = crate::performance::task("roster/card-projection",
                     || build(selected.map(|names| (names, &[][..]))))?;
-                #[cfg(any(test, feature = "test-support"))]
-                self.count_refolded_cards_for_test(items.len());
+                self.count_agent_roster_cards(items.len());
                 items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
                     .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
                 crate::otel::record_roster("cold", items.len());
@@ -1307,12 +1301,31 @@ impl SeatsStore for Store {
             roster_local_frontier(&self.readers.get(), index)
         })?;
         let selected = BTreeSet::from([agent.to_owned()]);
-        Ok(self.fractal.exact_agent_resources_cache.lock()
-            .expect("exact agent resources cache poisoned").iter().rev()
-            .find(|entry| exact_agent_entry(entry, agent)
-                && entry.index == index && entry.local == local && entry.history == history)
-            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, Some(&selected)))
-            .map(|entry| Arc::clone(&entry.items)))
+        let candidate = {
+            let cache = self.fractal.exact_agent_resources_cache.lock()
+                .expect("exact agent resources cache poisoned");
+            cache.iter().rev()
+                .find(|entry| exact_agent_entry(entry, agent)
+                    && entry.index == index && entry.local <= local && entry.history == history)
+                .filter(|entry| agent_resources_entry_hits(entry, now, index, entry.local, history, Some(&selected)))
+                .map(|entry| (entry.local, Arc::clone(&entry.items), entry.published_at_unix_ms))
+        };
+        let Some((before, items, published_at)) = candidate else { return Ok(None); };
+        if before == local {
+            return Ok(Some(items));
+        }
+        if !roster_local_unchanged(&self.readers.get(), before, local, index)? {
+            return Ok(None);
+        }
+        // Match the checked entry after releasing the lock for reader acquisition and SQL.
+        let mut cache = self.fractal.exact_agent_resources_cache.lock()
+            .expect("exact agent resources cache poisoned");
+        if let Some(entry) = cache.iter_mut().find(|entry|
+            entry.index == index && entry.history == history && entry.local == before
+                && entry.published_at_unix_ms == published_at && Arc::ptr_eq(&entry.items, &items)) {
+            entry.local = local;
+        }
+        Ok(Some(items))
     }
 
     fn agent_page_refs_cached_at(

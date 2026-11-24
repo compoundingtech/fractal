@@ -1,7 +1,7 @@
 //! Owner-host mail latency from transaction-fed, retained source facts. Reads never sample mail.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, PoisonError};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rusqlite::OptionalExtension as _;
 use serde_json::{Value, json};
@@ -19,10 +19,10 @@ struct Publication {
     snapshot: Mutex<Option<Snapshot>>,
     changed: Mutex<Option<tokio::sync::watch::Receiver<u64>>>,
     incarnation: Mutex<Option<String>>,
+    work: Work,
     #[cfg(test)]
     captures: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    captured: tokio::sync::Notify,
+
 }
 #[derive(Debug)]
 struct Snapshot {
@@ -34,53 +34,203 @@ struct Snapshot {
     samples: Vec<LifecycleSample>,
     held: usize,
     unknown: usize,
+    recipients: BTreeSet<String>,
     source_cut: u64,
     error: Option<String>,
     #[cfg(test)]
     source_work: [usize; 3],
+}
+
+#[derive(Default)]
+struct Work {
+    full_rebuilds: AtomicU64,
+    messages_evaluated: AtomicU64,
+    source_rows: AtomicU64,
+    acceptance_rows: AtomicU64,
+    lifecycle_rows: AtomicU64,
+    owner_lookups: AtomicU64,
+}
+
+/// Cumulative source work, independent of request/render frequency.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct WorkCounts {
+    pub full_rebuilds: u64,
+    pub messages_evaluated: u64,
+    pub source_rows: u64,
+    pub acceptance_rows: u64,
+    pub lifecycle_rows: u64,
+    pub owner_lookups: u64,
+}
+
+pub fn work_counts(store: &Store) -> WorkCounts {
+    let publication = store.extension::<Publication>();
+    let work = &publication.work;
+    WorkCounts {
+        full_rebuilds: work.full_rebuilds.load(Ordering::Relaxed),
+        messages_evaluated: work.messages_evaluated.load(Ordering::Relaxed),
+        source_rows: work.source_rows.load(Ordering::Relaxed),
+        acceptance_rows: work.acceptance_rows.load(Ordering::Relaxed),
+        lifecycle_rows: work.lifecycle_rows.load(Ordering::Relaxed),
+        owner_lookups: work.owner_lookups.load(Ordering::Relaxed),
+    }
+}
+
+/// Retained per-message reductions and their recipient dependencies. Source commits
+/// replace only the affected reductions; timer expiry uses the same changed-key path.
+#[derive(Default)]
+struct Incremental {
+    generation: Option<u64>,
+    messages: BTreeMap<String, Snapshot>,
+    recipients: BTreeMap<String, BTreeSet<String>>,
+    facts: BTreeMap<String, Facts>,
+}
+
+impl Incremental {
+    fn capture(&mut self, store: &Store, at: u64) -> anyhow::Result<Snapshot> {
+        let receiver = store.subscribe_mail_objective_inputs();
+        let (generation, delta) = store.mail_objective_changes_since(self.generation.unwrap_or(0));
+        let work = store.extension::<Publication>();
+        let mut changed = BTreeSet::new();
+        if self.generation.is_none() || delta.is_none() {
+            work.work.full_rebuilds.fetch_add(1, Ordering::Relaxed);
+            self.messages.clear();
+            self.facts.clear();
+            self.recipients.clear();
+            let raw = source_rows(store,
+                at.saturating_sub(HORIZON.saturating_add(DEADLINE).saturating_add(FRESHNESS)), &mut || {})?;
+            work.work.source_rows.fetch_add(raw.len() as u64, Ordering::Relaxed);
+            for row in raw {
+                changed.insert(row.0.clone());
+                self.facts.entry(row.0.clone()).or_default().source.get_or_insert_with(Vec::new).push(row);
+            }
+        } else if let Some((messages, recipients)) = delta {
+            for message in &messages { self.facts.remove(message); }
+            changed.extend(messages);
+            for recipient in recipients {
+                if let Some(messages) = self.recipients.get(&recipient) {
+                    changed.extend(messages.iter().cloned());
+                }
+            }
+        }
+        changed.extend(self.messages.iter().filter(|(_, snapshot)|
+            snapshot.recapture_at_ms.is_some_and(|deadline| deadline <= at))
+            .map(|(message, _)| message.clone()));
+        let mut recipient_inputs = BTreeMap::new();
+        for message in changed {
+            work.work.messages_evaluated.fetch_add(1, Ordering::Relaxed);
+            let snapshot = capture_message(store, at, Some(&message), Some(self.facts.entry(message.clone()).or_default()), &mut recipient_inputs, || {})?;
+            if let Some(previous) = self.messages.remove(&message) {
+                for recipient in previous.recipients {
+                    if let Some(messages) = self.recipients.get_mut(&recipient) {
+                        messages.remove(&message);
+                        if messages.is_empty() { self.recipients.remove(&recipient); }
+                    }
+                }
+            }
+            if !snapshot.recipients.is_empty() {
+                for recipient in &snapshot.recipients {
+                    self.recipients.entry(recipient.clone()).or_default().insert(message.clone());
+                }
+                self.messages.insert(message, snapshot);
+            } else {
+                self.facts.remove(&message);
+            }
+        }
+        self.generation = Some(generation);
+        let mut snapshot = Snapshot {
+            observed_ms: at, generation, covered_from_ms: at, source_through_ms: at,
+            recapture_at_ms: None, samples: Vec::new(), held: 0, unknown: 0,
+            recipients: BTreeSet::new(), source_cut: store.index()?, error: None,
+            #[cfg(test)]
+            source_work: [0; 3],
+        };
+        for part in self.messages.values() {
+            snapshot.covered_from_ms = snapshot.covered_from_ms.min(part.covered_from_ms);
+            snapshot.source_through_ms = snapshot.source_through_ms.min(part.source_through_ms);
+            snapshot.recapture_at_ms = snapshot.recapture_at_ms.into_iter().chain(part.recapture_at_ms).min();
+            snapshot.samples.extend_from_slice(&part.samples);
+            snapshot.held += part.held;
+            snapshot.unknown += part.unknown;
+            #[cfg(test)]
+            for (total, count) in snapshot.source_work.iter_mut().zip(part.source_work) { *total += count; }
+        }
+        // A recipient's newer frontier cannot extend another recipient's certified cut.
+        snapshot.unknown += snapshot.samples.iter().filter(|sample| sample.onset_ms > snapshot.source_through_ms).count();
+        let connection = store.readers.get();
+        let shard = crate::store::messages_shard::mailbox_reads::position(store)?;
+        let mirrored = crate::store::stream_mirror::mail_source_sent_through(&connection)?;
+        let lifecycle: Option<String> = connection.query_row(
+            "SELECT value FROM meta WHERE key='mail_delivery_source_v1_stream_through'", [], |row| row.get(0)).optional()?;
+        if mirrored < shard.admitted || lifecycle.and_then(|value| value.parse::<i64>().ok()).unwrap_or(0) < shard.lifecycle {
+            snapshot.unknown += 1;
+        }
+        if let Some(shard) = crate::store::messages_shard::shard(store) { drop(shard.connection.write()); }
+        drop(store.connection.write());
+        if *receiver.borrow() != generation || store.mail_objective_input_coverage_failed() {
+            snapshot.unknown += 1;
+        }
+        Ok(snapshot)
+    }
 }
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
 }
 
-/// One subscription owns source capture. Changes coalesce during a minimum rest after each
-/// capture. Timers renew the producer heartbeat and wake the objective evaluator at actual
-/// lifecycle/budget boundaries without continuously recomputing retained history.
+/// One source-specific subscription owns capture. Changes coalesce while capture runs;
+/// unrelated API wakes never recapture. Timers only renew the producer heartbeat or
+/// evaluate actual lifecycle/budget boundaries, including retained-source expiry.
 pub fn start(state: &crate::api::AppState) {
     let publication = state.store.extension::<Publication>();
     if publication.started.swap(true, Ordering::AcqRel) { return; }
     *publication.incarnation.lock().unwrap_or_else(PoisonError::into_inner) = Some(crate::model::new_request_id());
     let state = state.clone();
-    let mut changed = state.event_notify.subscribe();
+    let mut changed = state.store.subscribe_mail_objective_inputs();
     *publication.changed.lock().unwrap_or_else(PoisonError::into_inner) = Some(changed.clone());
     tokio::spawn(async move {
+        let mut objective = Incremental::default();
         loop {
             let generation = *changed.borrow_and_update();
+            #[cfg(test)]
+            publication.captures.fetch_add(1, Ordering::AcqRel);
             let store = state.store.clone();
-            let captured = tokio::task::spawn_blocking(move || capture(&store, now())).await;
-            let recapture_after = tokio::time::Instant::now()
-                + std::time::Duration::from_millis(FRESHNESS / 2);
+            let captured = tokio::task::spawn_blocking(move || {
+                let result = objective.capture(&store, now());
+                (objective, result)
+            }).await;
             let mut snapshot = match captured {
-                Ok(Ok(snapshot)) => snapshot,
-                error => Snapshot { observed_ms: now(), generation, samples: Vec::new(), held: 0, unknown: 1,
-                    covered_from_ms: now(), source_through_ms: 0, recapture_at_ms: None,
-                    #[cfg(test)]
-                    source_work: [0; 3],
-                    source_cut: 0, error: Some(format!("mail source capture unavailable: {error:?}")) },
+                Ok((next, result)) => {
+                    objective = next;
+                    match result {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            objective = Incremental::default();
+                            Snapshot { observed_ms: now(), generation, samples: Vec::new(), held: 0, unknown: 1,
+                                covered_from_ms: now(), source_through_ms: 0, recapture_at_ms: None,
+                                recipients: BTreeSet::new(),
+                                #[cfg(test)]
+                                source_work: [0; 3],
+                                source_cut: 0, error: Some(format!("mail source capture unavailable: {error:?}")) }
+                        }
+                    }
+                }
+                Err(error) => {
+                    objective = Incremental::default();
+                    Snapshot { observed_ms: now(), generation, samples: Vec::new(), held: 0, unknown: 1,
+                        covered_from_ms: now(), source_through_ms: 0, recapture_at_ms: None,
+                        recipients: BTreeSet::new(),
+                        #[cfg(test)]
+                        source_work: [0; 3],
+                        source_cut: 0, error: Some(format!("mail source capture unavailable: {error:?}")) }
+                }
             };
             snapshot.generation = generation;
             *publication.snapshot.lock().unwrap_or_else(PoisonError::into_inner) = Some(snapshot);
-            #[cfg(test)]
-            {
-                publication.captures.fetch_add(1, Ordering::SeqCst);
-                publication.captured.notify_one();
-            }
             let store = state.store.clone();
-            let state_dir = state.state_dir.clone();
+            let at = now();
             let reported = tokio::task::spawn_blocking(move || {
-                let rows = crate::api::operations::current_slo_rows(&store, &state_dir)?;
-                crate::declared_objectives::check_and_report(&store, &rows);
+                let native = rows(&store, at)?;
+                crate::declared_objectives::check_native_and_report(&store, at, "agents/mail-delivery", &native)?;
                 Ok::<_, anyhow::Error>(())
             }).await;
             match reported {
@@ -98,9 +248,6 @@ pub fn start(state: &crate::api::AppState) {
                 tokio::select! {
                     result = changed.changed() => {
                         if result.is_err() { return; }
-                        // Rest after capture ENDS, not after it starts. The next
-                        // borrow_and_update coalesces all changes during this interval.
-                        tokio::time::sleep_until(recapture_after).await;
                         break;
                     }
                     () = tokio::time::sleep(std::time::Duration::from_millis(delay.max(1))) => {
@@ -110,7 +257,22 @@ pub fn start(state: &crate::api::AppState) {
                             snapshot.observed_ms = now();
                         }
                         if boundary.is_some_and(|deadline| deadline <= now()) {
+                            // Retained-source expiry needs a new population; budget boundaries
+                            // only rerender the same samples. Neither depends on broad API wakes.
+                            let recapture = publication.snapshot.lock().unwrap_or_else(PoisonError::into_inner)
+                                .as_ref().and_then(|snapshot| snapshot.recapture_at_ms)
+                                .is_some_and(|deadline| deadline <= now());
+                            if recapture { break; }
                             crate::api::signal_local_change(&state);
+                            let store = state.store.clone();
+                            let reported = tokio::task::spawn_blocking(move || {
+                                let at = now();
+                                let native = rows(&store, at)?;
+                                crate::declared_objectives::check_native_and_report(&store, at, "agents/mail-delivery", &native)
+                            }).await;
+                            if !matches!(reported, Ok(Ok(()))) {
+                                tracing::warn!(error = ?reported, "mail objective boundary episode evaluation failed");
+                            }
                         }
                     }
                 }
@@ -141,6 +303,7 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
         .as_ref().map(|changed| *changed.borrow());
     let known = snapshot.is_some_and(|snapshot| snapshot.error.is_none() && snapshot.unknown == 0
         && generation == Some(snapshot.generation)
+        && !store.mail_objective_input_coverage_failed()
         && now.saturating_sub(snapshot.observed_ms) <= FRESHNESS
         && now.saturating_sub(snapshot.source_through_ms) <= FRESHNESS);
     let samples = snapshot.map_or(&[][..], |snapshot| snapshot.samples.as_slice());
@@ -201,12 +364,20 @@ fn native_frontier(store: &Store, connection: &rusqlite::Connection, recipient: 
     ).optional()?)
 }
 
+#[cfg(test)]
 fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
     capture_with_progress(store, now, || {})
 }
 
 const SOURCE_PAGE: usize = 128;
 type SourceRow = (String, String, u64, String);
+
+#[derive(Default)]
+struct Facts {
+    source: Option<Vec<SourceRow>>,
+    acceptance: BTreeMap<String, Vec<(String, u64)>>,
+    steps: BTreeMap<String, Vec<(String, String, u64)>>,
+}
 
 /// Each indexed page is fully consumed before processing or reading another page.
 /// In particular, no read transaction spans the retained-history scan.
@@ -250,14 +421,41 @@ fn source_rows(store: &Store, cutoff: u64, progress: &mut impl FnMut()) -> anyho
     Ok(result)
 }
 
-fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) -> anyhow::Result<Snapshot> {
-        let source_cut = store.index()?;
-        let owners = store.desired_subjects()?.into_iter().filter(|subject| subject.kind == "agent")
-            .map(|subject| (subject.subject, subject.member.map(|member| member.host)))
-            .collect::<BTreeMap<_, _>>();
+#[cfg(test)]
+fn capture_with_progress(store: &Store, now: u64, progress: impl FnMut()) -> anyhow::Result<Snapshot> {
+    capture_message(store, now, None, None, &mut BTreeMap::new(), progress)
+}
+
+fn capture_message(store: &Store, now: u64, message: Option<&str>, facts: Option<&mut Facts>,
+    recipient_inputs: &mut BTreeMap<String, (Option<String>, Option<u64>)>, mut progress: impl FnMut()) -> anyhow::Result<Snapshot> {
+        // Incremental capture owns one fence for the whole changed-key cut.
+        let changed = message.is_none().then(|| store.subscribe_mail_objective_inputs());
+        let generation = changed.as_ref().map_or(0, |changed| *changed.borrow());
+        let source_cut = if message.is_none() { store.index()? } else { 0 };
         let connection = store.readers.get();
-        let raw = source_rows(store,
-            now.saturating_sub(HORIZON.saturating_add(DEADLINE).saturating_add(FRESHNESS)), &mut progress)?;
+        let publication = store.extension::<Publication>();
+        let mut transient = Facts::default();
+        let facts = facts.unwrap_or(&mut transient);
+        if facts.source.is_none() {
+        let raw = match message {
+            Some(message) => {
+                let cutoff = now.saturating_sub(HORIZON.saturating_add(DEADLINE).saturating_add(FRESHNESS));
+                connection.prepare_cached(
+                    "SELECT message,recipient,sent_ms,fields FROM local_mail_delivery_source_v1 source
+                     WHERE message=?1 AND (sent_ms>=?2 OR EXISTS(
+                         SELECT 1 FROM local_mail_delivery_pending_v1 pending
+                         WHERE pending.message=source.message AND pending.recipient=source.recipient))")?
+                    .query_map(rusqlite::params![message, cutoff], |row|
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                    .collect::<rusqlite::Result<Vec<SourceRow>>>()?
+            }
+            None => source_rows(store,
+                now.saturating_sub(HORIZON.saturating_add(DEADLINE).saturating_add(FRESHNESS)), &mut progress)?,
+        };
+            publication.work.source_rows.fetch_add(raw.len() as u64, Ordering::Relaxed);
+            facts.source = Some(raw);
+        }
+        let raw = facts.source.as_ref().unwrap();
         #[cfg(test)]
         let mut source_work = [raw.len(), 0, 0];
         let mut source = BTreeMap::<(String, String), (u64, Value)>::new();
@@ -266,21 +464,39 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
         let mut recapture_at_ms: Option<u64> = None;
         let mut source_through_ms = now;
         let mut checked_recipients = std::collections::BTreeSet::new();
+        let mut recipients = BTreeSet::new();
         let mut uncovered_recipients = std::collections::BTreeSet::new();
-        // Resolve each distinct reference once per capture. Concurrent graph changes
-        // invalidate the publication below, including any cached identity mapping.
+        // Resolve each distinct reference once per capture. Concurrent relevant input
+        // changes invalidate the publication below, including its identity mappings.
         let mut identities = BTreeMap::new();
         for (message, recipient, sent, fields) in raw {
-            let recipient = canonical(&connection, &mut identities, &recipient)?;
+            let sent = *sent;
+            let cutoff = now.saturating_sub(HORIZON.saturating_add(DEADLINE).saturating_add(FRESHNESS));
+            if sent < cutoff && !connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_mail_delivery_pending_v1 WHERE message=?1 AND recipient=?2)",
+                rusqlite::params![message, recipient], |row| row.get::<_, bool>(0))? { continue; }
+            let recipient = canonical(&connection, &mut identities, recipient)?;
             if !recipient.starts_with("agent/") { continue; }
+            recipients.insert(recipient.clone());
             covered_from_ms = covered_from_ms.min(sent);
             let expiry = sent.saturating_add(DEADLINE).saturating_add(HORIZON).saturating_add(FRESHNESS).saturating_add(1);
             if expiry > now { recapture_at_ms = Some(recapture_at_ms.map_or(expiry, |at| at.min(expiry))); }
             if sent > now { unknown += 1; continue; }
-            let Some(Some(host)) = owners.get(&recipient) else { unknown += 1; continue; };
+            if !recipient_inputs.contains_key(&recipient) {
+                publication.work.owner_lookups.fetch_add(1, Ordering::Relaxed);
+                let member = connection.query_row("SELECT member FROM desired WHERE subject=?1 AND kind='agent'",
+                    [&recipient], |row| row.get::<_, Option<String>>(0)).optional()?.flatten();
+                let host = member.map(|member| serde_json::from_str::<Value>(&member))
+                    .transpose()?.and_then(|member| member["host"].as_str().map(str::to_owned));
+                let frontier = if host.as_deref() == Some(store.origin()) {
+                    native_frontier(store, &connection, &recipient)?
+                } else { None };
+                recipient_inputs.insert(recipient.clone(), (host, frontier));
+            }
+            let Some((Some(host), frontier)) = recipient_inputs.get(&recipient) else { unknown += 1; continue; };
             if host != store.origin() { continue; }
             if checked_recipients.insert(recipient.clone()) {
-                match native_frontier(store, &connection, &recipient)? {
+                match *frontier {
                     Some(through) if through <= now => {
                         source_through_ms = source_through_ms.min(through);
                         let expiry = through.saturating_add(FRESHNESS).saturating_add(1);
@@ -291,8 +507,8 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
                     _ => { unknown += 1; uncovered_recipients.insert(recipient.clone()); }
                 }
             }
-            let fields: Value = serde_json::from_str(&fields)?;
-            match source.entry((message, recipient)) {
+            let fields: Value = serde_json::from_str(fields)?;
+            match source.entry((message.clone(), recipient)) {
                 std::collections::btree_map::Entry::Vacant(entry) => { entry.insert((sent, fields)); }
                 std::collections::btree_map::Entry::Occupied(mut entry) if sent < entry.get().0 => {
                     entry.insert((sent, fields));
@@ -311,16 +527,26 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
         let mut accepted = BTreeMap::<(String, String), u64>::new();
         let mut steps = BTreeMap::<(String, String), BTreeMap<String, u64>>::new();
         for message in messages {
-            let raw = acceptance_query.query_map([message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !facts.acceptance.contains_key(message) {
+                let raw = acceptance_query.query_map([message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                publication.work.acceptance_rows.fetch_add(raw.len() as u64, Ordering::Relaxed);
+                facts.acceptance.insert(message.clone(), raw);
+            }
+            let raw = &facts.acceptance[message];
             #[cfg(test)]
             { source_work[1] += raw.len(); }
             for (recipient, at) in raw {
-                let key = (message.clone(), canonical(&connection, &mut identities, &recipient)?);
-                accepted.entry(key).and_modify(|first| *first = (*first).min(at)).or_insert(at);
+                let key = (message.clone(), canonical(&connection, &mut identities, recipient)?);
+                accepted.entry(key).and_modify(|first| *first = (*first).min(*at)).or_insert(*at);
             }
-            let raw = step_query.query_map([message], |row| Ok((row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?, row.get::<_, u64>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            if !facts.steps.contains_key(message) {
+                let raw = step_query.query_map([message], |row| Ok((row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?, row.get::<_, u64>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                publication.work.lifecycle_rows.fetch_add(raw.len() as u64, Ordering::Relaxed);
+                facts.steps.insert(message.clone(), raw);
+            }
+            let raw = &facts.steps[message];
             #[cfg(test)]
             { source_work[2] += raw.len(); }
             for (consumer, kind, at) in raw {
@@ -328,19 +554,21 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
                 // before any harness handoff; its actor is not the target input consumer.
                 let consumer = if consumer.is_empty() || matches!(kind.as_str(), "message.closed" | "message.expired") {
                     String::new()
-                } else { canonical(&connection, &mut identities, &consumer)? };
-                steps.entry((message.clone(), consumer)).or_default().entry(kind)
-                    .and_modify(|first| *first = (*first).min(at)).or_insert(at);
+                } else { canonical(&connection, &mut identities, consumer)? };
+                steps.entry((message.clone(), consumer)).or_default().entry(kind.clone())
+                    .and_modify(|first| *first = (*first).min(*at)).or_insert(*at);
             }
             progress();
         }
         // The mirror's own cut must include every stream item visible to its shard.
-        let shard = crate::store::messages_shard::mailbox_reads::position(store)?;
-        let mirrored = crate::store::stream_mirror::mail_source_sent_through(&connection)?;
-        let lifecycle: Option<String> = connection.query_row(
-            "SELECT value FROM meta WHERE key='mail_delivery_source_v1_stream_through'", [], |row| row.get(0)).optional()?;
-        if mirrored < shard.admitted || lifecycle.and_then(|value| value.parse::<i64>().ok()).unwrap_or(0) < shard.lifecycle {
-            unknown += 1;
+        if message.is_none() {
+            let shard = crate::store::messages_shard::mailbox_reads::position(store)?;
+            let mirrored = crate::store::stream_mirror::mail_source_sent_through(&connection)?;
+            let lifecycle: Option<String> = connection.query_row(
+                "SELECT value FROM meta WHERE key='mail_delivery_source_v1_stream_through'", [], |row| row.get(0)).optional()?;
+            if mirrored < shard.admitted || lifecycle.and_then(|value| value.parse::<i64>().ok()).unwrap_or(0) < shard.lifecycle {
+                unknown += 1;
+            }
         }
         let mut samples = Vec::with_capacity(source.len());
         let mut held = 0;
@@ -396,10 +624,26 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
                 samples.push(LifecycleSample { onset_ms: onset, terminal });
             }
         }
-        // Paged reads deliberately do not share a snapshot. A concurrent graph write
-        // makes this publication unknown until the next coalesced change is captured.
-        if store.index()? != source_cut { unknown += 1; }
+        // Paged reads do not share a SQLite snapshot. Only a relevant input advance
+        // fences this cut; unrelated graph claims cannot change these source facts.
+        // A writer publishes native generations when its loan ends, after COMMIT.
+        // Resolve every loan that could have committed between pages before certifying.
+        // All statements have been consumed; no SQLite read transaction is held here.
+        if let Some(changed) = changed {
+            if let Some(shard) = crate::store::messages_shard::shard(store) {
+                drop(shard.connection.write());
+            }
+            drop(store.connection.write());
+            if *changed.borrow() != generation || store.mail_objective_input_coverage_failed() {
+                unknown += 1;
+            }
+        }
+        if message.is_some() && checked_recipients.is_empty() {
+            // Remote-only source rows do not constrain this host's certified frontier.
+            source_through_ms = u64::MAX;
+        }
         Ok(Snapshot { observed_ms: now, generation: 0, covered_from_ms, source_through_ms, recapture_at_ms,
+            recipients,
             #[cfg(test)]
             source_work,
             samples, held, unknown, source_cut, error: None })

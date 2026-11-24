@@ -1543,6 +1543,39 @@ fn a_write_another_thread_makes_while_an_item_is_evaluated_is_no_correction() {
     });
 }
 
+#[test]
+fn native_turn_external_request_wakes_are_not_corrections_or_lost_during_evaluation() {
+    let (store, _runtime, reconciler, _) = stopping();
+    let item = "mission-run/native-parent";
+    let reads = BTreeSet::from(["step-run/program".to_owned()]);
+    reconciler.incremental.observe(&store).unwrap();
+    reconciler.incremental.evaluated(item, reads.clone(), None);
+    for before_mark in [false, true] {
+        assert!(!reconciler.incremental.needs(item, START));
+        // A resource request has no journal claim yet. Its host invalidates the parent
+        // through the program step, either just after needs_item or during evaluation.
+        if before_mark {
+            reconciler.incremental.touch("step-run/program");
+        }
+        smallclaims::touched::record_wrote(|| {
+            let mark = reconciler.evaluation_mark();
+            store.append_claim(&observed("resource/native-child")).unwrap();
+            assert_eq!(reconciler.missed_by_skipping(item, mark, &reads, None).is_empty(), before_mark);
+            if !before_mark {
+                std::thread::scope(|scope| {
+                    scope.spawn(|| reconciler.incremental.touch("step-run/program")).join().unwrap();
+                });
+            }
+            assert!(reconciler.missed_by_skipping(item, mark, &reads, None).is_empty());
+            reconciler.incremental.evaluated_after(item, reads.clone(), None, mark.touch_revision);
+            assert_eq!(reconciler.incremental.needs(item, START), !before_mark);
+        });
+        // The next evaluation acknowledges any touch that raced the previous one.
+        let mark = reconciler.evaluation_mark();
+        reconciler.incremental.evaluated_after(item, reads.clone(), None, mark.touch_revision);
+    }
+}
+
 /// A settle whose write the passes read before the run's evaluation started, yet which marked
 /// nothing, is a missed wake: what the evaluation writes on it still fails the strict check.
 #[test]
@@ -1679,4 +1712,682 @@ fn idle_residency_arms_the_exact_stable_epoch_deadline_and_rearms_after_a_blocke
         restarted.evaluate_idle_residency("agent/node.garden", START + 10_000).unwrap();
     });
     assert_eq!(after_restart, Some(START + 15_000), "restart starts a full local grace interval");
+}
+
+#[test]
+fn unchanged_running_workspaces_with_retained_render_failures_spawn_no_leases() {
+    let _clock = Clock::at(START);
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    store.set_write_clock_at(START).unwrap();
+    let mut source = String::from("version 2\n");
+    for index in 0..3 {
+        let workspace = root.path().join(format!("worker-{index}"));
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "--quiet", "-b", &format!("worker-{index}"),
+            workspace.to_str().unwrap(),
+        ]);
+        source.push_str(&format!(
+            "agent \"worker-{index}\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"worker-{index}\"; command \"true\" }}\n",
+            workspace.to_str().unwrap(), repository.to_str().unwrap(),
+        ));
+    }
+    apply_source(&store, &source, "existing-workspaces");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ).skipping_unneeded(true);
+    reconciler.reconcile_once().unwrap();
+    *runtime.ptys.lock().unwrap() = runtime.started_members.lock().unwrap().iter()
+        .map(|member| RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("current".into()),
+        }).collect();
+    assert_eq!(runtime.ptys.lock().unwrap().len(), 3);
+    reconciler.reconcile_once().unwrap();
+    reconciler.incremental.observe(&store).unwrap();
+    for subject in store.desired_subjects().unwrap() {
+        let item = format!("member:{}", subject.subject);
+        let reads = reconciler.incremental.reads_of(&item);
+        reconciler.incremental.evaluated(&item, reads, Some(u128::MAX));
+        // A retained failure keeps validation/observation selected even when neither
+        // rendering nor a start is due. This used to spawn one lease per workspace.
+        reconciler.render_failures.lock().unwrap()
+            .insert(subject.subject, "retained render failure".into());
+    }
+    let reads = reconciler.incremental.reads_of("render");
+    reconciler.incremental.evaluated("render", reads, None);
+    assert!(!reconciler.incremental.needs("render", now_ms()));
+    let before = crate::checkout::test_support::lease_count(&repository);
+    let starts = runtime.started_members.lock().unwrap().len();
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before,
+        "validation/observation of unchanged running workspaces must spawn zero leases");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+    assert_eq!(reconciler.render_failures.lock().unwrap().len(), 3,
+        "the pass must retain prior failures rather than render again");
+}
+
+#[test]
+fn unchanged_full_render_passes_spawn_no_leases_but_disk_drift_is_repaired() {
+    let _clock = Clock::at(START);
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+        repository.to_str().unwrap(),
+    ), "unchanged-full-render");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ).skipping_unneeded(true);
+    reconciler.reconcile_once().unwrap();
+    // Starting records the request; the fake runtime needs an explicit running observation.
+    *runtime.ptys.lock().unwrap() = runtime.started_members.lock().unwrap().iter()
+        .map(|member| RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("current".into()),
+        }).collect();
+    assert_eq!(runtime.ptys.lock().unwrap().len(), 1);
+    let before = crate::checkout::test_support::lease_count(&repository);
+    let starts = runtime.started_members.lock().unwrap().len();
+    smallclaims::store::set_thread_clock(Some(START + crate::incremental::FULL_PASS_INTERVAL_MS));
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before,
+        "even a full safety render must not lease unchanged output");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+    assert_eq!(std::fs::read_to_string(repository.join("output")).unwrap(), "ready");
+
+    std::fs::write(repository.join("output"), "drift").unwrap();
+    smallclaims::store::set_thread_clock(Some(START + 2 * crate::incremental::FULL_PASS_INTERVAL_MS));
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), before + 1,
+        "a full pass repairing changed output must acquire admission");
+    assert_eq!(std::fs::read_to_string(repository.join("output")).unwrap(), "ready");
+    assert_eq!(runtime.started_members.lock().unwrap().len(), starts);
+}
+
+#[test]
+fn non_git_workspace_creation_still_prepares_before_start() {
+    let root = crate::test_support::canonical_tempdir();
+    let workspace = root.path().join("plain");
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?} create=#true; command \"true\" }}",
+        workspace.to_str().unwrap(),
+    ), "plain-workspace-create");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    reconciler.reconcile_once().unwrap();
+    assert!(workspace.is_dir());
+    assert!(!workspace.join(".git").exists());
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+}
+
+fn queue_workspace_start(
+    store: &Store,
+    repository: &Path,
+    workspace: &Path,
+    legacy: bool,
+    request: Option<crate::model::ClaimRecord>,
+) -> String {
+    let desired = store.desired_subjects_named(&["agent/node.worker".into()])
+        .unwrap().remove(0);
+    let member = desired.member.as_ref().unwrap().clone();
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut launch_member = member.clone();
+    launch_member.tags.insert(start_jobs::OPERATION_TAG.into(), id.clone());
+    let prepared = start_jobs::PreparedStart {
+        workspace_admission: Some(start_jobs::WorkspaceAdmission::Git {
+            owner: workspace.to_path_buf(),
+            repository: repository.to_path_buf(),
+        }),
+        subject: desired.clone(),
+        launch_member,
+        member,
+        reason: "workspace recovery".into(),
+        request,
+        desired_token: store.selected_desired_token(&desired.subject).unwrap().unwrap(),
+        selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+        placement_evidence: Vec::new(),
+        start_request: String::new(),
+        start_request_receipt: None,
+        control_request: None,
+        control_request_receipt: None,
+        expected_incarnation: None,
+        resume_operation: None,
+    };
+    let mut body = serde_json::to_value(prepared).unwrap();
+    if legacy {
+        body.as_object_mut().unwrap().remove("workspace_admission");
+    }
+    let mut operation = crate::store::RuntimeStartOperation {
+        id,
+        subject: desired.subject,
+        owner: "previous-daemon".into(),
+        body,
+        revoked_by: None,
+        finished: false,
+        result: None,
+        applied: false,
+        cleanup_verified: false,
+        dispatched: false,
+        receipted: false,
+    };
+    store.admit_runtime_start(&mut operation, 2).unwrap();
+    operation.id
+}
+
+#[test]
+fn recovery_retires_queued_starts_with_missing_or_replaced_workspaces() {
+    for replacement in ["missing", "plain", "foreign", "dispatched"] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        let database = root.path().join("claims.db");
+        {
+            let store = Store::open(&database, "node").unwrap();
+            apply_source(&store, &format!(
+                "version 2\nagent \"worker\" {{ workspace {:?} create=#true; checkout {:?} base=\"origin/main\" branch=\"worker\"; command \"true\" }}",
+                workspace.to_str().unwrap(), repository.to_str().unwrap(),
+            ), "workspace-recovery");
+            let id = queue_workspace_start(&store, &repository, &workspace, false, None);
+            if replacement == "dispatched" {
+                assert!(store.dispatch_runtime_start(&id, 2).unwrap());
+            }
+        }
+        std::fs::remove_dir_all(&workspace).unwrap();
+        if matches!(replacement, "plain" | "foreign") {
+            std::fs::create_dir(&workspace).unwrap();
+            if replacement == "foreign" {
+                crate::checkout::test_support::git(&workspace, &["init", "--quiet"]);
+            }
+        }
+        let store = Arc::new(Store::open(&database, "node").unwrap());
+        let runtime = Arc::new(FakeRuntime::default());
+        let restarted = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        restarted.reconcile_start_jobs().unwrap();
+        if replacement == "dispatched" {
+            // Recover the lost producer, apply its result, then close using
+            // the runtime's operation-fenced producer-closure evidence.
+            restarted.reconcile_start_jobs().unwrap();
+            restarted.reconcile_start_jobs().unwrap();
+        }
+        assert!(store.runtime_start_for("agent/node.worker").unwrap().is_none(),
+            "invalid workspace must not prevent durable queued-operation retirement");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert!(crate::checkout::test_support::lease_count(&repository) >= 1,
+            "recovery must use the persisted original repository rather than rediscovery");
+        assert!(store.observations_for("agent/node.worker", "harness.diagnostic").unwrap()
+            .iter().any(|claim| claim.body["fields"]["code"] == "start-workspace-refused"));
+        if replacement == "missing" {
+            restarted.reconcile_once().unwrap();
+            assert!(workspace.join(".git").exists());
+            assert_eq!(runtime.started_members.lock().unwrap().len(), 1,
+                "retirement must allow the next pass to recreate and start with fresh admission");
+            assert_eq!(crate::checkout::test_support::lease_count(&repository), 2);
+        }
+    }
+}
+
+#[test]
+fn queued_workspace_starts_admit_legacy_records_and_reuse_modern_leases() {
+    for legacy in [true, false] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let database = root.path().join("claims.db");
+        let id = {
+            let store = Store::open(&database, "node").unwrap();
+            apply_source(&store, &format!(
+                "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
+                repository.to_str().unwrap(),
+            ), "queued-start");
+            queue_workspace_start(&store, &repository, &repository, legacy, None)
+        };
+        let store = Arc::new(Store::open(&database, "node").unwrap());
+        let runtime = Arc::new(FakeRuntime::default());
+        let restarted = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        restarted.reconcile_start_jobs().unwrap();
+        complete_queued_workspace_start(&restarted, &store, &runtime, &id, legacy);
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1,
+            "dispatch and completion must reuse the same deletion lease");
+    }
+}
+
+#[test]
+fn legacy_queued_idle_restart_keeps_its_original_request_and_quiet_boundary() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let database = root.path().join("claims.db");
+    let (id, request, release) = {
+        let store = Store::open(&database, "node").unwrap();
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; restart \"never\" }}",
+            repository.to_str().unwrap(),
+        ), "queued-idle-restart");
+        let request = store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from(crate::restart::WHEN_IDLE)),
+                ("runtime_id".into(), Value::from("node.worker")),
+                ("incarnation_id".into(), Value::from("incumbent")),
+            ]),
+            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let release = store.append_claim(&ClaimInput {
+            subject: request.subject.clone(), kind: "runtime.action.succeeded".into(),
+            actor: request.actor.clone(),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("operation_status".into(), Value::from("quiesced")),
+            ]),
+            evidence: vec![request.id.clone()], expected_subject: None,
+            idempotency_key: Some(crate::restart::release_key(&request)),
+        }).unwrap();
+        let id = queue_workspace_start(&store, &repository, &repository, true, Some(request.clone()));
+        (id, request, release)
+    };
+    let store = Arc::new(Store::open(&database, "node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_start_jobs().unwrap();
+    complete_queued_workspace_start(&restarted, &store, &runtime, &id, true);
+    assert_eq!(crate::restart::latest_request(&store, &request.subject).unwrap().unwrap().id, request.id);
+    assert_eq!(store.operation_claim(&crate::restart::release_key(&request)).unwrap().unwrap().id, release.id);
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+}
+
+#[test]
+fn a_later_stop_prevents_legacy_queued_restart_dispatch() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let database = root.path().join("claims.db");
+    {
+        let store = Store::open(&database, "node").unwrap();
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
+            repository.to_str().unwrap(),
+        ), "queued-before-stop");
+        let request = store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("runtime_id".into(), Value::from("node.worker")),
+                ("incarnation_id".into(), Value::from("incumbent")),
+            ]),
+            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        queue_workspace_start(&store, &repository, &repository, true, Some(request));
+        store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([("action".into(), Value::from("stop"))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        apply_source(&store, "version 2\nstop \"agent/node.worker\"", "stop-queued-start");
+    }
+    let store = Arc::new(Store::open(&database, "node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_start_jobs().unwrap();
+    restarted.reconcile_once().unwrap();
+    assert!(runtime.started_members.lock().unwrap().is_empty());
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 0);
+}
+
+#[test]
+fn refused_legacy_admission_stays_queued_and_retries_without_losing_its_operation() {
+    let _clock = Clock::at(START);
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let database = root.path().join("claims.db");
+    let id = {
+        let store = Store::open(&database, "node").unwrap();
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\" }}",
+            repository.to_str().unwrap(),
+        ), "queued-before-refusal");
+        let request = store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("runtime_id".into(), Value::from("node.worker")),
+                ("incarnation_id".into(), Value::from("incumbent")),
+            ]),
+            evidence: store.selected_desired_token("agent/node.worker").unwrap().into_iter().collect(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        queue_workspace_start(&store, &repository, &repository, true, Some(request))
+    };
+    let hidden = root.path().join("temporarily-unavailable");
+    std::fs::rename(&repository, &hidden).unwrap();
+    let store = Arc::new(Store::open(&database, "node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_once().unwrap();
+    assert!(store.observations_for("agent/node.worker", "runtime.reconcile-decision").unwrap()
+        .iter().any(|claim| claim.body["fields"]["decision"] == "restart-waiting"),
+        "the broad member pass must interleave its pending-restart diagnostic");
+    let events = restarted.event_notify.subscribe();
+    for _ in 0..5 {
+        restarted.reconcile_once().unwrap();
+        assert!(!events.has_changed().unwrap(),
+            "a refused admission interleaved with restart-waiting must not repeatedly wake reconciliation");
+        let queued = store.runtime_start_for("agent/node.worker").unwrap().unwrap();
+        assert_eq!(queued.id, id);
+        assert!(!queued.dispatched && !queued.finished && queued.revoked_by.is_none());
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+    assert_eq!(store.observations_for("agent/node.worker", "runtime.reconcile-decision").unwrap()
+        .iter().filter(|claim| claim.body["fields"]["key"] == format!("start-workspace-wait:{id}")).count(), 1);
+    assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+    // The wait dedup is one keyed operation-registry lookup, never a scan of the
+    // subject's decision history: the SQLite work of a refused pass must not grow
+    // when that history does.
+    let refused_pass_work = {
+        restarted.reconcile_start_jobs().unwrap();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        restarted.reconcile_start_jobs().unwrap();
+        scope.finish()
+    };
+    for index in 0..800 {
+        store.append_claim(&ClaimInput {
+            subject: "agent/node.worker".into(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("key".into(), Value::from(format!("refusal-history-{index}"))),
+                ("decision".into(), Value::from("history-noise")),
+                ("reason".into(), Value::from("seeded history the wait dedup must not read")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    let grown_pass_work = {
+        restarted.reconcile_start_jobs().unwrap();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        restarted.reconcile_start_jobs().unwrap();
+        scope.finish()
+    };
+    assert_eq!(grown_pass_work.statements, refused_pass_work.statements,
+        "a refused pass must run the same statements whatever the decision history holds");
+    assert!(grown_pass_work.vm_steps <= refused_pass_work.vm_steps + 64,
+        "a refused pass must not read the subject's decision history: \
+         {refused_pass_work:?} then {grown_pass_work:?}");
+    std::fs::rename(&hidden, &repository).unwrap();
+    restarted.reconcile_start_jobs().unwrap();
+    complete_queued_workspace_start(&restarted, &store, &runtime, &id, true);
+}
+
+fn complete_queued_workspace_start(
+    reconciler: &Reconciler<FakeRuntime>,
+    store: &Store,
+    runtime: &FakeRuntime,
+    id: &str,
+    legacy: bool,
+) {
+    let (live, changed) = &*reconciler.start_jobs.live;
+    let mut live = live.lock().unwrap();
+    while !live.is_empty() {
+        live = changed.wait(live).unwrap();
+    }
+    drop(live);
+    let operation = store.runtime_start_for("agent/node.worker").unwrap().unwrap();
+    assert_eq!(operation.id, id);
+    assert!(operation.dispatched && operation.finished);
+    assert_eq!(operation.body["workspace_admission"].is_null(), legacy,
+        "lazy dispatch must not rewrite the stored operation body");
+    assert!(reconciler.apply_start_result(id, "agent/node.worker").unwrap(),
+        "legacy completion must reacquire admission and publish its fenced result");
+    let receipt = store.latest_observation("agent/node.worker", "runtime.action.succeeded")
+        .unwrap().unwrap();
+    assert_eq!(receipt.body["fields"]["operation"], id);
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+    assert!(store.observations_for("agent/node.worker", "runtime.action.failed").unwrap().is_empty());
+}
+
+#[test]
+fn a_nested_bare_repository_is_not_normalized_to_its_parent_worktree() {
+    let root = crate::test_support::canonical_tempdir();
+    let parent = crate::checkout::test_support::repository(root.path());
+    let nested = parent.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let workspace = crate::checkout::test_support::store_repository(&nested);
+    let bare = nested.join(".bare");
+    assert_eq!(crate::repositories::workspace_repository(&workspace), Some(bare.clone()));
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"main\" branch=\"main\"; command \"true\" }}",
+        format!("{}/", workspace.display()), workspace.to_str().unwrap(),
+    ), "nested-bare-repository-admission");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(runtime.started_members.lock().unwrap().len(), 1);
+    assert_eq!(crate::checkout::test_support::lease_count(&bare), 1,
+        "the nested bare repository, not the containing worktree, owns admission");
+}
+
+#[test]
+fn checkout_repository_aliases_remain_valid_at_start_admission() {
+    for linked in [false, true] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let alias = root.path().join("source");
+        if linked {
+            crate::checkout::test_support::git(&repository, &[
+                "worktree", "add", "-b", "source", alias.to_str().unwrap(),
+            ]);
+        } else {
+            std::os::unix::fs::symlink(&repository, &alias).unwrap();
+        }
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"worker\"; command \"true\" }}",
+            workspace.to_str().unwrap(), alias.to_str().unwrap(),
+        ), "start-repository-alias");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.started_members.lock().unwrap().len(), 1,
+            "linked and symlinked repository declarations must admit the same checkout");
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+    }
+}
+
+#[test]
+fn a_checkout_branch_changed_after_render_is_refused_at_start_admission() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let workspace = root.path().join("worker");
+    crate::checkout::test_support::git(&repository, &[
+        "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+    ]);
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"worker\"; command \"true\" }}",
+        workspace.to_str().unwrap(), repository.to_str().unwrap(),
+    ), "branch-changed-before-start");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ).tolerating_faults();
+    let changed = workspace.clone();
+    *reconciler.after_workspace_render.lock().unwrap() = Some(Box::new(move || {
+        crate::checkout::test_support::git(&changed, &["checkout", "-b", "replacement"]);
+    }));
+    reconciler.reconcile_once().unwrap();
+    assert!(runtime.started_members.lock().unwrap().is_empty(),
+        "the declared branch must be revalidated while holding start admission");
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+}
+
+#[test]
+fn a_worktree_reclaimed_after_unchanged_render_never_starts_as_a_plain_directory() {
+    for declared_checkout in [false, true] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        std::fs::write(workspace.join("output"), "ready").unwrap();
+        let checkout = if declared_checkout {
+            format!("checkout {:?} base=\"origin/main\" branch=\"worker\";",
+                repository.to_str().unwrap())
+        } else {
+            String::new()
+        };
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?} create=#true; {checkout} command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+            workspace.to_str().unwrap(),
+        ), "reclaimed-after-unchanged-render");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store, runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        ).tolerating_faults();
+        let removed = workspace.clone();
+        let source_repository = repository.clone();
+        *reconciler.after_workspace_render.lock().unwrap() = Some(Box::new(move || {
+            assert_eq!(crate::checkout::test_support::lease_count(&source_repository), 0,
+                "unchanged rendering must remain unleased");
+            std::fs::remove_dir_all(&removed).unwrap();
+        }));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1,
+            "start must use the observed identity even after Git pointers disappear");
+        assert!(!workspace.exists(), "start must not recreate a checkout as a plain directory");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn an_existing_workspace_renders_and_publishes_with_exactly_one_lease() {
+    let root = crate::test_support::canonical_tempdir();
+    let repository = crate::checkout::test_support::repository(root.path());
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+        repository.to_str().unwrap(),
+    ), "render-existing-workspace");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store.clone(), runtime, "node".into(), Arc::new(Notify::new()),
+    );
+    // Synchronous test dispatch adopts through reconcile_start_jobs(), which does not
+    // invoke completion_hook. Exercise the real signalled-result adoption lane instead.
+    reconciler.wait_for_test_starts.store(false, Ordering::Release);
+    let owner = repository.clone();
+    let lease_store = root.path().join("mr-store");
+    let published = store.clone();
+    let checked = Arc::new(AtomicBool::new(false));
+    let marker = checked.clone();
+    *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(move || {
+        assert_eq!(crate::checkout::test_support::lease_count(&owner), 1,
+            "render and runtime initialization must share one lease");
+        assert_eq!(std::fs::read_to_string(owner.join("output")).unwrap(), "ready");
+        assert!(!published.observations_for("agent/node.worker", "render.applied").unwrap().is_empty());
+        // Bypass the counting seam for the contention probe, not for reconciliation.
+        let mut command = std::process::Command::new(
+            fractal_runtime::store_worktree_lease::mr_executable().unwrap(),
+        );
+        command.env("MEGAREPO_STORE", &lease_store);
+        assert!(fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
+            command, &owner, &owner,
+        ).is_err(), "completion publication must remain fenced");
+        marker.store(true, Ordering::SeqCst);
+    }));
+    reconciler.reconcile_once().unwrap();
+    let (live, changed) = &*reconciler.start_jobs.live;
+    let mut live = live.lock().unwrap();
+    while !live.is_empty() {
+        live = changed.wait(live).unwrap();
+    }
+    drop(live);
+    let operation = store.runtime_start_for("agent/node.worker").unwrap().unwrap();
+    assert!(reconciler.apply_start_result(&operation.id, "agent/node.worker").unwrap());
+    assert!(checked.load(Ordering::SeqCst), "completion publication must be exercised");
+    assert_eq!(crate::checkout::test_support::lease_count(&repository), 1);
+    assert!(!store.observations_for("agent/node.worker", "runtime.action.succeeded").unwrap().is_empty());
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_ok(),
+        "the completed pass must release admission");
+}
+
+#[test]
+fn a_workspace_reclaimed_after_observation_is_leased_but_never_rendered_or_recreated() {
+    // Cover both declared checkouts and Git workspaces discovered during observation.
+    for declared_checkout in [false, true] {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let workspace = root.path().join("worker");
+        crate::checkout::test_support::git(&repository, &[
+            "worktree", "add", "--quiet", "-b", "worker", workspace.to_str().unwrap(),
+        ]);
+        let checkout = if declared_checkout {
+            format!("checkout {:?} base=\"origin/main\" branch=\"worker\";",
+                repository.to_str().unwrap())
+        } else {
+            String::new()
+        };
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?} create=#true; {checkout} command \"true\"; render {{ file \"output\" \"ready\" }} }}",
+            workspace.to_str().unwrap(),
+        ), "reclaimed-before-render");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        ).tolerating_faults();
+        let removed = workspace.clone();
+        let observed = store.clone();
+        let source_repository = repository.clone();
+        *reconciler.before_workspace_render.lock().unwrap() = Some(Box::new(move || {
+            assert_eq!(crate::checkout::test_support::lease_count(&source_repository), 0,
+                "observation must remain unleased");
+            assert!(!observed.observations_for("agent/node.worker", "workspace.observed")
+                .unwrap().is_empty(), "reclamation must happen after workspace observation");
+            std::fs::remove_dir_all(&removed).unwrap();
+        }));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(crate::checkout::test_support::lease_count(&repository), 1,
+            "render admission must retain the observed repository after Git pointers disappear");
+        assert!(!workspace.exists(), "render must not replace the checkout with a plain directory");
+        assert!(store.observations_for("agent/node.worker", "render.applied").unwrap().is_empty());
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert!(store.member_reconcile_fault("agent/node.worker", None).unwrap().unwrap()
+            .contains("workspace reclaimed before render"));
+    }
 }

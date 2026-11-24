@@ -26,6 +26,130 @@ use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
 
+#[test]
+fn cached_actual_inspection_never_fills_a_cold_or_stale_entry() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "resource/github/acme/garden/pull-request/12";
+    let append = |state: &str| store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "resource.observed".into(), actor: None,
+        fields: BTreeMap::from([
+            ("kind".into(), json!("vcs.pull-request")),
+            ("facts".into(), json!({"number": 12, "state": state, "merged": false, "title": "Garden"})),
+            ("observer".into(), json!("observer/repo")),
+            ("baseline".into(), json!(false)),
+            ("changed_fields".into(), json!(["state"])),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    append("open");
+    store.fractal.actual_cache.lock().unwrap().clear();
+    assert_eq!(store.inspect_cached_actual(subject, |_| true).unwrap(), None);
+    assert!(store.fractal.actual_cache.lock().unwrap().is_empty());
+    assert!(store.latest_actual_value(subject).unwrap().is_some());
+    assert_eq!(store.inspect_cached_actual(subject, |_| true).unwrap(), Some(true));
+    let cached_index = store.fractal.actual_cache.lock().unwrap()[subject].0;
+    append("closed");
+    assert_eq!(store.inspect_cached_actual(subject, |_| true).unwrap(), None);
+    assert_eq!(store.fractal.actual_cache.lock().unwrap()[subject].0, cached_index);
+    let plan: String = store.readers.get().query_row(
+        "EXPLAIN QUERY PLAN SELECT store_index FROM claims INDEXED BY claims_subject_index
+         WHERE subject=?1 ORDER BY store_index DESC LIMIT 1",
+        [subject], |row| row.get(3),
+    ).unwrap();
+    assert!(plan.contains("COVERING INDEX claims_subject_index"), "{plan}");
+}
+
+fn assert_open_indexes_reviewed(connection: &rusqlite::Connection) {
+    #[derive(serde::Deserialize)]
+    struct Allowlist {
+        indexes: std::collections::BTreeMap<String, Vec<String>>,
+    }
+    let allowlist: Allowlist = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h680ee8d4cd36 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include_str!(
+        "../../../../docs/st3/open-indexes.json"
+    )).unwrap();
+    let mut actual = std::collections::BTreeMap::from([
+        ("claims".to_owned(), Vec::<String>::new()),
+        ("local_observations".to_owned(), Vec::<String>::new()),
+    ]);
+    let mut statement = connection.prepare(
+        "SELECT tbl_name, name FROM sqlite_master
+         WHERE type='index' AND tbl_name IN ('claims', 'local_observations')
+         ORDER BY tbl_name, name",
+    ).unwrap();
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }).unwrap();
+    for row in rows {
+        let (table, name) = row.unwrap();
+        assert!(
+            allowlist.indexes.get(&table).is_some_and(|names| names.contains(&name)),
+            "Unreviewed store-open index {name} on {table}: new indexes on claims or \
+             local_observations must go through offline `fractal store prepare-indexes` \
+             (owner_indexes) or reuse an existing index. Extending \
+             docs/st3/open-indexes.json requires Fractal Product Lead approval."
+        );
+        actual.get_mut(&table).unwrap().push(name);
+    }
+    let mut absent = Vec::new();
+    for (table, names) in &allowlist.indexes {
+        for name in names {
+            if !actual.get(table).is_some_and(|indexes| indexes.contains(name)) {
+                absent.push(format!("{table}.{name}"));
+            }
+        }
+    }
+    assert!(
+        absent.is_empty(),
+        "Listed store-open indexes are absent: {}. Remove these obsolete entries from \
+         docs/st3/open-indexes.json; removing an index does not require approval to add one.",
+        absent.join(", ")
+    );
+}
+
+#[test]
+#[should_panic(expected = "Listed store-open indexes are absent: claims.claims_accepted_order_index")]
+fn open_index_guard_reports_obsolete_allowlist_entries_separately() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    assert_open_indexes_reviewed(&connection);
+}
+
+#[test]
+fn store_open_indexes_require_product_lead_review() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.sqlite3");
+    {
+        let store = Store::open(&path, "open-index-fixture").unwrap();
+        assert_open_indexes_reviewed(&store.connection.write());
+    }
+    // Exercise the existing-store create_schema path too, not just fresh-store DDL.
+    let reopened = Store::open(&path, "open-index-fixture").unwrap();
+    assert_open_indexes_reviewed(&reopened.connection.write());
+}
+
+#[test]
+#[should_panic(expected = "Unreviewed store-open index unreviewed_claims_index on claims")]
+fn open_index_guard_rejects_new_claims_index() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hd1094061b9cd owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */
+        "CREATE TABLE claims(id INTEGER PRIMARY KEY);
+         CREATE INDEX unreviewed_claims_index ON claims(id);",
+    ).unwrap();
+    assert_open_indexes_reviewed(&connection);
+}
+
+#[test]
+#[should_panic(expected = "Unreviewed store-open index unreviewed_observations_index on local_observations")]
+fn open_index_guard_rejects_new_observation_index() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hbdc943236c85 owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */
+        "CREATE TABLE local_observations(id INTEGER PRIMARY KEY);
+         CREATE INDEX unreviewed_observations_index ON local_observations(id);",
+    ).unwrap();
+    assert_open_indexes_reviewed(&connection);
+}
+
 fn legacy_repair_fixture(store: &Store) -> Value {
     store.connection.write().execute(
         /* sqlite-large-value: allow-for-now lv-haf973508711e owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
@@ -2840,13 +2964,24 @@ fn subject_cache_overflow_advances_once_and_rebuilds_only_selected_subjects() {
         store.status_for_subject_names_at(names.clone(), before, true, ClaimsReduction::Summary).unwrap();
         assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), names.len());
         store.connection.batched(|transaction| -> Result<()> {
-            for index in 0..=SUBJECT_CACHE_DELTA_ROWS {
-                append_claim_tx(transaction, &store.origin, "custom/example/overflow", "custom.example.reading",
-                    None, &json!({"fields":{"round":round,"reading":index}}), &[], None)?;
+            // Seed the backlog before the final admitted append flushes projections.
+            // Flushing each custom claim rereads this subject's growing history,
+            // making setup quadratic even though the cache only needs the row delta.
+            // Keep every claim and event, and project the complete batch once.
+            for index in 0..SUBJECT_CACHE_DELTA_ROWS {
+                let body = json!({"fields":{"round":round,"reading":index}});
+                let claim = append_claim_record_tx(
+                    transaction, &store.origin, "custom/example/overflow",
+                    "custom.example.reading", None, &body, &[], None,
+                )?;
+                insert_event(transaction, claim.store_index, &claim.kind, &claim.subject, &body)?;
             }
+            append_claim_tx(transaction, &store.origin, "custom/example/overflow", "custom.example.reading",
+                None, &json!({"fields":{"round":round,"reading":SUBJECT_CACHE_DELTA_ROWS}}), &[], None)?;
             Ok(())
         }).unwrap().unwrap();
         let cut = store.index().unwrap();
+        assert_eq!(cut - before, (SUBJECT_CACHE_DELTA_ROWS + 1) as u64);
         store.advance_subject_cache(&store.readers.get(), cut).unwrap();
         {
             let cache = store.fractal.subject_cache.lock().unwrap();

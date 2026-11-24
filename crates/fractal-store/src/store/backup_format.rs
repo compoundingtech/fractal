@@ -63,6 +63,14 @@ pub struct Header {
     /// the JSON, below [`VERSION_WITH_SHARDS`] and whenever no shard holds anything.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub shards: BTreeMap<String, ShardDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceIdentity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SourceIdentity {
+    pub writer_id: String,
+    pub max_store_index: u64,
 }
 
 /// What an archive holds of one shard: the digest of its admitted envelope log, as the graph's

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Align TypeScript model drift round-trip tests with shared timestamp and nullable field codecs.",
+  "replay": {
+    "status": "none",
+    "detail": "Test-only change; no stored data or replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Model drift timestamps retain the existing Timestamp codec and DateTime.Utc decoded values."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The test now expects canonical UTC timestamps with millisecond precision and compares nullable fallback reasons after encoding."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client or server runtime behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery required."
+  }
+}

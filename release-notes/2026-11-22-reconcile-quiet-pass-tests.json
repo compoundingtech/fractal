@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Internal: isolate reconcile quiet-pass count tests from concurrent result adoption and host pressure sampling.",
+  "replay": {"status": "none", "detail": "Test harness change only; no replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No product behavior changes."},
+  "compatibility": {"status": "none", "detail": "The quiet-pass harness runs the real broad-pass loop alone, retaining exact count assertions and its explicit helper-completion barrier. Concurrent result adoption remains covered separately."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "No persisted state changes."}
+}

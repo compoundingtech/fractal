@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep published agent rosters and collection views available when the background retirement-identity import finishes. Changing retirement authority invalidates replication inventory without withdrawing graph-equivalent publications, so a successful roster publication barrier remains valid during startup maintenance.",
+  "replay": {"status": "none", "detail": "No replay behavior changes; actual graph replacement still invalidates views."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Retirement authority, admission decisions, and retention rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "No protocol or generated client changes."},
+  "downtime": {"status": "none", "detail": "Authority changes no longer withdraw existing graph publications."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new recovery restrictions."}
+}

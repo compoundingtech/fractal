@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep graph replication receives from queueing behind projection",
+  "replay": { "status": "none", "detail": "Existing bounded projection and exactly-once frontier advancement are retained. Quiet coalescing leaves the completion watermark unchanged; real admissions still invalidate it and retain deferred recovery." },
+  "schema": { "status": "none", "detail": "No schema, index, store-version or claim-field changes." },
+  "rules": { "status": "changed", "detail": "Graph receive, wake and peer-failure requests never wait for the projection gate. Quiet exchanges may restart deferred recovery only when no episode is active and its previous end is at least 120 seconds old. Stale graph failures are never replayed inline by quiet exchanges. Maintenance retains three attempts, including non-contention failures; error detail is limited to one per episode." },
+  "compatibility": { "status": "changed", "detail": "Receive response fields are unchanged. Existing receive summary logs gain gate_wait_ms and discovery_ms; discovery includes conflict discovery and tail verdict processing outside the main projection chunk and overlaps their writer work." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout." },
+  "manual": { "status": "none", "detail": "Deferred projection remains visible until its frontier catches up; no further peer page is required to schedule the retry." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback preserves admitted history and projection watermarks." }
+}

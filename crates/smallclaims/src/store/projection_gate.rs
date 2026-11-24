@@ -45,6 +45,16 @@ impl ProjectionGate {
         self.acquire(None).expect("a wait without a deadline cannot expire")
     }
 
+    /// Acquire an idle gate without waiting or overtaking an enrolled waiter.
+    pub fn try_lock(&self) -> Option<ProjectionGuard<'_>> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.next != state.serving {
+            return None;
+        }
+        state.next = state.next.wrapping_add(1);
+        Some(ProjectionGuard { gate: self })
+    }
+
     /// Acquire before `deadline`, or remove this ticket and return `None`.
     ///
     /// The deadline includes queueing time; an expired deadline cannot acquire even
@@ -120,6 +130,16 @@ mod tests {
     }
 
     #[test]
+    fn try_lock_neither_waits_nor_enrolls_behind_an_owner() {
+        let gate = ProjectionGate::default();
+        let held = gate.try_lock().unwrap();
+        assert!(gate.try_lock().is_none());
+        assert_eq!(gate.state.lock().unwrap_or_else(PoisonError::into_inner).next, 1);
+        drop(held);
+        assert!(gate.try_lock().is_some());
+    }
+
+    #[test]
     fn fifo_waiter_is_never_overtaken_by_later_arrivals() {
         let gate = Arc::new(ProjectionGate::default());
         let held = gate.lock();
@@ -135,6 +155,7 @@ mod tests {
             // Each ticket is enrolled before a later arrival starts. The owner
             // remains held until all waiters are queued, so wake order is contested.
             wait_for_tickets(&gate, id + 2);
+            assert!(gate.try_lock().is_none(), "a try-lock must not overtake queued work");
         }
         drop(held);
         for expected in 0..16_u64 {

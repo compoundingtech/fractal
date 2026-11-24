@@ -2772,11 +2772,14 @@ enum ClaudeChannelCommand {
 
 #[derive(Subcommand)]
 enum BackupCommand {
-    /// Save one live snapshot to a new file. --database exports an offline copy instead.
+    /// Save a snapshot to a new file, or stream to stdout with `-`.
     Create {
         file: PathBuf,
         #[arg(long)]
         database: Option<PathBuf>,
+        /// Abort a live stdout export above this many bytes of WAL growth.
+        #[arg(long, default_value_t = fractal_daemon::backup::DEFAULT_MAX_WAL_GROWTH)]
+        max_wal_growth: u64,
     },
     /// Restore offline into an empty database, using a fresh writer identity.
     Restore {
@@ -6608,7 +6611,13 @@ async fn run(cli: Cli) -> Result<()> {
             BackupCommand::Create {
                 file,
                 database: None,
+                max_wal_growth,
             } => {
+                if file == Path::new("-") {
+                    let receipt = fractal_daemon::backup::create_stdout(&endpoint, max_wal_growth).await?;
+                    eprintln!("{}", serde_json::to_string(&receipt)?);
+                    return Ok(());
+                }
                 fractal_daemon::backup::create(&endpoint, &file).await?;
                 if cli.json {
                     println!("{}", json!({"file":file}));
@@ -6620,8 +6629,14 @@ async fn run(cli: Cli) -> Result<()> {
             BackupCommand::Create {
                 file,
                 database: Some(database),
+                max_wal_growth: _,
             } => {
                 let state_root = backup_state_root(&config, &database)?;
+                if file == Path::new("-") {
+                    let receipt = fractal_daemon::backup::create_stdout_from_database(&database, &state_root)?;
+                    eprintln!("{}", serde_json::to_string(&receipt)?);
+                    return Ok(());
+                }
                 let header = fractal_daemon::backup::create_from_database(&database, &state_root, &file)?;
                 if cli.json {
                     println!("{}", serde_json::to_string(&header)?);
@@ -7852,6 +7867,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     store.trim_locally(config.trim.local)?;
     store.storage_census.checkpoint_enabled.set(config.checkpoint.enabled)
         .map_err(|_| anyhow::anyhow!("storage checkpoint census already configured"))?;
+    // Existing configurations get the store's UTC-day pacing without another setting.
     if let Some(claims) = config.trim.daily_claims {
         store.trim_locally_at_most(claims);
     }
@@ -7971,12 +7987,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"owned_set_native_policy":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission-escalation-v1": 1,
+                    "message_mark_events": 1,
                     "mission_resource_lane": 2,
                     "resource_profile_keys": 1,
                     "resource_recovery_observations": 1,
                     "idle_residency": 1,
                     "per_run_missions": 1,
+                    "work_rebind_v1": 1,
                     "shell_resource_exec": 2,
+                    "runtime_workspace": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -8101,6 +8120,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     reconciler.set_idle_residency(config.reconcile.idle_residency()?);
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
+    reconciler.set_model_return_policy(&config.model_return)?;
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
     reconciler.set_ask_digest_policy(&config.asks)?;
@@ -8117,6 +8137,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Five seconds finds gaps between short readers without polling on every write.
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store), Duration::from_secs(5));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
+    let _shard_contention_retry = retry_projection_contention_for_store(
+        Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone(), true, |_| {},
+    );
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone(), config.store.valid_record_delete_after_ms()?)));
@@ -8164,11 +8187,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
     {
         let store = store.clone();
         let state_dir = config.state_dir.clone();
+        let inputs = Arc::new(std::sync::Mutex::new(
+            fractal_daemon::store::declared_objectives::DeclaredObjectiveInputs::default(),
+        ));
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let domain = fractal_daemon::declared_objectives::github_rows(&store, &state_dir, now_ms() as u64)?;
-                let mut rows = fractal_daemon::api::slo_rows(&store, domain)?;
+                let mut inputs = inputs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                inputs.refresh(&store)?;
+                let domain = fractal_daemon::declared_objectives::github_rows_from_declarations(
+                    &store, &state_dir, now_ms() as u64, inputs.declarations(),
+                )?;
+                let mut rows = fractal_daemon::api::slo_rows_from_declarations(
+                    &store, domain, inputs.declarations(),
+                )?;
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
@@ -8381,6 +8413,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
             ));
+            tokio::spawn(fractal_daemon::maintenance::run_usage_period(
+                Arc::downgrade(&store),
+            ));
             let admission_notify = notify.clone();
             let admission_events = event_notify.clone();
             let admission_state_dir = config.state_dir.clone();
@@ -8430,10 +8465,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
                 Some(state.store.clone()),
                 Some(worker_observer),
+                None,
                 ready
             ),
             fractal_daemon::api::serve_reserved_unix_with_ready(
-                gateway_reserved, fabric_router(state).layer(web_status), None, None, ready,
+                gateway_reserved, fabric_router(state).layer(web_status), None, None, None, ready,
             ),
             async {
                 let result = web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()).await;
@@ -10073,21 +10109,28 @@ async fn trace_claims(client: &Client, args: &TraceArgs) -> Result<Vec<ClaimReco
 
 fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> Result<()> {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    let summary = ["state", "status", "verdict", "action", "reason"]
-        .into_iter()
+    let keys: &[&str] = if claim.kind == "step.execution-phase" {
+        &["attempt", "phase", "exec", "at_unix_ms", "host"]
+    } else {
+        &["state", "status", "verdict", "action", "reason"]
+    };
+    let summary = keys.iter().copied()
         .filter_map(|key| {
             fields
                 .get(key)
                 .filter(|value| !value.is_null())
-                .map(|value| format!("{key}={}", trace_scalar(value)))
+                .map(|value| {
+                    if key == "at_unix_ms" {
+                        value.as_u64().map(|at| format!("{key}={}", format_trace_timestamp(u128::from(at))))
+                            .unwrap_or_else(|| format!("{key}={}", trace_scalar(value)))
+                    } else {
+                        format!("{key}={}", trace_scalar(value))
+                    }
+                })
         })
         .collect::<Vec<_>>()
         .join(" · ");
-    let timestamp = chrono::DateTime::from_timestamp_millis(
-        claim.accepted_at_unix_ms.min(i64::MAX as u128) as i64,
-    )
-    .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-    .unwrap_or_else(|| claim.accepted_at_unix_ms.to_string());
+    let timestamp = format_trace_timestamp(claim.accepted_at_unix_ms);
     if summary.is_empty() {
         writeln!(
             output,
@@ -10102,6 +10145,13 @@ fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> R
         )?;
     }
     Ok(())
+}
+
+fn format_trace_timestamp(at_unix_ms: u128) -> String {
+    i64::try_from(at_unix_ms).ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| at_unix_ms.to_string())
 }
 
 fn trace_scalar(value: &Value) -> String {
@@ -15550,6 +15600,24 @@ fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
     Some(line)
 }
 
+fn agent_model_line(agent: &fractal_client::Agent) -> String {
+    use std::fmt::Write as _;
+    let drift = agent.model_drift.as_ref();
+    let declared = agent.declared_model.as_deref().unwrap_or("unknown");
+    let state = drift.map(|value| value.state.as_str()).unwrap_or("unknown");
+    let mut line = format!("declared {declared} · live {} · {state}", agent.live_model.as_deref().unwrap_or("unknown"));
+    if let Some(since) = drift.and_then(|value| value.drift_since.as_deref()) {
+        let _ = write!(line, " · since {since}");
+    }
+    let reason = drift.and_then(|value| value.fallback_reason.as_deref()).unwrap_or("unknown");
+    let _ = write!(line, " · fallback {reason} · returns ");
+    match drift.and_then(|value| value.return_attempts) {
+        Some(attempts) => { let _ = write!(line, "{attempts}"); }
+        None => line.push_str("unknown"),
+    }
+    line
+}
+
 fn render_client_agent(
     agent: &fractal_client::Agent,
     current_steps: &[StepRunView],
@@ -15592,9 +15660,7 @@ fn render_client_agent(
         agent.driver.as_deref().unwrap_or("none"),
         agent.harness_state.as_deref().unwrap_or("unobserved")
     );
-    if let Some(live) = agent.live_model.as_deref() {
-        let _ = writeln!(output, "LIVE MODEL   {live}");
-    }
+    let _ = writeln!(output, "MODEL        {}", agent_model_line(agent));
     if agent.blocked_on.as_deref() == Some("human")
         && agent.ask.as_deref() == Some("permission")
     {
@@ -15940,6 +16006,7 @@ fn render_client_agents(
                     agent.header.id, agent.name, agent.state
                 );
             }
+            let _ = writeln!(output, "  model {}", agent_model_line(agent));
             if let Some(admission) = agent.extra.get("seat_admission") {
                 let _ = writeln!(output, "  {}", agents_cli::admission_start_message(&agent.header.id, admission));
             }
@@ -16007,6 +16074,7 @@ fn render_client_agents(
                     agent.reachability
                 );
                 let _ = writeln!(output, "{member_prefix}   {}", agent.header.id);
+                let _ = writeln!(output, "{member_prefix}   model {}", agent_model_line(agent));
                 if let Some(admission) = agent.extra.get("seat_admission") {
                     let _ = writeln!(output, "{member_prefix}   {}", agents_cli::admission_start_message(&agent.header.id, admission));
                 }
@@ -17465,6 +17533,10 @@ impl NativePaths {
 struct NativeLoopState {
     #[serde(default)]
     paths: Option<fractal_drivers::driver_paths::Paths>,
+    /// Provider launch boundary, captured before its hooks can start children. Re-exec carries
+    /// the same boundary because it adopts the running provider rather than launching another.
+    #[serde(default)]
+    provider_started_at_ms: u64,
     ready: bool,
     /// Whether the harness-state file already belongs to this session. A resumed driver adopts a
     /// running session, so its record is always current.
@@ -18038,6 +18110,7 @@ impl NativeObservations {
             let publisher = ObservationClient {
                 client,
                 event: Some((&self.runtime, event.sequence, &self.dir, account_ref.as_ref().and_then(Value::as_str))),
+                source_runtime: Some(&event.runtime_incarnation),
             };
             let raw = serde_json::to_vec(&event.payload)?;
             let source_driver = event.payload["harness"]
@@ -18273,6 +18346,7 @@ impl NativeObservations {
 struct ObservationClient<'a> {
     client: &'a Client,
     event: Option<(&'a str, u64, &'a Path, Option<&'a str>)>,
+    source_runtime: Option<&'a str>,
 }
 impl std::ops::Deref for ObservationClient<'_> {
     type Target = Client;
@@ -18293,9 +18367,9 @@ impl ObservationClient<'_> {
         let mut claim = claim.clone();
         bind_observation_account(&mut claim, account.as_deref());
         if let Some((runtime, sequence, dir, _)) = self.event {
-            // Diagnostics are retained graph facts, not local observation slots. Preserve
-            // their episode key; /harness-events replaces keys with its observation slot.
-            if claim.kind == "harness.diagnostic" {
+            // Reasoned native facts are retained graph claims, not local observation slots.
+            // Preserve their episode keys across lost acknowledgements and channel replay.
+            if matches!(claim.kind.as_str(), "harness.diagnostic" | "harness.model-fallback.observed") {
                 return self.client.post(path, &claim).await;
             }
             let slot = format!(
@@ -18463,25 +18537,52 @@ async fn publish_harness_activity(
     if driver == "omp"
         && let (Some(incarnation), Some(ready)) = (incarnation, channel_ready)
     {
-        // Extensible diagnostics are reader-first: older readers retain these facts without
-        // rejecting the native activity claim. No suspension action consumes this proof yet.
-        let episode = match client.event {
-            Some((runtime, sequence, _, _)) => format!("{runtime}:{sequence}"),
-            None => format!("{}:{}:{}", observed.evidence_incarnation.as_deref().unwrap_or(""),
-                observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0)),
+        // Idle suspension consumes the latest incarnation edge, not a heartbeat.
+        // Freeze durable decisions so retries and re-exec cannot lose an edge.
+        let legacy_key = || {
+            let episode = match client.event {
+                Some((runtime, sequence, _, _)) => format!("{runtime}:{sequence}"),
+                None => format!("{}:{}:{}", observed.evidence_incarnation.as_deref().unwrap_or(""),
+                    observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0)),
+            };
+            format!("native-channel:{subject}:{incarnation}:{episode}:{ready}:{fingerprint}")
         };
-        let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
-            subject: subject.into(), kind: "harness.diagnostic".into(),
-            actor: Some(subject.into()),
-            fields: BTreeMap::from([
-                ("code".into(), Value::from(if ready { "omp-channel-ready" } else { "omp-channel-unready" })),
-                ("driver".into(), Value::from("omp")),
-                ("incarnation_id".into(), Value::from(incarnation)),
-                ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
-            ]),
-            evidence: Vec::new(), expected_subject: None,
-            idempotency_key: Some(format!("native-channel:{subject}:{incarnation}:{episode}:{ready}:{fingerprint}")),
-        }).await?;
+        let key = match (client.event, client.source_runtime) {
+            // The publication envelope can belong to a successor wrapper. Readiness is
+            // prepared against the retained event's own runtime, never that successor.
+            (Some((_, sequence, dir, _)), Some(runtime)) => {
+                match fractal_drivers::harness_events::prepare_channel_readiness(
+                    dir, sequence, runtime, incarnation, ready,
+                ) {
+                    Ok(emit) => emit.then(|| format!("native-channel:{subject}:{incarnation}:{runtime}:{sequence}:{ready}")),
+                    Err(error) => {
+                        tracing::warn!(%error, "preparing channel readiness failed; invalidating fence before fallback");
+                        // Without invalidation a fallback edge could leave a stale fence
+                        // suppressing its successor. Retain the event until this succeeds.
+                        fractal_drivers::harness_events::invalidate_channel_readiness(dir, runtime)
+                            .context("invalidating channel readiness before fallback publication")?;
+                        Some(legacy_key())
+                    }
+                }
+            }
+            // Non-durable callers and failed preparation must not lose the readiness edge
+            // or prevent subsequent activity publication and outbox acknowledgement.
+            _ => Some(legacy_key()),
+        };
+        if let Some(key) = key {
+            let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
+                subject: subject.into(), kind: "harness.diagnostic".into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([
+                    ("code".into(), Value::from(if ready { "omp-channel-ready" } else { "omp-channel-unready" })),
+                    ("driver".into(), Value::from("omp")),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                    ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
+                ]),
+                evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some(key),
+            }).await?;
+        }
     }
     if last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return Ok(());
@@ -18736,6 +18837,32 @@ async fn native_timeline_claim(
     client: &Client, subject: &str, incarnation: &str,
     operation: fractal_drivers::harness_timeline::Operation,
 ) -> Result<ClaimInput> {
+    if operation.driver == "omp" && operation.entry_type == "status"
+        && operation.body["code"] == "model-fallback"
+    {
+        let mut body = operation.body;
+        let mut fields = BTreeMap::from([
+            ("incarnation_id".into(), Value::from(incarnation)),
+            ("observed_at_unix_ms".into(), Value::from(operation.observed_at_unix_ms)),
+            ("reason".into(), Value::from(if body["observation"] == "applied" {
+                "native-retry-fallback"
+            } else { "native-model-selection" })),
+        ]);
+        for key in ["observation", "cause", "from", "to", "native_session", "source_event", "episode_id"] {
+            if let Some(value) = body.as_object_mut().and_then(|body| body.remove(key)) {
+                fields.insert(key.into(), value);
+            }
+        }
+        fractal_schema::registry().validate_claim(subject, "harness.model-fallback.observed", &fields)?;
+        return Ok(ClaimInput {
+            subject: subject.into(), kind: "harness.model-fallback.observed".into(),
+            actor: Some(subject.into()),
+            idempotency_key: Some(format!("model-fallback:{subject}:{incarnation}:{}:{}:{}",
+                fields["episode_id"].as_str().unwrap(), fields["source_event"].as_str().unwrap(),
+                fields["observation"].as_str().unwrap())),
+            fields, evidence: Vec::new(), expected_subject: None,
+        });
+    }
     let mut failure = None;
     if operation.entry_type == "error"
         && operation.body["code"] == fractal_drivers::work_claim_failure::CODE
@@ -21795,13 +21922,16 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
             .ok()
             .flatten();
         match reloaded {
-            Some(Ok((reloaded, reconcile, asks))) => {
+            Some(Ok((reloaded, reconcile, asks, model_return))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
                 reconciler.set_idle_residency(reconcile.idle_residency().expect("validated idle residency"));
                 reconciler.set_default_stall_reports(reconcile.default_stall_reports);
+                if let Err(error) = reconciler.set_model_return_policy(&model_return) {
+                    tracing::warn!("the model return policy keeps its last config: {error:#}");
+                }
                 if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }
@@ -21915,26 +22045,49 @@ fn retry_projection_contention(
 // The observer is a no-op in the daemon; owned tests use it to synchronize on actual
 // backoff entry rather than assume a task has polled after a virtual-time advance.
 fn retry_projection_contention_observed(
-    store: std::sync::Weak<Store>,
+    weak_store: std::sync::Weak<Store>,
     notify: Arc<Notify>,
     event_notify: watch::Sender<u64>,
     state_dir: PathBuf,
+    on_poll: impl FnMut(bool) + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    retry_projection_contention_for_store(weak_store, notify, event_notify, state_dir, false, on_poll)
+}
+
+fn retry_projection_contention_for_store(
+    weak_store: std::sync::Weak<Store>,
+    notify: Arc<Notify>,
+    event_notify: watch::Sender<u64>,
+    state_dir: PathBuf,
+    messages_shard: bool,
     mut on_poll: impl FnMut(bool) + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("replication.retry_projection", async move {
         let mut schedule = ProjectionContentionRetry::default();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let Some(store) = store.upgrade() else { break };
+            let Some(graph) = weak_store.upgrade() else { break };
+            let shard = if messages_shard {
+                let Some(shard) = fractal_store::store::messages_shard::shard(&graph) else { break };
+                Some(shard)
+            } else {
+                None
+            };
+            let store = shard.as_deref().unwrap_or(&graph.graph);
+            if !store.replication_projection_deferred() {
+                store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
+            }
             let generation = store.projection_contention_generation();
             let attempt = schedule.poll(
                 tokio::time::Instant::now(), generation, store.replication_projection_deferred());
             on_poll(schedule.due.is_some());
             let Some(attempt) = attempt else { continue };
+            store.projection_retry_episode_started();
             // Only this task schedules these attempts. The existing projection mutex also
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
             let result = store.connection.write_workers().spawn_blocking(move || {
                 fractal_daemon::task_cpu::profiled_blocking("replication.retry_projection", || {
+                let store = shard.as_deref().unwrap_or(&graph.graph);
                 let result = store.project_replication_backlog_unless_catching_up();
                 (result, store.projection_contention_generation(), store.replication_projection_deferred())
                 })
@@ -21951,7 +22104,7 @@ fn retry_projection_contention_observed(
                 Ok((Ok(Some(true)), _current, _)) => (true, false, generation, "projected"),
                 Ok((Ok(None), current, _)) => (false, true, current, "catch-up-throttled"),
                 Ok((Ok(Some(false)), current, _)) => {
-                    (false, current != generation, current, "deferred")
+                    (false, true, current, "deferred")
                 }
                 Ok((Err(error), current, _)) => {
                     let busy = error
@@ -21959,7 +22112,9 @@ fn retry_projection_contention_observed(
                         .is_some_and(|error| error.is_sqlite_contention());
                     (
                         false,
-                        busy,
+                        // Other projection failures can be transient too. Retain the
+                        // same three-attempt budget rather than abandoning the frontier.
+                        true,
                         current,
                         if busy {
                             "sqlite-contention"
@@ -21971,8 +22126,16 @@ fn retry_projection_contention_observed(
                 Err(_) => (false, false, generation, "worker-failed"),
             };
             schedule.finish(tokio::time::Instant::now(), generation, retry);
+            if schedule.due.is_none()
+                && let Some(store) = weak_store.upgrade()
+            {
+                let shard = messages_shard.then(|| fractal_store::store::messages_shard::shard(&store)).flatten();
+                let store = shard.as_deref().unwrap_or(&store.graph);
+                store.projection_retry_episode_finished(tokio::time::Instant::now().into_std());
+            }
             stderr_message("fractal", format_args!("projection contention retry {}", json!({
                 "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
+                "shard": if messages_shard { "messages" } else { "graph" },
                 "projection_deferred_after_attempt": still_deferred,
                 "stop_reason": if schedule.due.is_some() { None } else if recovered {
                     Some("recovered")
@@ -22470,18 +22633,43 @@ async fn import_retired_identities(store: Arc<Store>) {
     }
 }
 
-/// Decide, at startup and every minute after, whether this member records its seats' lifecycle
-/// as local marks: once every other member, and every configured peer, reads marks and asks hosts
-/// for them (store/marks_switch.rs). A member that joins without that turns it off again within a
-/// minute.
-async fn refresh_marks_switch(store: Arc<Store>, peers: Vec<String>) {
+/// Converge initially, then only when a member capability, fleet membership or writer roster
+/// changes. Configured peers are fixed for this daemon invocation, as are its sync workers.
+async fn refresh_marks_switch(store: Arc<Store>, mut peers: Vec<String>) {
+    let mut maintenance = None;
+    let mut recovery = None;
+    let (recovered, mut recovery_events) = watch::channel(0u64);
     loop {
-        let (worker, peers_now) = (store.clone(), peers.clone());
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || worker.refresh_marks_switch(&peers_now))).await;
-        if !matches!(result, Ok(Ok(_))) {
-            stderr_message("fractal", format_args!("message marks switch check failed: {result:?}"));
+        recovery_events.borrow_and_update();
+        let worker = store.clone();
+        let (next, next_peers, result) = tokio::task::spawn_blocking(move || {
+            let result = fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || -> Result<()> {
+                if maintenance.is_none() { maintenance = Some(worker.marks_switch_maintenance()?); }
+                maintenance.as_mut().expect("initialized marks switch maintenance").refresh(&worker, &peers)
+            });
+            (maintenance, peers, result)
+        }).await.expect("marks switch maintenance task panicked");
+        maintenance = next;
+        peers = next_peers;
+        match result {
+            Ok(()) => {
+                recovery = None;
+                if !maintenance.as_mut().expect("initialized marks switch maintenance").changed().await { return; }
+            }
+            Err(error) => {
+                stderr_message("fractal", format_args!("message marks switch blocked on local recovery: {error:#}"));
+                if recovery.is_none() {
+                    let wake = recovered.clone();
+                    recovery = Some(store.observe_commits(move |_| {
+                        wake.send_modify(|generation| *generation = generation.wrapping_add(1));
+                    }));
+                    // Register then recheck once, covering a repair committed before registration.
+                    // Further attempts require actual committed writer activity, never a timer.
+                    continue;
+                }
+                if recovery_events.changed().await.is_err() { return; }
+            }
         }
-        tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
 
@@ -22638,27 +22826,37 @@ async fn release_old_envelopes(store: Arc<Store>) {
     }
 }
 
-/// Sign this member's own claims with its member key (`member_signatures`): the claims it held
-/// before this build a page at a time, then each new one within seconds of its append. Signing
-/// happens outside the writer; each page stores in one short write.
+/// Replay durable signing/ready cursors after subscribing, then wait for changed keys.
+/// The only idle deadline is an actual pending signature's retention expiry.
 async fn sign_own_claims(store: Arc<Store>) {
+    let (_observer, mut changes) = store.subscribe_claim_signatures();
     loop {
+        changes.borrow_and_update();
         let page_store = store.clone();
-        // Signatures that wait for their claims are settled first: a page of them, then a page
-        // of this member's own claims to sign.
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || {
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || -> anyhow::Result<_> {
             page_store.promote_claim_member_signatures()?;
-            page_store.sign_own_claims()
+            page_store.expire_claim_signatures()?;
+            let report = page_store.sign_own_claims()?;
+            Ok((report.done && !page_store.claim_signatures_ready()?, page_store.claim_signature_expiry()?))
         })).await;
-        let pause = match result {
-            Ok(Ok(report)) if report.done => Duration::from_secs(5),
-            Ok(Ok(_)) => Duration::from_millis(50),
+        match result {
+            Ok(Ok((false, _))) => tokio::task::yield_now().await,
+            Ok(Ok((true, expiry))) => {
+                if let Some(expiry) = expiry {
+                    let wait = Duration::from_millis(u64::try_from(expiry.saturating_sub(now_ms())).unwrap_or(u64::MAX));
+                    tokio::select! {
+                        result = changes.changed() => if result.is_err() { return; },
+                        _ = tokio::time::sleep(wait) => {},
+                    }
+                } else if changes.changed().await.is_err() {
+                    return;
+                }
+            }
             error => {
                 stderr_message("fractal", format_args!("signing own claims failed: {error:?}"));
-                Duration::from_secs(60)
+                tokio::time::sleep(Duration::from_secs(60)).await;
             }
-        };
-        tokio::time::sleep(pause).await;
+        }
     }
 }
 
@@ -22806,15 +23004,97 @@ async fn copy_stop_deferral_history(store: Arc<Store>) {
     }
 }
 
+// Subscribe to durable work frontiers, not writer returns. Trigger-generated queue
+// mutations also cover source repair, deletion and projection-only transactions.
+const PUBLICATION_EVIDENCE_TABLES: &[&str] = &[
+    "local_publication_bootstrap", "local_publication_pending", "local_publication_batches",
+];
+const STREAM_MIRROR_TABLES: &[&str] = &["stream_messages", "stream_lifecycle", "claims"];
+const MESSAGE_OUTBOX_TABLES: &[&str] = &["local_message_outbox"];
+// Committed claim time can release expiry's clock-safety deferral.
+const RESPONSE_EXPIRY_TABLES: &[&str] = &["idempotency", "meta", "claims"];
+// These are replicated payload/authority and retirement inputs, not local worker
+// bookkeeping. In particular, an envelope/signature can change without new mail.
+const SHARD_REPLICATION_TABLES: &[&str] = &[
+    "claims", "batches", "replica_envelopes", "replica_records",
+    "replica_envelope_signatures", "released_envelopes",
+    "checkpoint_envelopes", "checkpoint_claims",
+    "retired_claim_ids", "retired_envelopes", "retired_envelope_withdrawals",
+];
+
+#[cfg(test)]
+mod daemon_observer_scope_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    #[test]
+    fn daemon_scopes_count_committed_dependencies_not_unrelated_or_rolled_back_work() {
+        for tables in [
+            PUBLICATION_EVIDENCE_TABLES, STREAM_MIRROR_TABLES, MESSAGE_OUTBOX_TABLES,
+            RESPONSE_EXPIRY_TABLES, SHARD_REPLICATION_TABLES,
+        ] {
+            let connection = rusqlite::Connection::open_in_memory().unwrap();
+            connection.execute_batch(
+                "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT,k TEXT UNIQUE,v INTEGER);
+                 CREATE TABLE unrelated(k TEXT PRIMARY KEY) WITHOUT ROWID;",
+            ).unwrap();
+            for table in tables.iter().filter(|table| **table != "claims") {
+                connection.execute_batch(&format!(
+                    "CREATE TABLE {table}(k TEXT PRIMARY KEY,v INTEGER NOT NULL) WITHOUT ROWID;"
+                )).unwrap();
+            }
+            let writer = smallclaims::sqlite::WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = calls.clone();
+            let _observer = writer.observe_tables(tables, move |_| { count.fetch_add(1, Ordering::SeqCst); });
+            {
+                let connection = writer.write();
+                connection.execute("INSERT INTO unrelated VALUES('committed')", []).unwrap();
+            }
+            drop(writer.write());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            for (index, table) in tables.iter().enumerate() {
+                {
+                    let connection = writer.write();
+                    connection.execute_batch(&format!(
+                        "BEGIN; INSERT INTO {table}(k,v) VALUES('rollback',0); ROLLBACK;
+                         SAVEPOINT discarded; INSERT INTO {table}(k,v) VALUES('savepoint',0);
+                         ROLLBACK TO discarded; RELEASE discarded;"
+                    )).unwrap();
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), index, "rolled back {table}");
+                {
+                    let connection = writer.write();
+                    // A later rollback in the same loan must not erase earlier commits.
+                    connection.execute_batch(&format!(
+                        "BEGIN; INSERT INTO {table}(k,v) VALUES('committed',1); COMMIT;
+                         BEGIN; UPDATE {table} SET v=2 WHERE k='committed'; COMMIT;
+                         BEGIN; DELETE FROM {table} WHERE k='committed'; ROLLBACK;"
+                    )).unwrap();
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), index + 1, "committed {table}");
+            }
+        }
+    }
+
+    #[test]
+    fn replication_wake_is_independent_of_mirror_and_local_bookkeeping() {
+        assert!(SHARD_REPLICATION_TABLES.contains(&"replica_envelopes"));
+        assert!(SHARD_REPLICATION_TABLES.contains(&"replica_envelope_signatures"));
+        assert!(!STREAM_MIRROR_TABLES.contains(&"replica_envelopes"));
+        for table in ["meta", "local_observations", "replication_peers", "idempotency"] {
+            assert!(!SHARD_REPLICATION_TABLES.contains(&table), "{table} is local bookkeeping");
+        }
+    }
+}
+
 /// Commit notifications drive exact-delta maintenance after the API has bound.
 /// Each bootstrap page yields the FIFO writer; malformed source stops the job and
 /// leaves a durable incomplete state for doctor, rather than retrying a local defect.
 fn spawn_publication_evidence(store: Arc<Store>) {
     let (changed, mut receiver) = tokio::sync::watch::channel(());
-    let observer = store.observe_commits(move |connection| {
-        if connection.is_autocommit() {
-            changed.send_replace(());
-        }
+    let observer = store.connection.observe_tables(PUBLICATION_EVIDENCE_TABLES, move |_| {
+        changed.send_replace(());
     });
     tokio::spawn(fractal_daemon::task_cpu::account("publication.evidence", async move {
         let _observer = observer;
@@ -22852,7 +23132,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 }
 
 /// Mirror the messages shard into the graph's mail indexes (store/stream_mirror.rs): once at
-/// start, which catches up on what a crash left unmirrored, then after each shard commit. A
+/// start, which catches up on what a crash left unmirrored, then after source mutations. A
 /// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
 /// after a pause; the cursors keep what it already mirrored.
 fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, state_dir: PathBuf) {
@@ -22861,17 +23141,32 @@ fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, stat
         return;
     };
     let (changed, mut receiver) = tokio::sync::watch::channel(());
-    let observer = shard.observe_commits(move |_| {
+    let source = changed.clone();
+    let observer = shard.connection.observe_tables(STREAM_MIRROR_TABLES, move |_| {
+        source.send_replace(());
+    });
+    // A graph rebuild can reset the replay cursors without a new shard commit.
+    let replay_observer = store.connection.observe_tables(&["meta"], move |_| {
         changed.send_replace(());
     });
+    let (replicated, mut replication) = tokio::sync::watch::channel(());
+    let replication_observer = shard.connection.observe_tables(SHARD_REPLICATION_TABLES, move |_| {
+        replicated.send_replace(());
+    });
+    tokio::spawn(fractal_daemon::task_cpu::account("messages.replication_wake", async move {
+        let _observer = replication_observer;
+        loop {
+            replication.borrow_and_update();
+            // Wake dialers for replicated changes even when there is no mirror work.
+            let _ = fs::write(state_dir.join("replication.wake"), format!("{}\n", uuid::Uuid::now_v7()));
+            if replication.changed().await.is_err() { return; }
+        }
+    }));
     tokio::spawn(fractal_daemon::task_cpu::account("messages.stream_mirror", async move {
         let _observer = observer;
+        let _replay_observer = replay_observer;
         loop {
             receiver.borrow_and_update();
-            // The shard's dialers wake on the replication file, as the graph's do: a stream item
-            // this member wrote goes out to its recipient's host at once, not at the worker's
-            // next timer. An item a peer pushed wakes them too, which finds nothing new to send.
-            let _ = fs::write(state_dir.join("replication.wake"), format!("{}\n", uuid::Uuid::now_v7()));
             let mirror_store = store.clone();
             let mirrored = mirror_store.connection.write_workers().spawn_blocking(move || {
                 fractal_daemon::task_cpu::blocking("messages.stream_mirror", || {
@@ -22906,19 +23201,14 @@ fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, stat
     }));
 }
 
-/// Drain the message outbox (message_outbox.rs) once at startup and again after each commit
-/// that leaves a new message in it. The callback performs no SQL and never takes the writer; the
-/// probe is one read of the table on a pooled reader, so while the outbox is empty, as it always
-/// is in this build, a commit costs no more than that. A message a drain could not write (the
-/// shard or the graph refused it, or the drain failed) is tried again after a pause, not on every
-/// commit, so it never holds up new mail.
+/// Drain durable outbox work once at startup and after outbox mutations. The callback
+/// performs no SQL and never takes the writer. A refused message retains its retry
+/// deadline while fresh mail can wake and drain independently.
 fn spawn_message_outbox(store: Arc<Store>) {
     const RETRY: Duration = Duration::from_secs(30);
     let (changed, mut receiver) = tokio::sync::watch::channel(());
-    let observer = store.observe_commits(move |connection| {
-        if connection.is_autocommit() {
-            changed.send_replace(());
-        }
+    let observer = store.connection.observe_tables(MESSAGE_OUTBOX_TABLES, move |_| {
+        changed.send_replace(());
     });
     let waiting = |store: Arc<Store>| async move {
         tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_waiting", || {
@@ -23005,9 +23295,13 @@ fn maintenance_contention(error: &anyhow::Error) -> bool {
     })
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct ResponseExpiryAttempts(tokio::sync::Notify);
+
 /// Register before the first rowid deadline read. The callback performs no SQL and never
-/// takes the writer: it only coalesces committed-write notifications. Deadline reads run on a
-/// pooled reader, so unrelated commits add no expiry SQL to the writer path.
+/// takes the writer: it only coalesces committed receipt/cursor mutations. Deadline reads
+/// run on a pooled reader, while the existing expiry deadline remains authoritative.
 #[cfg(test)]
 fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
     spawn_response_expiry_with(store, smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS)
@@ -23017,10 +23311,8 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
 /// go too, in their own paced chunks.
 fn spawn_response_expiry_with(store: Arc<Store>, replay_safe_window_ms: i64) -> tokio::task::JoinHandle<()> {
     let (changed, receiver) = tokio::sync::watch::channel(());
-    let observer = store.observe_commits(move |connection| {
-        if connection.is_autocommit() {
-            changed.send_replace(());
-        }
+    let observer = store.connection.observe_tables(RESPONSE_EXPIRY_TABLES, move |_| {
+        changed.send_replace(());
     });
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.response_expiry", async move {
         let _observer = observer;
@@ -23109,15 +23401,17 @@ async fn expire_completed_responses(
         }
         clock_deferred = false;
         let clean_store = store.clone();
-        match clean_store.connection.write_workers().spawn_blocking(move || {
+        let cleaned = clean_store.connection.write_workers().spawn_blocking(move || {
             fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry", || {
                 // Two short writer transactions, never one long one.
                 clean_store.cleanup_idempotency(now)?;
                 clean_store.cleanup_replay_safe_idempotency(now, replay_safe_window_ms)
             })
         })
-        .await
-        {
+        .await;
+        #[cfg(test)]
+        store.extension::<ResponseExpiryAttempts>().0.notify_one();
+        match cleaned {
             Ok(Ok(_)) => {
                 retry = Duration::from_millis(200);
                 tokio::time::sleep(Duration::from_millis(20)).await;

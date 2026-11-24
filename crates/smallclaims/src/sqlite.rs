@@ -50,7 +50,10 @@ pub mod transport_bench {
 }
 
 pub(crate) mod writer_observer;
+mod commit_scope;
+pub use commit_scope::{WriterObserverStats, writer_observer_stats};
 pub use writer_observer::WriterObserver;
+pub use writer_observer::observe_transaction_resolution;
 
 use crate::store::current_index;
 
@@ -179,6 +182,7 @@ pub struct CommitObserver {
 
 struct CommitObserverCallback {
     state: Mutex<CommitObserverState>,
+    tables: Option<&'static [&'static str]>,
     completed: Condvar,
 }
 
@@ -220,9 +224,11 @@ struct CommitObservers {
 impl CommitObservers {
     fn register(
         self: &Arc<Self>,
+        tables: Option<&'static [&'static str]>,
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
         let callback = Arc::new(CommitObserverCallback {
+            tables,
             state: Mutex::new(CommitObserverState {
                 run: Some(Arc::new(callback)),
                 running: None,
@@ -241,7 +247,7 @@ impl CommitObservers {
         }
     }
 
-    fn notify(&self, connection: &Connection) {
+    fn notify(&self, connection: &Connection, changes: &commit_scope::Changes) {
         // The common case takes no lock and allocates nothing.
         if !self.active.load(Ordering::Acquire) {
             return;
@@ -253,6 +259,9 @@ impl CommitObservers {
             .clone();
         let current = std::thread::current().id();
         for callback in callbacks.iter() {
+            if callback.tables.is_some_and(|tables| !changes.matches(tables)) {
+                continue;
+            }
             let run = {
                 let mut state = callback
                     .state
@@ -266,6 +275,11 @@ impl CommitObservers {
                 run
             };
             let _invocation = CommitObserverInvocation { callback };
+            if callback.tables.is_some() {
+                commit_scope::SCOPED_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                commit_scope::GLOBAL_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            }
             run(connection);
         }
     }
@@ -449,6 +463,7 @@ pub enum WriterJob {
         holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
+        deadline_unix_ms: Option<u128>,
     },
     /// Hands the connection to a caller until its guard gives it back.
     Lend {
@@ -458,6 +473,7 @@ pub enum WriterJob {
         holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
+        deadline_unix_ms: Option<u128>,
     },
 }
 
@@ -486,6 +502,26 @@ pub struct WriterGuard<'a> {
 }
 
 impl WriterConnection {
+    /// A read-only store has no writer connection, queue, or background thread.
+    pub(crate) fn read_only(committed_index: Arc<AtomicU64>) -> Self {
+        Self {
+            jobs: Mutex::new(None),
+            thread: Mutex::new(None),
+            committed_index,
+            observers: Arc::new(CommitObservers::default()),
+            finalizers: Arc::new(TransactionFinalizers::default()),
+            background: Arc::new(writer_queue::BackgroundAdmission::default()),
+            deferred: Arc::new(Mutex::new(None)),
+            workers: Arc::new(Semaphore::new(writer_admission::constructor_write_limit())),
+            worker_queue: writer_admission::WorkerQueue::new(),
+            handler_policy: Arc::new(Mutex::new(None)),
+            mutation_observer: None,
+            batches: Arc::new((AtomicU64::new(0), AtomicU64::new(0))),
+            fifo: crate::fifo::Queue::new(crate::fifo::Kind::Writer),
+            telemetry: None,
+        }
+    }
+
     pub fn new(connection: Connection, committed_index: Arc<AtomicU64>) -> Self {
         Self::new_inner(connection, committed_index, None, None)
             .expect("writer without an observer needs no schema check")
@@ -545,9 +581,10 @@ impl WriterConnection {
             policy.install(&connection)?;
         }
         let handler_policy = Arc::new(Mutex::new(policy.map(Arc::new)));
-        let mutation_observer = observer
-            .map(|observer| writer_observer::MutationState::new(&connection, observer))
-            .transpose()?;
+        let mutation_observer = Some(writer_observer::MutationState::new(
+            &connection,
+            observer.unwrap_or_else(|| Arc::new(writer_observer::NoPhysicalObserver)),
+        )?);
         let mutations = mutation_observer.clone();
         let (jobs, queue) = std::sync::mpsc::channel::<WriterJob>();
         let index = committed_index.clone();
@@ -606,8 +643,9 @@ impl WriterConnection {
         })
     }
 
-    /// Observe every successfully committed batch and every returned lent writer, synchronously
-    /// after its committed index is updated and before its write can acknowledge success.
+    /// Observe boundaries containing committed DML/DDL, synchronously after the committed
+    /// index is updated and before the write can acknowledge success. Empty/read-only work
+    /// and rolled-back mutations do not evaluate callbacks; lost native coverage fails closed.
     /// A callback may read authority from this same connection, but must not write or acquire the
     /// writer. Dropping its own observer handle is safe and disables future invocations.
     /// Batched callbacks run on the writer thread; lent callbacks run on the returning thread.
@@ -624,7 +662,19 @@ impl WriterConnection {
         &self,
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
-        self.observers.register(callback)
+        self.observers.register(None, callback)
+    }
+
+    /// Observe committed mutations of declared main-database tables, including WITHOUT
+    /// ROWID tables. DDL and a native-hook coverage gap conservatively invalidate all
+    /// dependencies. Read-only loans, zero-row writes and rolled-back mutations do not
+    /// evaluate callbacks. Registration and handle lifetime match `observe_commits`.
+    pub fn observe_tables(
+        &self,
+        tables: &'static [&'static str],
+        callback: impl Fn(&Connection) + Send + Sync + 'static,
+    ) -> CommitObserver {
+        self.observers.register(Some(tables), callback)
     }
 
     /// Install exactly one transaction-owned adapter, explicitly and before attesting source
@@ -747,7 +797,8 @@ impl WriterConnection {
     /// A panic rolls back its open transaction while its guard returns the connection.
     #[track_caller]
     pub fn write(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Foreground)
+        self.lend_writer(writer_queue::LoanClass::Foreground, None)
+            .expect("unbounded writer admission cannot expire")
     }
 
     /// Borrow the same writer for one bounded maintenance/publication page. Pending foreground
@@ -757,16 +808,33 @@ impl WriterConnection {
     /// authority and prepared CAS evidence after acquisition. No operator work belongs here.
     #[track_caller]
     pub fn write_background(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Background)
+        self.lend_writer(writer_queue::LoanClass::Background, None)
+            .expect("unbounded writer admission cannot expire")
+    }
+
+    /// Refuse expired local replication work before lending the connection. A live
+    /// loan is never preempted: its transaction retains the normal commit/rollback boundary.
+    #[track_caller]
+    pub fn write_background_before(
+        &self,
+        deadline_unix_ms: Option<u128>,
+    ) -> Result<WriterGuard<'_>, crate::error::Error> {
+        self.lend_writer(writer_queue::LoanClass::Background, deadline_unix_ms)
     }
 
     #[track_caller]
     fn write_fence(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Fence)
+        self.lend_writer(writer_queue::LoanClass::Fence, None)
+            .expect("unbounded writer admission cannot expire")
     }
 
     #[track_caller]
-    fn lend_writer(&self, class: writer_queue::LoanClass) -> WriterGuard<'_> {
+    fn lend_writer(
+        &self,
+        class: writer_queue::LoanClass,
+        deadline_unix_ms: Option<u128>,
+    ) -> Result<WriterGuard<'_>, crate::error::Error> {
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
         debug_assert_no_pinned_read();
         let wait = crate::profile::writer_waiting();
         let holder = crate::windows::holds::Holder::current();
@@ -780,9 +848,9 @@ impl WriterConnection {
             "write.lend",
         );
         match class {
-            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin }),
+            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }),
             writer_queue::LoanClass::Background => {
-                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued, origin });
+                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms });
             }
             writer_queue::LoanClass::Fence => {
                 // Hold the admission lock while recording the barrier and enqueueing it.
@@ -794,7 +862,7 @@ impl WriterConnection {
                     .get()
                     .map_or(0, |queue| queue.watermark());
                 let job = if through == 0 {
-                    WriterJob::Lend { lent, returned, holder, enqueued, origin }
+                    WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }
                 } else {
                     WriterJob::FenceLend {
                         through,
@@ -803,6 +871,7 @@ impl WriterConnection {
                         holder,
                         enqueued,
                         origin,
+                        deadline_unix_ms,
                     }
                 };
                 self.fifo.send_at(enqueued, || jobs.as_ref()
@@ -811,15 +880,18 @@ impl WriterConnection {
                     .expect("the writer thread runs while the store is open");
             }
         }
-        let connection = lent_here
-            .recv()
-            .expect("the writer thread lends its connection");
+        let connection = lent_here.recv().map_err(|_| {
+            assert!(deadline_unix_ms.is_some(), "the writer thread lends its connection");
+            crate::error::Error::new("replication-overloaded", "the replication receive answer deadline elapsed before writer admission")
+        })?;
+        #[cfg(any(test, feature = "test-support"))]
+        work::record_writer_loan();
         drop(waiting);
         telemetry::acknowledged(enqueued.elapsed(), false);
         if let Some(operation) = &mut writer_operation {
             operation.acquired(enqueued.elapsed());
         }
-        WriterGuard {
+        let guard = WriterGuard {
             changes_at_lend: connection.total_changes(),
             connection: Some(connection),
             give_back,
@@ -832,7 +904,11 @@ impl WriterConnection {
             writer_operation,
             receive_hold: crate::receive_metrics::capture().as_ref().map(|context|
                 crate::receive_metrics::WriterSample::start(context, enqueued.elapsed())),
-        }
+        };
+        // The deadline may cross while the channel handoff runs. Return the untouched
+        // connection before opening any transaction in that case.
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
+        Ok(guard)
     }
 
     fn enqueue_background(&self, job: WriterJob) {
@@ -877,6 +953,7 @@ impl WriterConnection {
         // The job runs on the writer thread; what it wrote is handed back to this one.
         let capture = crate::touched::recording_wrote();
         let clock = crate::store::ClockContext::capture();
+        let stages = crate::windows::holds::BatchStages::capture();
         let wrote_rows = Mutex::new(Vec::new());
         let wrote = &wrote_rows;
         // Counts this caller until its write begins, or the writer drops it unrun.
@@ -886,6 +963,7 @@ impl WriterConnection {
             let before = tx.total_changes();
             let job = || {
                 let _clock = clock.enter();
+                let _stages = stages.enter();
                 job(tx)
             };
             let (result, written) = if capture {
@@ -1016,13 +1094,7 @@ fn write_queue(
                     }
                 };
                 if run {
-                    if let Ok(index) = current_index(&connection) {
-                        committed_index.store(index, Ordering::Release);
-                    }
-                    if let Some(observer) = callbacks.2 {
-                        observer.resolved(&connection);
-                    }
-                    callbacks.0.notify(&connection);
+                    publish_writer_boundary(&connection, committed_index, callbacks.0, callbacks.2);
                 }
                 // Rest outside every writer loan. Foreground dispatch continues during this
                 // interval; a busy queue cannot postpone a due maintenance turn forever.
@@ -1043,10 +1115,15 @@ fn write_queue(
             },
         };
         match job {
-            WriterJob::Lend { lent, returned, holder, enqueued, origin }
-            | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, .. } => {
+            WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }
+            | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, deadline_unix_ms, .. } => {
                 fifo.dequeued_at(enqueued);
                 telemetry::queued(enqueued.elapsed(), origin.as_ref());
+                if crate::replication::check_receive_deadline(deadline_unix_ms).is_err() {
+                    // Dropping the unanswered loan tells its borrower to return overload.
+                    // No connection was handed out and no write transaction was opened.
+                    continue;
+                }
                 let _hold = crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Lend, &holder);
                 let _holder = callbacks.3.map(|writer| writer.holding(origin));
                 if let Err(std::sync::mpsc::SendError(back)) = lent.send(connection) {
@@ -1284,15 +1361,7 @@ fn run_write_batch(
         }
         telemetry::METRICS.batch.record(started.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
         telemetry::METRICS.batch_size.record(answers.len() as u64, telemetry::SQLITE.as_slice());
-        if let Ok(index) = current_index(connection) {
-            committed_index.store(index, Ordering::Release);
-        }
-        if let Some(observer) = mutation_observer {
-            observer.resolved(connection);
-        }
-        if committed.is_ok() {
-            observers.notify(connection);
-        }
+        publish_writer_boundary(connection, committed_index, observers, mutation_observer);
         if let (Some(batch), Some(post_commit_started)) = (attribution, post_commit_started) {
             batch.finish(started.elapsed(), post_commit_started.elapsed(), op_count);
         }
@@ -1364,13 +1433,7 @@ impl Drop for WriterGuard<'_> {
         let Some(connection) = self.connection.take() else {
             return;
         };
-        if let Ok(index) = current_index(&connection) {
-            self.committed_index.store(index, Ordering::Release);
-        }
-        if let Some(observer) = self.mutation_observer {
-            observer.resolved(&connection);
-        }
-        self.observers.notify(&connection);
+        publish_writer_boundary(&connection, self.committed_index, self.observers, self.mutation_observer);
         crate::touched::note_writes(
             connection
                 .total_changes()
@@ -1386,6 +1449,36 @@ impl Drop for WriterGuard<'_> {
     }
 }
 
+/// Native coverage publication is unconditional. Confirmed write commits also check the
+/// claims index: SQLite can advance AUTOINCREMENT without row hooks or total_changes.
+/// Read-only loans and rollbacks do not probe it; callbacks require committed changes.
+fn publish_writer_boundary(
+    connection: &Connection,
+    committed_index: &AtomicU64,
+    observers: &CommitObservers,
+    mutations: Option<&Arc<writer_observer::MutationState>>,
+) {
+    let Some(mutations) = mutations else { return; };
+    mutations.resolved(connection);
+    let mut changes = mutations.take_committed(connection);
+    if changes.changed() || changes.committed {
+        commit_scope::INDEX_REFRESHES.fetch_add(1, Ordering::Relaxed);
+        match current_index(connection) {
+            Ok(index) => {
+                if index != committed_index.load(Ordering::Acquire) {
+                    changes.index_changed();
+                }
+                committed_index.store(index, Ordering::Release);
+            }
+            Err(_) => changes.unknown = true,
+        }
+    }
+    commit_scope::boundary(&changes);
+    if changes.changed() {
+        observers.notify(connection, &changes);
+    }
+}
+
 /// Read connections, with separate admission and idle-retention ceilings. Top-level API
 /// workers enter admitted request scopes before acquiring a connection or other store locks.
 /// Cross-pool nested scopes never wait for admission, like legacy raw `get`/`try_get`:
@@ -1398,6 +1491,7 @@ pub struct ReadPool {
     pub returned: Condvar,
     pub path: PathBuf,
     pub shared_memory: bool,
+    immutable: bool,
     counts: Arc<ReaderCounts>,
     admission: Arc<Semaphore>,
     diagnostic_id: u64,
@@ -1468,9 +1562,9 @@ pub struct ReadGuard<'a> {
     pub connection: Option<ReadConnection>,
     /// The connection `Store::read_snapshot` pinned for this thread, shared by every read in it.
     pub pinned: Option<Rc<ReadConnection>>,
-    /// Declared last, so it ends after the connection is returned. `None` for a read inside a
-    /// pinned snapshot, which `Store::read_snapshot` already registers.
-    _live: Option<LiveReadToken>,
+    /// Declared last, so it ends after the connection is returned. Borrowing an existing
+    /// snapshot or request loan creates no second physical-loan token.
+    pub(crate) _live: Option<LiveReadToken>,
 }
 
 thread_local! {
@@ -1596,6 +1690,9 @@ pub struct PinnedRead<'a> {
     pub registered: bool,
     /// Times the read transaction until it ends, and names who held one past its target.
     pub transaction: Option<crate::windows::holds::ReadHold>,
+    /// An owned checkout follows its connection through pin cleanup. Borrowed request
+    /// readers retain their token in the enclosing loan instead.
+    pub(crate) _live: Option<LiveReadToken>,
 }
 
 impl Drop for PinnedRead<'_> {
@@ -1622,19 +1719,25 @@ impl Drop for PinnedRead<'_> {
 
 impl ReadPool {
     pub fn new(path: &Path, shared_memory: bool) -> Result<Self> {
-        Self::new_with(path, shared_memory, None,
+        Self::new_with(path, shared_memory, false, None,
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    /// Readers of a cleanly stopped offline source never create or update WAL/SHM files.
+    pub(crate) fn new_immutable(path: &Path) -> Result<Self> {
+        Self::new_with(path, false, true, None,
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
     pub(crate) fn new_admitted(admitted: Arc<crate::store::AdmittedStore>) -> Result<Self> {
         let path = admitted.database_path().to_path_buf();
-        Self::new_with(&path, false, Some(admitted),
+        Self::new_with(&path, false, false, Some(admitted),
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_temporary(path: &Path, directory: Option<Arc<tempfile::TempDir>>) -> Result<Self> {
-        Self::new_with(path, false, None, directory)
+        Self::new_with(path, false, false, None, directory)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1653,6 +1756,7 @@ impl ReadPool {
     fn new_with(
         path: &Path,
         shared_memory: bool,
+        immutable: bool,
         admitted: Option<Arc<crate::store::AdmittedStore>>,
         #[cfg(any(test, feature = "test-support"))]
         temporary_directory: Option<Arc<tempfile::TempDir>>,
@@ -1662,6 +1766,7 @@ impl ReadPool {
             returned: Condvar::new(),
             path: path.to_path_buf(),
             shared_memory,
+            immutable,
             counts: Arc::new(ReaderCounts::default()),
             admission: Arc::new(Semaphore::new(constructor_read_limit())),
             diagnostic_id: read_lifetime::next_pool_id(),
@@ -1697,8 +1802,10 @@ impl ReadPool {
     fn open_connection(&self) -> Result<ReadConnection> {
         let connection = if let Some(admitted) = &self.admitted {
             let connection = admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            crate::store::blob_file::attach_reader(&connection, admitted.database_path())?;
+            crate::store::blob_file::attach_reader(&connection, admitted.database_path(), false)?;
             configure_open_read_connection(connection)?
+        } else if self.immutable {
+            open_immutable_read_connection(&self.path)?
         } else {
             open_read_connection(&self.path, self.shared_memory)?
         };
@@ -2199,9 +2306,55 @@ pub mod work {
     static AUTOINDEX_ROWS: AtomicU64 = AtomicU64::new(0);
 
     thread_local! {
+        static WRITER_LOANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static THREAD_WORK: std::cell::Cell<SqliteWork> = const { std::cell::Cell::new(SqliteWork {
             statements:0,vm_steps:0,fullscan_steps:0,sorts:0,autoindex_rows:0,
         }) };
+    }
+
+    thread_local! {
+        /// The capture this thread started, if any. `traced` copies a statement's expanded
+        /// SQL into it, so no per-statement allocation happens unless a capture is running.
+        static CAPTURED_SQL: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The expanded SQL of every statement this thread starts while the guard lives, with the
+    /// same thread attribution as [`SqliteWorkScope`]: writer loans and readers this thread
+    /// runs are captured, and other threads' work is not. Layered into `traced`, it keeps
+    /// working under the native mutation dispatcher, which installs and reinstalls that one
+    /// callback; a raw `Connection::trace` would be clobbered by it.
+    pub struct SqlCapture {
+        buffer: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        previous: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    }
+
+    impl SqlCapture {
+        pub fn start() -> Self {
+            let buffer = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let previous = CAPTURED_SQL
+                .with(|capture| capture.borrow_mut().replace(std::rc::Rc::clone(&buffer)));
+            Self { buffer, previous }
+        }
+
+        /// The statements captured so far, emptying the buffer and leaving the capture running.
+        pub fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.buffer.borrow_mut())
+        }
+    }
+
+    impl Drop for SqlCapture {
+        fn drop(&mut self) {
+            CAPTURED_SQL.with(|capture| {
+                let mut capture = capture.borrow_mut();
+                if capture
+                    .as_ref()
+                    .is_some_and(|active| std::rc::Rc::ptr_eq(active, &self.buffer))
+                {
+                    *capture = self.previous.take();
+                }
+            });
+        }
     }
 
     /// Completed traced statements on this thread within one explicit scope. It counts every
@@ -2225,6 +2378,16 @@ pub mod work {
         pub fn finish(self) -> SqliteWork {
             THREAD_WORK.with(std::cell::Cell::get) - self.before
         }
+    }
+
+    /// Writer loans acquired by this caller thread, including loans that execute no SQL.
+    /// Snapshot outside setup and verification queries to measure only the operation.
+    pub fn writer_loans() -> u64 {
+        WRITER_LOANS.with(std::cell::Cell::get)
+    }
+
+    pub(super) fn record_writer_loan() {
+        WRITER_LOANS.with(|count| count.set(count.get() + 1));
     }
 
     /// Everything counted so far, in every connection of this process.
@@ -2264,7 +2427,7 @@ pub mod work {
     /// its runs until someone resets them, and tests read them too, so this never resets them.
     static STARTED: Mutex<BTreeMap<usize, [u64; 4]>> = Mutex::new(BTreeMap::new());
 
-    unsafe extern "C" fn traced(
+    pub(super) unsafe extern "C" fn traced(
         event: c_uint,
         _context: *mut c_void,
         statement: *mut c_void,
@@ -2277,6 +2440,18 @@ pub mod work {
         let now = COUNTERS.map(|counter| u64::try_from(read(counter)).unwrap_or(0));
         let mut started = STARTED.lock().unwrap_or_else(PoisonError::into_inner);
         if event == ffi::SQLITE_TRACE_STMT as c_uint {
+            if let Some(captured) = CAPTURED_SQL.with(|capture| capture.borrow().as_ref().map(std::rc::Rc::clone)) {
+                // SQLITE_TRACE_STMT detail contains unexpanded SQL (or a trigger
+                // comment). Expand the live statement explicitly for EXPLAIN fixtures.
+                // SAFETY: SQLite owns the live statement; its allocated expansion is
+                // copied while valid and released with SQLite's matching allocator.
+                let raw = unsafe { ffi::sqlite3_expanded_sql(statement) };
+                if !raw.is_null() {
+                    let sql = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+                    unsafe { ffi::sqlite3_free(raw.cast()) };
+                    captured.borrow_mut().push(sql);
+                }
+            }
             // A trigger's start reports the statement again; the first start counts.
             started.entry(key).or_insert(now);
             return 0;
@@ -2364,12 +2539,19 @@ pub mod work {
                 statement.query_row([],|row|row.get::<_,u64>(0)).unwrap();
                 capture.store(statement.get_status(rusqlite::StatementStatus::VmStep) as u64,Ordering::Relaxed);
             });
+            // The native contract publishes nothing for an unchanged loan, so the fixture
+            // commits an actual mutation; the loan's whole return, including the observer
+            // the dispatcher publishes at guard return, stays inside the one scope.
             let scope = SqliteWorkScope::start();
-            drop(writer.write());
+            let guard = writer.write();
+            guard
+                .execute("INSERT INTO claims(store_index) VALUES (1)", [])
+                .unwrap();
+            drop(guard);
             let work = scope.finish();
             assert_eq!(
-                work.statements, 2,
-                "committed index read plus returned-guard observer"
+                work.statements, 3,
+                "the committed mutation, its index read and the returned-guard observer"
             );
             assert!(observed_vm.load(Ordering::Relaxed) > 0);
             assert!(work.vm_steps > observed_vm.load(Ordering::Relaxed));
@@ -2420,8 +2602,55 @@ pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connecti
     };
     let connection = Connection::open_with_flags(path, flags)
         .with_context(|| format!("open st read connection {}", path.display()))?;
-    crate::store::blob_file::attach_reader(&connection, path)?;
+    crate::store::blob_file::attach_reader(&connection, path, false)?;
     configure_open_read_connection(connection)
+}
+
+/// Encode a native filename, not a caller-supplied SQLite URI. In particular, `?`, `#`
+/// and `%` in source paths must not become URI options or change the opened database.
+pub(crate) fn immutable_database_uri(path: &Path) -> Result<String> {
+    let mut uri = String::from("file:");
+    use std::fmt::Write as _;
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'/' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(char::from(byte));
+            }
+            _ => write!(uri, "%{byte:02X}")?,
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    Ok(uri)
+}
+
+/// Immutable SQLite ignores WAL, so refuse any nonempty WAL before opening the file.
+/// This is an offline contract: the caller must keep the source stopped throughout export.
+pub(crate) fn open_immutable_read_connection(path: &Path) -> Result<Connection> {
+    let path = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve offline backup database {}", path.display()))?;
+    require_checkpointed_backup_database(&path)?;
+    let uri = immutable_database_uri(&path)?;
+    let connection = Connection::open_with_flags(
+        uri, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    ).with_context(|| format!("open immutable backup read connection {}", path.display()))?;
+    crate::store::blob_file::attach_reader(&connection, &path, true)?;
+    configure_open_read_connection(connection)
+}
+
+pub(crate) fn require_checkpointed_backup_database(path: &Path) -> Result<()> {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let wal = PathBuf::from(wal);
+    match std::fs::metadata(&wal) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.len() == 0,
+            "read-only backup refuses nonempty WAL {}; source must be cleanly stopped and checkpointed before exporting",
+            wal.display(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspect offline backup WAL {}", wal.display())),
+    }
+    Ok(())
 }
 
 fn configure_open_read_connection(mut connection: Connection) -> Result<Connection> {
@@ -3077,6 +3306,7 @@ mod tests {
         let pool = ReadPool::new(&path, false).unwrap();
         let mut guard = pool.get();
         let connection = Rc::new(guard.connection.take().unwrap());
+        let live = guard._live.take();
         drop(guard);
         let escaped = connection.clone();
         drop(PinnedRead {
@@ -3084,6 +3314,7 @@ mod tests {
             connection: Some(connection),
             registered: false,
             transaction: None,
+            _live: live,
         });
         assert_eq!((pool.usage().open, pool.usage().idle), (1, 0));
         drop(escaped);

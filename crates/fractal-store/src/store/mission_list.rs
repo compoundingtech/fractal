@@ -151,15 +151,33 @@ impl MissionRows {
             .map(|(id, key)| (key.order, id.clone()))
             .collect::<Vec<_>>();
         order.sort_by(|(left_time, left), (right_time, right)| {
-            match (left_time, right_time) {
-                (Some(left), Some(right)) => right.cmp(left),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-            .then_with(|| left.cmp(right))
+            Self::compare(*left_time, left, *right_time, right)
         });
         self.order = order.into_iter().map(|(_, id)| id).collect();
+    }
+
+    fn compare(left_time: Option<i64>, left: &str, right_time: Option<i64>, right: &str) -> std::cmp::Ordering {
+        match (left_time, right_time) {
+            (Some(left), Some(right)) => right.cmp(&left),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }.then_with(|| left.cmp(right))
+    }
+
+    /// Keep unaffected missions in place and insert only changed visible keys.
+    pub fn update_order(&mut self, missions: &BTreeSet<String>) {
+        if missions.is_empty() {
+            return;
+        }
+        self.order.retain(|id| !missions.contains(id));
+        for id in missions {
+            let Some(key) = self.keys.get(id).filter(|key| key.visible) else { continue; };
+            let at = self.order.binary_search_by(|other| {
+                Self::compare(self.keys[other].order, other, key.order, id)
+            }).unwrap_or_else(|at| at);
+            self.order.insert(at, id.clone());
+        }
     }
 
     /// The first time a shown mission leaves the list with no new claim: just after the last

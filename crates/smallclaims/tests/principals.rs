@@ -16,6 +16,17 @@ use smallclaims::store::runtime::Plain;
 
 const FLEET: &str = "6f1e8a52-3c4d-4b7e-9a10-2d5c8e7f9b31";
 
+fn simulation_clock(at: u128) -> impl Drop {
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    smallclaims::store::set_thread_clock(Some(at));
+    ResetClock
+}
+
 #[test]
 fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering() {
     thread_local! {
@@ -29,7 +40,7 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
         store.judge_claims(true).unwrap();
         assert_eq!(verdict(&store, &claim), Verdict::Verified);
         {
-            let mut connection = store.connection.write();
+            let connection = store.connection.write();
             if tampered {
                 // Rejudgment must use the current transaction's body, never the earlier one.
                 connection.execute(
@@ -45,19 +56,24 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
                 "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
                 [&claim.id],
             ).unwrap();
+            drop(connection);
             BODY_READS.with(|reads| reads.borrow_mut().clear());
-            connection.trace(Some(|sql| {
-                if sql.starts_with("SELECT id, subject, kind, actor, body FROM claims WHERE id=") {
-                    BODY_READS.with(|reads| reads.borrow_mut().push(sql.to_owned()));
+            // The native mutation dispatcher reinstalls its one trace callback on every loan,
+            // so a raw connection.trace would be clobbered; the capture is layered into it.
+            let capture = smallclaims::sqlite::work::SqlCapture::start();
+            store.judge_claims(false).unwrap();
+            let ran = capture.take();
+            drop(capture);
+            BODY_READS.with(|reads| {
+                for sql in &ran {
+                    if sql.starts_with("SELECT id, subject, kind, actor, body FROM claims WHERE id=") {
+                        reads.borrow_mut().push(sql.clone());
+                    }
                 }
-            }));
+                let reads = reads.borrow();
+                assert_eq!(reads.len(), 1, "tampered={tampered}: {reads:?}");
+            });
         }
-        store.judge_claims(false).unwrap();
-        store.connection.write().trace(None);
-        BODY_READS.with(|reads| {
-            let reads = reads.borrow();
-            assert_eq!(reads.len(), 1, "tampered={tampered}: {reads:?}");
-        });
         let result = verdict(&store, &claim);
         if tampered {
             assert!(matches!(result, Verdict::Invalid(_)), "{result:?}");
@@ -1367,6 +1383,9 @@ fn competing_carriers_cannot_revive_a_checkpointed_signature() {
     use smallclaims::store::checkpoint::{
         ClaimTombstone, delete_dropped_rows_tx, record_checkpoint_tombstones_tx,
     };
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let written_at = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    let _clock = simulation_clock(written_at);
     let fixture = signature_candidates(1, 1);
     let original = &fixture.exchange.envelopes[0];
     let tombstone = ClaimTombstone {
@@ -1385,11 +1404,16 @@ fn competing_carriers_cannot_revive_a_checkpointed_signature() {
     for reverse in [false, true] {
         for width in [1, 2] {
             for copies in [1, 2] {
+                smallclaims::store::set_thread_clock(Some(written_at));
                 let target = node("birch", None, Some(&fixture.anchor));
                 receive_carriers(&target, &fixture.baseline);
                 let mut first = fixture.exchange.clone();
                 first.envelopes = vec![original.clone()];
                 receive_carriers(&target, &first);
+                // Keep the signature's original batch, but let its full retention bound pass.
+                let forget_at = written_at + u128::from(FORGET_SIGNED_AFTER_MS) + 60_000;
+                smallclaims::store::set_thread_clock(Some(forget_at));
+                target.set_write_clock_at(forget_at).unwrap();
                 {
                     let mut connection = target.connection.write();
                     let tx = connection.transaction().unwrap();
@@ -3010,11 +3034,15 @@ fn principal_physical_roots(
 fn live_signed_appends_between_inventory_loans_need_no_bulk_activation_tail() {
     use smallclaims::store::principals::SignatureModel;
     use std::sync::mpsc;
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let written_at = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    let _clock = simulation_clock(written_at);
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");
     let member = key();
     {
         let source = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+        source.set_write_clock_at(written_at).unwrap();
         source.set_node_key(member.clone()).unwrap();
         for i in 0..513 {
             note(&source, None, &format!("initial {i}"));
@@ -3023,11 +3051,14 @@ fn live_signed_appends_between_inventory_loans_need_no_bulk_activation_tail() {
         remove_candidate_schema(&source.connection.write());
     }
     let store = Arc::new(Store::open(&path, "studio", Arc::new(Plain)).unwrap());
+    // The write-clock override is connection-local and must be restored after reopening.
+    store.set_write_clock_at(written_at).unwrap();
     store.set_node_key(member.clone()).unwrap();
     let (start, work) = mpsc::channel();
     let (completed, received) = mpsc::channel();
     let writer = store.clone();
     let producer = std::thread::spawn(move || {
+        let _clock = simulation_clock(written_at);
         for i in work {
             let input = ClaimInput {
                 subject: format!("note/live-{i}"),
@@ -3041,7 +3072,10 @@ fn live_signed_appends_between_inventory_loans_need_no_bulk_activation_tail() {
             let body = json!({"fields":input.fields,"evidence":input.evidence});
             let content =
                 content_digest(&input.subject, &input.kind, input.actor.as_deref(), &body);
-            let signature = ClaimSignature::sign(&member, &content, "host/studio", None, vec![], 1);
+            let signature = ClaimSignature::sign(
+                &member, &content, "host/studio", None, vec![],
+                u64::try_from(written_at).unwrap(),
+            );
             let (claim, _) = writer.append_signed_claim(&input, &signature).unwrap();
             completed.send((claim, signature)).unwrap();
         }
@@ -3071,6 +3105,9 @@ fn live_signed_appends_between_inventory_loans_need_no_bulk_activation_tail() {
     // Exercise the existing checkpoint deletion hook on a sealed, live new input.
     // This is maintenance coverage, not proof this removal family qualifies for production.
     let (dropped, _) = live.remove(0);
+    let forget_at = written_at + u128::from(FORGET_SIGNED_AFTER_MS) + 60_000;
+    smallclaims::store::set_thread_clock(Some(forget_at));
+    store.set_write_clock_at(forget_at).unwrap();
     {
         use smallclaims::store::checkpoint::{
             ClaimTombstone, delete_dropped_rows_tx, record_checkpoint_tombstones_tx,

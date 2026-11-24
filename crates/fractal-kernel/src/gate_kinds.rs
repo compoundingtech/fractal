@@ -91,12 +91,23 @@ pub fn cargo_test(gate: &CargoTest<'_>) -> GateAnswer {
         }
     };
     let short = &sha[..sha.len().min(12)];
-    let worktree = gate
-        .worktree
-        .map(Path::to_path_buf)
+    let worktree = gate.worktree.map(Path::to_path_buf)
         .unwrap_or_else(|| default_worktree(&top));
+    let worktree = match std::path::absolute(&worktree) {
+        Ok(path) => path,
+        Err(error) => return GateAnswer::Broken(format!("cannot resolve gate worktree: {error}")),
+    };
     let _lock = match lock(&worktree) {
         Ok(lock) => lock,
+        Err(error) => return GateAnswer::Broken(format!("{error:#}")),
+    };
+    // Retain the deletion barrier through checkout/reuse, compilation and the test receipt.
+    let _lease = match fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire(
+        &worktree, &top,
+    ) {
+        Ok(lease) => lease,
+        Err(error) if error.is::<fractal_runtime::store_worktree_lease::LeaseAdmissionTimeout>() =>
+            return GateAnswer::NotYet(format!("{error:#}")),
         Err(error) => return GateAnswer::Broken(format!("{error:#}")),
     };
     if let Err(error) = checkout(&top, &worktree, &sha) {

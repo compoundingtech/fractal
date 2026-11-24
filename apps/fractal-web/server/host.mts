@@ -1,9 +1,10 @@
 import type { IncomingMessage } from 'node:http'
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Tracer } from 'effect'
 import { createFractalWebServer, type FractalWebServer, type AdmissionIdentity } from './core.mts'
-import { checkTagAuthorization } from './tagAuthorization.mts'
+import { checkPublisherAuthorization, checkTagAuthorization } from './tagAuthorization.mts'
+import { readAuthorization, type SecretFiles } from './authorization.mts'
 
 /**
  * Loopback trust boundary: only the identity-stripping published-surface filter is a legitimate
@@ -105,18 +106,11 @@ export interface HostConfig {
 
 const loopbackHosts = new Set(['127.0.0.1', '::1', 'localhost'])
 
-export interface SecretFiles {
-  readonly readText: (path: string) => string
-  /** The file's permission bits and owner. */
-  readonly owner: (path: string) => { readonly mode: number; readonly uid: number }
-}
-const localFiles: SecretFiles = { readText: (path) => readFileSync(path, 'utf8'), owner: (path) => statSync(path) }
-
 /**
  * Reads the host's environment. The bearer comes from a file so it never sits in the process
  * environment, and that file must belong to this user and be unreadable by anyone else.
  */
-export const readHostConfig = (env: NodeJS.ProcessEnv, files: SecretFiles = localFiles, uid: number | undefined = process.getuid?.()): HostConfig => {
+export const readHostConfig = (env: NodeJS.ProcessEnv, files?: SecretFiles, uid: number | undefined = process.getuid?.()): HostConfig => {
   const required = (name: string): string => {
     const value = env[name]?.trim()
     if (!value) throw new TypeError(`${name} is required`)
@@ -131,17 +125,8 @@ export const readHostConfig = (env: NodeJS.ProcessEnv, files: SecretFiles = loca
   if (logins.length === 0) throw new TypeError('WF_TAILNET_LOGINS must name at least one tailnet login')
   const tags = (env.WF_TAILNET_TAGS ?? '').split(',').map(tag => tag.trim()).filter(tag => tag !== '')
   if (tags.some(tag => !/^tag:[^,\s]+$/.test(tag))) throw new TypeError('WF_TAILNET_TAGS must name tag: prefixed tags')
-  const readAuthorization = (name: string): string => {
-    const path = required(name)
-    const { mode, uid: fileOwner } = files.owner(path)
-    if ((mode & 0o077) !== 0 || (uid !== undefined && fileOwner !== uid))
-      throw new TypeError(`${name} must be owned by this user and readable by no one else (chmod 600)`)
-    const token = files.readText(path).trim()
-    if (token === '' || /\s/.test(token.replace(/^Bearer /, ''))) throw new TypeError(`${name} must hold one bearer token`)
-    return token.startsWith('Bearer ') ? token : `Bearer ${token}`
-  }
-  const authorization = readAuthorization('WF_ST_AUTHORIZATION_FILE')
-  const tagAuthorization = tags.length === 0 ? undefined : readAuthorization('WF_TAG_AUTHORIZATION_FILE')
+  const authorization = readAuthorization(env, 'WF_ST_AUTHORIZATION_FILE', files, uid)
+  const tagAuthorization = tags.length === 0 ? undefined : readAuthorization(env, 'WF_TAG_AUTHORIZATION_FILE', files, uid)
   if (tagAuthorization !== undefined && tagAuthorization === authorization)
     throw new TypeError('WF_TAG_AUTHORIZATION_FILE must hold a dedicated credential, not the person credential')
   return {
@@ -161,6 +146,7 @@ export const readHostConfig = (env: NodeJS.ProcessEnv, files: SecretFiles = loca
 export const startHost = async (config: HostConfig, readText: (path: string) => string = (path) => readFileSync(path, 'utf8')): Promise<FractalWebServer> => {
   const gateway = { socketPath: config.socketPath, host: '127.0.0.1', authorization: config.authorization, tagAuthorization: config.tagAuthorization, timeoutMs: 30_000 }
   if (config.tags.length > 0) await checkTagAuthorization(gateway)
+  await checkPublisherAuthorization(gateway)
   const buildIdentity: unknown = JSON.parse(readText(join(config.dist, 'build-identity.json')))
   let listening: string | undefined
   const served = createFractalWebServer({

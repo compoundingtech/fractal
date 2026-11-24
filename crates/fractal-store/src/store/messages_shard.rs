@@ -553,10 +553,8 @@ fn hosts_advertising(
     let connection = graph.graph.readers.get();
     // A member's answer changes only with a new start: a start is never rewritten or trimmed,
     // and one that replicates in later is a new row. So the newest start, with the members
-    // asked, keys the answer kept from the last read; the shard's peers poll every 5–30 s.
-    let newest_start: i64 = connection
-        .prepare_cached("SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE kind='daemon.started'")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h98a9e19b2202 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+    // asked, keys the answer kept from the last read and the discovery subscription below.
+    let newest_start = advertising_generation(&connection)?.1;
     let key = (hosts.clone(), newest_start);
     let kept = graph.extension::<AdvertisingHosts>();
     if let Some((kept_key, answer)) = kept.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(feature)
@@ -591,6 +589,77 @@ struct AdvertisingHosts(std::sync::Mutex<BTreeMap<&'static str, (AdvertisingRead
 /// newest `daemon.started` there was.
 type AdvertisingRead = (BTreeMap<String, u64>, i64);
 
+/// Discovery follows admitted advertisements, not envelope receipt. Admission/projection can
+/// materialize a start long after receipt, including after a deferred projection resumes.
+struct AdvertisingRevisions {
+    changed: tokio::sync::watch::Sender<smallclaims::sync::revision::StoreRevision>,
+    observer: std::sync::OnceLock<smallclaims::sqlite::CommitObserver>,
+}
+
+impl Default for AdvertisingRevisions {
+    fn default() -> Self {
+        Self {
+            changed: tokio::sync::watch::channel(smallclaims::sync::revision::StoreRevision {
+                epoch: uuid::Uuid::now_v7(), generation: 0, authority_root: None,
+            }).0,
+            observer: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+fn advertising_generation(connection: &rusqlite::Connection) -> rusqlite::Result<(i64, i64)> {
+    connection.query_row(
+        "SELECT (SELECT value FROM fleet_generation WHERE id=1),
+                COALESCE(MAX(claims.store_index),0)
+         FROM claims JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.kind='daemon.started' AND batches.replica_sequence IS NOT NULL",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
+fn subscribe_advertising_revision(
+    graph: &super::Store,
+) -> tokio::sync::watch::Receiver<smallclaims::sync::revision::StoreRevision> {
+    let revisions = graph.extension::<AdvertisingRevisions>();
+    revisions.observer.get_or_init(|| {
+        let previous = std::sync::Mutex::new(advertising_generation(&graph.graph.readers.get()).ok());
+        let owner = Arc::downgrade(&revisions);
+        graph.graph.observe_tables(&["claims", "batches", "fleet_generation"], move |connection| {
+            let current = advertising_generation(connection).ok();
+            let mut previous = previous.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if current.is_none() || *previous != current {
+                *previous = current;
+                if let Some(revisions) = owner.upgrade() {
+                    revisions.changed.send_modify(|revision| revision.generation += 1);
+                    smallclaims::performance::record_request(
+                        "replication/discovery-revision", None, std::time::Duration::ZERO,
+                    );
+                }
+            }
+        })
+    });
+    revisions.changed.subscribe()
+}
+
+pub async fn wait_advertising_revision(
+    graph: &super::Store,
+    after: Option<smallclaims::sync::revision::StoreRevision>,
+) -> anyhow::Result<smallclaims::sync::revision::StoreRevision> {
+    let mut changes = subscribe_advertising_revision(graph);
+    smallclaims::performance::record_request(
+        "replication/discovery-wait", None, std::time::Duration::ZERO,
+    );
+    loop {
+        let current = changes.borrow_and_update().clone();
+        if !after.as_ref().is_some_and(|after| {
+            after.epoch == current.epoch && after.generation == current.generation
+        }) {
+            return Ok(current);
+        }
+        changes.changed().await?;
+    }
+}
+
 /// Where the graph keeps its open messages shard, for the request handlers that serve it. Empty
 /// until the daemon opens the shard; a process that never opens it serves no shard routes.
 #[derive(Default)]
@@ -599,6 +668,11 @@ pub struct Slot(std::sync::OnceLock<Arc<GraphStore>>);
 impl Slot {
     pub fn get(&self) -> Option<&Arc<GraphStore>> {
         self.0.get()
+    }
+
+    pub(super) fn set(&self, shard: Arc<GraphStore>) -> anyhow::Result<()> {
+        self.0.set(shard)
+            .map_err(|_| anyhow::anyhow!("the graph already has a messages shard"))
     }
 }
 
@@ -643,11 +717,8 @@ pub fn open(graph: &Arc<super::Store>, root: &Path) -> anyhow::Result<Arc<GraphS
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     shard.set_member_key(key)?;
-    graph
-        .extension::<Slot>()
-        .0
-        .set(shard.clone())
-        .map_err(|_| anyhow::anyhow!("the graph already has a messages shard"))?;
+    graph.extension::<Slot>().set(shard.clone())?;
+    graph.fractal.mail_objective_inputs.shard_replaced();
     Ok(shard)
 }
 
@@ -752,6 +823,13 @@ fn append_item(store: &GraphStore, input: &ClaimInput) -> Result<(ClaimRecord, b
 }
 
 impl Runtime for MessagesRuntime {
+    fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
+        Some(Arc::new(super::observer_mail_inputs::ShardObserver {
+            graph: self.0.clone(),
+            dirty: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
     fn migrate_schema(&self, _connection: &Connection) -> anyhow::Result<()> {
         Ok(())
     }
@@ -1186,6 +1264,58 @@ mod tests {
         // This host never counts itself.
         advertise(&alder, 1);
         assert!(advertising_hosts(&alder, &["alder".to_owned()]).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn discovery_waits_for_admitted_start_after_receipt_and_ignores_unrelated_writes() {
+        let target = Store::open_memory("target").unwrap();
+        let source = Store::open_memory("source").unwrap();
+        for store in [&target, &source] {
+            store.bind_fleet(FLEET).unwrap();
+        }
+        let peers = ["source".to_owned()];
+        let before = wait_advertising_revision(&target, None).await.unwrap();
+        assert!(advertising_hosts(&target, &peers).unwrap().is_empty());
+        let wait = wait_advertising_revision(&target, Some(before.clone()));
+        tokio::pin!(wait);
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        advertise(&source, 1);
+        let exchange = source.graph.export_replication_exchange(
+            FLEET, &target.graph.replication_inventory().unwrap(),
+        ).unwrap();
+        // This is the API's after_receipt boundary: the envelope is committed, but its
+        // claims are not admitted/projected yet. Receipt cannot consume discovery's wake.
+        target.graph.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        assert!(advertising_hosts(&target, &peers).unwrap().is_empty());
+        target.graph.validate_replication_backlog().unwrap();
+        target.graph.apply_replication_repairs().unwrap();
+        target.graph.project_replication_backlog().unwrap();
+        let after = match futures_util::poll!(&mut wait) {
+            std::task::Poll::Ready(Ok(after)) => after,
+            other => panic!("admitted advertisement did not wake discovery: {other:?}"),
+        };
+        assert!(after.generation > before.generation);
+        assert_eq!(advertising_hosts(&target, &peers).unwrap(), BTreeSet::from(["source".into()]));
+        let mut changes = subscribe_advertising_revision(&target);
+        changes.borrow_and_update();
+        for _ in 0..100 {
+            target.graph.connection.write().execute(
+                "INSERT INTO meta(key,value) VALUES('discovery_local_progress','1')
+                 ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", [],
+            ).unwrap();
+        }
+        target.append_claim(&ClaimInput {
+            subject: "host/unrelated".into(), kind: "transport.observed".into(), actor: None,
+            fields: BTreeMap::from([("status".into(), json!("up"))]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert!(!changes.has_changed().unwrap(), "ordinary claims and local mirrors do no discovery work");
+        target.graph.connection.write().execute(
+            "UPDATE fleet_generation SET value=value+1 WHERE id=1", [],
+        ).unwrap();
+        assert!(changes.has_changed().unwrap(), "membership is an independent discovery dependency");
     }
 
     /// A start with `features`, under its own key `start`.

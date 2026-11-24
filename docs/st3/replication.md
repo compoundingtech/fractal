@@ -154,7 +154,7 @@ it supplies no generation witness and cannot authorize a same-UID process.
 Unreadable same-UID processes, unknown ownership, exited or changed processes fail closed.
 A completed same-UID walk without any identity variable is a person.
 On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
-Failed inspection denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER`
+Failed inspection denies backup/proof exports, attributed internal routes, `LOCAL_PERSON_HEADER`
 sessions and actor/requester body impersonation; it does not deny every public request.
 The same macOS PID-reuse residual risk applies to this ancestry inspection.
 
@@ -165,8 +165,17 @@ Operator fleet routes retain their existing local authority boundary.
 
 
 Adapters that retain a departing member's transport must instead make their
-decision from one `GET /v1/internal/fleet/leave-state` response:
+decision from one `GET /v1/internal/fleet/leave-state` response.
 
+This read-only snapshot requires only local same-UID access, not an agent identity.
+An unreadable ancestor does not refuse this GET/HEAD read; person headers still require
+verified attribution, and identified agent/run callers remain excluded from internal
+routes. No service-manager environment exception or companion credential is needed.
+If the snapshot read fails (including HTTP 422), the Fabric adapter records an error
+status and tries again after its configured interval without contacting Fabric or
+changing existing grants. Grants therefore remain stale until a read succeeds.
+
+Snapshot shape:
 ```json
 {
   "fleet_id": "fleet-id",
@@ -225,6 +234,76 @@ leave list. Polling never imports claims, writes the journal, refreshes membersh
 selects a confirmer, starts grace, or changes transport policy. External adapters
 own transport-policy reconciliation; neither daemon nor worker reconciles Fabric
 runtime peers.
+
+## Store-scoped revision subscriptions
+
+Workers wait on the daemon's `POST /v1/internal/replication/revision` endpoint,
+or `/v1/internal/replication/shard/{shard}/revision` for a shard. Requests select
+`kind: "authority"` or `kind: "membership"` and provide `after: null` for an
+initial snapshot, then the previous cursor to wait for a change. A cursor contains
+an `epoch` and `generation`; authority snapshots also contain `authority_root`.
+A new daemon epoch returns immediately, including after a restart.
+
+Each store owns separate authority and membership observers. Registering a wait
+precedes checking its cursor, so a change during subscription cannot be lost.
+Authority roots are read against a stable revision before the snapshot is
+returned. The worker updates its root witness before waking peer dialers, and
+compares it locally with authenticated inbound exchange evidence. Unrelated
+notifications require neither an authority-guard request nor a membership read.
+Membership refreshes follow the membership subscription; direct leave and
+signature-protection decisions retain their explicit fresh-authority reads.
+
+Unsealed local batches are authority inputs: a local append wakes the snapshot
+that seals its envelope, rather than waiting for an envelope to already exist.
+Shard discovery separately waits at
+`POST /v1/internal/replication/shard/{shard}/peers/revision`, using a null initial
+cursor or its previous cursor as the body. Its cursor follows admitted
+`daemon.started` advertisements and fleet membership, not merely envelope receipt.
+Receipt before admission therefore cannot consume the only discovery wake.
+
+The performance report exposes `replication/authority-revision` and
+`replication/membership-revision` observer counts, `replication/authority-wait` and
+`replication/membership-wait` subscription work, `replication/authority-root-read`
+snapshot work, and `replication/membership-read` fleet-view work. Discovery exposes
+`replication/discovery-revision` and `replication/discovery-wait`.
+
+## Root-first peer exchanges
+
+Peers advertise `root-first-v1` in inventory capabilities. A root-only probe also
+carries `root-summary-v1`, distinguishing a deliberately omitted bucket list from
+an ordinary inventory. Matching peers exchange roots and control metadata without
+constructing or serializing the full bucket summary. A differing root answers with
+bucket proofs and a bounded listing of complete ranges, prioritizing ranges with
+live payloads over checkpoint-only ranges. Omitted probe proofs mean unknown
+ranges, not empty ones: the responder does not send speculative payloads.
+
+The initiator uses those listings to push the reverse difference in its second
+request, alongside its own bounded range listings; the second answer pulls the
+remaining envelopes. Thus gaps within already-shared live ranges converge in one
+compact round (two requests when they fit the existing bounds), even with
+unsettled checkpoint lineages. Larger differences rotate listings across rounds.
+Modern root-first exchanges, including empty stores with no buckets, never request
+a whole identity inventory. Compact answers carry `range-proofs-v1`, marking their
+bucket list as complete even when empty. This distinguishes an empty range answer
+from an ordinary empty complete-identity request, which still receives every
+identity, including tombstones. A root-summary marker instead means its absent
+ranges are unknown. The range-proofs marker describes the message, not a peer
+capability, and is interpreted only with root-first support.
+
+Advertising root-first support does not reinterpret an ordinary complete identity
+inventory as bucket proofs. Such requests still receive complete identity answers,
+and their known identities are not reoffered. Both compact and complete-inventory
+payload pages carry the writer signatures of the claims in their envelopes.
+
+An older peer that does not advertise `root-first-v1` receives a full-summary
+exchange before reconciliation continues. An older peer's ordinary request also
+keeps its existing full-summary response. This is protocol capability negotiation,
+not a fallback for local export failures. Mixed-version fleets do not require a
+simultaneous upgrade.
+
+The existing `/v1/performance` request work counts distinguish
+`replication/root-summary` from `replication/full-summary`, including difference
+exports in the latter.
 
 ## Sync invariants
 
@@ -909,12 +988,38 @@ detects PID reuse on Linux; other platforms retain the runtime's PID-based token
 The check also detects a daemon-only upgrade while the reporting worker keeps running.
 
 A local graph change writes `replication.wake`. The worker watches only this file, not the SQLite files.
+Filesystem events are coalesced **before** shared fan-out to graph, messages-shard and
+membership followers: the leading wake is immediate, followed by at most one broadcast
+per second while events continue. The final event is retained for the trailing broadcast.
+Authority guard reads also have a one-second minimum gap, including re-entry caused by
+inbound or route notifications. A local wake is announced at most one second after its
+write. Scheduling delay can approach two seconds: the one-second pacer plus the existing
+one-second no-movement window, followed by the round's execution time. Movement still
+drains immediately and failure/overload scheduling is unchanged.
+`st.replication.wakes{stage="raw"}` counts filesystem events and `stage="paced"` counts
+shared broadcasts, exposing wake amplification separately from completed round rates.
 
 The worker coalesces wake bursts for one second, so new authority, such as a mission publish, reaches every peer within seconds. An exchange that stored new envelopes on either side runs again at once until a backlog drains. An exchange that stored nothing new waits for the next wake, even if it carried envelopes the other side already held.
 
-The worker also runs a 30-second anti-entropy exchange. A recent inbound exchange suppresses
-a redundant connection in the opposite direction; local graph changes still request a prompt
-push. Failed attempts back off exponentially from one second through minutes to one hour, with 20 percent
+The worker's anti-entropy interval starts at 30 seconds and doubles after consecutive
+`in_sync` rounds, up to 10 minutes, independently for each store, peer and shard dialer.
+Movement resets it and drains the backlog immediately. A local wake, a new inbound exchange
+from that peer, changed routes or local connectivity also resets the idle sequence.
+`ST3_REPLICATION_IDLE_MAX_MS` raises or lowers the ceiling (30,000–3,600,000 ms;
+default 600,000). `ST3_WORKER_INTERVAL_MS` retains its cap-only meaning and can shorten
+these waits. Worker status reports the next idle deadline; `st.replication.rounds` retains
+its `peer` and `outcome` labels for comparing `in_sync` and `moved` round rates.
+A remote-only change, or a change whose notification is missed, can now wait up to the
+idle maximum: 600 seconds by default, or 3,600 seconds when raised, versus 30 seconds
+previously. This increased anti-entropy latency is an accepted tradeoff for reducing idle I/O.
+On worker return the filesystem watcher is dropped and one final dirty generation is
+queued, covering kernel events that watcher retirement may discard before delivery.
+The pacer gets up to two seconds to drain that generation and generations already
+delivered by the watcher. If its backend retains a raw producer, timeout aborts the
+pacer and logs one warning, preserving the original worker error so supervision can restart it.
+A recent inbound exchange suppresses a redundant connection in the opposite direction;
+local graph changes still request a prompt push. Failed attempts back off exponentially
+from one second through minutes to one hour, with 20 percent
 jitter. Graph wakes do not reset failure backoff. An authenticated inbound request, a successful
 peer request, a change to the member's routes, or a local connectivity change interrupts it
 immediately, including activity received while an outbound request is still failing. Peer

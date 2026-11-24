@@ -19,7 +19,6 @@ use axum::routing::{get, post};
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
-use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
@@ -1809,6 +1808,11 @@ impl MainBackend {
             failure.code = code.to_owned();
             failure.http_status = Some(status);
         }
+        if phase == smallclaims::replication::ReplicationFailurePhase::LocalReceive
+            && crate::client::daemon_deadline_exceeded(&error)
+        {
+            failure.code = "replication-overloaded".to_owned();
+        }
         let display = error.to_string();
         error.context(failure).context(display)
     }
@@ -1852,6 +1856,13 @@ fn started_at_unix_ms() -> u64 {
 }
 
 impl Backend for MainBackend {
+    async fn wait_revision(
+        &self,
+        request: smallclaims::sync::revision::RevisionRequest,
+    ) -> Result<smallclaims::sync::revision::StoreRevision> {
+        self.client.post(&self.replication_path("revision"), &request).await
+    }
+
     async fn ready(&self) {
         loop {
             if let Ok(health) = self.client.get::<serde_json::Value>("/v1/health").await {
@@ -1891,56 +1902,23 @@ impl Backend for MainBackend {
             ))
     }
 
-    async fn guard_summary(&self, fleet_id: &str) -> Result<ReplicationExportResponse> {
-        // This marker goes only to our local daemon, never into a signed peer exchange.
-        // Old daemons ignore it and return the same complete summary.
-        self.client
-            .post(
-                &self.replication_path("export"),
-                &ReplicationExportRequest {
-                    fleet_id: fleet_id.to_owned(),
-                    inventory: ReplicationInventory::default(),
-                    summary_only: true,
-                    authority_guard: true,
-                    authority_digest_only: false,
-                    signature_requests: Vec::new(),
-                },
-            )
-            .await
-    }
-
-    async fn authority_digest(&self, fleet_id: &str) -> Result<String> {
-        // New daemons omit only the unused buckets. An old daemon ignores the additive
-        // option and returns its full response; consume its digest from this same call.
-        let response: ReplicationExportResponse = self
-            .client
-            .post(
-                &self.replication_path("export"),
-                &ReplicationExportRequest {
-                    fleet_id: fleet_id.to_owned(),
-                    inventory: ReplicationInventory::default(),
-                    summary_only: true,
-                    authority_guard: true,
-                    authority_digest_only: true,
-                    signature_requests: Vec::new(),
-                },
-            )
-            .await?;
-        Ok(response.exchange.authority_digest)
-    }
 
     async fn receive(
         &self,
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: smallclaims::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
+        options: smallclaims::replication::ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
+        let smallclaims::replication::ReceiveOptions {
+            round_trip,
+            carrier,
+            authenticated_member_key,
+            deadline_unix_ms,
+        } = options;
         let started = std::time::Instant::now();
         self.client
-            .post(
+            .post_receive_before(
                 &self.replication_path("receive"),
                 &ReplicationReceiveRequest {
                     peer: peer.to_owned(),
@@ -1950,6 +1928,7 @@ impl Backend for MainBackend {
                     carrier,
                     authenticated_member_key: authenticated_member_key.map(str::to_owned),
                 },
+                deadline_unix_ms,
             )
             .await.map_err(|error| Self::exchange_error(
                 error, smallclaims::replication::ReplicationFailurePhase::LocalReceive, started,
@@ -2132,39 +2111,24 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
         peer_listen: config.peer_listen.clone(),
         fleet: config.fleet.clone(),
     };
-    // The daemon touches this file whenever the graph changes; each touch wakes the dialers.
+    // Outbound and membership followers subscribe to daemon-owned store revisions.
     let (wake, _) = watch::channel(0_u64);
-    let wake_file = config.state_dir.join("replication.wake");
-    if !wake_file.exists() {
-        fs::write(&wake_file, b"worker-start\n")?;
-    }
-    let watcher_wake = wake.clone();
-    let mut database_watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if event.is_ok() {
-                watcher_wake.send_modify(|generation| *generation = generation.saturating_add(1));
-            }
-        })?;
-    database_watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive)?;
     started_at_unix_ms();
     tokio::spawn(MainBackend::new(config.socket.clone()).report_process_cpu());
     let main = MainBackend::new(config.socket.clone());
     main.ready().await;
     let mut shards = Vec::new();
-    // Graph sync never waits on the shard. A 404 or 405 means this daemon holds none. Any other
-    // failure is taken as passing on a daemon that holds it: the shard is followed from an empty
-    // peer set, and if that guess is wrong the sync stays idle and dials nobody.
-    let held = match shard_peers(&main, MESSAGES_SHARD).await {
-        Ok(peers) => peers,
-        Err(error) => {
-            eprintln!("st replication-worker: messages shard peers unavailable, following: {error:#}");
-            Some(BTreeSet::new())
-        }
-    };
-    if let Some(peers) = held {
+    let mut followers = tokio::task::JoinSet::new();
+    let held = shard_peers(&main, MESSAGES_SHARD).await?;
+    if held.is_some() {
+        let discovery_revision = shard_discovery_revision(&main, MESSAGES_SHARD, None).await?;
+        // Registration precedes the peer read, so admission racing startup is retained.
+        let peers = shard_peers(&main, MESSAGES_SHARD).await?.unwrap_or_default();
         let (sender, receiver) = watch::channel(peers);
-        let shard_wake = wake.clone();
-        tokio::spawn(follow_shard_peers(main.clone(), MESSAGES_SHARD, sender, wake.subscribe()));
+        let (shard_wake, _) = watch::channel(0_u64);
+        followers.spawn(follow_shard_peers(
+            main.clone(), MESSAGES_SHARD, sender, Some(discovery_revision),
+        ));
         shards.push(smallclaims::sync::ShardSync {
             id: smallclaims::shards::ShardId::parse(MESSAGES_SHARD)?,
             backend: MainBackend::for_shard(config.socket.clone(), MESSAGES_SHARD),
@@ -2172,8 +2136,12 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
             wake: shard_wake,
         });
     }
-    smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards).await
+    tokio::select! {
+        result = smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards) => result,
+        Some(result) = followers.join_next() => result.context("shard discovery follower failed")?,
+    }
 }
+
 
 /// The shard the daemon keeps messages in; see `fractal_store::store::messages_shard`.
 const MESSAGES_SHARD: &str = "messages";
@@ -2196,35 +2164,68 @@ async fn shard_peers(backend: &MainBackend, shard: &str) -> Result<Option<BTreeS
     }
 }
 
-/// Keep a shard's peer set current: advertisements arrive as graph claims, so look again
-/// when the graph wakes the dialers, at most every 5 seconds and at least every 30.
+async fn shard_discovery_revision(
+    backend: &MainBackend,
+    shard: &str,
+    after: Option<smallclaims::sync::revision::StoreRevision>,
+) -> Result<smallclaims::sync::revision::StoreRevision> {
+    backend.client.post(
+        &format!("/v1/internal/replication/shard/{shard}/peers/revision"), &after,
+    ).await
+}
+
+/// Follow admitted advertisement/membership changes; receipt and local mirrors do not refresh peers.
 async fn follow_shard_peers(
     backend: MainBackend,
     shard: &'static str,
     peers: watch::Sender<BTreeSet<String>>,
-    mut wake: watch::Receiver<u64>,
-) {
+    mut after: Option<smallclaims::sync::revision::StoreRevision>,
+) -> Result<()> {
     loop {
-        tokio::select! {
-            changed = wake.changed() => if changed.is_err() { return },
-            () = tokio::time::sleep(Duration::from_secs(30)) => {}
-        }
-        // Graph wakes come in bursts; one look covers every wake in the pause.
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        wake.mark_unchanged();
-        if let Ok(Some(current)) = shard_peers(&backend, shard).await {
-            peers.send_if_modified(|known| {
-                let changed = *known != current;
-                *known = current;
-                changed
-            });
-        }
+        let revision = shard_discovery_revision(&backend, shard, after).await?;
+        let current = shard_peers(&backend, shard).await?.unwrap_or_default();
+        peers.send_if_modified(|known| {
+            let changed = *known != current;
+            *known = current;
+            changed
+        });
+        after = Some(revision);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn only_local_receive_maps_the_daemon_ceiling_to_overloaded() {
+        use smallclaims::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
+        use tokio::io::AsyncReadExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("ceiling.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        for phase in [ReplicationFailurePhase::LocalReceive, ReplicationFailurePhase::LocalExport] {
+            let client = Client::unix(socket.clone());
+            let request = tokio::spawn(async move {
+                client.post::<_, Value>("/v1/internal/replication/receive", &serde_json::json!({})).await
+            });
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+            }
+            tokio::time::advance(Duration::from_secs(121)).await;
+            let error = request.await.unwrap().unwrap_err();
+            assert!(crate::client::daemon_deadline_exceeded(&error));
+            let error = MainBackend::exchange_error(error, phase, std::time::Instant::now());
+            let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+            assert_eq!(failure.phase, phase);
+            assert_eq!(failure.code == "replication-overloaded", phase == ReplicationFailurePhase::LocalReceive);
+            assert_eq!(failure.http_status, None);
+        }
+    }
+
 
     #[tokio::test]
     async fn peer_envelope_versions_are_accepted_by_the_client_relay() {

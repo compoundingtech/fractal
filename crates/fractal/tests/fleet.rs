@@ -10247,10 +10247,7 @@ async fn previous_release_member_watches_beside_this_builds_poller() {
     assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     elder.start().await;
     watch_fixture_app(&poller);
-    wait_until("the poller fills its mirror", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move { answer["source"]["kind"] == "mirror" }
-    }).await;
+    wait_for_mirror(&poller, "the poller fills its mirror").await;
     wait_until("the elder holds the poller's observer declaration", 90, || async {
         observer_declarations(&elder).await.iter().any(|(origin, _)| origin == "fixture-poller")
     }).await;
@@ -10292,10 +10289,7 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
     assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     elder.start().await;
     watch_fixture_app(&poller);
-    wait_until("the poller fills its mirror", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move { answer["source"]["kind"] == "mirror" }
-    }).await;
+    wait_for_mirror(&poller, "the poller fills its mirror").await;
     // Compact mode depends on every current fleet member's capability, regardless of its
     // subscriptions. The elder reads the replicated item; it need not declare another watch
     // against the poller's shared observer while the previous release is running.
@@ -10596,7 +10590,7 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
             assert_eq!(retired["claims"], 4, "{retired}");
             break;
         }
-        assert!(Instant::now() < deadline, "the member never retired its closed mail: {retired}");
+        assert!(Instant::now() < deadline, "the member never retired its closed mail: {retired}\n{}", n1.logs());
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert!(thread_kinds(&n1, &agent).await.is_empty());

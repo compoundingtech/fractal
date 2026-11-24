@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Isolate the Codex short-lived-exit regression's workspace from concurrent repository activation leases",
+  "replay": {"status": "none", "detail": "Test-only change; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No retention or checkpoint change."},
+  "compatibility": {"status": "none", "detail": "The restart budget, raised decision and exit-code assertions remain unchanged; production behavior is unchanged."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}
