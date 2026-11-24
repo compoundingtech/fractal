@@ -7,6 +7,8 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 pub const LIGHT_NODE_SESSION_PATH: &str = "/v1/light-node/session";
+pub const LIGHT_NODE_SESSION_MAX_FRAME: usize = 64 * 1024;
+pub const LIGHT_NODE_SESSION_CAPABILITIES: [&str; 8] = ["commands-v1", "receipts-v1", "joint-checkpoints-v1", "run-effects-v1", "authority-v1", "signed-channel-v1", "start-authorizations-v1", "retained-withdrawal-v1"];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,13 +27,9 @@ pub struct LightNodeScope {
 
 impl LightNodeScope {
     pub fn validate(&self) -> Result<()> {
-        if self.operations.contains(&LightNodeOperation::Start) {
-            return Err(crate::model::FractalError::new("light-node-start-not-supported",
-                "this session slice supports observe and stop only; graph-free remote start requires a separate authorization boundary").into());
-        }
         anyhow::ensure!((1..=256).contains(&self.subjects.len()),
             "a light-node grant needs between 1 and 256 exact subjects");
-        anyhow::ensure!((1..=2).contains(&self.operations.len()),
+        anyhow::ensure!((1..=3).contains(&self.operations.len()),
             "a light-node grant needs explicit operations");
         let mut subjects = BTreeSet::new();
         for subject in &self.subjects {
@@ -75,7 +73,42 @@ impl LightNodeGrant {
             anyhow::ensure!(bytes.len() == 32, "light-node public key must be Ed25519");
         }
         anyhow::ensure!(self.home_key != self.host_key, "light-node home and host must use distinct private identities");
-        self.grant.validate()
+        self.grant.validate()?;
+        self.validate_hello_budget("")
+    }
+
+    /// Include JSON escaping, the actual fleet identity and the signed envelope, not just
+    /// subject counts. Maximum integer widths make this an upper bound for the first Hello.
+    /// A real signed-frame regression in the peer crate fences this wire-layout calculation.
+    pub fn signed_hello_max_bytes(&self, fleet: &str) -> Result<usize> {
+        #[derive(Serialize)]
+        struct Hello<'a> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            version: u32,
+            selection: &'a LightNodeGrant,
+            capabilities: &'static [&'static str],
+        }
+        #[derive(Serialize)]
+        struct SignedHello<'a> {
+            sequence: u64,
+            frame: Hello<'a>,
+            authentication: [(); 0],
+        }
+        let empty = SignedHello { sequence: u64::MAX, frame: Hello {
+            kind: "hello", version: u32::MAX, selection: self,
+            capabilities: &LIGHT_NODE_SESSION_CAPABILITIES,
+        }, authentication: [] };
+        let authentication = smallclaims::sync::signed_request_authentication_json_size(
+            fleet, &self.host, &self.host_key)?;
+        Ok(serde_json::to_vec(&empty)?.len() + authentication - 2)
+    }
+
+    pub fn validate_hello_budget(&self, fleet: &str) -> Result<()> {
+        anyhow::ensure!(fleet.len() <= LIGHT_NODE_SESSION_MAX_FRAME
+            && self.signed_hello_max_bytes(fleet)? <= LIGHT_NODE_SESSION_MAX_FRAME,
+            "light-node grant exceeds the encoded signed Hello frame budget");
+        Ok(())
     }
 }
 
@@ -126,6 +159,16 @@ impl LightNodeSessionConfig {
         }
         Ok(())
     }
+
+    pub fn validate_hello_budget(&self, fleet: &str) -> Result<()> {
+        match self {
+            Self::Home { grants, .. } => {
+                for grant in grants { grant.validate_hello_budget(fleet)?; }
+                Ok(())
+            }
+            Self::Agent { grant, .. } => grant.validate_hello_budget(fleet),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -172,14 +215,10 @@ mod tests {
     }
 
     #[test]
-    fn start_grants_and_both_configuration_roles_are_explicitly_refused() {
+    fn start_grants_are_explicit_scopes_for_both_configuration_roles() {
         let mut authority = grant();
         authority.grant.operations.push(LightNodeOperation::Start);
-        let assert_unsupported = |error: anyhow::Error| {
-            assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,
-                "light-node-start-not-supported");
-        };
-        assert_unsupported(authority.validate().unwrap_err());
+        authority.validate().unwrap();
         for (node, config) in [
             ("example-home", LightNodeSessionConfig::Home {
                 listen: "127.0.0.1:1234".parse().unwrap(), grants: vec![authority.clone()],
@@ -189,7 +228,70 @@ mod tests {
             }),
         ] {
             let decoded: LightNodeSessionConfig = serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
-            assert_unsupported(decoded.validate_for(node).unwrap_err());
+            decoded.validate_for(node).unwrap();
+        }
+    }
+
+    #[test]
+    fn individually_valid_subjects_cannot_exceed_the_encoded_hello_budget() {
+        let mut authority = grant();
+        authority.grant.subjects = (0..256).map(|index| {
+            let prefix = format!("agent/budget-{index:03}-");
+            format!("{prefix}{}", "x".repeat(300 - prefix.len()))
+        }).collect();
+        authority.grant.validate().unwrap();
+        assert!(authority.validate().is_err());
+        for (node, config) in [
+            ("example-home", LightNodeSessionConfig::Home {
+                listen: "127.0.0.1:1234".parse().unwrap(), grants: vec![authority.clone()],
+            }),
+            ("example-seat", LightNodeSessionConfig::Agent {
+                home_endpoint: "ws://127.0.0.1:1234/v1/light-node/session".into(), grant: authority,
+            }),
+        ] {
+            assert!(config.validate_for(node).is_err());
+        }
+    }
+
+    #[test]
+    fn both_roles_validate_actual_signed_hello_at_the_exact_encoded_boundary() {
+        let fleet = "1f91ca65-7793-48cc-866e-ac15690130e1";
+        let mut authority = grant();
+        authority.grant.subjects.clear();
+        while authority.signed_hello_max_bytes(fleet).unwrap() < LIGHT_NODE_SESSION_MAX_FRAME {
+            let prefix = format!("agent/budget-{:03}-", authority.grant.subjects.len());
+            authority.grant.subjects.push(prefix);
+            let remaining = LIGHT_NODE_SESSION_MAX_FRAME - authority.signed_hello_max_bytes(fleet).unwrap();
+            let subject = authority.grant.subjects.last_mut().unwrap();
+            let padding = (512 - subject.len()).min(remaining);
+            subject.push_str(&"x".repeat(padding));
+        }
+        assert!(authority.grant.subjects.last().unwrap().len() < 512);
+        assert_eq!(authority.signed_hello_max_bytes(fleet).unwrap(), LIGHT_NODE_SESSION_MAX_FRAME);
+        authority.validate_hello_budget(fleet).unwrap();
+        for at_boundary in [true, false] {
+            if !at_boundary { authority.grant.subjects.last_mut().unwrap().push('x'); }
+            for (node, config) in [
+                ("example-home", LightNodeSessionConfig::Home {
+                    listen: "127.0.0.1:1234".parse().unwrap(), grants: vec![authority.clone()],
+                }),
+                ("example-seat", LightNodeSessionConfig::Agent {
+                    home_endpoint: "ws://127.0.0.1:1234/v1/light-node/session".into(), grant: authority.clone(),
+                }),
+            ] {
+                config.validate_for(node).unwrap();
+                assert_eq!(config.validate_hello_budget(fleet).is_ok(), at_boundary);
+                let complete = super::super::Config {
+                    node: node.to_owned(), fleet_id: Some(fleet.to_owned()),
+                    shared_secret_file: Some("unused-test-secret".into()),
+                    fleet: Some(super::super::FleetFile {
+                        mode: super::super::FleetMode::DialOut, ..Default::default()
+                    }),
+                    light_node_session: Some(config), ..Default::default()
+                };
+                let result = complete.validate();
+                assert_eq!(result.is_ok(), at_boundary, "{result:?}");
+            }
         }
     }
 }

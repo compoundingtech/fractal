@@ -185,6 +185,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         identity: &WorkspaceAdmission,
     ) -> Result<Option<ActivationLease>> {
+        let checkout = (subject.kind == "agent").then(|| Checkout::from_desired(&subject.desired)).flatten();
+        self.admit_physical_workspace(member, identity, checkout.as_ref())
+    }
+
+    pub(super) fn admit_physical_workspace(
+        &self,
+        member: &MemberSpec,
+        identity: &WorkspaceAdmission,
+        checkout: Option<&Checkout>,
+    ) -> Result<Option<ActivationLease>> {
         let workspace = Path::new(&member.workspace);
         let lease = match identity {
             WorkspaceAdmission::Git { owner, repository } => {
@@ -202,9 +212,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         };
         anyhow::ensure!(workspace.is_dir(), "workspace reclaimed before start: {}", workspace.display());
-        if subject.kind == "agent"
-            && let Some(checkout) = Checkout::from_desired(&subject.desired)
-        {
+        if let Some(checkout) = checkout {
             checkout.validate_workspace(workspace)?;
         }
         Ok(lease)
@@ -504,6 +512,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(operation) = self.store.runtime_start_for(subject)? else {
             return Ok(());
         };
+        if operation.body.get("remote_start").is_some() {
+            return self.stop_remote_start(&operation);
+        }
         if operation.revoked_by.is_some() {
             return Ok(());
         }
@@ -570,6 +581,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if operation.id != id || !operation.finished || operation.applied {
             return Ok(false);
         }
+        if operation.body.get("remote_start").is_some() {
+            return Ok(false);
+        }
         #[cfg(test)]
         {
             let hook = self.start_jobs.completion_hook.lock().unwrap().take();
@@ -615,6 +629,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
             .starts.retain(|id, _| pending.iter().any(|operation| operation.id == *id));
         for operation in pending {
+            // A remote operation has a different durable authority reader: only the
+            // session journal may authorize it or finalize its native producer.
+            // Never decode it as PreparedStart or run graph-backed adoption.
+            if operation.body.get("remote_start").is_some() { continue; }
             let subject = operation.subject.clone();
             self.isolate_start_completion(&subject, || {
                 self.reconcile_start_operation(operation, snapshot)
@@ -674,6 +692,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         mut operation: RuntimeStartOperation,
         snapshot: &PassPtySnapshot,
     ) -> Result<()> {
+        if operation.body.get("remote_start").is_some() {
+            // This entry is also called by exact-result consumers. Native session
+            // recovery, not PreparedStart adoption, owns this authoritative arm.
+            return Ok(());
+        }
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
         // Undispatched legacy records acquire admission only at dispatch. A cancelled
         // producer that never ran needs no workspace admission to retire.
