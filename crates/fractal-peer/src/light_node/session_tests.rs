@@ -434,11 +434,14 @@ async fn finalization_retry_requires_real_progress_and_never_retries_unknown_cus
     let own_progress=(1,f.seat_journal.local_change_count().unwrap());
     assert!(may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,own_progress).unwrap(),"the first terminal commit permits one idempotent finalization retry");
     attempted.insert(command.execution_id.clone(),own_progress);
-    let wake=f.seat_journal.changed.notified(); tokio::pin!(wake); wake.as_mut().enable();
-    f.seat_journal.complete_requiring_local_finalization(&command.execution_id,outcome.clone(),"retired/live-finalization").unwrap();
-    let unchanged=(1,f.seat_journal.local_change_count().unwrap());
-    assert_eq!(unchanged,own_progress);
-    assert!(wake.as_mut().now_or_never().is_none(),"same-proof completion must neither write nor self-notify");
+    let unchanged={
+        let wake=f.seat_journal.changed.notified(); tokio::pin!(wake); wake.as_mut().enable();
+        f.seat_journal.complete_requiring_local_finalization(&command.execution_id,outcome.clone(),"retired/live-finalization").unwrap();
+        let unchanged=(1,f.seat_journal.local_change_count().unwrap());
+        assert_eq!(unchanged,own_progress);
+        assert!(wake.as_mut().now_or_never().is_none(),"same-proof completion must neither write nor self-notify");
+        unchanged
+    };
     assert!(!may_attempt_recovery(&f.seat_journal,&attempted,&command.execution_id,unchanged).unwrap());
     let mut socket=f.connect().await; f.hello(&mut socket).await;
     client_send(&mut socket,Frame::Drained {}).await.unwrap();

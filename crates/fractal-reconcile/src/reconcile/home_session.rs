@@ -1,5 +1,6 @@
 //! The first session slice controls existing native custody; it cannot launch work.
 use super::*;
+use crate::model::FractalError;
 use fractal_peer::light_node::journal::{Command, Journal, Operation, Outcome, Recovery, Selection};
 use fractal_peer::light_node::session::Executor;
 use crate::store::local_sessions::{LocalSession, SessionCustody};
@@ -62,7 +63,7 @@ impl NativeSessionExecutor {
 
     fn stop_proof(&self, command: &Command, binding: LocalSession) -> Result<NativeProof> {
         let reconciler = &self.reconciler;
-        reconciler.host_observations.invalidate_member(&binding.runtime_id, binding.terminal);
+        reconciler.host_observations.invalidate();
         let retired = stop_local_session_with_retirement_proof(&reconciler.store, reconciler.runtime.as_ref(),
             &binding.subject, &binding.incarnation, &command.execution_id)?;
         reconciler.start_changed(&binding.subject);
