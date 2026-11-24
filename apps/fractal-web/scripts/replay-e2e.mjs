@@ -49,7 +49,7 @@ deadline.unref()
 
 try {
   // Replay must work with no live gateway or bearer, even in a developer's configured shell.
-  for (const key of ['WF_ST_GATEWAY', 'WF_ST_AUTHORIZATION', 'WF_ST_GATEWAY_HOST']) delete process.env[key]
+  for (const key of ['WF_ST_GATEWAY', 'WF_ST_CREDENTIAL_FILE', 'WF_ST_GATEWAY_HOST']) delete process.env[key]
   process.chdir(app)
   server = await createServer({
     configFile: `${app}/vite.config.ts`,

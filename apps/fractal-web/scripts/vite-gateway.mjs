@@ -2,6 +2,7 @@ import { Tracer } from 'effect'
 
 import { createFractalWebMiddleware } from '../server/core.mts'
 import { devAdmission } from '../server/devAdmission.mts'
+import { readAuthorization } from '../server/authorization.mts'
 
 /** Enable live data only when explicitly configured; Storybook remains credential-free. */
 export function webfractalGateway() {
@@ -18,10 +19,7 @@ export function webfractalGateway() {
       const socket = process.env.WF_ST_GATEWAY
       if (!socket) return
       if (!vite.httpServer) throw new Error('WF_ST_GATEWAY requires a Vite HTTP listener')
-      const authorization = process.env.WF_ST_AUTHORIZATION
-      if (authorization === undefined || authorization === '') {
-        throw new Error('WF_ST_GATEWAY requires WF_ST_AUTHORIZATION to carry the paired gateway bearer token')
-      }
+      const authorization = readAuthorization(process.env, 'WF_ST_CREDENTIAL_FILE')
       const server = vite.httpServer
       const boundary = createFractalWebMiddleware({
         server,
