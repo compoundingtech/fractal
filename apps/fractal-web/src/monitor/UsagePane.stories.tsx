@@ -9,7 +9,7 @@ import { scenarioArgTypes } from '@fractal/scenarios/storybook'
 import { assistantDarkTheme, liveAccentTheme, compositionLightTheme } from '@fractal/ui/assistant-ui'
 import { colorVars as color, typeVars as type } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { accountOf, accounts, FIXTURE_NOW, fixtureSource, quotaEnvelope } from './fixtures.ts'
+import { accountOf, accounts, FIXTURE_NOW, fixtureSource, historyEnvelope, quotaEnvelope, type Scripted } from './fixtures.ts'
 import { scenarioUsageSource, usageReads, type UsageRead } from './usageFixtures.ts'
 import { UsagePane } from './UsagePane.tsx'
 import type { QuotaAccount } from './wire.ts'
@@ -26,6 +26,18 @@ const quotas = {
   'at limit': quotaOf([accounts.claudeAlpha, atLimit, accounts.codexAlpha]),
   stale: quotaOf([held, accounts.claudeBravo], 2 * HOUR),
   empty: quotaOf([]),
+  history: fixtureSource({
+    quota: [{ _tag: 'ok', json: quotaEnvelope({ list: [accounts.claudeAlpha, accounts.claudeBravo, accounts.codexAlpha, accounts.codexBravo, atLimit] }) }],
+    history: (ledgerAccountId): readonly Scripted[] => {
+      switch (ledgerAccountId) {
+        case 'anthropic/alpha': return [{ _tag: 'ok', json: historyEnvelope({ ledgerAccountId, days: 40, coverageOk: false, idle: [2, 3] }) }]
+        case 'anthropic/bravo': return [{ _tag: 'fail', failure: { kind: 'unavailable', reason: 'history returned HTTP 404' } }]
+        case 'openai-codex/alpha': return [{ _tag: 'ok', json: { lens: 'usage_over_time', rows: 'none' } }]
+        case 'openai-codex/bravo': return [{ _tag: 'fail', failure: { kind: 'http', reason: 'history returned HTTP 502' } }]
+        default: return [{ _tag: 'hang' }]
+      }
+    },
+  }),
 }
 
 interface UsageArgs { readonly reads: readonly UsageRead[]; readonly scheme: 'dark' | 'light'; readonly objectives?: string; readonly quota?: keyof typeof quotas }
@@ -163,6 +175,9 @@ export const QuotaAtLimit: Story = {
     await expect(detail.getByText('100%!')).toBeVisible()
     await expect(detail.getByText('at limit · resets 4d')).toBeVisible()
     await expect(detail.getByText('12%')).toBeVisible()
+    await expect(await within(canvasElement).findByText('Daily spend, USD · last 30 days')).toBeVisible()
+    expect(canvasElement.querySelectorAll('[data-usage-day]')).toHaveLength(30)
+    expect(canvasElement.querySelector('[data-usage-day]:last-child')).toHaveAttribute('data-open', 'true')
     await expect(detail.getByText('1 banked reset · expires in 6d')).toBeVisible()
     await expect(detail.getByText('Reading, 42s old')).toBeVisible()
     await userEvent.click(await accountRow(canvasElement, 'claude/alpha'))
@@ -195,6 +210,29 @@ export const QuotaEmpty: Story = {
   play: async ({ canvasElement }) => {
     await expect(await within(canvasElement).findByText(/The quota source reports no accounts/)).toBeVisible()
     expect(detailOf(canvasElement)).toBeNull()
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+/** Each history state under the selected account: tokens below USD coverage, none relayed, unreadable, failed, still reading. */
+export const QuotaHistory: Story = {
+  args: { quota: 'history' },
+  globals: { scenarioNow: FIXTURE_NOW },
+  play: async ({ canvasElement }) => {
+    const usage = within(canvasElement)
+    await waitFor(() => expect(detailOf(canvasElement)).not.toBeNull())
+    for (const [account, text] of [
+      ['claude/alpha', 'Daily tokens · last 30 days'],
+      ['claude/bravo', 'No account history here'],
+      ['codex/alpha', 'History is in a shape this app cannot read'],
+      ['codex/bravo', 'Could not read history'],
+      ['codex/team-north', 'Reading history…'],
+    ] as const) {
+      await userEvent.click(accountRow(canvasElement, account))
+      await expect(await usage.findByText(text, { exact: false })).toBeVisible()
+    }
+    await userEvent.click(accountRow(canvasElement, 'claude/alpha'))
+    await expect(await usage.findByText('USD coverage is below the producer’s gate, so this shows tokens')).toBeVisible()
     canvasElement.dataset.proof = 'passed'
   },
 }

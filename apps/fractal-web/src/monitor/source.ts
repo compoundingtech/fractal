@@ -64,7 +64,7 @@ const getJson = ({
             }),
           })
         : Effect.fail<QuotaFailure>({
-            kind: what === 'quota' && response.status === 404 ? 'unavailable' : 'http',
+            kind: response.status === 404 ? 'unavailable' : 'http',
             reason: `${what} returned HTTP ${response.status}`,
           }),
     ),
@@ -105,7 +105,11 @@ const relaySnapshot = (json: unknown): Effect.Effect<unknown, QuotaFailure> =>
     }),
   )
 
-/** Usage relay; quota 404 (a daemon without the route) and `disabled` both mean no source is configured. */
+/**
+ * Usage relay; quota 404 (a daemon without the route) and `disabled` both mean no source is
+ * configured. History 404 means no history here: the host runs no history relay, or the relay
+ * publishes none for that account.
+ */
 export const relayUsageSource = ({
   label,
   prefix = RELAY_PREFIX,
