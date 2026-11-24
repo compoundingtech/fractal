@@ -1836,6 +1836,7 @@ pub struct Reconciler<R = NativeRuntime> {
 struct EvaluationMark {
     wrote: usize,
     feed: Option<(u64, i64)>,
+    touch_revision: u64,
 }
 
 struct FileWatch {
@@ -12381,7 +12382,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.incremental_correction("mission-run", &subject, &reads, &wrote);
             }
         }
-        self.incremental.evaluated(&subject, reads, due);
+        self.incremental.evaluated_after(&subject, reads, due, mark.touch_revision);
         self.start_declared_execs();
         evaluated.unwrap_or(false)
     }
@@ -12611,7 +12612,11 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Where an item's evaluation starts, taken after [`Self::needs_item`] read the feed.
     fn evaluation_mark(&self) -> EvaluationMark {
-        EvaluationMark { wrote: smallclaims::touched::wrote_len(), feed: self.incremental.watermark() }
+        EvaluationMark {
+            wrote: smallclaims::touched::wrote_len(),
+            feed: self.incremental.watermark(),
+            touch_revision: self.incremental.touch_revision(),
+        }
     }
 
     /// What an evaluation of `item` that nothing marked and nothing made due did, which an
@@ -12634,6 +12639,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             && self.incremental.due_of(item).is_none_or(|recorded| due < recorded)
         {
             missed.push(format!("due {item} at {due}"));
+        }
+        // The program host and file watchers also invalidate reads without writing the
+        // feed. A touch after needs_item() is a real wake, not a missed dependency.
+        if self.incremental.has_pending_touch(item) {
+            missed.clear();
         }
         // A failed read of the feed keeps the correction.
         if !missed.is_empty()

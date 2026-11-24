@@ -8187,11 +8187,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
     {
         let store = store.clone();
         let state_dir = config.state_dir.clone();
+        let inputs = Arc::new(std::sync::Mutex::new(
+            fractal_daemon::store::declared_objectives::DeclaredObjectiveInputs::default(),
+        ));
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let domain = fractal_daemon::declared_objectives::github_rows(&store, &state_dir, now_ms() as u64)?;
-                let mut rows = fractal_daemon::api::slo_rows(&store, domain)?;
+                let mut inputs = inputs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                inputs.refresh(&store)?;
+                let domain = fractal_daemon::declared_objectives::github_rows_from_declarations(
+                    &store, &state_dir, now_ms() as u64, inputs.declarations(),
+                )?;
+                let mut rows = fractal_daemon::api::slo_rows_from_declarations(
+                    &store, domain, inputs.declarations(),
+                )?;
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
@@ -22624,18 +22633,43 @@ async fn import_retired_identities(store: Arc<Store>) {
     }
 }
 
-/// Decide, at startup and every minute after, whether this member records its seats' lifecycle
-/// as local marks: once every other member, and every configured peer, reads marks and asks hosts
-/// for them (store/marks_switch.rs). A member that joins without that turns it off again within a
-/// minute.
-async fn refresh_marks_switch(store: Arc<Store>, peers: Vec<String>) {
+/// Converge initially, then only when a member capability, fleet membership or writer roster
+/// changes. Configured peers are fixed for this daemon invocation, as are its sync workers.
+async fn refresh_marks_switch(store: Arc<Store>, mut peers: Vec<String>) {
+    let mut maintenance = None;
+    let mut recovery = None;
+    let (recovered, mut recovery_events) = watch::channel(0u64);
     loop {
-        let (worker, peers_now) = (store.clone(), peers.clone());
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || worker.refresh_marks_switch(&peers_now))).await;
-        if !matches!(result, Ok(Ok(_))) {
-            stderr_message("fractal", format_args!("message marks switch check failed: {result:?}"));
+        recovery_events.borrow_and_update();
+        let worker = store.clone();
+        let (next, next_peers, result) = tokio::task::spawn_blocking(move || {
+            let result = fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || -> Result<()> {
+                if maintenance.is_none() { maintenance = Some(worker.marks_switch_maintenance()?); }
+                maintenance.as_mut().expect("initialized marks switch maintenance").refresh(&worker, &peers)
+            });
+            (maintenance, peers, result)
+        }).await.expect("marks switch maintenance task panicked");
+        maintenance = next;
+        peers = next_peers;
+        match result {
+            Ok(()) => {
+                recovery = None;
+                if !maintenance.as_mut().expect("initialized marks switch maintenance").changed().await { return; }
+            }
+            Err(error) => {
+                stderr_message("fractal", format_args!("message marks switch blocked on local recovery: {error:#}"));
+                if recovery.is_none() {
+                    let wake = recovered.clone();
+                    recovery = Some(store.observe_commits(move |_| {
+                        wake.send_modify(|generation| *generation = generation.wrapping_add(1));
+                    }));
+                    // Register then recheck once, covering a repair committed before registration.
+                    // Further attempts require actual committed writer activity, never a timer.
+                    continue;
+                }
+                if recovery_events.changed().await.is_err() { return; }
+            }
         }
-        tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
 
