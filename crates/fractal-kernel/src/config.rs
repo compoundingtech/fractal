@@ -15,7 +15,8 @@ pub mod changes;
 pub mod model_return;
 mod light_node;
 pub use light_node::{
-    LIGHT_NODE_SESSION_PATH, LightNodeGrant, LightNodeOperation, LightNodeScope,
+    LIGHT_NODE_SESSION_CAPABILITIES, LIGHT_NODE_SESSION_MAX_FRAME, LIGHT_NODE_SESSION_PATH,
+    LightNodeGrant, LightNodeOperation, LightNodeScope,
     LightNodeSessionConfig,
 };
 mod client;
@@ -1302,6 +1303,8 @@ impl Config {
             anyhow::ensure!(self.fleet_id.is_some() && self.shared_secret_file.is_some()
                 && self.fleet.is_some(),
                 "light-node session needs the admitted local fleet signing identity");
+            session.validate_hello_budget(self.fleet_id.as_deref()
+                .context("light-node session needs its admitted fleet identity")?)?;
         }
         if let Some(usage_limits) = &self.usage_limits {
             usage_limits.validate()?;
