@@ -26,7 +26,9 @@ export default {
           unix:process.env.TEST_SOCKET,method:'POST',headers:{'content-type':'application/json'},
           body:JSON.stringify({request_id,claim})
         });
-        return {ok:response.ok,body:await response.json()};
+        const envelope = await response.json();
+        // Per-HTTP request IDs/snapshot metadata are not the durable effect receipt.
+        return {ok:response.ok,body:response.ok ? envelope.value : envelope};
       };
       const first = await post('program-session-effect',claim);
       const replay = await post('program-session-effect',claim);
@@ -52,7 +54,8 @@ export default {
       const post = async (path, body) => {
         const response = await fetch('http://localhost'+path,{unix:process.env.TEST_SOCKET,
           method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-        return {ok:response.ok,body:await response.json()};
+        const envelope = await response.json();
+        return {ok:response.ok,body:response.ok ? envelope.value : envelope};
       };
       const ack = (claim) => post('/v1/internal/native/run-request/acknowledge',{
         request:{request_id:'program-session-effect',claim},
