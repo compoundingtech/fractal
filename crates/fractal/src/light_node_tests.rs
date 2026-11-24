@@ -146,7 +146,7 @@ mission "program-session" state="ready" {{
     let reconciler = Arc::new(Reconciler::new(store.clone(), runtime, selection.host.clone(), notify.clone()));
     reconciler.install_home_session_journal(journal.clone()).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("ws://{}{fractal_daemon::config::LIGHT_NODE_SESSION_PATH}", listener.local_addr().unwrap());
+    let endpoint = format!("ws://{}{}", listener.local_addr().unwrap(), fractal_daemon::config::LIGHT_NODE_SESSION_PATH);
     let seat_auth = FleetAuth::test("program-session-tests", &[7; 32]).with_member_key(Some(seat_key.clone()));
     let client = SeatClient::new(journal.clone(), seat_auth, selection.host.clone(), endpoint, Arc::new(NativeSessionExecutor::new(reconciler.clone()))).unwrap();
     let authority = Arc::new(NativeRunAuthority { journal: journal.clone(), selection: selection.clone(), key: seat_key, requester: client.requester() });
