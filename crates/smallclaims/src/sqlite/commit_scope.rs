@@ -57,8 +57,12 @@ pub(super) struct Ledger {
     transaction_savepoint: bool,
     suspended: Vec<SuspendedStatement>,
     deferred_profile: Option<DeferredProfile>,
+    page_size: usize,
 }
 impl Ledger {
+    pub(super) fn new(connection: &Connection) -> Self {
+        Self { page_size: super::performance_page_size(connection), ..Self::default() }
+    }
     pub(super) fn row(&mut self, database: &str, table: &str) {
         if database != "main" { return; }
         let changes = if self.statement.is_some() {
@@ -411,6 +415,7 @@ unsafe extern "C" fn traced(event: c_uint, context: *mut c_void, statement: *mut
             }
             ledger.started(statement as usize, &sql, ffi::sqlite3_get_autocommit(database) != 0, ffi::sqlite3_stmt_readonly(statement) != 0, ffi::sqlite3_total_changes64(database), active_write);
         } else {
+            let bytes = super::performance_reads(database, ledger.page_size);
             // SQLite does not expose the current VDBE result code until after PROFILE.
             // Never inspect sqlite3_errcode here: it can still belong to an earlier SQL
             // error. Transaction and savepoint rollback are resolved by native hooks and
@@ -418,7 +423,7 @@ unsafe extern "C" fn traced(event: c_uint, context: *mut c_void, statement: *mut
             ledger.finished(statement as usize, ffi::sqlite3_total_changes64(database), ffi::sqlite3_get_autocommit(database) != 0, ffi::sqlite3_stmt_busy(statement) != 0);
             drop(ledger);
             let nanos = *detail.cast::<u64>();
-            super::record_sqlite_time(&sql, std::time::Duration::from_nanos(nanos));
+            super::record_sqlite_time_with_reads(&sql, std::time::Duration::from_nanos(nanos), bytes);
         }
     });
     0

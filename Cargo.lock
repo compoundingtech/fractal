@@ -2324,6 +2324,7 @@ dependencies = [
  "notify",
  "opentelemetry",
  "opentelemetry_sdk",
+ "pty-core",
  "rusqlite",
  "serde",
  "serde_json",

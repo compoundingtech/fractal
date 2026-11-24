@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Live scratch-seat-only proof. Requires WF_ST_GATEWAY and WF_ST_AUTHORIZATION in the environment.
+/** Live scratch-seat-only proof. Requires WF_ST_GATEWAY and WF_ST_CREDENTIAL_FILE in the environment.
  * node apps/fractal-web/scripts/composer-send-proof.mjs [--without-binding]
  * The control removes only onNew's binding in Vite; it must issue no action and fail the send criterion.
  * HTTP and echo gates expose real Pending/Sent transitions; only the forced refusal is injected.
@@ -22,7 +22,7 @@ if (!Number.isFinite(load) || load >= 32) {
   console.log(JSON.stringify({ buildRev: rev, seat, load1: load, status: 'ready-not-run', command, timings: {} }))
   process.exit(0)
 }
-if (!process.env.WF_ST_GATEWAY || !process.env.WF_ST_AUTHORIZATION) throw new Error('Set WF_ST_GATEWAY and WF_ST_AUTHORIZATION for a send-granted scratch gateway; do not use a shared service')
+if (!process.env.WF_ST_GATEWAY || !process.env.WF_ST_CREDENTIAL_FILE) throw new Error('Set WF_ST_GATEWAY and WF_ST_CREDENTIAL_FILE for a send-granted scratch gateway; do not use a shared service')
 const scratchRoot = fileURLToPath(new URL('../../../tmp', import.meta.url))
 await mkdir(scratchRoot, { recursive: true })
 const scratch = await mkdtemp(`${scratchRoot}/composer-send-proof-`)

@@ -72,7 +72,11 @@ export const upgradeClientHeaders = (req: Pick<IncomingMessage, 'headers' | 'url
   return client !== undefined && /^[\x20-\x7e]{1,120}$/.test(client) ? { 'x-st3-client': client } : {}
 }
 const unavailable = (cause?: unknown) => new BoundaryError({ status: 502, code: 'client-gateway-unavailable', message: 'Client gateway unavailable\n', cause })
-const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeoutMs, browserPairing = false }: GatewayOptions) => Effect.gen(function* () {
+/** The bearer the gateway forwards for a request: the tag credential for previews, else the browser grant or publisher credential. */
+export const gatewayCredential = (headers: IncomingHttpHeaders, { authorization, tagAuthorization, browserPairing = false }: GatewayOptions, preview = false): string | undefined =>
+  preview ? tagAuthorization : browserAuthorization(headers, browserPairing ? undefined : authorization)
+const makeGateway = (options: GatewayOptions) => Effect.gen(function* () {
+  const { socketPath, host, tagAuthorization, timeoutMs } = options
   // The service scope, not the handshake fiber, owns successful tunnels.
   const tunnels = yield* Effect.acquireRelease(Effect.sync(() => new Set<Duplex>()), (sockets) => Effect.sync(() => {
     for (const socket of sockets) socket.destroy()
@@ -80,7 +84,7 @@ const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeou
   }))
   const http = (req: IncomingMessage, res: ServerResponse, parent: Tracer.AnySpan, preview = false) => Effect.gen(function* () {
     if (preview && !tagAuthorization) { reject(res, 403, 'Forbidden\n'); return }
-    const credential = preview ? tagAuthorization : browserAuthorization(req.headers, browserPairing ? undefined : authorization)
+    const credential = gatewayCredential(req.headers, options, preview)
     if (credential === undefined) { reject(res, 401, 'Browser pairing required\n'); return }
     const span = yield* Effect.currentSpan.pipe(Effect.orDie)
     const status = yield* Effect.callback<number, BoundaryError>((resume) => {
@@ -159,7 +163,7 @@ const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeou
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
       return 403
     }
-    const credential = preview ? tagAuthorization : browserAuthorization(req.headers, browserPairing ? undefined : authorization)
+    const credential = gatewayCredential(req.headers, options, preview)
     if (credential === undefined) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
       return 401

@@ -152,6 +152,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "POST /v1/internal/native/run-request/claim",
+        "host-local Unix-only forwarding requires an explicitly configured run-authority session and an admitted native credential, absent from generated full-node cost stores; run_requests guards exact bound requests and closed admission, while run_fence tests actual atomic writer admission and retry receipts; this local forwarding route's transport and home-writer cost is not measured by this JSON graph cost client",
+    ),
+    (
         "GET /v1/source-blobs/{hash}",
         "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
     ),

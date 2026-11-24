@@ -273,6 +273,7 @@ mod github_capture_config;
 pub mod objective_series;
 pub mod runtime_starts;
 pub mod runtime_cleanup;
+pub mod local_sessions;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;
 pub mod turn_invocations;
@@ -2913,6 +2914,36 @@ impl Store {
         }
     }
 
+    /// Planning-only snapshot: one global fast-path probe, then at most one
+    /// pending check per distinct owner. Never reuse this result at an effect fence.
+    pub fn pending_projection_runs<'a>(
+        &self,
+        owners: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeSet<String>> {
+        let owners = owners.into_iter().collect::<BTreeSet<_>>();
+        if owners.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        for owner in &owners {
+            smallclaims::touched::note_read(|| (*owner).to_owned());
+        }
+        let connection = self.readers.get();
+        let transaction = connection.unchecked_transaction()?;
+        if !projection_work_pending_tx(&transaction)? {
+            return Ok(BTreeSet::new());
+        }
+        let mut pending = BTreeSet::new();
+        for owner in owners {
+            #[cfg(test)]
+            self.extension::<observer_reconcile_inputs::PendingProbeCount>()
+                .0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if run_projection_pending_tx(&transaction, owner)? {
+                pending.insert(owner.to_owned());
+            }
+        }
+        Ok(pending)
+    }
+
     /// Publish a committed caller-driven drain, even when it appended no replicated claim.
     /// Call only after the transaction containing `finish_run_projection_tx` committed.
     pub fn run_projection_finished(&self) {
@@ -3032,6 +3063,7 @@ impl Store {
         scratch_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        run_credentials::assertions::initialize_home_authority(&graph.connection.write())?;
         storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -3078,6 +3110,7 @@ impl Store {
         scratch_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        run_credentials::assertions::initialize_home_authority(&graph.connection.write())?;
         storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -3121,6 +3154,7 @@ impl Store {
         scratch_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        run_credentials::assertions::initialize_home_authority(&graph.connection.write())?;
         storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -8015,28 +8049,9 @@ impl Store {
         };
         if kind == run_credentials::RUN_CREDENTIAL_KIND {
             self.with_run_fence_internal(subject, |transaction| -> Result<()> {
-                let run_id: String = transaction
-                    .query_row(
-                        "SELECT step_runs.run_id FROM step_runs
-                         JOIN mission_runs ON mission_runs.id=step_runs.run_id
-                         WHERE step_runs.subject=?1 AND step_runs.attempt=CAST(?2 AS INTEGER)
-                           AND step_runs.status IN ('ready','working','blocked','waiting-person')
-                           AND step_runs.generation_id=mission_runs.current_generation_id
-                           AND mission_runs.phase<>'terminal'",
-                        params![subject, incarnation_id], |row| row.get(0),
-                    )
-                    .optional()?
-                    .ok_or_else(|| FractalError::new(
-                        "run-credential-ended",
-                        "the program attempt is no longer current and live",
-                    ))?;
-                let run = mission_run_header_tx(transaction, &run_id)?;
-                if self.mission_run_supersession_pending_tx(transaction, &run)? {
-                    return Err(FractalError::new(
-                        "stale-run-generation",
-                        "the program run awaits automatic revision cutover",
-                    ).into());
-                }
+                let attempt = incarnation_id.and_then(|attempt| attempt.parse::<u32>().ok())
+                    .ok_or_else(|| FractalError::new("run-credential-ended", "the program credential names no valid attempt"))?;
+                self.admit_program_attempt_tx(transaction, subject, attempt)?;
                 insert(transaction)
             })?;
         } else {
@@ -9355,6 +9370,19 @@ fn resolve_mission_run_inputs(
                             )
                         })?
                 };
+                if let Some(expected) = &declaration.resource_kind {
+                    let actual: Option<String> = transaction.query_row(
+                        "SELECT CASE kind WHEN 'resource.observed' THEN json_extract(body, '$.fields.kind') WHEN 'vcs.item.state' THEN json_extract(body, '$.fields.item_kind') END FROM claims WHERE id=?1 AND subject=?2",
+                        params![claim_id, subject],
+                        |row| row.get(0),
+                    ).map_err(internal)?;
+                    if actual.as_ref() != Some(expected) {
+                        return Err(FractalError::new(
+                            "resource-input-kind-mismatch",
+                            format!("mission input `{name}` requires resource kind `{expected}`, got `{}` at {subject}@{claim_id}", actual.as_deref().unwrap_or("unknown")),
+                        ));
+                    }
+                }
                 MissionRunInput {
                     kind: MissionInputKind::Resource,
                     value: format!("{subject}@{claim_id}"),
@@ -18193,6 +18221,7 @@ fn rebuild_base_aggregate_tx(
         ).map_err(internal)?;
         if !retained {
             runtime_cleanup::forget_subject(transaction, subject).map_err(internal)?;
+            local_sessions::forget_subject(transaction, subject).map_err(internal)?;
         }
     }
     Ok(())
@@ -25005,6 +25034,8 @@ pub struct ClaimCommitContext<'a> {
     pub client_operation: bool,
     /// Only a replicated claim (written in the writer's batch) can carry follow-up writes.
     pub then: Option<&'a ClaimFollowUp<'a>>,
+    /// Selected-host run requests verify and persist their outcome in this same transaction.
+    pub run_request: Option<&'a run_credentials::assertions::RunRequestAdmission<'a>>,
     /// Write the claim as a build from before its kind became a local observation did: a
     /// replicated claim. Tests use it for the claims older members still replicate.
     #[cfg(any(test, feature = "test-support"))]
@@ -25139,6 +25170,11 @@ pub fn append_claim_with_commit_context(
     };
     run_fence::execute(graph, run_fence, Some(run_fence::API_TURN_BUDGET),
         |transaction| -> Result<(ClaimRecord, bool), FractalError> {
+            if let Some(request) = context.run_request
+                && let Some(prior) = request.before(transaction)?
+            {
+                return serde_json::from_value(prior).map(|claim| (claim, false)).map_err(internal);
+            }
             let normalized_input = if context.signature.is_none() {
                 identities::normalize_claim_input(transaction, input)?
             } else { std::borrow::Cow::Borrowed(input) };
@@ -25462,6 +25498,9 @@ pub fn append_claim_with_commit_context(
             }
             if outcome.1 && let Some(then) = context.then {
                 then(transaction, &outcome.0)?;
+            }
+            if let Some(request) = context.run_request {
+                request.record(transaction, &serde_json::to_value(&outcome.0).map_err(internal)?)?;
             }
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;

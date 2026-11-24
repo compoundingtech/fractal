@@ -11,7 +11,7 @@
  * seat, agent/example/atlas, and pairs a full-control device for avery whose bearer credential
  * stays in WEBPROOF_ROOT/authorization (mode 0600, never printed).
  * `run` (the default) brings it up when it is not, has atlas ask avery a yes-or-no question and
- * a structured decision, serves the app on loopback with WF_ST_GATEWAY/WF_ST_AUTHORIZATION set
+ * a structured decision, serves the app on loopback with WF_ST_GATEWAY/WF_ST_CREDENTIAL_FILE set
  * to the instance's paired gateway, opens atlas's conversation in headless Chromium, answers
  * both from the card (Yes, then the preselected recommended decision; each sent with Send) and checks
  * with Fractal that each step finished with that answer. It prints one JSON receipt: `firstDataMs`
@@ -192,7 +192,7 @@ async function proof() {
   const alertIds = new Map(fractalJson(['alerts', 'ls', '--as', person]).value.items.map((item) => [item.title, item.id]))
 
   process.env.WF_ST_GATEWAY = gateway()
-  process.env.WF_ST_AUTHORIZATION = readFileSync(authorizationFile, 'utf8').trim()
+  process.env.WF_ST_CREDENTIAL_FILE = authorizationFile
   const { createServer, loadConfigFromFile } = await import('vite')
   const loaded = await loadConfigFromFile({ command: 'serve', mode: 'development' }, `${app}/vite.config.ts`, app)
   // The gateway's upgrade handler answers every non-client upgrade with 403 on the same listener,
@@ -302,7 +302,7 @@ async function proof() {
 }
 
 const command = process.argv[2] ?? 'run'
-if (command === 'up') { await up(); console.log(`up: WF_ST_GATEWAY=${gateway()} WF_ST_AUTHORIZATION=$(cat ${authorizationFile})`) }
+if (command === 'up') { await up(); console.log(`up: WF_ST_GATEWAY=${gateway()} WF_ST_CREDENTIAL_FILE=${authorizationFile}`) }
 else if (command === 'down') down()
 else if (command === 'run') await proof()
 else throw new Error('usage: alerts-live-proof.mjs [run|up|down]')

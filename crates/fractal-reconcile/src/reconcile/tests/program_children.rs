@@ -36,6 +36,7 @@ const DECISION = {
 }
 export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
+    if (ctx.payload.source !== undefined) return { _tag: 'Success', value: ctx.payload.source }
     if (ctx.payload.mode.startsWith('turn')) {
       const resource = { key: 'turn', operation: 'agent.turn', payload: {
         agent: ctx.payload.mode === 'turn-remote' ? 'agent/peer.remote' : 'agent/node.publisher', instructions: 'Produce ${literal} without interpolation.',
@@ -276,6 +277,68 @@ impl Fixture {
         assert_eq!(unsafe { libc::kill(host as i32, libc::SIGKILL) }, 0);
         host
     }
+}
+
+#[test]
+fn a_subscription_starts_a_program_with_a_kind_checked_pinned_resource() {
+    let f = fixture();
+    let bundle = f.dir.path().join("program.mjs");
+    let hash = f.store.put_blob(BUNDLE.as_bytes()).unwrap();
+    apply_source(&f.store, &format!(r#"version 2
+mission "program-resource" state="ready" {{
+  goal "Consume one observed issue."
+  input "source" kind="resource" resource-kind="vcs.issue"
+  step "program" {{ program "{}" sha256="{hash}" }}
+}}"#, bundle.display()), "program-resource-definition");
+    let revision = f.store.mission_spec("program-resource", None).unwrap().unwrap().revision;
+    apply_source(&f.store, &format!(r#"version 2
+resource "program-repo" {{ kind "vcs.repository" }}
+observer "program-repo" {{
+  resource "resource/program-repo"; provider "github.repository"; locator "example/repo"; field "issues"
+}}
+subscription "program-resource" {{
+  observer "observer/program-repo"
+  on "issues"
+  delivery "mission" {{ mission "program-resource@{revision}"; resource "source"; workspace "{}" }}
+}}"#, f.dir.path().display()), "program-resource-subscription");
+    let desired = f.store.desired_subjects().unwrap();
+    let item = desired.iter().find(|item| item.subject == "subscription/program-resource").unwrap();
+    let subscriptions = vec![(item.subject.clone(), crate::graph::subscription_spec(&item.desired).unwrap())];
+    let observer_revision = f.store.selected_desired_revision("observer/program-repo").unwrap().unwrap();
+    let observe = |facts: Value| f.store.record_resource_observation(
+        "observer/program-repo", &observer_revision, None, "resource/program-repo", None,
+        &facts, now_ms() + 60_000, &subscriptions, None,
+    ).unwrap();
+    observe(json!({"issues": []}));
+    observe(json!({"issues": [{"number": 7, "state": "open", "title": "Consume this issue"}]}));
+    f.reconciler.reconcile_subscription_missions(&f.store.desired_subjects().unwrap()).unwrap();
+    let runs = f.store.active_mission_runs_for_mission("program-resource").unwrap();
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.inputs["source"].kind, crate::model::MissionInputKind::Resource);
+    let pinned = run.inputs["source"].value.clone();
+    assert!(pinned.starts_with("resource/program-repo/issue/7@"));
+    let step = run.steps.iter().find(|step| step.step == "program").unwrap();
+    f.until("resource program completes", || f.run_status(&run.subject) == "completed");
+    assert_eq!(f.result(&step.subject, RESULT_KEY, 1), Some(("completed".into(), json!(pinned))));
+    assert_eq!(f.store.claims_for("subscription/program-resource", Some("subscription.mission-started")).unwrap().len(), 1);
+    f.reconciler.reconcile_subscription_missions(&f.store.desired_subjects().unwrap()).unwrap();
+    assert_eq!(f.store.claims_for("subscription/program-resource", Some("subscription.mission-started")).unwrap().len(), 1);
+
+    apply_source(&f.store, &format!(r#"version 2
+mission "program-wrong-resource" state="ready" {{
+  goal "Refuse an issue where a ref is required."
+  input "source" kind="resource" resource-kind="vcs.ref"
+  step "program" {{ program "{}" sha256="{hash}" }}
+}}"#, bundle.display()), "program-wrong-resource-definition");
+    let error = f.store.create_mission_run(&MissionRunRequest {
+        mission: "program-wrong-resource".into(), revision: None,
+        workspace: f.dir.path().display().to_string(), requester: Some("person/owner".into()),
+        mode: None, inputs: BTreeMap::from([("source".into(), pinned)]),
+        idempotency_key: "program-wrong-resource".into(),
+    }).unwrap_err();
+    assert_eq!(error.code, "resource-input-kind-mismatch");
+    assert!(f.store.active_mission_runs_for_mission("program-wrong-resource").unwrap().is_empty());
 }
 
 fn count(journal: &[Entry], key: &str, status: &str) -> usize {
