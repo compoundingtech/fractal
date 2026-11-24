@@ -10465,7 +10465,7 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
             assert_eq!(retired["claims"], 4, "{retired}");
             break;
         }
-        assert!(Instant::now() < deadline, "the member never retired its closed mail: {retired}");
+        assert!(Instant::now() < deadline, "the member never retired its closed mail: {retired}\n{}", n1.logs());
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert!(thread_kinds(&n1, &agent).await.is_empty());

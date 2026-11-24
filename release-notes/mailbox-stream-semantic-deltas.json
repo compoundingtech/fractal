@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry recipient-scoped message identities from the mailbox dispatcher to open streams, avoiding repeated watermark and claim-range reads on message notifications. Export an open-stream census and per-stream notification, update, unchanged-update, routed-update and snapshot work counts in /v1/performance under mailbox_streams.",
+  "replay": {"status": "none", "detail": "Durable safety reconciliation retains its cursor and continues covering missed notifications and projection repairs."},
+  "schema": {"status": "none", "detail": "No persisted schema changes; the performance report gains additive local work counters."},
+  "rules": {"status": "none", "detail": "Message admission, canonical order, bounded recovery and ownership fences are unchanged."},
+  "compatibility": {"status": "none", "detail": "No mailbox wire-frame or peer protocol change."},
+  "downtime": {"status": "none", "detail": "No data migration is required."},
+  "manual": {"status": "none", "detail": "No manual action is required."},
+  "recovery": {"status": "none", "detail": "Coalesced identity sets are bounded; overflow or non-message changes use durable reconciliation. Reconnection still begins with a full snapshot."}
+}
