@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add an optional root-detail relay to the web publisher and Vite development gateway, off unless a loopback root-detail producer is configured.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of persisted state." },
+  "schema": { "status": "none", "detail": "No database, wire or client-v0 schema changes. The relay holds a bounded in-memory cache only." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Without WF_ROOT_DETAIL_URL nothing changes: GET /v1/client/usage/root-detail still reaches the client gateway, which has no such route. With it set, the web server answers that route itself and requires the request's gateway credential to grant read.projections. Every other client route still goes to the gateway." },
+  "downtime": { "status": "none", "detail": "No startup work. Each root-detail request makes six bounded gateway reads and at most one producer read with a thirty-second deadline; answers are cached for thirty seconds." },
+  "manual": { "status": "changed", "detail": "Optional: set WF_ROOT_DETAIL_URL to a loopback base URL such as http://127.0.0.1:PORT of a producer serving /api/v1/lens/root_detail, on the publisher or Vite development gateway. Any other URL fails startup." },
+  "recovery": { "status": "none", "detail": "Unset WF_ROOT_DETAIL_URL and restart to return to gateway-only routing. No persistent state changes." }
+}
