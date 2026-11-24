@@ -296,6 +296,7 @@ fn catch_up_admission_bounds_the_work_a_queued_write_waits_for() {
                 true
             }),
             profile: None,
+            charged: None,
             wait: None,
             holder: crate::windows::holds::Holder::current(),
             done,
@@ -1396,6 +1397,7 @@ fn signing_an_unsigned_backlog_releases_the_writer_between_pages() {
     store.connection.send(WriterJob::Batched {
         enqueued: Instant::now(),
         profile: None,
+        charged: None,
         wait: None,
         holder: crate::windows::holds::Holder::current(),
         done,
