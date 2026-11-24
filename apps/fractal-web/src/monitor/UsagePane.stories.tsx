@@ -194,18 +194,24 @@ export const QuotaAtLimit: Story = {
     // Selection carries the accent bar; the keyboard focus ring is neutral, never the accent.
     const selected = canvasElement.querySelector<HTMLElement>('[data-usage-account][data-selected]')!
     expect(getComputedStyle(selected).boxShadow).toMatch(/inset/)
-    expect(getComputedStyle(document.activeElement!).outlineColor).not.toBe(getComputedStyle(selected).boxShadow.match(/rgba?\([^)]*\)/)![0])
+    const ring = getComputedStyle(document.activeElement!)
+    expect(ring.outlineStyle).toBe('solid')
+    expect(parseFloat(ring.outlineWidth)).toBeGreaterThan(0)
+    expect(ring.outlineColor).not.toBe(getComputedStyle(selected).boxShadow.match(/rgba?\([^)]*\)/)![0])
     canvasElement.dataset.proof = 'passed'
   },
 }
 
-/** A snapshot past its horizon says so; a held account names its age and the producer's reason. */
+/** A snapshot past its horizon says so; each account names its own reading's age, and a held one the producer's reason. */
 export const QuotaStale: Story = {
   args: { quota: 'stale' },
   globals: { scenarioNow: FIXTURE_NOW },
   play: async ({ canvasElement }) => {
     const usage = within(canvasElement)
-    await expect(await usage.findByText('Quota snapshot 2h old: no account below is newer')).toBeVisible()
+    await expect(await usage.findByText('Quota snapshot 2h old: account readings are muted')).toBeVisible()
+    await userEvent.click(await accountRow(canvasElement, 'claude/bravo'))
+    await waitFor(() => expect(detailOf(canvasElement)).toHaveAttribute('data-usage-detail', 'claude/bravo'))
+    await expect(within(detailOf(canvasElement)!).getByText('This account’s reading, 42s old')).toBeVisible()
     await userEvent.click(await accountRow(canvasElement, 'codex/held'))
     const detail = within(detailOf(canvasElement)!)
     await expect(detail.getByText('This account’s reading, 3h old, held by the producer')).toBeVisible()
