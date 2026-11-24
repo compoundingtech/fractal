@@ -98,6 +98,38 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Changed-key reconciliation inputs
+
+Inventory review: [reconciliation input maintenance](https://github.com/compoundingtech/fractal/pull/7062).
+The `fractal_store::store::attention_snapshot` maintainer owns
+`lv-hc01ae9454288`, `lv-h5210e0457dfb`, `lv-h8f9121f82761` and
+`lv-h17ae5bb9d200`: existing claim, desired-member and mission-deadline reads
+now choose a trusted optional subject predicate. They retain the existing inline
+claim bodies, declaration JSON and subject keys; no producer format or value
+limit changes. Trace the dynamic templates to those representations before
+replacing their variable-sized values or index keys.
+
+The `fractal_store::store::observer_reconcile_inputs` maintainer owns
+`lv-hd10d6847d3fd`, an integer-rowid probe reading one existing desired input row.
+Its execution sink remains conservatively inventoried despite the fixed query:
+trace the bound integer and returned subject to the existing subject-key
+representation rather than treating a single row as a byte-size proof.
+
+The source maintainers of `mail_delivery_objectives_tests`,
+`observer_mail_inputs_tests` and `observer_reconcile_inputs_tests` own their
+new fixture-only entries. These insert, mutate or delete invented desired,
+mail-ledger, replica-record and projection-marker values to prove changed-key
+routing, deletion safety and work counts. They do not add production writers.
+`observer_reconcile_inputs_tests` also owns journal-retention fixtures
+`lv-hab0cd697de5c`, `lv-h58a0560e9304`, `lv-h13caf0b5c1cf` and `lv-h403d3ff20c2a`.
+They create and delete synthetic desired keys beyond the retained journal limit,
+then prove that an evicted cursor rebuilds the small live roster. The claim ID,
+subject bindings and declaration bodies remain fixture-only inline values.
+Their inline test values preserve the existing storage contracts; representation
+work must keep equivalent authority/reset/deletion regressions when those
+contracts change. The inventory records identify each fixture statement and
+its concrete producer/cleanup category.
+
 ### Roster paging and read-budget probe inventory repair
 
 The `fractal_api_core::api` maintainer owns `lv-hc92b1baa7e5f`; the
@@ -516,8 +548,10 @@ duplicate, malformed, orphaned or changed exceptions and altered column catalogs
 The guard compares exact template bytes and comment-free dynamic argument tokens;
 it does not infer receiver types or evaluate Rust/SQL.
 
-Explicit inline `#[cfg(test)]` items are excluded. Arbitrary cfg expressions are
-not evaluated; separate test-only source files and diagnostic strings may be
+Explicit inline `#[cfg(test)]` items and struct fields are excluded. A field's
+comma or enclosing brace ends its exclusion; it must not hide later production
+schema initialization. Arbitrary cfg expressions are not evaluated; separate
+test-only source files and diagnostic strings may be
 conservatively included. This makes the manifest a candidate source inventory,
 not a count of production writers. The column parser handles literal CREATE
 TABLE/INDEX lists and ALTER TABLE ADD COLUMN declarations, not an evaluated SQL grammar: generated table/column names,

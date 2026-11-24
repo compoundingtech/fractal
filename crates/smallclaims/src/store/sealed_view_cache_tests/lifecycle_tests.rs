@@ -131,7 +131,12 @@ fn sealed_view_cache_invalidates_after_replication_receive_and_admission() {
 
 #[test]
 fn sealed_view_cache_invalidates_after_a_trim() {
+    use crate::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let _restore = ClockContext::capture().enter();
+    let written_at = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    set_thread_clock(Some(written_at));
     let source = Store::open_memory("anchor", Arc::new(FleetCheckpointRuntime)).unwrap();
+    source.set_write_clock_at(written_at).unwrap();
     let key = configure(&source, 1);
     // Separate commits and seals leave the superseded endpoint alone in its envelope.
     append_endpoint(&source, &key, "https://anchor-1.invalid");
@@ -143,7 +148,9 @@ fn sealed_view_cache_invalidates_after_a_trim() {
          CREATE TABLE IF NOT EXISTS mission_revisions(claim_id TEXT);
          CREATE TABLE IF NOT EXISTS documents(binding_claim_id TEXT);",
     ).unwrap();
-    let cut = now_ms() + 60_000;
+    let cut = written_at + u128::from(FORGET_SIGNED_AFTER_MS) + 60_000;
+    set_thread_clock(Some(cut));
+    source.set_write_clock_at(cut).unwrap();
     let checkpoint = checkpoint_name(cut);
     let sealed = source.checkpoint_sealed_set(cut).unwrap();
     let dropped = sealed.claims.iter()
@@ -181,6 +188,7 @@ fn sealed_view_cache_invalidates_after_a_trim() {
 
     // The target has the claim log and the soon-to-be-dropped fleet claim, and trims it too.
     let target = replica(&key);
+    target.set_write_clock_at(cut).unwrap();
     let exchange = source
         .export_replication_exchange("sealed-cache-test", &target.replication_inventory().unwrap())
         .unwrap();

@@ -272,18 +272,6 @@ struct ExchangeShard {
 
 const REPLICATION_WAKE_COALESCE: Duration = Duration::from_secs(1);
 
-/// Coalesce filesystem events before graph, shard and membership followers see them.
-/// The first event is immediate; events during the next second produce one trailing wake.
-pub async fn coalesce_replication_wakes(
-    mut raw: watch::Receiver<u64>,
-    paced: watch::Sender<u64>,
-) {
-    while raw.changed().await.is_ok() {
-        paced.send_modify(|generation| *generation = generation.saturating_add(1));
-        super::telemetry::record_wake(super::telemetry::WakeStage::Paced);
-        tokio::time::sleep(REPLICATION_WAKE_COALESCE).await;
-    }
-}
 const PEER_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -302,7 +290,6 @@ pub struct PeerState<B> {
     node: String,
     auth: FleetAuth,
     fleet: FleetContext,
-    outbound_notify: watch::Sender<u64>,
     /// The named shards this node holds, by shard ID. An exchange that names one is answered
     /// from its store; one naming any other shard reaches `backend`, which refuses it.
     shards: Arc<BTreeMap<String, B>>,
@@ -315,7 +302,6 @@ impl<B> PeerState<B> {
             node,
             auth,
             fleet,
-            outbound_notify: watch::channel(0).0,
             shards: Arc::default(),
         }
     }
@@ -349,6 +335,13 @@ impl<B> PeerState<B> {
     }
 }
 
+/// Negotiated protocol state from authenticated exchanges, not an expiring cache.
+struct PeerCapabilities {
+    sender: Sender,
+    build: Option<String>,
+    root_first: bool,
+}
+
 /// What this worker knows about the fleet: the membership view, its config peers, and whether
 /// it still accepts HMAC-only exchanges from config peers.
 #[derive(Clone)]
@@ -379,6 +372,8 @@ pub struct FleetContext {
     inbound_changed: watch::Sender<u64>,
     /// Inventory advertised by the last inbound response; graph wakes it covers need no dial.
     inbound_authority: Arc<std::sync::RwLock<BTreeMap<String, String>>>,
+    /// The daemon's coherent authority cut, published before its outbound wake.
+    local_authority: Arc<std::sync::RwLock<Option<super::revision::StoreRevision>>>,
     connectivity_changed: watch::Sender<u64>,
     /// Sign of life from Fabric, distinct from a completed replication exchange.
     online: Arc<std::sync::RwLock<BTreeMap<String, tokio::time::Instant>>>,
@@ -386,11 +381,69 @@ pub struct FleetContext {
     /// healthy anti-entropy exchanges or cancelling their coalescing window.
     activity: Arc<std::sync::RwLock<BTreeMap<String, tokio::time::Instant>>>,
     activity_changed: watch::Sender<u64>,
+    capabilities: Arc<std::sync::RwLock<BTreeMap<String, PeerCapabilities>>>,
     exchange_jobs: Arc<ExchangeJobs>,
     leave: Arc<tokio::sync::Mutex<LeaveState>>,
 }
 
 impl FleetContext {
+    fn capability_class(&self, peer: &str) -> &'static str {
+        let capabilities = self.capabilities.read().expect("capabilities lock poisoned");
+        let Some(known) = capabilities.get(peer) else {
+            return "unknown";
+        };
+        // Membership can replace a peer without an exchange from its new identity.
+        if self.accept(&known.sender).is_err() {
+            return "unknown";
+        }
+        // Legacy admission may still accept an old shared-secret identity after a
+        // member replacement; that does not transfer its negotiated capabilities.
+        let view = self.view.read().expect("fleet view lock poisoned");
+        if view.members.iter().any(|member| {
+            member.name == peer && member.state == "current"
+                && Some(member.member_key.as_str()) != known.sender.member_key.as_deref()
+        }) {
+            return "unknown";
+        }
+        if known.root_first { "root_first" } else { "legacy" }
+    }
+
+    fn observe_capabilities(&self, name: &str, member_key: Option<&str>, exchange: &ReplicationExchange) {
+        let root_first = exchange.inventory.can(crate::replication::ROOT_FIRST);
+        let mut capabilities = self.capabilities.write().expect("capabilities lock poisoned");
+        if capabilities.get(name).is_some_and(|known| {
+            known.sender.member_key.as_deref() == member_key
+                && known.build == exchange.build && known.root_first == root_first
+        }) {
+            return;
+        }
+        // Replace, never union: a new identity or build must not inherit old capabilities.
+        capabilities.insert(name.to_owned(), PeerCapabilities {
+            sender: Sender {
+                name: name.to_owned(),
+                member_key: member_key.map(str::to_owned),
+                member_signature_valid: member_key.is_some(),
+            },
+            build: exchange.build.clone(),
+            root_first,
+        });
+    }
+
+    fn observe_inbound_capabilities(&self, name: &str, member_key: Option<&str>, exchange: &ReplicationExchange) {
+        if !exchange.inventory.can(crate::replication::ROOT_FIRST) {
+            self.observe_capabilities(name, member_key, exchange);
+            return;
+        }
+        // Inbound bodies are authenticated but replayable. They may revoke or
+        // invalidate state, never enable a capability without a fresh outbound challenge.
+        let mut capabilities = self.capabilities.write().expect("capabilities lock poisoned");
+        if capabilities.get(name).is_some_and(|known| {
+            known.sender.member_key.as_deref() != member_key || known.build != exchange.build
+        }) {
+            capabilities.remove(name);
+        }
+    }
+
     /// A node without membership: config peers only, as before.
     #[cfg(any(test, feature = "test-support"))]
     pub fn legacy(config_peers: BTreeSet<String>) -> Self {
@@ -411,12 +464,14 @@ impl FleetContext {
             inbound: Arc::default(),
             inbound_changed: watch::channel(0).0,
             inbound_authority: Arc::default(),
+            local_authority: Arc::default(),
             connectivity_changed: watch::channel(0).0,
             online: Arc::default(),
             activity: Arc::default(),
             activity_changed: watch::channel(0).0,
             leave: Arc::default(),
             exchange_jobs: Arc::default(),
+            capabilities: Arc::default(),
         }
     }
 
@@ -446,11 +501,13 @@ impl FleetContext {
             inbound: Arc::default(),
             inbound_changed: watch::channel(0).0,
             inbound_authority: Arc::default(),
+            local_authority: Arc::default(),
             connectivity_changed: watch::channel(0).0,
             online: Arc::default(),
             activity: Arc::default(),
             activity_changed: watch::channel(0).0,
             exchange_jobs: Arc::default(),
+            capabilities: Arc::default(),
             leave: Arc::default(),
         }
     }
@@ -787,11 +844,13 @@ pub async fn run_with_shards<B: Backend>(
         inbound: Arc::default(),
         inbound_changed: watch::channel(0).0,
         inbound_authority: Arc::default(),
+        local_authority: Arc::default(),
         connectivity_changed: watch::channel(0).0,
         online: Arc::default(),
         activity: Arc::default(),
         activity_changed: watch::channel(0).0,
         exchange_jobs: Arc::default(),
+        capabilities: Arc::default(),
         leave: Arc::new(tokio::sync::Mutex::new(leave)),
     };
     tokio::spawn(crate::task_cpu::account(
@@ -806,17 +865,23 @@ pub async fn run_with_shards<B: Backend>(
     }
     backend.ready().await;
     let notify = wake;
-    refresh_fleet_view(&backend, &fleet).await;
-    tokio::spawn(crate::task_cpu::account(
+    let membership_revision = backend.wait_revision(super::revision::RevisionRequest {
+        kind: super::revision::RevisionKind::Membership, after: None,
+    }).await?;
+    refresh_fleet_view(&backend, &fleet).await?;
+    settings_tasks.spawn(crate::task_cpu::account(
         "replication.fleet_view",
-        keep_fleet_view_current(backend.clone(), fleet.clone(), notify.subscribe()),
+        keep_fleet_view_current(backend.clone(), fleet.clone(), Some(membership_revision)),
+    ));
+    settings_tasks.spawn(crate::task_cpu::account(
+        "replication.authority",
+        follow_authority(backend.clone(), fleet.clone(), notify.clone()),
     ));
     let state = PeerState {
         backend: backend.clone(),
         node: config.node.clone(),
         auth: auth.clone(),
         fleet: fleet.clone(),
-        outbound_notify: notify.clone(),
         shards: Arc::new(
             shards
                 .iter()
@@ -843,12 +908,19 @@ pub async fn run_with_shards<B: Backend>(
         ));
     }
     for shard in shards {
+        let mut shard_fleet = fleet.clone();
+        shard_fleet.local_authority = Arc::default();
+        shard_fleet.inbound_authority = Arc::default();
+        settings_tasks.spawn(crate::task_cpu::account(
+            "replication.shard_authority",
+            follow_authority(shard.backend.clone(), shard_fleet.clone(), shard.wake.clone()),
+        ));
         start_outbound(
             shard.backend,
             config.node.clone(),
             config.peers.clone(),
             auth.clone(),
-            fleet.clone(),
+            shard_fleet,
             shard.wake,
             Some(shard.peers),
         );
@@ -1216,13 +1288,14 @@ async fn keep_fabric_presence_current(fabric: Fabric, fleet: FleetContext) {
     }
 }
 
-async fn refresh_fleet_view<B: Backend>(backend: &B, fleet: &FleetContext) {
+async fn refresh_fleet_view<B: Backend>(backend: &B, fleet: &FleetContext) -> Result<()> {
     let _refresh = fleet.view_refresh.lock().await;
-    refresh_fleet_view_locked(backend, fleet).await;
+    refresh_fleet_view_locked(backend, fleet).await
 }
 
-async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext) {
-    if let Ok(view) = backend.fleet_view().await {
+async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext) -> Result<()> {
+    let view = backend.fleet_view().await?;
+    {
         {
             let mut leave = fleet.leave.lock().await;
             let mut updated = leave.clone();
@@ -1276,6 +1349,7 @@ async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext
                 .send_modify(|generation| *generation = generation.wrapping_add(1));
         }
     }
+    Ok(())
 }
 
 /// Announce this member's mode and endpoints whenever they change, and again every minute;
@@ -1378,6 +1452,9 @@ async fn select_leave_confirmer<B: Backend>(
     let Some(own) = &fleet.own_key else {
         return Ok(());
     };
+    if !may_carry_direct_leave(exchange, own) {
+        return Ok(());
+    }
     let view = backend.fleet_view().await?;
     if !view.members.iter().any(|member| {
         member.member_key == *own
@@ -1442,9 +1519,13 @@ async fn receive_from_peer<B: Backend>(
     exchange: &ReplicationExchange,
     options: ReceiveOptions<'_>,
 ) -> Result<crate::replication::ReplicationReceiveResponse> {
-    // Match the inbound shard path: admission remains authoritative in the daemon,
-    // but graph membership and leave bookkeeping do not apply to shard payloads.
-    if exchange.shard_id.is_some() {
+    // Only a possible direct leave needs fresh pre-import membership and journaling.
+    // Ordinary graph records, like shards, leave membership refresh to its subscription.
+    let possible_leave = !exchange.signatures.is_empty() || exchange.envelopes.iter().any(|envelope| {
+        let marker = b"fleet.member-left";
+        envelope.payload.bytes().is_ok_and(|bytes| bytes.windows(marker.len()).any(|part| part == marker))
+    });
+    if exchange.shard_id.is_some() || !possible_leave {
         crate::replication::check_receive_deadline(options.deadline_unix_ms)?;
         let received = backend.receive(peer, fleet_id, exchange, options).await?;
         if received.changed {
@@ -1483,8 +1564,8 @@ async fn receive_from_peer<B: Backend>(
     if received.changed {
         backend.changed().await;
     }
-    if received.changed || protect.is_some() {
-        refresh_fleet_view_locked(backend, fleet).await;
+    if protect.is_some() {
+        refresh_fleet_view_locked(backend, fleet).await?;
     }
     Ok(received)
 }
@@ -1613,22 +1694,34 @@ async fn receive_leave_receipt<B: Backend>(
     })
 }
 
-/// Reread membership on every graph change and at least every 30 seconds.
+/// Membership has its own cursor: ordinary authority and transport wakes do no reads.
 async fn keep_fleet_view_current<B: Backend>(
     backend: B,
     fleet: FleetContext,
-    mut notify: watch::Receiver<u64>,
-) {
+    mut after: Option<super::revision::StoreRevision>,
+) -> Result<()> {
     loop {
-        tokio::select! {
-            changed = notify.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-            }
-            _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
-        }
-        refresh_fleet_view(&backend, &fleet).await;
+        let revision = backend.wait_revision(super::revision::RevisionRequest {
+            kind: super::revision::RevisionKind::Membership, after,
+        }).await?;
+        refresh_fleet_view(&backend, &fleet).await?;
+        super::telemetry::record_wake(super::telemetry::WakeStage::Membership);
+        after = Some(revision);
+    }
+}
+
+async fn follow_authority<B: Backend>(
+    backend: B, fleet: FleetContext, notify: watch::Sender<u64>,
+) -> Result<()> {
+    let mut after = None;
+    loop {
+        let revision = backend.wait_revision(super::revision::RevisionRequest {
+            kind: super::revision::RevisionKind::Authority, after,
+        }).await?;
+        *fleet.local_authority.write().expect("authority lock poisoned") = Some(revision.clone());
+        notify.send_modify(|generation| *generation = generation.saturating_add(1));
+        super::telemetry::record_wake(super::telemetry::WakeStage::Authority);
+        after = Some(revision);
     }
 }
 
@@ -1774,9 +1867,6 @@ async fn dial_peer<B: Backend>(
     let mut activity_changes = fleet.activity_changed.subscribe();
     let mut connectivity = fleet.connectivity_changed.subscribe();
     let mut must_send = false;
-    let mut guard_not_before = tokio::time::Instant::now();
-    let mut guard_wake = None;
-    let mut guard_in_sync_at = None;
     // The last exchange moved envelopes, so more may wait on either side: exchange again at
     // once, even though the peer dialed in recently.
     let mut moving = false;
@@ -1829,29 +1919,12 @@ async fn dial_peer<B: Backend>(
         let continuing = std::mem::take(&mut moving);
         if let Some(at) = inbound_at.filter(|_| !continuing) {
             if must_send && at.elapsed() < worker_interval(Duration::from_secs(30)) {
-                // A matching witness remains valid only for this paced generation
-                // and inbound cut. Other notifications must not repeat the guard read.
-                let wake = *notify.borrow();
-                let now = tokio::time::Instant::now();
-                if guard_wake != Some(wake) && now >= guard_not_before {
-                    let offered = fleet
-                        .inbound_authority
-                        .read()
-                        .expect("inbound inventory lock poisoned")
-                        .get(&name)
-                        .cloned();
-                    if let Some(offered) = offered {
-                        guard_not_before = now + REPLICATION_WAKE_COALESCE;
-                        guard_wake = Some(wake);
-                        guard_in_sync_at = None;
-                        if let Ok(current) = backend.authority_digest(auth.fleet_id()).await
-                            && !current.is_empty() && current == offered
-                        {
-                            guard_in_sync_at = Some(at);
-                        }
-                    }
-                }
-                if guard_wake == Some(wake) && guard_in_sync_at == Some(at) {
+                let authority = fleet.local_authority.read().expect("authority lock poisoned");
+                let offered = fleet.inbound_authority.read().expect("inbound inventory lock poisoned");
+                if authority.as_ref().and_then(|revision| revision.authority_root.as_ref())
+                    .filter(|root| !root.is_empty())
+                    .is_some_and(|root| offered.get(&name) == Some(root))
+                {
                     must_send = false;
                 }
             }
@@ -2986,6 +3059,11 @@ async fn receive_exchange_inner_to<B: Backend>(
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
                 }
             };
+            state.fleet.observe_inbound_capabilities(
+                &relay,
+                sender.member_key.as_deref().filter(|_| sender.member_signature_valid),
+                &request,
+            );
             // Bound retained answers as well as active backend work. Completed answers may be
             // recomputed safely: envelope receipt is idempotent.
             if jobs.len() >= MAX_EXCHANGE_JOBS {
@@ -3057,12 +3135,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                         )
                         .await;
                         backend_timing.record("local-receive-done");
-                        let received = received.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
-                        if received.receipt.received != 0 {
-                            state.outbound_notify.send_modify(|generation| {
-                                *generation = generation.saturating_add(1)
-                            });
-                        }
+                        received.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
                         backend_timing.record("follow-up-export-start");
                         let response = state
                             .backend
@@ -3313,7 +3386,9 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
             // The new member dials soon; let the dialers see it.
-            refresh_fleet_view(&state.backend, &state.fleet).await;
+            if let Err(error) = refresh_fleet_view(&state.backend, &state.fleet).await {
+                eprintln!("cannot refresh membership after join: {error:#}");
+            }
             (StatusCode::OK, axum::Json(response)).into_response()
         }
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -3594,20 +3669,26 @@ async fn exchange_inner<B: Backend>(
     telemetry: &mut super::telemetry::Round,
     carrier: crate::replication::ReplicationCarrier,
 ) -> Result<bool> {
-    // One compact round. Each side lists the ranges that differ a few at a time, from a different
-    // range on each answer, so successive rounds compare every range without either side ever
-    // sending its whole inventory (a million identities, 228 MB, on a busy fleet). Ranges that
-    // differ only by payloadless checkpoint identities never settle this way; checkpoint-lineage
-    // reconciliation, not more envelope requests, settles those.
+    // Unknown and legacy peers require complete bucket proofs. Root-only summaries are
+    // safe only after an authenticated exchange has advertised root-first support.
     let attempt = std::time::Instant::now();
+    let mut summary = ReplicationInventory::default();
+    if fleet.capability_class(&peer.name) == "root_first" {
+        summary.capabilities.push(crate::replication::ROOT_SUMMARY.to_owned());
+    }
     let first = backend
-        .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+        .export(auth.fleet_id(), &summary, true, &[])
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalExport, attempt, None))?
         .exchange;
-    let query = ReplicationExchange {
+    let mut query = ReplicationExchange {
         envelopes: Vec::new(),
         ..first
     };
+    if !query.inventory.can(crate::replication::ROOT_SUMMARY) {
+        // A complete bucket list can be empty. The marker keeps modern peers on
+        // their bounded range-answer path when bootstrapping an empty store.
+        query.inventory.capabilities.push(crate::replication::RANGE_PROOFS.to_owned());
+    }
     let started = std::time::Instant::now();
     let (remote, peer_inflates, authenticated_member_key) =
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
@@ -3949,6 +4030,13 @@ fn overloaded_error(
     anyhow::Error::new(PeerOverloaded { retry_after }).context(failure)
 }
 
+#[derive(Serialize)]
+struct ChallengedExchange<'a> {
+    #[serde(flatten)]
+    exchange: &'a ReplicationExchange,
+    request_nonce: [u8; 16],
+}
+
 /// Send one signed exchange, compressed when `compress` is set and the body is large, and return
 /// the peer's verified answer and whether the peer takes compressed requests.
 #[allow(clippy::too_many_arguments)]
@@ -3967,7 +4055,14 @@ async fn post_signed<B: Backend>(
     let attempted = crate::store::now_ms();
     let started = std::time::Instant::now();
     let mut last_overload = None;
+    let mut request_nonce = [0; 16];
+    getrandom::fill(&mut request_nonce).context("generate exchange request nonce")?;
+    // Legacy readers ignore this additive field. The signed response binds the
+    // entire request digest, so an old response cannot answer this challenge.
+    // Keep it stable while polling the same admitted server job after overload.
+    let request = ChallengedExchange { exchange, request_nonce };
     for _ in 0..MAX_OVERLOAD_POLLS {
+        let capability = fleet.capability_class(&peer.name);
         record_worker(backend, &peer.name, "exchange", attempted, None, None).await;
         let result = match tokio::time::timeout_at(
             deadline,
@@ -3978,7 +4073,7 @@ async fn post_signed<B: Backend>(
                 auth,
                 fleet,
                 EXCHANGE_PATH,
-                exchange,
+                &request,
                 compress,
             ),
         )
@@ -3986,11 +4081,16 @@ async fn post_signed<B: Backend>(
         {
             Ok(result) => result,
             Err(_) => {
+                super::telemetry::exchange_outcome(capability, false);
                 return Err(last_overload.unwrap_or_else(|| {
                     overloaded_error(OVERLOAD_RETRY, started, None)
                 }));
             }
         };
+        super::telemetry::exchange_outcome(capability, result.is_ok());
+        if let Ok((answer, _, member_key)) = &result {
+            fleet.observe_capabilities(&peer.name, member_key.as_deref(), answer);
+        }
         match result {
             Err(error) if error.is::<PeerOverloaded>() => {
                 let delay = error.downcast_ref::<PeerOverloaded>().unwrap().retry_after;
@@ -4220,6 +4320,12 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
             .as_ref()
             .and_then(|value| value["code"].as_str())
             .unwrap_or_default();
+        if path == EXCHANGE_PATH && code == "replication-exchange-metadata-too-large" {
+            // A rollback can retain its member key. Do not keep probing it with a
+            // previously negotiated capability after an authenticated incompatibility.
+            // The next ordinary round renegotiates using complete bucket proofs.
+            fleet.capabilities.write().expect("capabilities lock poisoned").remove(&peer.name);
+        }
         if path == EXCHANGE_PATH
             && status == StatusCode::SERVICE_UNAVAILABLE
             && code == "replication-overloaded"

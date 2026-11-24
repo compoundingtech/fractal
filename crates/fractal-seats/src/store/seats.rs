@@ -1010,8 +1010,8 @@ impl SeatsStore for Store {
             let _rebuild = self.start_roster_rebuild("historical_snapshot", index);
             let mut items = crate::performance::task("roster/card-projection",
                 || build(selected.map(|names| (names, &[][..]))))?;
-            #[cfg(any(test, feature = "test-support"))]
-            self.count_refolded_cards_for_test(items.len());
+            self.count_agent_roster_cards(items.len());
+            self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
                 .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
             crate::otel::record_roster("cold", items.len());
@@ -1185,7 +1185,6 @@ impl SeatsStore for Store {
                         published_at_unix_ms: now_ms(),
                     });
                 }
-                #[cfg(any(test, feature = "test-support"))]
                 self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = previous.items.iter()
                     .filter(|item| {
@@ -1196,8 +1195,7 @@ impl SeatsStore for Store {
                 let rebuilt = crate::performance::task("roster/card-projection",
                     || build(Some((&changed, queue_metadata.as_deref().unwrap_or(&previous.items)))))?;
                 record_roster_counts(changed.len() + deferred.len(), covered.as_ref().map_or(items.len() + rebuilt.len(), BTreeSet::len), rebuilt.len());
-                #[cfg(any(test, feature = "test-support"))]
-                self.count_refolded_cards_for_test(rebuilt.len());
+                self.count_agent_roster_cards(rebuilt.len());
                 items.extend(rebuilt);
                 items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
                     .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
@@ -1212,12 +1210,10 @@ impl SeatsStore for Store {
             }
             None => {
                 let _rebuild = self.start_roster_rebuild(invalidation, index);
-                #[cfg(any(test, feature = "test-support"))]
                 self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = crate::performance::task("roster/card-projection",
                     || build(selected.map(|names| (names, &[][..]))))?;
-                #[cfg(any(test, feature = "test-support"))]
-                self.count_refolded_cards_for_test(items.len());
+                self.count_agent_roster_cards(items.len());
                 items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
                     .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
                 crate::otel::record_roster("cold", items.len());

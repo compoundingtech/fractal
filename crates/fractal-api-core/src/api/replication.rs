@@ -1,6 +1,30 @@
 use crate::DeliveryStore;
 use super::*;
 
+/// A store-scoped revision wait; no pinned read transaction survives the await.
+pub async fn replication_revision(
+    State(state): State<AppState>,
+    Json(request): Json<smallclaims::sync::revision::RevisionRequest>,
+) -> Result<Json<smallclaims::sync::revision::StoreRevision>, ApiError> {
+    let kind = request.kind;
+    state.store.wait_replication_revision(request).await
+        .map_err(|error| ApiError::bad(FractalError::new("internal", error.to_string())))?;
+    let store = state.store.clone();
+    blocking_store(move || store.replication_revision_snapshot(kind)).await.map(Json)
+}
+
+pub async fn shard_replication_revision(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(request): Json<smallclaims::sync::revision::RevisionRequest>,
+) -> Result<Json<smallclaims::sync::revision::StoreRevision>, ApiError> {
+    let store = replication_shard(&state, &shard)?;
+    let kind = request.kind;
+    store.wait_replication_revision(request).await
+        .map_err(|error| ApiError::bad(FractalError::new("internal", error.to_string())))?;
+    blocking_store(move || store.replication_revision_snapshot(kind)).await.map(Json)
+}
+
 #[cfg(test)]
 #[path = "replication_receive_tests.rs"]
 mod receive_tests;
@@ -138,6 +162,8 @@ pub async fn replication_export(
             record_replication_summary(request.authority_guard, || {
                 if request.authority_guard && request.authority_digest_only {
                     store.export_replication_authority_guard(&request.fleet_id)
+                } else if request.inventory.can(smallclaims::replication::ROOT_SUMMARY) {
+                    store.export_replication_root_summary(&request.fleet_id)
                 } else {
                     store.export_replication_summary(&request.fleet_id)
                 }
@@ -259,6 +285,8 @@ pub async fn replication_receive(
         finalizer_client_messages_ms = counters.finalizer_time[Finalizer::ClientMessages as usize].as_secs_f64() * 1000.0,
         admit_ms = counters.admit_time.as_secs_f64() * 1000.0,
         project_ms = counters.project_time.as_secs_f64() * 1000.0,
+        gate_wait_ms = counters.gate_wait.as_secs_f64() * 1000.0,
+        discovery_ms = counters.projection_discovery_time.as_secs_f64() * 1000.0,
         receipt_ingest = ?counters.phases[smallclaims::receive_metrics::Stage::ReceiptIngest as usize],
         admission_prelude = ?counters.phases[smallclaims::receive_metrics::Stage::AdmissionPrelude as usize],
         admission = ?counters.phases[smallclaims::receive_metrics::Stage::Admission as usize],
@@ -288,6 +316,7 @@ fn replication_receive_phases(
     request: &ReplicationReceiveRequest,
     metrics: smallclaims::receive_metrics::RequestMetrics,
     deadline_unix_ms: Option<u128>,
+    quiet_retry_now: std::time::Instant,
     after_receipt: impl FnOnce(),
 ) -> Result<(ReplicationReceiveResponse, bool, bool), FractalError> {
         let _metrics = metrics.enter();
@@ -343,10 +372,10 @@ fn replication_receive_phases(
         } else {
             (Default::default(), 0)
         };
-        // A catching-up node defers projection; the first receive after the deferral window,
-        // with or without new data, projects what it admitted meanwhile.
+        // A quiet exchange retries a deferred frontier without waiting. This also
+        // re-arms bounded maintenance after an earlier retry budget was exhausted.
         let was_deferred = store.replication_projection_deferred();
-        let projection = if new_data || was_deferred {
+        let projection = if admission.changed || repairs != 0 || was_deferred {
             let _projection = smallclaims::receive_metrics::Timer::start(
                 smallclaims::receive_metrics::Stage::Projection,
             );
@@ -358,9 +387,11 @@ fn replication_receive_phases(
             let mut span = crate::otel::stage_root(
                 "st.replication.projection", "receive", receive,
             );
-            let result = admitted_projection_result(
-                store.project_replication_backlog_unless_catching_up(),
-            );
+            let result = admitted_projection_result(if admission.changed || repairs != 0 {
+                store.try_project_replication_backlog_unless_catching_up()
+            } else {
+                store.try_project_replication_backlog_after_quiet_exchange(quiet_retry_now)
+            });
             if let Some(span) = span.as_mut() {
                 span.set_attribute(opentelemetry::KeyValue::new(
                     "st.replication.peer", request.peer.clone(),
@@ -384,7 +415,7 @@ fn replication_receive_phases(
             }
             result?
         } else {
-            Some(true)
+            (!was_deferred).then_some(true)
         };
         let _response = smallclaims::receive_metrics::Timer::start(
             smallclaims::receive_metrics::Stage::ResponsePostcommit,
@@ -427,8 +458,11 @@ async fn replication_receive_inner(
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
     let response_metrics = metrics.clone();
+    let quiet_retry_now = tokio::time::Instant::now().into_std();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
-        replication_receive_phases(&store, &request, metrics, deadline_unix_ms, || {})
+        replication_receive_phases(
+            &store, &request, metrics, deadline_unix_ms, quiet_retry_now, || {},
+        )
     })
     .await.inspect_err(|error| {
         smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
@@ -466,6 +500,7 @@ pub async fn replication_peer_failure(
     Json(request): Json<ReplicationPeerFailureRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
+    let quiet_retry_now = tokio::time::Instant::now().into_std();
     let (changed, visible_carrier_changed) = blocking_store(move || {
         let before_index = store.index()?;
         let previous = store.replication_peer_transport(&request.peer).1;
@@ -482,7 +517,7 @@ pub async fn replication_peer_failure(
         }
         // A peer that fails mid-sync sends no more exchanges, so project what it delivered.
         let projected = store.replication_projection_deferred()
-            && store.project_replication_backlog_unless_catching_up()? == Some(true);
+            && store.try_project_replication_backlog_after_quiet_exchange(quiet_retry_now)? == Some(true);
         let current = store.replication_peer_transport(&request.peer).1;
         // Repeated failures on the same carrier retain a fresh local timestamp without
         // waking all clients. First evidence or a carrier change matters only in a notice.
@@ -510,6 +545,7 @@ pub async fn replication_peer_failure(
 
 pub async fn replication_wake(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
+    let quiet_retry_now = tokio::time::Instant::now().into_std();
     let (admission, repairs, projection_attempted, projected, was_deferred) =
         blocking_store(move || {
             let admission = store.validate_replication_backlog()?;
@@ -520,9 +556,12 @@ pub async fn replication_wake(State(state): State<AppState>) -> Result<Json<Valu
                 || was_deferred
                 || store.replication_projection_needs_recovery()?;
             let projected = if projection_attempted {
-                store
-                    .project_replication_backlog_unless_catching_up()?
-                    .unwrap_or(false)
+                let result = if admission.changed || repairs != 0 {
+                    store.try_project_replication_backlog_unless_catching_up()?
+                } else {
+                    store.try_project_replication_backlog_after_quiet_exchange(quiet_retry_now)?
+                };
+                result.unwrap_or(false)
             } else {
                 true
             };
@@ -556,6 +595,18 @@ fn replication_shard(state: &AppState, shard: &str) -> Result<Arc<smallclaims::s
         .ok_or_else(|| ApiError::not_found(format!("this daemon holds no shard `{shard}`")))
 }
 
+/// Follow admitted advertisement/membership changes, independently of envelope receipt.
+pub async fn shard_replication_peers_revision(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    Json(after): Json<Option<smallclaims::sync::revision::StoreRevision>>,
+) -> Result<Json<smallclaims::sync::revision::StoreRevision>, ApiError> {
+    replication_shard(&state, &shard)?;
+    crate::store::messages_shard::wait_advertising_revision(&state.store, after)
+        .await.map(Json)
+        .map_err(|error| ApiError::bad(FractalError::new("internal", error.to_string())))
+}
+
 /// The members to dial for a shard: those whose current daemon advertises holding it.
 pub async fn shard_replication_peers(
     State(state): State<AppState>,
@@ -579,7 +630,11 @@ pub async fn shard_replication_export(
     let store = replication_shard(&state, &shard)?;
     blocking_store(move || {
         let exchange = if request.summary_only {
-            store.export_replication_summary(&request.fleet_id)?
+            if request.inventory.can(smallclaims::replication::ROOT_SUMMARY) {
+                store.export_replication_root_summary(&request.fleet_id)?
+            } else {
+                store.export_replication_summary(&request.fleet_id)?
+            }
         } else {
             store.export_replication_exchange_answering(
                 &request.fleet_id,
@@ -617,8 +672,8 @@ pub(crate) async fn stream_admitted(state: &AppState) {
         .send_modify(|generation| *generation = generation.saturating_add(1));
 }
 
-/// Receive a peer's shard exchange, then admit and project what it brought. A shard carries
-/// no transport observations or sync notices: those describe the graph's exchanges.
+/// Receive and durably admit a peer's shard exchange without waiting for projection.
+/// A shard carries no transport observations or sync notices.
 pub async fn shard_replication_receive(
     State(state): State<AppState>,
     AxumPath(shard): AxumPath<String>,
@@ -627,6 +682,7 @@ pub async fn shard_replication_receive(
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let deadline_unix_ms = receive_deadline(&headers)?;
     let store = replication_shard(&state, &shard)?;
+    let quiet_retry_now = tokio::time::Instant::now().into_std();
     let response = blocking_action(move || {
         let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
         smallclaims::replication::check_receive_deadline(deadline_unix_ms)?;
@@ -644,12 +700,19 @@ pub async fn shard_replication_receive(
             },
         )?;
         // Held envelopes get another pass when the graph's membership moved since the last one.
-        if replication_receive_has_new_data(receipt.received + receipt.signatures)
+        let (admission, repairs) = if replication_receive_has_new_data(receipt.received + receipt.signatures)
             || store.fleet_moved_since_admission().map_err(internal)?
         {
-            store.validate_replication_backlog().map_err(internal)?;
-            store.apply_replication_repairs().map_err(internal)?;
-            store.project_replication_backlog().map_err(internal)?;
+            let admission = store.validate_replication_backlog().map_err(internal)?;
+            let repairs = store.apply_replication_repairs().map_err(internal)?;
+            (admission, repairs)
+        } else {
+            (Default::default(), 0)
+        };
+        if admission.changed || repairs != 0 {
+            admitted_projection_result(store.try_project_replication_backlog_unless_catching_up())?;
+        } else if store.replication_projection_deferred() {
+            admitted_projection_result(store.try_project_replication_backlog_after_quiet_exchange(quiet_retry_now))?;
         }
         let store_index = store.index().map_err(internal)?;
         Ok(ReplicationReceiveResponse {
@@ -686,11 +749,21 @@ pub async fn shard_replication_wake(
     AxumPath(shard): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let store = replication_shard(&state, &shard)?;
+    let quiet_retry_now = tokio::time::Instant::now().into_std();
     let changed = blocking_store(move || {
         let admission = store.validate_replication_backlog()?;
         let repairs = store.apply_replication_repairs()?;
-        let projected = store.project_replication_backlog()?;
-        Ok(projected && (admission.changed || repairs != 0))
+        let was_deferred = store.replication_projection_deferred();
+        let projection = if admission.changed || repairs != 0 {
+            store.try_project_replication_backlog_unless_catching_up()
+        } else if was_deferred {
+            store.try_project_replication_backlog_after_quiet_exchange(quiet_retry_now)
+        } else {
+            Ok(Some(true))
+        };
+        let projected = admitted_projection_result(projection)
+            .map_err(anyhow::Error::new)?.unwrap_or(false);
+        Ok(admission.changed || repairs != 0 || (projected && was_deferred))
     })
     .await?;
     if changed {

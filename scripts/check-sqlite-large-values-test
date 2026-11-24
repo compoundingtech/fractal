@@ -173,6 +173,21 @@ fn write<'a>(db: &'a Db) {
         self.assertEqual(len(sites), 1)
         self.assertIn('facts', sites[0].excerpt)
 
+    def test_cfg_test_struct_fields_do_not_hide_following_production_sql(self):
+        for fields in [
+            '#[cfg(test)] count: AtomicU64, live: bool,',
+            'live: bool, #[cfg(test)] count: AtomicU64',
+        ]:
+            sites, _ = scan_file('crates/sample/src/lib.rs', '''
+struct Store { ''' + fields + ''' }
+impl Store {
+    fn open() { db.execute_batch(SCHEMA); }
+    fn commit() { db.execute_batch("COMMIT"); }
+}
+''')
+            self.assertEqual(len(sites), 2, fields)
+            self.assertEqual([s.kind for s in sites], ['unresolved-sql-sink'] * 2)
+
     def test_read_literal_is_not_write_but_prepared_bind_is_unresolved(self):
         sites, _ = scan_file('crates/sample/src/lib.rs', '''
 fn read() { db.query_row("SELECT body FROM facts", [], row); }

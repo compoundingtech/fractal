@@ -59,6 +59,7 @@ fn in_queue(facts: &Map<String, Value>) -> bool {
 
 fn required_state(facts: &Map<String, Value>) -> Option<&str> {
     facts.get("required_checks").and_then(|checks| checks.get("state")).and_then(Value::as_str)
+        .map(|state| if state == "cancelled" { "fail" } else { state })
 }
 
 /// The events between an item's mirrored facts and its new ones, oldest first.
@@ -113,6 +114,19 @@ pub fn derive(old: Option<&Map<String, Value>>, new: &Map<String, Value>) -> Vec
                 "failed".into(),
                 Value::Array(failed.iter().take(fractal_schema::github_plugin::MAX_FAILED_CHECKS).cloned().collect()),
             );
+        }
+        if now == "fail"
+            && new.get("required_checks").and_then(|checks| checks.get("state")).and_then(Value::as_str) == Some("cancelled")
+        {
+            // The event contract treats cancellation as non-success, even though watches
+            // distinguish its wording from failure. Keep the counted names in the event.
+            let counted = new.get("required_checks").and_then(|checks| checks.get("checks")).and_then(Value::as_array);
+            let cancelled = new.get("checks").and_then(Value::as_array).into_iter().flatten()
+                .filter(|check| check.get("conclusion").and_then(Value::as_str) == Some("cancelled"))
+                .filter_map(|check| check.get("name").and_then(Value::as_str))
+                .filter(|name| counted.is_some_and(|names| names.iter().any(|value| value.as_str() == Some(*name))))
+                .collect::<std::collections::BTreeSet<_>>();
+            detail.insert("failed".into(), json!(cancelled.into_iter().take(fractal_schema::github_plugin::MAX_FAILED_CHECKS).collect::<Vec<_>>()));
         }
         let sha = head.as_deref().unwrap_or("unknown");
         let (key, name) = if now == "pass" {
@@ -330,6 +344,26 @@ mod tests {
         let reopened = facts(json!({"state": "open", "head_sha": "b", "required_checks": {"state": "fail"}}));
         assert_eq!(names(&derive(Some(&merged), &reopened)), [("reopened", "reopened")]);
         assert!(derive(Some(&reopened), &reopened).is_empty(), "the same facts hold nothing");
+    }
+
+    #[test]
+    fn cancelled_required_checks_keep_the_failed_event_contract() {
+        let pending = facts(json!({"state":"open", "head_sha":"a",
+            "required_checks":{"state":"pending", "checks":["build"]}}));
+        let cancelled = facts(json!({"state":"open", "head_sha":"a",
+            "required_checks":{"state":"cancelled", "checks":["build"], "failed":[]},
+            "checks":[{"name":"build", "conclusion":"cancelled"},
+                {"name":"optional", "conclusion":"cancelled"}]}));
+        let events = derive(Some(&pending), &cancelled);
+        assert_eq!(names(&events), [("checks/a/fail", "checks-failed")]);
+        assert_eq!(events[0].detail["failed"], json!(["build"]));
+        assert!(derive(Some(&cancelled), &cancelled).is_empty());
+        let passed = facts(json!({"state":"open", "head_sha":"a",
+            "required_checks":{"state":"pass"}}));
+        assert_eq!(names(&derive(Some(&cancelled), &passed)), [("checks/a/pass", "checks-passed")]);
+        let failed = facts(json!({"state":"open", "head_sha":"a",
+            "required_checks":{"state":"fail"}}));
+        assert!(derive(Some(&failed), &cancelled).is_empty());
     }
 
     #[test]

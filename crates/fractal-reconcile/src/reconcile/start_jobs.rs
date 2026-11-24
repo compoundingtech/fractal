@@ -11,6 +11,14 @@ pub const MAX_START_JOBS: usize = 2;
 pub const OPERATION_TAG: &str = "st3.start-operation";
 pub const OPERATION_ENV: &str = "ST3_START_OPERATION";
 
+const ENVIRONMENT_CAPTURE_ATTEMPTS: u32 = 3;
+
+#[derive(Clone, Copy)]
+struct CaptureRetry {
+    timeouts: u32,
+    due: Option<u128>,
+}
+
 struct StartResult {
     id: String,
     subject: String,
@@ -33,6 +41,7 @@ pub struct StartJobs {
     pub live: Arc<(Mutex<HashSet<String>>, Condvar)>,
     application: Mutex<()>,
     activation_leases: Mutex<ActivationLeases>,
+    capture_retries: Arc<Mutex<HashMap<String, CaptureRetry>>>,
     results: tokio::sync::mpsc::UnboundedSender<StartResult>,
     completions: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<StartResult>>,
     #[cfg(test)]
@@ -46,6 +55,7 @@ impl Default for StartJobs {
             live: Arc::default(),
             application: Mutex::new(()),
             activation_leases: Mutex::default(),
+            capture_retries: Arc::default(),
             results,
             completions: tokio::sync::Mutex::new(completions),
             #[cfg(test)]
@@ -133,9 +143,14 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn observe_start_worktrees(
         &self,
         observed: BTreeMap<PathBuf, (PathBuf, PathBuf)>,
+        scoped: bool,
     ) {
-        self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner)
-            .observed = observed;
+        let mut leases = self.start_jobs.activation_leases.lock().unwrap_or_else(PoisonError::into_inner);
+        if scoped {
+            leases.observed.extend(observed);
+        } else {
+            leases.observed = observed;
+        }
     }
 
     pub(super) fn member_activation_lease(
@@ -348,7 +363,11 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub fn start_queued_job(&self, operation: &RuntimeStartOperation) -> Result<()> {
-        if operation.dispatched || operation.finished || operation.revoked_by.is_some() {
+        self.start_capture_attempt(operation, 0)
+    }
+
+    fn start_capture_attempt(&self, operation: &RuntimeStartOperation, timeouts: u32) -> Result<()> {
+        if (operation.dispatched && timeouts == 0) || operation.finished || operation.revoked_by.is_some() {
             return Ok(());
         }
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
@@ -400,7 +419,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
-        if !self
+        if !operation.dispatched && !self
             .store
             .dispatch_runtime_start(&operation.id, MAX_START_JOBS)?
         {
@@ -413,6 +432,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let results = self.start_jobs.results.clone();
         let incremental = self.incremental.clone();
         let live = self.start_jobs.live.clone();
+        let capture_retries = self.start_jobs.capture_retries.clone();
+        if timeouts > 0 {
+            capture_retries.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation.id);
+        }
         let id = operation.id.clone();
         let subject = operation.subject.clone();
         let owner = self.start_jobs.owner.clone();
@@ -455,6 +478,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     runtime_before_start = store.latest_claim(&subject, Some("runtime.observed"))?
                         .map(|claim| claim.id);
                 }
+                // The durable advance must succeed before either backend can run.
+                // Keep backend_entered false on write failure so completion proves non-launch.
+                store.enter_runtime_start_backend(&id, &owner)?;
                 backend_entered = true;
                 let operation = fractal_runtime::LaunchOperation(id.clone());
                 if resource_lanes::request(&prepared.launch_member)?.is_some() {
@@ -475,6 +501,30 @@ impl<R: RuntimeControl> Reconciler<R> {
                     None => (false, observation_error),
                 };
                 Ok((incarnation, verified, verification_error))
+            });
+            if let Err(error) = &result
+                && !backend_entered
+                && fractal_runtime::is_shell_startup_timeout(error)
+                && timeouts + 1 < ENVIRONMENT_CAPTURE_ATTEMPTS
+            {
+                // No backend was entered: the same guarded operation can safely try capture
+                // again. The planner supplies the injected-clock deadline, not this worker.
+                capture_retries.lock().unwrap_or_else(PoisonError::into_inner)
+                    .insert(id.clone(), CaptureRetry { timeouts: timeouts + 1, due: None });
+                drop(_lock);
+                live.0.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+                live.1.notify_all();
+                incremental.touch(&format!("local-runtime-start:{subject}"));
+                incremental.touch(&subject);
+                signal_changed(&notify, &events);
+                return;
+            }
+            let result = result.map_err(|error| {
+                if !backend_entered && fractal_runtime::is_shell_startup_timeout(&error) {
+                    error.context(format!("environment capture timed out after {} attempts", timeouts + 1))
+                } else {
+                    error
+                }
             });
             let mut result = match result {
                 Ok((incarnation, verified, error)) => serde_json::json!({"incarnation": if verified {incarnation.clone()} else {None}, "candidate_incarnation": incarnation, "verification": if verified {"operation-incarnation"} else {"launch-accepted-unverified"}, "verification_error": error}),
@@ -548,7 +598,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&operation.id);
-            self.store.finish_runtime_start(&operation.id, &serde_json::json!({"error": format!("spawn launch worker: {error}"), "producer_closed": true}))?;
+            self.store.finish_runtime_start(&operation.id, &serde_json::json!({
+                "error": format!("spawn launch worker: {error}"),
+                "producer_closed": true,
+                "closure_kind": "before-backend",
+                "verification": "producer-closed",
+            }))?;
             self.store.finish_invocation_trace(&format!("invocation/{}", operation.id), true);
             self.start_changed(&operation.subject);
         }
@@ -767,6 +822,40 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&operation.id);
+        if !operation.finished && !live {
+            let retry = self.start_jobs.capture_retries.lock()
+                .unwrap_or_else(PoisonError::into_inner).get(&operation.id).copied();
+            if let Some(mut retry) = retry {
+                if operation.revoked_by.is_none() && current {
+                    self.record_capture_timeout_diagnostic(&operation.subject, true)?;
+                    let due = *retry.due.get_or_insert_with(|| now_ms() + u128::from(retry.timeouts) * 2_000);
+                    self.start_jobs.capture_retries.lock().unwrap_or_else(PoisonError::into_inner)
+                        .insert(operation.id.clone(), retry);
+                    if now_ms() < due {
+                        self.arm_deadline_at(&format!("capture-retry:{}", operation.id), due,
+                            crate::reconcile_telemetry::WakeCause::Deadline);
+                        return Ok(());
+                    }
+                    self.start_capture_attempt(&operation, retry.timeouts)?;
+                    return Ok(());
+                }
+                // The worker returned before entering the backend. Preserve that exact
+                // non-launch proof when cancellation retires the retry; lost-worker
+                // recovery cannot reconstruct it from a runtime that never existed.
+                self.store.finish_runtime_start(&operation.id, &serde_json::json!({
+                    "error": "environment capture retry was revoked before launching the agent",
+                    "producer_closed": true,
+                    "closure_kind": "before-backend",
+                    "verification": "producer-closed",
+                }))?;
+                let Some(fresh) = self.store.runtime_start_for(&operation.subject)? else {
+                    return Ok(());
+                };
+                operation = fresh;
+                self.start_jobs.capture_retries.lock().unwrap_or_else(PoisonError::into_inner)
+                    .remove(&operation.id);
+            }
+        }
         if !operation.finished
             && operation.dispatched && (operation.owner != self.start_jobs.owner || !live)
         {
@@ -780,13 +869,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .store
                     .pending_runtime_starts()?
                     .into_iter()
-                    .any(|fresh| fresh.id == operation.id && !fresh.finished);
-                if unfinished {
+                    .find(|fresh| fresh.id == operation.id && !fresh.finished);
+                if let Some(unfinished) = unfinished {
                     self.revoke_start(&operation.subject)?;
-                    self.store.finish_runtime_start(
-                        &operation.id,
-                        &serde_json::json!({"error": "launch owner ended before its result"}),
-                    )?;
+                    let result = if unfinished.before_backend() {
+                        serde_json::json!({
+                            "error": "launch owner ended before entering the runtime backend",
+                            "producer_closed": true,
+                            "closure_kind": "before-backend",
+                            "verification": "producer-closed",
+                        })
+                    } else {
+                        // Legacy, mismatched and already-entered markers prove nothing.
+                        serde_json::json!({"error": "launch owner ended before its result"})
+                    };
+                    self.store.finish_runtime_start(&operation.id, &result)?;
                     self.start_changed(&operation.subject);
                 }
             }
@@ -866,6 +963,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let completed = self.finish_start(
                     &operation.id, &prepared, outcome, result.get("launch_contract").filter(|value| !value.is_null()),
                 )?;
+                if matches!(&completed, StartCompletion::Applied(None)) {
+                    self.record_capture_timeout_diagnostic(&operation.subject, false)?;
+                }
                 if let StartCompletion::Applied(Some(error)) = &completed {
                     if let Some(request) = &prepared.request
                         && self.store.runtime_start_request_retained(request)?

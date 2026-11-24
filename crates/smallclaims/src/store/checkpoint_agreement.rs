@@ -255,6 +255,10 @@ impl Store {
             u64::try_from(context.now_unix_ms / super::checkpoint::DAY_MS)?,
             std::sync::atomic::Ordering::Relaxed,
         );
+        self.trim_now_ms.store(
+            u64::try_from(context.now_unix_ms)?,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.finish_interrupted_trims(&mut actions)?;
         self.trim_local_cut(context, &mut actions)?;
         self.trim_peer_retired(&mut actions)?;

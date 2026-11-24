@@ -410,6 +410,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "one indexed daemon.started lookup per member or configured peer; grows with the fleet, not the store",
     ),
     (
+        "POST /v1/internal/replication/shard/{shard}/peers/revision",
+        "subscribes to the graph's store-local membership watch for shard advertisements; the generated fixture holds an empty messages shard, and the wait retains no read transaction",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/revision",
+        "subscribes to the shard's store-local authority or membership watch; the generated fixture holds no populated messages shard, and authority snapshot work is covered by the graph revision probe",
+    ),
+    (
         "POST /v1/internal/replication/shard/{shard}/export",
         "pages the messages shard like the graph export; the shard stays empty until the stream writer",
     ),
@@ -1605,6 +1613,11 @@ const PROBES: &[Probe] = &[
     }),
     // Replication, as the worker calls it: an in-step peer asks for a summary, and each side
     // answers the other's summary with what it lacks, here a few new claims.
+    post(
+        "POST /v1/internal/replication/revision",
+        "/v1/internal/replication/revision",
+        |_, _| json!({"kind": "authority", "after": null}),
+    ),
     post(
         "POST /v1/internal/replication/export",
         "/v1/internal/replication/export",

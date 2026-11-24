@@ -376,6 +376,8 @@ pub trait RuntimeStartsStore {
             limit: usize,
         ) -> Result<RuntimeStartAdmission>;
     fn dispatch_runtime_start(&self, id: &str, limit: usize) -> Result<bool>;
+    /// Advance the dispatch fence durably before invoking any runtime backend.
+    fn enter_runtime_start_backend(&self, id: &str, owner: &str) -> Result<()>;
     /// Transfer a never-dispatched durable operation to the current daemon before dispatch.
     fn adopt_queued_runtime_start(&self, id: &str, owner: &str) -> Result<bool>;
     fn runtime_start_failure(&self, subject: &str) -> Result<Option<String>>;
@@ -1001,7 +1003,24 @@ impl RuntimeStartsStore for Store {
             }
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
-            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-ha2a0e9b6e6e1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1 WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h9cfcb3ca5088 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,body=json_set(body,'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','before-backend')) WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+        }).map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
+    fn enter_runtime_start_backend(&self, id: &str, owner: &str) -> Result<()> {
+        self.connection.batched(|tx| -> Result<()> {
+            let changed = tx.execute(
+                /* sqlite-large-value: allow-for-now lv-h32881e5b0f45 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE local_runtime_starts SET body=json_set(body,'$.backend_entry.phase','backend-entering')
+                 WHERE id=?1 AND owner=?2 AND dispatched=1 AND finished=0 AND revoked_by IS NULL
+                   AND json_extract(body,'$.backend_entry.version')=1
+                   AND json_extract(body,'$.backend_entry.operation')=id
+                   AND json_extract(body,'$.backend_entry.owner')=owner
+                   AND json_extract(body,'$.backend_entry.phase')='before-backend'",
+                params![id, owner],
+            )?;
+            anyhow::ensure!(changed == 1, "runtime backend entry fence was rejected");
+            Ok(())
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 

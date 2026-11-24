@@ -17,15 +17,86 @@ use axum::http::Request;
 use std::path::PathBuf;
 
 #[tokio::test]
+async fn simulated_mail_retirement_advances_the_signed_claim_forget_clock() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    store.bind_fleet("7b6c5d4e-3f20-4b1c-8d9e-0f1a2b3c4d5e").unwrap();
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    // Always exercise the signed-claim guard, even before its calendar activation.
+    let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    store.set_write_clock_at(written).unwrap();
+    let mut ids = Vec::new();
+    for kind in ["message.sent", "message.delivered", "message.read", "message.closed"] {
+        ids.push(store.append_claim(&crate::model::ClaimInput {
+            subject: "message/retirement-clock".into(),
+            kind: kind.into(),
+            actor: Some(if kind == "message.sent" { "agent/retirement-sender" } else { "agent/retirement-reader" }.into()),
+            fields: serde_json::from_value(if kind == "message.sent" {
+                json!({
+                    "from": "agent/retirement-sender", "to": "agent/retirement-reader",
+                    "content": "signed retirement clock", "status": "sent",
+                })
+            } else {
+                json!({"status": kind.trim_start_matches("message.")})
+            }).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap().id);
+    }
+    store.seal_local_batches().unwrap();
+    assert!(ids.iter().all(|id| store.claim_signature(id).unwrap().is_some()));
+    let later = u64::try_from(written).unwrap() + FORGET_SIGNED_AFTER_MS + 1;
+    let step = store.retire_closed_mail_step(later).unwrap();
+    assert_eq!(step.threads, 0, "the write-clock backstop must still protect fresh signatures");
+    assert!(ids.iter().all(|id| store.claim_by_id(id).unwrap().is_some()));
+    store.set_write_clock_offset(0).unwrap();
+
+    let Json(retired) = test_retire_closed_mail(
+        State(state.clone()), Json(TestMailRetirement { now_ms: later }),
+    ).await.unwrap();
+    assert_eq!(retired, json!({"threads": 1, "claims": 4}));
+    assert!(ids.iter().all(|id| store.claim_by_id(id).unwrap().is_none()));
+    // The simulated deletion must not move the daemon's shared writer clock.
+    let clock: (i64, Option<i64>) = store.connection.write().query_row(
+        "SELECT offset_ms, at_ms FROM temp.write_clock", [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(clock, (0, None));
+}
+
+#[tokio::test]
 async fn performance_exports_native_writer_work_counts() {
     let root = tempfile::tempdir().unwrap();
     let (status, report) = get_request(router(state(root.path())), "/v1/performance").await;
     assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["mailbox_streams"]["open_streams"], 0);
+    assert_eq!(report["mailbox_streams"]["streams"], json!([]));
     for counter in [
         "boundaries", "noops", "rollbacks", "index_refreshes",
         "global_evaluations", "scoped_evaluations",
     ] {
         assert!(report["writer_observers"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+    for counter in ["builds", "card_rebuilds", "largest_fold", "presentations", "fault_enrichments", "ref_enrichments"] {
+        assert!(report["agent_roster_work"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+    assert!(report["agent_roster_presentation_work"]["card_rebuilds"].as_u64().is_some(), "{report}");
+    for counter in ["cards_presented", "cards_enriched", "subjects_rebuilt", "groups_rebuilt", "prompt_reads", "fleet_agent_inputs"] {
+        assert!(report["attention_work"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+    for counter in ["mission_subject_rebuilds", "agent_subject_rebuilds", "machine_subject_rebuilds"] {
+        assert!(report["summary_work"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+    for counter in [
+        "discovery_passes", "candidate_messages", "remote_event_pages",
+        "remote_changed_messages", "legacy_peer_discovery_passes",
+    ] {
+        assert_eq!(report["relayed_close_work"][counter].as_u64(), Some(0), "{counter}: {report}");
+    }
+    for collection in ["work", "missions", "runtimes"] {
+        assert_eq!(report["published_list_work"][collection]["refolded"], 0, "{collection}: {report}");
     }
 }
 
@@ -10358,6 +10429,40 @@ fn roster_claims_fixture() -> RosterClaimsFixture {
         roster_fixture_work(&fixture, agent, "claim", &format!("roster-initial-claim-{agent}"));
     }
     fixture
+}
+
+#[test]
+fn agent_roster_production_work_counts_only_changed_card_enrichment() {
+    let _clock = RosterFixtureClock::at(1_900_000_000_000);
+    let fixture = roster_claims_fixture();
+    let store = &fixture.store;
+    let read = || store.read_snapshot(|index| {
+        client_agent_resources_cached(store, false, index)
+    }).unwrap();
+    let original = read();
+    let warm = store.agent_roster_work();
+    assert_eq!(read(), original);
+    assert_eq!(store.agent_roster_work(), warm);
+
+    roster_fixture_append(store, &fixture.subjects[0], "harness.todo.observed",
+        roster_fixture_todo(0, 1));
+    let changed = read();
+    let after = store.agent_roster_work();
+    for field in ["builds", "card_rebuilds", "presentations", "fault_enrichments", "ref_enrichments"] {
+        assert_eq!(after[field].as_u64().unwrap(), warm[field].as_u64().unwrap() + 1,
+            "{field}: a changed agent enriches exactly one card");
+    }
+    for row in &original {
+        if row["id"] != fixture.subjects[0] {
+            assert_eq!(changed.iter().find(|new| new["id"] == row["id"]).unwrap(), row);
+        }
+    }
+
+    roster_fixture_append(store, "daemon/fixture", "daemon.diagnostic",
+        json!({"code":"fixture","severity":"warning","reason":"Unrelated roster input."}));
+    assert_eq!(read(), changed);
+    assert_eq!(store.agent_roster_work(), after,
+        "an unrelated commit must not fold, present, enrich faults or resolve references");
 }
 
 // Freeze the old policy here so the same measurement remains meaningful after cutover.

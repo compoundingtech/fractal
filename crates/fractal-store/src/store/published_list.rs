@@ -68,6 +68,8 @@ pub struct PublishedList<R> {
     changes: tokio::sync::watch::Sender<u64>,
     /// Folds from nothing or in chunks, by why: each refolded many rows, not a few.
     rebuilds: Mutex<BTreeMap<String, u64>>,
+    /// Rows whose reducers ran, including initial publication and catch-up chunks.
+    refolded: AtomicU64,
     /// Folds the refresher began, for tests.
     #[cfg(any(test, feature = "test-support"))]
     folds: std::sync::atomic::AtomicUsize,
@@ -93,6 +95,7 @@ impl<R> Default for PublishedList<R> {
             completed_materialization: AtomicU64::new(0),
             changes: tokio::sync::watch::Sender::new(0),
             rebuilds: Mutex::default(),
+            refolded: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             folds: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -208,6 +211,14 @@ impl<R> PublishedList<R> {
     pub fn note_fold(&self) {
         #[cfg(any(test, feature = "test-support"))]
         self.folds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_refolded(&self, rows: usize) {
+        self.refolded.fetch_add(rows as u64, Ordering::Relaxed);
+    }
+
+    pub fn refolded(&self) -> u64 {
+        self.refolded.load(Ordering::Relaxed)
     }
 
     #[cfg(any(test, feature = "test-support"))]

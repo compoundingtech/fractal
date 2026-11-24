@@ -415,9 +415,10 @@ impl StoreConfig {
 /// copy a peer already holds stays until its own trim drops it. `local = false` turns trimming off on
 /// this member; it is on by default. `notify` names the agent that receives a fault when the
 /// daily answers check finds this member and a peer answering differently; without it the
-/// fleet's fault agent does. `daily_claims` is the most claims a trim deletes in a day (100,000
-/// unless set): a cut that drops more goes on the next day where it stopped. With `mail = true`, a
-/// member that trims also retires closed agent and daemon graph mail a week after it closes, at
+/// fleet's fault agent does. `daily_claims` is the most claims a trim deletes per UTC day
+/// (100,000 unless set). The available budget advances evenly from midnight, plus one
+/// ten-minute worker interval's burst; a larger cut resumes in later steps and days.
+/// With `mail = true`, a member that trims also retires closed agent and daemon graph mail a week after it closes, at
 /// its own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
 /// set, until the owner decides whether it becomes the default (Factory's decision of
 /// 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person mail where it

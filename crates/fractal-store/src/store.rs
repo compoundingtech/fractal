@@ -137,6 +137,8 @@ pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
 mod observer_mail_inputs;
+mod observer_reconcile_inputs;
+pub use observer_reconcile_inputs::DesiredInputs;
 pub mod completion_state;
 #[cfg(test)]
 pub mod resource_preparation_fence_tests;
@@ -349,6 +351,7 @@ mod message_sent_tests;
 #[cfg(test)]
 mod message_outbox_tests;
 pub mod relayed_closes;
+pub mod relayed_close_work;
 #[cfg(test)]
 mod relayed_closes_tests;
 pub mod stream_mirror;
@@ -5733,6 +5736,17 @@ impl Store {
         self.status_for_claim_kind_view(kind, at_index, include_history, claims, true)
     }
 
+    /// Runtime owner keys at a snapshot, including owners later filtered into history.
+    pub fn runtime_list_subjects(&self, store_index: u64) -> Result<BTreeSet<String>> {
+        let connection = self.readers.get();
+        // One seek per runtime instead of every runtime observation.
+        connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h11ef4fb3e9cb owner=fractal_store::store TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
+            .query_map([store_index], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(Into::into)
+    }
+
     fn status_for_claim_kind_view(
         &self, kind: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction, generic: bool,
     ) -> Result<StatusResponse> {
@@ -5743,11 +5757,7 @@ impl Store {
             connection.prepare_cached("SELECT subject FROM arrangements ORDER BY subject")?
                 .query_map([], |row| row.get::<_,String>(0))?.collect::<Result<BTreeSet<_>,_>>()?
         } else if kind == "runtime.observed" {
-            // One seek per runtime instead of every runtime observation.
-            connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h11ef4fb3e9cb owner=fractal_store::store TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
-                .query_map([store_index], |row| row.get::<_, String>(0))?
-                .collect::<Result<BTreeSet<_>, _>>()?
+            self.runtime_list_subjects(store_index)?
         } else {
             connection
                 .prepare(
@@ -7113,17 +7123,25 @@ impl Store {
     pub fn fault_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
         // One read cut for every family, so a run, step, declaration or failure that many
         // faults share is read once.
-        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, false)))
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, None)))
     }
 
     /// The faults whose notices the generic reconciler owns.
     pub fn fault_delivery_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
-        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, true)))
+        // Capture the native journal before establishing the SQL cut. A newer journal
+        // generation cannot be consumed by a reader still pinned to an older projection.
+        let desired_generation = self.desired_changes_since(None).0;
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, Some(desired_generation))))
     }
 
-    fn fault_snapshot_in_cut(&self, as_of: u128, generic_delivery_only: bool) -> Result<Vec<FaultView>> {
+    fn fault_snapshot_in_cut(&self, as_of: u128, desired_generation: Option<u64>) -> Result<Vec<FaultView>> {
+        let generic_delivery_only = desired_generation.is_some();
         let mut items = self.subscription_fault_items(as_of)?;
-        items.extend(self.operational_fault_families(None, as_of)?);
+        items.extend(if let Some(generation) = desired_generation {
+            self.cached_operational_fault_families(as_of, generation)?
+        } else {
+            self.operational_fault_families(None, as_of)?
+        });
         // Failure episodes come from the fault cache, read again only where something changed.
         let (operational, gates) = self.cached_failure_faults(as_of)?;
         let mut explicit_reviewers = BTreeSet::new();
@@ -7138,6 +7156,11 @@ impl Store {
         }
         items.extend(gates);
         items.extend(self.signature_attention_items()?);
+        for item in &items {
+            if item.requested_at_unix_ms > as_of {
+                smallclaims::touched::note_due(item.requested_at_unix_ms);
+            }
+        }
         let fallback = self.fleet_fault_agent()?;
         let dismissed = self.dismissed_faults()?;
         self.current_attention(items, as_of)?
@@ -7896,6 +7919,26 @@ impl Store {
                 "SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1 AND kind=?2",
             )?
             .query_row(/* sqlite-large-value: allow-for-now lv-hf5a6039f365d owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, kind], |row| row.get(0))?)
+    }
+
+    /// Inspect only an already-warm actual value; never fill the cache or fold history.
+    /// A single seek checks the newest claim of any kind. Ignored newer claims conservatively
+    /// make this unavailable too, rather than walking kinds or accepting stale evidence.
+    pub fn inspect_cached_actual<T>(
+        &self,
+        subject: &str,
+        inspect: impl FnOnce(&Value) -> T,
+    ) -> Result<Option<T>> {
+        let newest: Option<u64> = self.readers.get().query_row(
+            "SELECT store_index FROM claims INDEXED BY claims_subject_index
+             WHERE subject=?1 ORDER BY store_index DESC LIMIT 1",
+            [subject], |row| row.get(0),
+        ).optional()?;
+        let cache = self.fractal.actual_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(cache.get(subject)
+            .filter(|(index, _)| Some(*index) == newest)
+            .and_then(|(_, value)| value.as_ref())
+            .map(inspect))
     }
 
     pub fn latest_actual_value(&self, subject: &str) -> Result<Option<Value>> {
@@ -17372,6 +17415,7 @@ fn generation_run_tx(
     transaction: &Connection,
     generation: &str,
 ) -> Result<Option<String>, FractalError> {
+    smallclaims::touched::note_read(|| format!("run-generation/{generation}"));
     if let Some(run) = transaction
         .query_row(
             "SELECT run_id FROM run_generations WHERE id=?1",
@@ -17484,6 +17528,7 @@ fn run_of_subject_tx(
 
 /// The root a run names, or the owner of an ask run, or the run itself.
 fn run_root_tx(transaction: &Connection, run: &str) -> Result<String, FractalError> {
+    smallclaims::touched::note_read(|| format!("mission-run/{run}"));
     if let Some(root) = transaction
         .query_row(
             "SELECT root_run_id FROM mission_runs WHERE id=?1",
@@ -17546,6 +17591,7 @@ fn parent_step_of_run_tx(
     transaction: &Connection,
     run: &str,
 ) -> Result<Option<String>, FractalError> {
+    smallclaims::touched::note_read(|| format!("mission-run/{run}"));
     if let Some(parent) = transaction
         .query_row(
             "SELECT parent_step_run FROM mission_runs WHERE id=?1",
@@ -17579,6 +17625,7 @@ fn step_generation(parent: &str) -> Option<&str> {
 
 /// Whether a root run has ended, or any claim ends it: projected so, or claimed so in any order.
 fn run_ever_ended_tx(transaction: &Connection, run: &str) -> Result<bool, FractalError> {
+    smallclaims::touched::note_read(|| format!("mission-run/{run}"));
     transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1
@@ -26128,28 +26175,44 @@ pub mod checkpoint_capture_epoch_tests_shared_attention_tests;
 /// its seats in full to a member whose `daemon.started` changed. The card's freshness rule ages
 /// the time itself, so an answer needs no expiry: a host that stops pushing reads stale.
 #[derive(Default)]
-pub struct RelayedFreshness(std::sync::Mutex<HashMap<String, (String, u128)>>);
+pub struct RelayedFreshness {
+    heard: std::sync::Mutex<HashMap<String, (String, u128)>>,
+    changes: tokio::sync::watch::Sender<u64>,
+}
 
 impl RelayedFreshness {
     /// Record when the seat's host heard each `(agent, incarnation, heard_at)`, keeping the newest.
     pub fn record(&self, seats: impl IntoIterator<Item = (String, String, u128)>) {
-        let mut heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut heard = self.heard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut changed = false;
         for (agent, incarnation, heard_at) in seats {
             let newer = heard
                 .get(&agent)
                 .is_none_or(|(of, at)| *of != incarnation || *at < heard_at);
             if newer {
                 heard.insert(agent, (incarnation, heard_at));
+                changed = true;
             }
         }
+        drop(heard);
+        if changed {
+            self.changes.send_modify(|revision| *revision += 1);
+        }
+    }
+
+    /// Observe changed freshness evidence, including incarnation replacement.
+    /// Equal or older repetitions do not wake consumers.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// When the seat's host last said it heard `subject`'s `incarnation`.
     pub fn heard_at(&self, subject: &str, incarnation: &str) -> Option<u128> {
-        let heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let heard = self.heard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         heard.get(subject).filter(|(of, _)| of == incarnation).map(|(_, at)| *at)
     }
 }
+
 
 /// How often an unchanged harness report still replicates while some member cannot ask the
 /// seat's host how recently it heard the seat. Within an older member's 661-second down rule.
@@ -26179,4 +26242,30 @@ fn stopped_after(connection: &Connection, subject: &str, decision_index: u64, at
                AND store_index>?2 AND store_index<=?3 AND json_extract(body, '$.kind')='stop')",
         )?
         .query_row(/* sqlite-large-value: allow-for-now lv-h0e4abbec7bce owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, decision_index, at_index], |row| row.get(0))?)
+}
+#[cfg(test)]
+mod relayed_freshness_change_tests {
+    use super::RelayedFreshness;
+
+    #[test]
+    fn wakes_only_for_changed_evidence() {
+        let freshness = RelayedFreshness::default();
+        let mut changes = freshness.subscribe();
+        let record = |incarnation: &str, at| {
+            freshness.record([("agent/example".into(), incarnation.into(), at)]);
+        };
+        record("one", 100);
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        record("one", 100);
+        record("one", 99);
+        assert!(!changes.has_changed().unwrap());
+        record("one", 101);
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        record("two", 50);
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(freshness.heard_at("agent/example", "one"), None);
+        assert_eq!(freshness.heard_at("agent/example", "two"), Some(50));
+    }
 }

@@ -35,6 +35,12 @@ use crate::sqlite::{
     STATEMENT_CACHE_CAPACITY, WriterConnection,
 };
 
+fn note_full_summary_construction(_store: &Store) {
+    crate::performance::record_request("replication/full-summary", None, std::time::Duration::ZERO);
+    #[cfg(test)]
+    _store.full_summary_constructions.fetch_add(1, Ordering::Relaxed);
+}
+
 mod admitted;
 #[cfg(any(test, feature = "test-support"))]
 mod temporary;
@@ -201,6 +207,13 @@ impl ProjectionDiagnosticRate {
         self.last_logged = Some(now);
         Some(std::mem::take(&mut self.suppressed))
     }
+}
+
+#[derive(Default)]
+struct ProjectionRetryEpisode {
+    active: bool,
+    ended: Option<std::time::Instant>,
+    logged_failure: bool,
 }
 
 #[derive(Default)]
@@ -464,6 +477,26 @@ mod projection_failure_diagnostic_tests {
             assert_eq!(value["suppressed_errors"], suppressed);
             assert_eq!(value["rate_bucket_overflow"], false);
         }
+    }
+
+    #[test]
+    fn projection_retry_episode_logs_one_error_even_after_diagnostic_interval() {
+        let store = Store::open_memory("node", Arc::new(runtime::Plain)).unwrap();
+        let error = FractalError::new("internal", "projection failed")
+            .with_detail("projection_stage", "decode");
+        let mut lines = Vec::new();
+        let now = std::time::Instant::now();
+        store.projection_retry_episode_started();
+        store.log_projection_failure(&error, "replication", 0, 1, &mut |line| lines.push(line.to_owned()));
+        store.projection_diagnostics.lock().unwrap().slots[0].2.last_logged =
+            Some(now - PROJECTION_DIAGNOSTIC_INTERVAL);
+        store.log_projection_failure(&error, "replication", 0, 1, &mut |line| lines.push(line.to_owned()));
+        assert_eq!(lines.len(), 1);
+        store.projection_retry_episode_finished(now);
+        assert!(!store.request_quiet_projection_retry(now + std::time::Duration::from_secs(119)));
+        assert!(store.request_quiet_projection_retry(now + std::time::Duration::from_secs(120)));
+        store.log_projection_failure(&error, "replication", 0, 1, &mut |line| lines.push(line.to_owned()));
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
@@ -894,6 +927,8 @@ pub struct Store {
     /// The day, in days since the epoch, that a local trim's deletions count against: each
     /// checkpoint step sets it from its own clock.
     pub(crate) trim_day: AtomicU64,
+    /// The checkpoint context's injectable clock, used to accrue local trim allowance.
+    pub(crate) trim_now_ms: AtomicU64,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -916,14 +951,17 @@ pub struct Store {
     replication_projection_state: AtomicU64,
     /// Only limits new error detail lines; it never caches projection results or decisions.
     projection_diagnostics: Mutex<ProjectionDiagnosticState>,
-    /// Advances only for numeric SQLite contention, so the daemon can coalesce a bounded
-    /// retry episode without treating arbitrary deferred work as contention.
+    /// Coalesces deferred request work into bounded daemon retry episodes.
     projection_contention_generation: AtomicU64,
+    projection_retry_episode: Mutex<ProjectionRetryEpisode>,
     /// When this process last attempted projection of replicated claims, in Unix milliseconds.
     pub last_replication_projection_unix_ms: AtomicU64,
     /// For a shard, the default store whose fleet identity and membership it uses: a shard
     /// holds no fleet claims of its own. See `bind_fleet_authority`.
     fleet_authority: std::sync::OnceLock<Arc<dyn FleetAuthority>>,
+    pub(crate) sync_revisions: std::sync::OnceLock<Arc<crate::sync::revision::StoreRevisions>>,
+    #[cfg(test)]
+    pub(crate) full_summary_constructions: AtomicU64,
     /// For a shard, its authority's fleet generation when its last admission began. Membership
     /// that changes later can decide envelopes the shard held. See `fleet_moved_since_admission`.
     admitted_fleet_generation: AtomicI64,
@@ -1464,10 +1502,14 @@ impl Store {
             trim_local: AtomicBool::new(false),
             trim_daily_claims: AtomicU64::new(checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS),
             trim_day: AtomicU64::new(0),
+            trim_now_ms: AtomicU64::new(0),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
             fleet_authority: std::sync::OnceLock::new(),
+            sync_revisions: Default::default(),
+            #[cfg(test)]
+            full_summary_constructions: AtomicU64::new(0),
             admitted_fleet_generation: AtomicI64::new(i64::MIN),
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
@@ -1478,6 +1520,7 @@ impl Store {
             replication_projection_state: AtomicU64::new(u64::from(projection_pending)),
             projection_diagnostics: Mutex::new(ProjectionDiagnosticState::default()),
             projection_contention_generation: AtomicU64::new(0),
+            projection_retry_episode: Mutex::default(),
             last_replication_projection_unix_ms: AtomicU64::new(0),
             member_key: std::sync::RwLock::new(None),
             keyring: crate::principal::Keyring::default(),
@@ -5472,9 +5515,9 @@ pub fn replication_bucket_start(sequence: u64) -> u64 {
 }
 
 /// Compare a local inventory with a peer's compact inventory. Returns the local envelopes the
-/// peer provably lacks, bounded per exchange, and the local identities of the ranges both
-/// sides hold with different digests, so the peer can compute the reverse difference. Whole
-/// ranges are listed in order while they fit `listing_limit`, from the first differing range.
+/// peer provably lacks, bounded per exchange, and complete local range listings so the peer can
+/// compute the reverse difference. A root probe proves no ranges absent: it receives bounded
+/// listings without payloads. Whole ranges fit `listing_limit`, except the first is always whole.
 pub fn compact_replication_difference(
     inventory: &CompactReplicationInventory,
     buckets: &[ReplicationInventoryBucket],
@@ -5514,6 +5557,10 @@ pub fn compact_replication_difference_turn(
             .push(identity);
     }
     let page_limit = replication_page_limit(remote);
+    // A root probe omits proofs; absent ranges are unknown, not proven empty.
+    let omitted_buckets = remote.buckets.is_empty()
+        && remote.can(crate::replication::ROOT_FIRST)
+        && remote.can(crate::replication::ROOT_SUMMARY);
     let mut missing = Vec::new();
     // Differing ranges with an envelope to send, then those holding only checkpoint identities.
     let (mut live, mut payloadless) = (Vec::new(), Vec::new());
@@ -5522,6 +5569,14 @@ pub fn compact_replication_difference_turn(
         let local = inventory.range(&bucket.writer, bucket.start);
         let room = page_limit.saturating_sub(missing.len());
         let Some(theirs) = remote_buckets.get(&key) else {
+            if omitted_buckets {
+                if local.iter().any(|envelope| inventory.has_payload(envelope)) {
+                    live.push(bucket);
+                } else {
+                    payloadless.push(bucket);
+                }
+                continue;
+            }
             // The peer holds nothing in this range.
             missing.extend(
                 local
@@ -7975,6 +8030,16 @@ impl Store {
         self.replication_summary(fleet_id, true)
     }
 
+    /// A signed peer probe, including signature requests and claim roots, but no bucket list.
+    /// The root-summary marker distinguishes omitted proofs from an empty inventory.
+    pub fn export_replication_root_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        let mut summary = self.replication_summary(fleet_id, false)?;
+        summary.signature_requests = self.replication_signature_requests()?;
+        summary.inventory.capabilities.push(crate::replication::ROOT_SUMMARY.to_owned());
+        crate::performance::record_request("replication/root-summary", None, std::time::Duration::ZERO);
+        Ok(summary)
+    }
+
     /// A local scalar guard reads only `authority_digest`. Keep the full summary's fresh
     /// snapshot, metadata and errors, but avoid cloning/serializing its unused bucket list.
     /// This reduced inventory must not be used to construct a signed peer exchange.
@@ -7989,6 +8054,9 @@ impl Store {
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
         let digests = self.exported_digests(&snapshot)?;
+        if include_buckets {
+            note_full_summary_construction(self);
+        }
         let _timing = time_stage(&self.replication_timers.export);
         // A guard summary stays on this node, so it asks no peer and takes no backfill request.
         let signature_requests = if include_buckets {
@@ -8125,15 +8193,33 @@ impl Store {
         buckets: &[ReplicationInventoryBucket],
         mut archive: Option<&mut crate::wire_archive::ArchiveReaders>,
     ) -> Result<ReplicationExchange> {
+        let _timing = time_stage(&self.replication_timers.export);
+        let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
+        if same
+            && remote.can(crate::replication::ROOT_FIRST)
+            && remote.can(crate::replication::ROOT_SUMMARY)
+            && remote.claim_range_query.is_none()
+        {
+            // Only equality can be answered without proofs. A mismatch must also list
+            // bounded complete ranges so the next request can push the reverse difference.
+            return self.export_replication_root_summary(fleet_id);
+        }
         let digests = {
             let _span = crate::profile::span("replication.digests");
             self.exported_digests(snapshot)?
         };
-        let _timing = time_stage(&self.replication_timers.export);
-        let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
-        if !same && !remote.buckets.is_empty() {
-            // The peer sent range digests, so only differing ranges need identities. Each
-            // answer lists from the next differing range, so every one is listed in turn.
+        note_full_summary_construction(self);
+        let root_probe = remote.can(crate::replication::ROOT_FIRST)
+            && remote.can(crate::replication::ROOT_SUMMARY);
+        if !same
+            && (root_probe
+                || !remote.buckets.is_empty()
+                || (remote.can(crate::replication::ROOT_FIRST)
+                    && remote.can(crate::replication::RANGE_PROOFS)))
+        {
+            // Capability support alone does not turn a complete identity inventory into
+            // range proofs. A root probe omits proofs; a marked range answer has a
+            // complete bucket list, including when that list proves the empty set.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
                 compact_replication_difference_turn(
@@ -8144,6 +8230,7 @@ impl Store {
                     self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
                 )
             };
+            let claim_member_signatures = self.claim_member_signatures_for_envelopes(&missing)?;
             let envelopes = {
                 let _span = crate::profile::span("replication.envelopes");
                 match archive.as_deref_mut() {
@@ -8171,14 +8258,18 @@ impl Store {
                 // peer then adopts nothing).
                 checkpoint: None,
                     claim_range_query: None,
-                    capabilities: crate::replication::replication_capabilities(),
+                    capabilities: {
+                        let mut capabilities = crate::replication::replication_capabilities();
+                        capabilities.push(crate::replication::RANGE_PROOFS.to_owned());
+                        capabilities
+                    },
                 },
                 envelopes,
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
                 claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
-                claim_member_signatures: Vec::new(),
+                claim_member_signatures,
                 signed_envelopes,
                 unservable_released,
             });
@@ -9222,6 +9313,61 @@ impl Store {
         self.project_replication_backlog().map(Some)
     }
 
+    /// Quiet requests may restart maintenance only after the preceding episode's
+    /// longest backoff. Stale graph failures never replay inline on this path.
+    pub fn try_project_replication_backlog_after_quiet_exchange(
+        &self,
+        now: std::time::Instant,
+    ) -> Result<Option<bool>> {
+        if !self.request_quiet_projection_retry(now) {
+            return Ok(None);
+        }
+        if self.replication_projection_needs_recovery()? {
+            return Ok(None);
+        }
+        let result = self.try_project_replication_backlog_unless_catching_up();
+        if matches!(result, Ok(Some(true))) && !self.replication_projection_deferred() {
+            self.projection_retry_episode_finished(now);
+        }
+        result
+    }
+
+    /// Request-side projection never queues behind another pass. Background
+    /// maintenance drains admitted work even if no further peer page arrives.
+    pub fn try_project_replication_backlog_unless_catching_up(&self) -> Result<Option<bool>> {
+        if self.replication_projection_throttle_remaining().is_some() {
+            self.defer_replication_projection();
+            self.note_projection_contention();
+            return Ok(None);
+        }
+        let gate_wait = std::time::Instant::now();
+        let projecting = self.projection.try_lock();
+        crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
+        let Some(projecting) = projecting else {
+            self.defer_replication_projection();
+            self.note_projection_contention();
+            return Ok(None);
+        };
+        let generation = self.projection_contention_generation();
+        let result = self.project_replication_backlog_owned(
+            projecting,
+            || {},
+            || {},
+            "replication",
+            |line| eprintln!("{line}"),
+            |_| {},
+        )
+        .map(Some);
+        if !matches!(&result, Ok(Some(true)))
+            && self.projection_contention_generation() == generation
+        {
+            // Both returned errors and unhealthy Ok(false) retain the frontier.
+            // Start one bounded retry episode; never spin in the request.
+            self.note_projection_contention();
+        }
+        result
+    }
+
     /// Time until a catch-up projection may run again, without bypassing its throttle.
     pub fn replication_projection_throttle_remaining(&self) -> Option<std::time::Duration> {
         let since = (now_ms() as u64).saturating_sub(
@@ -9280,7 +9426,42 @@ impl Store {
         self.projection_contention_generation.load(Ordering::Acquire)
     }
 
+    pub fn projection_retry_episode_started(&self) {
+        let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+        if !episode.active {
+            episode.active = true;
+            episode.logged_failure = false;
+        }
+    }
+
+    pub fn projection_retry_episode_finished(&self, now: std::time::Instant) {
+        let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+        if episode.active {
+            episode.active = false;
+            episode.ended = Some(now);
+        }
+    }
+
+    /// Reserve one quiet retry episode; repeated exchanges cannot extend its budget.
+    pub fn request_quiet_projection_retry(&self, now: std::time::Instant) -> bool {
+        // Coalescing admits no new work: leave a running pass's completion
+        // generation alone. Only a reserved episode also advances its retry signal.
+        let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+        if episode.active || episode.ended.is_some_and(|ended|
+            now.saturating_duration_since(ended) < std::time::Duration::from_secs(120))
+        {
+            return false;
+        }
+        episode.active = true;
+        episode.logged_failure = false;
+        drop(episode);
+        self.defer_replication_projection();
+        self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
     fn note_projection_contention(&self) {
+        self.projection_retry_episode_started();
         self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
         crate::receive_metrics::contended();
     }
@@ -9472,6 +9653,14 @@ impl Store {
             .get("projection_stage")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        // Keep one error detail per maintenance episode, not per quiet exchange.
+        let already_logged = {
+            let episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+            episode.active && episode.logged_failure
+        };
+        if already_logged {
+            return;
+        }
         let emission = {
             let mut state = self
                 .projection_diagnostics
@@ -9482,6 +9671,11 @@ impl Store {
         // Release the diagnostic mutex before formatting or invoking the caller's log sink.
         // The caller still holds its existing projection transaction at this boundary.
         if let Some(emission) = emission {
+            let mut episode = self.projection_retry_episode.lock().unwrap_or_else(PoisonError::into_inner);
+            if episode.active {
+                episode.logged_failure = true;
+            }
+            drop(episode);
             log(&projection_failure_log_line(
                 phase,
                 error.code,
@@ -9596,15 +9790,27 @@ impl Store {
 
     fn project_replication_backlog_chunks(
         &self,
+        between: impl FnMut(),
+        before_clear: impl FnMut(),
+        phase: &str,
+        log: impl FnMut(&str),
+        progress: impl FnMut(ProjectionProgress),
+    ) -> Result<bool> {
+        let gate_wait = std::time::Instant::now();
+        let projecting = self.projection.lock();
+        crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
+        self.project_replication_backlog_owned(projecting, between, before_clear, phase, log, progress)
+    }
+
+    fn project_replication_backlog_owned(
+        &self,
+        _projecting: ProjectionGuard<'_>,
         mut between: impl FnMut(),
         mut before_clear: impl FnMut(),
         phase: &str,
         mut log: impl FnMut(&str),
         mut progress: impl FnMut(ProjectionProgress),
     ) -> Result<bool> {
-        let gate_wait = std::time::Instant::now();
-        let _projecting = self.projection.lock();
-        crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
         let _timing = time_stage(&self.replication_timers.projection);
         self.defer_replication_projection();
         self.last_replication_projection_unix_ms
@@ -9612,7 +9818,10 @@ impl Store {
         // Finish the backlog observed at entry. New receives can admit more between chunks;
         // their own projection pass will take those up without keeping this one alive forever.
         let target = self.index()?;
-        self.discover_operation_conflicts(target).map_err(|error| {
+        let discovery_started = std::time::Instant::now();
+        let discovery = self.discover_operation_conflicts(target);
+        crate::receive_metrics::projection_discovery_time(discovery_started.elapsed());
+        discovery.map_err(|error| {
             // Discovery lends the same writer before the projection chunk. Preserve its
             // typed contention boundary, health and deferred retry state as for that chunk.
             let error = crate::error::typed(error);
@@ -9934,7 +10143,12 @@ impl Store {
                         continue;
                     }
                     if self.verdicts_due.swap(false, Ordering::AcqRel) {
-                        self.judge_claims_slice(true).map_err(|error| {
+                        let discovery_started = std::time::Instant::now();
+                        let verdicts = self.judge_claims_slice(true);
+                        crate::receive_metrics::projection_discovery_time(
+                            discovery_started.elapsed(),
+                        );
+                        verdicts.map_err(|error| {
                             self.verdicts_due.store(true, Ordering::Release);
                             let error = crate::error::typed(error);
                             if error.is_sqlite_contention() {
@@ -10567,9 +10781,9 @@ impl Store {
         self.trim_local.load(Ordering::Relaxed)
     }
 
-    /// The most claims a member deletes in one day, `[trim] daily_claims`. A
-    /// cut that drops more stays `trimming` and goes on where it stopped the next day, before the
-    /// next cut begins, so a large backlog drains over several days rather than in one long trim.
+    /// The most claims a member deletes per UTC day, `[trim] daily_claims`. Allowance advances
+    /// evenly from midnight plus a ten-minute burst; an unfinished cut resumes in later steps
+    /// and days before the next cut begins.
     pub fn trim_locally_at_most(&self, claims: u64) {
         self.trim_daily_claims.store(claims, Ordering::Relaxed);
     }
@@ -10761,6 +10975,33 @@ impl Store {
             if sole_creator { 0 } else { targets.max(1) },
             age(last_exchange),
         ))
+    }
+
+    /// Fault text uses only the last failure phase/code of current exchange targets.
+    /// Do not compute full replication status here: it also reads inventory and projections.
+    pub fn replication_health_message(&self, health: crate::replication::ReplicationHealth) -> Result<String> {
+        if health != crate::replication::ReplicationHealth::ExchangeStale {
+            return Ok(health.message().into());
+        }
+        let view = self.fleet_view_sealed()?;
+        let first_sync = self.first_sync()?;
+        let bootstrap = first_sync.as_ref().filter(|first| first.state == "syncing")
+            .and_then(|first| first.peer.as_deref())
+            .filter(|peer| view.members.iter().all(|member| member.name != *peer));
+        let progress = self.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+        let targets = view.members.iter()
+            .filter(|member| member.name != self.origin && member.state == "current")
+            .map(|member| member.name.as_str())
+            .chain(bootstrap);
+        let failure = |peer: &str| progress.get(peer)
+            .and_then(|progress| progress.last_failed_exchange.as_ref())
+            .and_then(|exchange| exchange.failure.as_ref());
+        // Legacy config-peer operation has no membership or join receipt.
+        if view.anchor.is_none() && first_sync.is_none() {
+            Ok(health.message_with_failures(progress.keys().map(|peer| failure(peer))))
+        } else {
+            Ok(health.message_with_failures(targets.map(failure)))
+        }
     }
     /// Invalid claims and fenced writers cannot be treated as ordinary in-flight traffic.
     pub fn replication_admission_healthy(&self) -> Result<bool> {
