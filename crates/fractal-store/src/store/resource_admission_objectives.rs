@@ -75,10 +75,7 @@ impl Store {
         let mut connection = self.connection.write();
         let tx = connection.transaction()?;
         let subject = format!("resource-admission/{}", self.origin);
-        let Some(coverage) = latest_claim_of_kind_tx(&tx, &subject, COVERAGE_KIND)? else {
-            return Ok(false);
-        };
-        if coverage.body["fields"]["complete"] == true { return Ok(false); }
+        let coverage = latest_claim_of_kind_tx(&tx, &subject, COVERAGE_KIND)?;
         let mut statement = tx.prepare(
             "SELECT pending.membership_id,membership.body FROM resource_admission_pending_v1 AS pending
              JOIN resource_memberships_v1 AS membership ON membership.id=pending.membership_id
@@ -95,6 +92,9 @@ impl Store {
                 validate_readers(&tx, &self.origin).is_ok()
             });
             let published = publish_with_readers(&tx, &member, supported)?;
+            if published {
+                super::resource_membership::publish_invalidation(&tx, &member)?;
+            }
             tx.execute(/* sqlite-large-value: allow-for-now lv-hbe53b1627d37 owner=fractal_store::store::resource_admission_objectives TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_admission_pending_v1 WHERE membership_id=?1", [id])?;
             if !published {
                 // Rotate blocked IDs behind already-pending work. New traffic cannot
@@ -105,7 +105,9 @@ impl Store {
         let pending: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM resource_admission_pending_v1 WHERE host=?1)",
             [&self.origin], |row| row.get(0))?;
-        if !pending {
+        if !pending && let Some(coverage) = coverage
+            && coverage.body["fields"]["complete"] != true
+        {
             let mut fields = coverage.body["fields"].clone();
             fields["complete"] = json!(true);
             append_claim_tx(&tx, &self.origin, &subject, COVERAGE_KIND, None,
@@ -119,7 +121,7 @@ impl Store {
     }
 }
 
-fn enqueue(tx: &Transaction<'_>, member: &Membership) -> Result<()> {
+pub(super) fn enqueue(tx: &Transaction<'_>, member: &Membership) -> Result<()> {
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7ae18f03ddc9 owner=fractal_store::store::resource_admission_objectives TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_admission_pending_v1(host,membership_id) VALUES(?1,?2)",
         rusqlite::params![member.request.host,member.request.id])?;
     Ok(())
