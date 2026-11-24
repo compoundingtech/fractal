@@ -93,7 +93,7 @@ export const UsageAccounts = ({ label }: { readonly label: string }): React.Reac
   const row = view._tag === 'ready' ? selectedRow({ state, view, selected }) : undefined
   return <section aria-label={`${label}: quota`} data-usage-accounts={view._tag} {...stylex.props(styles.region)}>
     {view._tag !== 'ready' ? <Note view={view} /> : <>
-      {view.old === undefined ? null : <p role="status" {...stylex.props(styles.meta, styles.inset, styles.held)}>Quota snapshot {view.old}: no account below is newer</p>}
+      {view.old === undefined ? null : <p role="status" {...stylex.props(styles.meta, styles.inset, styles.held)}>Quota snapshot {view.old}: account readings are muted</p>}
       {row === undefined ? null : <>
         <Detail detail={accountDetailView({ row, now })} muted={view.old !== undefined || row.retained} />
         <AccountHistory row={row} />
