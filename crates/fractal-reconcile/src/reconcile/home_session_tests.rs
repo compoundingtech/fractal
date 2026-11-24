@@ -911,12 +911,18 @@ async fn native_start_physical_workspace_freeze_and_preexisting_generation_are_n
         }
         authorization.seal().unwrap();
         let start = pair.home.enqueue(pair.draft(&format!("physical-{boundary}"), Operation::Start { authorization: Box::new(authorization) })).unwrap();
+        assert!(matches!(pair.seat.admit(&start).unwrap(), Admission::Accepted(_)));
+        let _entry = pair.seat.enter(&start.execution_id, |command, authority|
+            pair.driver.enter(command, authority));
+        let recovery = pair.seat.recoverable().unwrap().into_iter()
+            .find(|recovery| recovery.command.execution_id == start.execution_id).unwrap();
+        let outcome = pair.driver.recover(recovery).await.unwrap();
+        assert!(matches!(&outcome, Outcome::Refused { .. }), "{boundary}: {outcome:?}");
+        pair.seat.complete(&start.execution_id, outcome).unwrap();
         pair.connect();
         pair.settled(&start).await;
         pair.disconnect().await;
         assert!(!pair.root.path().join("forbidden").exists(), "{boundary}");
-        assert!(matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
-            ReceiptState::Settled { outcome: Outcome::Refused { .. } }), "{boundary}");
         assert!(pair.store.local_session(&start.binding.subject).unwrap().is_none(), "{boundary}");
     }
 }
