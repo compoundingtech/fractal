@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test-only large-value sites in observer reconcile input tests carry allow-for-now markers, and the large-value site inventory records them, so the genie freshness check passes on main again.",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "Test and inventory metadata only; no runtime or wire changes."},
+  "downtime": {"status": "none", "detail": "No migration or downtime is required."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Reverting restores the previous inventory."}
+}
