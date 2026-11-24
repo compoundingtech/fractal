@@ -900,6 +900,11 @@ impl ProgramEngine {
         let mut child = Command::new(&runtime)
             .arg(&script)
             .current_dir(&self.dir)
+            // This shared supervisor is not the invoking harness or any one
+            // attempt. Only dispatch supplies the effect's run identity.
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
+            .env_remove(crate::store::run_credentials::RUN_CREDENTIAL_ENV)
             .env("FRACTAL_PROGRAM_GROUPS", self.groups_dir())
             .env("FRACTAL_PROGRAM_BOOT_ID", boot_id()?)
             .env("FRACTAL_PROGRAM_WORKER_DEADLINE_MS", self.liveness.worker_deadline.as_millis().to_string())

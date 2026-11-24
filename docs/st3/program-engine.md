@@ -351,6 +351,11 @@ evaluations, not a timer poll. Already acknowledged live authority can mint offl
 hash secrets at rest, never journal them as graph claims, and pass only
 the local secret as `ST_RUN_CREDENTIAL` in the start message's `env`. The host spreads run env last,
 so an effect cannot replace it. See [light-node authorization](light-node.md#authorization-withdrawal-and-host-admission).
+The shared host is launched without inherited `ST_AGENT`, `FRACTAL_AGENT` or
+`ST_RUN_CREDENTIAL` markers from the process that started the daemon. Each effect
+receives only its own dispatch's authoritative run credential; an invoking
+harness's identity must not conflict with that run at the Unix ancestry guard.
+The guard still rejects an effect that explicitly supplies both identity kinds.
 
 **Binding.** The ancestry walk reads `ST_RUN_CREDENTIAL` from each ancestor's exec-time environment
 beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon

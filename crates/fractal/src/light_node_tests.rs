@@ -13,7 +13,10 @@ use tokio::sync::{Notify, oneshot};
 const PROGRAM: &str = r#"
 export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
-    const secret = (await ctx.spawn(['sh', '-c', 'printf %s "$ST_RUN_CREDENTIAL"'])).stdout
+    const identity = await ctx.spawn(['sh', '-c',
+      'test "${ST_AGENT+x}" != x && test "${FRACTAL_AGENT+x}" != x && test -n "$ST_RUN_CREDENTIAL" && printf %s "$ST_RUN_CREDENTIAL"'])
+    if (identity.code !== 0) throw new Error('program effect inherited a harness identity or lost its own run credential')
+    const secret = identity.stdout
     await ctx.record({ key: 'credential', status: 'completed', value: secret, ms: 0 })
     const script = `
       const claim = {subject:'custom/example/session-effect',kind:'custom.example.recorded',actor:null,
