@@ -12845,21 +12845,24 @@ agent "worker" {
     #[test]
     fn delay_restart_intensity_waits_for_the_sliding_window() {
         let store = Arc::new(Store::open_memory("node").unwrap());
-        let source = r#"
+        // Restart policy must not contend for the shared checkout's activation lease.
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(r#"
             version 2
 
-              agent "worker" {
+              agent "worker" {{
+                workspace "{}"
                 command "true"
                 restart "always"
-                restart {
+                restart {{
                   attempts 1
                   interval "60s"
                   mode "delay"
-                }
-              }
+                }}
+              }}
 
-        "#;
-        let intent = parse_intent(source, "node").unwrap();
+        "#, workspace.path().display());
+        let intent = parse_intent(&source, "node").unwrap();
         let mission = store
             .mission(
                 &intent,
@@ -12880,6 +12883,7 @@ agent "worker" {
             Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.starts.lock().unwrap().len(), 1);
         runtime.ptys.lock().unwrap().push(RuntimeObservation {
             runtime_id: "node.worker".into(),
             terminal: true,
@@ -12900,6 +12904,7 @@ agent "worker" {
                 .and_then(Value::as_str),
             Some("wait")
         );
+        assert!(store.member_reconcile_fault("agent/node.worker", None).unwrap().is_none());
     }
 
     #[test]
