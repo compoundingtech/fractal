@@ -12494,6 +12494,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut changes = self.event_notify.subscribe();
         // Look once at the start too, for what committed before this subscribed.
         changes.mark_changed();
+        // Scoped launch work also observes the shared pass feed. Pin our independent
+        // starting position before that work can advance its watermark past a mission
+        // input committed since the last pass.
+        {
+            let mut cursor = self.mission_reads_cursor.lock().unwrap_or_else(PoisonError::into_inner);
+            if cursor.is_none() {
+                *cursor = self.incremental.watermark();
+            }
+        }
         let mut continuations = 0;
         loop {
             if continuations == 0 {
