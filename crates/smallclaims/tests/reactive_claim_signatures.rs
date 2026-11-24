@@ -25,6 +25,8 @@ async fn changed_keys_do_no_idle_or_unrelated_candidate_work_and_replay_races() 
     let key = Arc::new(MemberKey::generate().unwrap().0);
     let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
     store.bind_fleet("reactive-fleet").unwrap();
+    // Admission claims do not establish trust: pending signatures require a pinned anchor.
+    store.pin_fleet_anchor(key.public()).unwrap();
     store.set_member_key(Some(key.clone())).unwrap();
     store.admit_fleet_anchor("reactive-fleet", key.public(), "listening").unwrap();
     // More than a page proves startup backfill drains without a later notification.
@@ -76,6 +78,7 @@ async fn changed_keys_do_no_idle_or_unrelated_candidate_work_and_replay_races() 
     };
     changes.borrow_and_update();
     store.receive_claim_member_signatures("peer", &[pending]).unwrap();
+    assert!(store.claim_signatures_ready().unwrap(), "the known anchor's signature must queue work");
     changes.changed().await.unwrap();
     let before = work_counts();
     drain(&store);
