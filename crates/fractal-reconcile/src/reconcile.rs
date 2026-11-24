@@ -4067,8 +4067,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             && !self.incremental.take_full_pass("member", now_ms());
         // Runtime changes must select a member before preparation, including execs and screens.
         if !scoped {
-        self.host_observations.observe_execs(
-            self.runtime.as_ref(), &self.incremental, !skip_members);
+        self.observe_host_execs();
         self.incremental.poll_values(
             "screen:",
             self.screen_poll_every_ms,
@@ -11980,13 +11979,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.store.supersede_mission_publications()?;
         self.incremental.observe(&self.store)?;
         // A gate runner's exit is not a claim: look again at the runners evaluations wait on.
-        self.incremental.observe_execs(|runtime_id| {
-            self.runtime
-                .observe_exec(runtime_id)
-                .ok()
-                .flatten()
-                .map(|observation| observation.status)
-        });
+        self.observe_host_execs();
         let mut ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
         for id in self.store.escalation_run_ids(&self.host)? {
             if !ids.contains(&id) { ids.push(id); }
