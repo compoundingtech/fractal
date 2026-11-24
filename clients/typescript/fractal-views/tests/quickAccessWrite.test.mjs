@@ -170,3 +170,44 @@ test('safe conflict after ambiguous replay retains GET-only validation when that
   assert.deepEqual(h.actions.map(a => a.type), ['arrangement.edit', 'arrangement.edit', 'arrangement.membership.edit']);
   assert.equal(h.actions[2].id, identity.id);
 });
+
+
+test('canonical SDK uncertainty blocks legacy shortcuts and create adoption through both applied locations', async () => {
+  const cases = [
+    [{ applied: 'unknown' }, {}],
+    [{ applied: 'unknown' }, { applied: 'none' }],
+    [{ applied: 'none' }, { applied: 'unknown' }],
+    [{ applied: 'future-state' }, { applied: 'none' }],
+    [{ applied: 'none' }, { applied: null }],
+  ];
+  for (const code of ['stale-fence', 'rate-limited', 'arrangement-exists']) for (const [outer, details] of cases) {
+    const h = setup(() => Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/unknown', code, message: 'unconfirmed', retryable: false, ...outer, details }, { status: 409 }));
+    const write = new QuickAccessWrite(h.client, selection, identity, operations, code === 'arrangement-exists' ? create : undefined);
+    await assert.rejects(write.send()); await assert.rejects(write.send());
+    assert.equal(write.unconfirmed, true); assert.equal(write.refused, false); assert.equal(write.needsAdoption, false);
+    assert.equal(h.reads.length, 0, 'uncertainty never enters adoption');
+    assert.deepEqual(h.actions[0], h.actions[1], 'explicit check retains the original request');
+  }
+});
+
+
+for (const invalidStage of ['arrangement.edit', 'arrangement.membership.edit']) {
+  test(`matching completed ID with wrong receipt kind stays unknown at ${invalidStage}`, async () => {
+    let wrong = false;
+    const h = setup(action => {
+      if (!wrong && action.type === invalidStage) {
+        wrong = true;
+        return Response.json({ api_version: 'st3.client.v0', request_id: 'request/wrong-kind', snapshot, value: { kind: 'not-action-result', action_id: action.id, status: 'completed' } });
+      }
+      return 'completed';
+    });
+    const write = new QuickAccessWrite(h.client, selection, identity, operations, create);
+    await assert.rejects(write.send(), /not confirmed/);
+    assert.equal(write.unconfirmed, true); assert.equal(write.refused, false);
+    const before = h.actions.length, original = structuredClone(h.actions.at(-1));
+    await write.send();
+    assert.deepEqual(h.actions[before], original);
+    assert.equal(write.unconfirmed, false);
+    assert.equal(h.actions.filter(a => a.type === 'arrangement.edit').length, invalidStage === 'arrangement.edit' ? 2 : 1);
+  });
+}
