@@ -1,15 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { once } from 'node:events'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import type { IncomingMessage, Server } from 'node:http'
+import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Tracer } from 'effect'
 import { createServer as createViteServer } from 'vite'
 import { createFractalWebServer } from './core.mts'
 import type { MiddlewareOptions } from './core.mts'
-import { usageHistoryPath, usageHistoryProducer, usageHistoryRoute } from './usageHistory.mts'
+import { createUsageHistoryRelay, usageHistoryPath, usageHistoryProducer, usageHistoryRoute } from './usageHistory.mts'
 import { webfractalGateway } from '../scripts/vite-gateway.mjs'
 
 // Assembled so the source itself never carries a literal bearer credential pair.
@@ -50,7 +50,8 @@ const portOf = (server: Server): number => {
 const upstreams = async () => {
   const root = await mkdtemp(join(tmpdir(), 'usage-history-test-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
-  const state = { grantStatus: 200, granted: true, quotaStatus: 200, quotaBody: accountsBody, historyStatus: 200, historyBody }
+  const state = { grantStatus: 200, granted: true, quotaStatus: 200, quotaBody: accountsBody, historyStatus: 200, historyBody, historyMode: 'answer' as 'answer' | 'trickle' | 'hold' }
+  const held: ServerResponse[] = []
   const grants: Received[] = []
   const forwarded: Received[] = []
   const producerReads: Received[] = []
@@ -71,13 +72,34 @@ const upstreams = async () => {
   const producer = createServer((req, res) => {
     producerReads.push(received(req))
     const history = req.url?.startsWith('/api/v1/lens/') === true
+    if (history && state.historyMode === 'hold') { held.push(res); return }
+    if (history && state.historyMode === 'trickle') {
+      // Real time on purpose: the relay's elapsed deadline must fire while these bytes keep the socket active.
+      res.writeHead(200, { 'content-type': 'application/json' })
+      const trickle = setInterval(() => res.write(' '), 20)
+      res.once('close', () => clearInterval(trickle))
+      return
+    }
     res.writeHead(history ? state.historyStatus : state.quotaStatus, { 'content-type': 'application/json' })
     res.end(history ? state.historyBody : state.quotaBody)
   })
   await listen(producer)
   cleanups.push(() => close(producer))
-  return { root, state, grants, forwarded, producerReads, socketPath, producer, producerUrl: `http://127.0.0.1:${portOf(producer)}` }
+  return { root, state, grants, forwarded, producerReads, held, socketPath, producer, producerUrl: `http://127.0.0.1:${portOf(producer)}` }
 }
+
+/** The relay alone on a plain listener, for producer-read limits that need a short deadline. */
+const directRelay = async (up: { readonly producerUrl: string; readonly socketPath: string }, producerDeadlineMs?: number) => {
+  const producer = usageHistoryProducer(up.producerUrl)
+  if (producer === undefined) throw new TypeError('Missing fixture producer')
+  const relay = createUsageHistoryRelay({ producer, producerDeadlineMs,
+    gateway: { socketPath: up.socketPath, host: 'paired-gateway', authorization: publisherAuthorization, timeoutMs: 1000 } })
+  const server = createServer((req, res) => { void relay.handle(req, res, false).catch(() => res.destroy()) })
+  await listen(server)
+  cleanups.push(() => close(server))
+  return `http://127.0.0.1:${portOf(server)}`
+}
+const historyReads = (reads: readonly Received[]) => reads.filter((read) => read.path?.startsWith('/api/v1/lens/') === true)
 
 const fixture = async ({ enabled = true, admit = () => true, pairing = false }: {
   readonly enabled?: boolean
@@ -114,10 +136,52 @@ describe('usageHistoryProducer', () => {
     expect(usageHistoryProducer('http://127.0.0.1:4100')).toEqual({ hostname: '127.0.0.1', port: 4100 })
     expect(usageHistoryProducer('http://127.0.0.1:4100/')).toEqual({ hostname: '127.0.0.1', port: 4100 })
     expect(usageHistoryProducer('http://[::1]:4100')).toEqual({ hostname: '::1', port: 4100 })
+    expect(usageHistoryProducer('http://127.0.0.1:80')).toEqual({ hostname: '127.0.0.1', port: 80 })
+    expect(usageHistoryProducer('http://[::1]:80/')).toEqual({ hostname: '::1', port: 80 })
     for (const value of ['https://127.0.0.1:4100', 'http://localhost:4100', 'http://192.0.2.10:4100', 'http://hub.example.test:4100',
       'http://127.0.0.1', 'http://127.0.0.1:4100/api', 'http://127.0.0.1:4100/?x=1', 'http://user:pw@127.0.0.1:4100', 'not a url']) {
       expect(() => usageHistoryProducer(value), value).toThrow(/WF_USAGE_HISTORY_URL/)
     }
+    for (const value of ['http://[::1]', 'http://[::1]/', 'http://127.0.0.1/', 'http://127.0.0.1:0', 'http://[::1]:0', 'http://127.0.0.1:00']) {
+      expect(() => usageHistoryProducer(value), value).toThrow(/WF_USAGE_HISTORY_URL/)
+    }
+  })
+})
+
+describe('producer read limits', () => {
+  it('ends a producer read at its elapsed deadline even while bytes keep arriving, and caches nothing', async () => {
+    const up = await upstreams()
+    const base = await directRelay(up, 200)
+    up.state.historyMode = 'trickle'
+    const started = performance.now()
+    expect((await expectFailure(await fetch(base + historyUrl('vendor/beta')), 502, 'usage-unavailable')).reason).toBe('deadline')
+    expect(performance.now() - started).toBeLessThan(2000)
+    up.state.historyMode = 'answer'
+    const retry = await fetch(base + historyUrl('vendor/beta'))
+    expect(retry.status).toBe(200)
+    expect(await retry.text()).toBe(historyBody)
+    expect(historyReads(up.producerReads)).toHaveLength(2)
+  })
+
+  it('refuses a 65th distinct in-flight history read with 503 and no producer read', async () => {
+    const up = await upstreams()
+    const accounts = Array.from({ length: 65 }, (_, index) => `vendor/a${index}`)
+    up.state.quotaBody = JSON.stringify({ schemaVersion: 3, accounts: accounts.map((ledgerAccountId) => ({ id: ledgerAccountId, ledgerAccountId })) })
+    up.state.historyMode = 'hold'
+    const base = await directRelay(up)
+    const inFlight = accounts.slice(0, 64).map((account) => fetch(base + historyUrl(account)))
+    await vi.waitFor(() => expect(up.held).toHaveLength(64), { timeout: 5000, interval: 20 })
+    const busy = await expectFailure(await fetch(base + historyUrl('vendor/a64')), 503, 'usage-busy')
+    expect(busy.reason).toBe('too many producer reads in flight')
+    expect(historyReads(up.producerReads)).toHaveLength(64)
+    for (const res of up.held) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(historyBody) }
+    for (const response of await Promise.all(inFlight)) {
+      expect(response.status).toBe(200)
+      await response.text()
+    }
+    up.state.historyMode = 'answer'
+    expect((await fetch(base + historyUrl('vendor/a64'))).status).toBe(200)
+    expect(historyReads(up.producerReads)).toHaveLength(65)
   })
 })
 
