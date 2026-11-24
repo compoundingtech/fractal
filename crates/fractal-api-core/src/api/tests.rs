@@ -46,6 +46,8 @@ async fn simulated_mail_retirement_advances_the_signed_claim_forget_clock() {
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap().id);
     }
+    store.seal_local_batches().unwrap();
+    assert!(ids.iter().all(|id| store.claim_signature(id).unwrap().is_some()));
     let later = u64::try_from(written).unwrap() + FORGET_SIGNED_AFTER_MS + 1;
     let step = store.retire_closed_mail_step(later).unwrap();
     assert_eq!(step.threads, 0, "the write-clock backstop must still protect fresh signatures");
