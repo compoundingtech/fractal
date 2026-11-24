@@ -2470,6 +2470,7 @@ pub mod work {
         }
     }
 
+    #[cfg(test)]
     /// Count `connection`'s statements. SQLite reports each one when it starts and when it
     /// finishes, also when a trigger or a foreign-key check did the work inside it.
     pub(super) fn count(connection: &Connection) {
