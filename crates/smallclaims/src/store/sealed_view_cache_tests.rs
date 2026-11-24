@@ -325,7 +325,13 @@ fn sealed_view_cache_local_claim_invalidates_but_is_invisible_until_sealed() {
 
 #[test]
 fn sealed_view_cache_invalidates_after_actual_checkpoint_trim() {
-    let (store, _) = fixture(1);
+    use crate::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let _restore = ClockContext::capture().enter();
+    let written_at = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    set_thread_clock(Some(written_at));
+    let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+    store.set_write_clock_at(written_at).unwrap();
+    configure(&store, 1);
     // Plain has no domain projections; sealed-set capture consults these retention roots.
     store
         .connection
@@ -338,7 +344,10 @@ fn sealed_view_cache_invalidates_after_actual_checkpoint_trim() {
         )
         .unwrap();
     store.fleet_view_sealed().unwrap();
-    let cut = now_ms() + 60_000;
+    // Both the trim planner and the deletion guard must see the signed batch age.
+    let cut = written_at + u128::from(FORGET_SIGNED_AFTER_MS) + 60_000;
+    set_thread_clock(Some(cut));
+    store.set_write_clock_at(cut).unwrap();
     let capture = store.checkpoint_sealed_set(cut).unwrap();
     let dropped = capture
         .claims
