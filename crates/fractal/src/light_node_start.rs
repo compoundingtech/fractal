@@ -228,7 +228,7 @@ mod tests {
         let command = queue(&controls, &binding).await;
         let Operation::Start { authorization } = &command.operation else { panic!("expected Start"); };
         assert!(authorization.continuation.is_none());
-        store.append_client_claim(&fractal_daemon::model::ClaimInput {
+        store.append_claim(&fractal_daemon::model::ClaimInput {
             subject: binding.subject.clone(), kind: "harness.session-file".into(),
             actor: Some(binding.subject.clone()),
             fields: BTreeMap::from([("harness".into(), Value::from("codex")),
