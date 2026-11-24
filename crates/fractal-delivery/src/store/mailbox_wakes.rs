@@ -101,6 +101,7 @@ pub trait MailboxWakesStore {
         ) -> Subscription;
     /// Local telemetry uses the existing doctor check shape; never claims or replicated state.
     fn mailbox_wake_health(&self) -> DoctorCheck;
+    fn mailbox_stream_work(&self) -> serde_json::Value;
     fn mailbox_wake_cursor(&self) -> Result<WakeCursor>;
     fn mailbox_wake_batch(
             &self,
@@ -162,6 +163,13 @@ impl MailboxWakesStore for Store {
         }
     }
 
+    fn mailbox_stream_work(&self) -> serde_json::Value {
+        self.fractal.mailbox_wakes.get().map_or_else(
+            || serde_json::json!({"open_streams": 0, "streams": []}),
+            |wakes| wakes.work_snapshot(),
+        )
+    }
+
     fn mailbox_wake_cursor(&self) -> Result<WakeCursor> {
         let connection = self.readers.get();
         let (index, local) = connection
@@ -207,7 +215,7 @@ impl MailboxWakesStore for Store {
             )?.query_map([&subject], |r| r.get::<_, Option<String>>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for recipient in recipients.into_iter().flatten() {
-                dependencies.insert(Dependency::Recipient(normalize_message_party(&recipient)));
+                dependencies.insert(Dependency::Message(subject.clone(), normalize_message_party(&recipient)));
             }
         }
         let rows = connection
@@ -228,7 +236,7 @@ impl MailboxWakesStore for Store {
         next.2 = stream;
         for (subject, recipient) in changed {
             if !recipient.is_empty() {
-                dependencies.insert(Dependency::Recipient(normalize_message_party(&recipient)));
+                dependencies.insert(Dependency::Message(subject.clone(), normalize_message_party(&recipient)));
             }
             dependencies.insert(Dependency::Subject(subject));
         }
@@ -237,7 +245,7 @@ impl MailboxWakesStore for Store {
         let marks_full = marks.len() == 1024;
         for (id, subject, consumer) in marks {
             next.3 = id;
-            dependencies.insert(Dependency::Recipient(normalize_message_party(&consumer)));
+            dependencies.insert(Dependency::Message(subject.clone(), normalize_message_party(&consumer)));
             dependencies.insert(Dependency::Subject(subject));
         }
         Ok((next, dependencies, graph_full || local_full || stream_full || marks_full))
@@ -251,6 +259,34 @@ mod tests {
     use crate::mailbox::Fence;
     use fractal_store::store::mailbox_wakes_tests_shared_delivery::*;
     use fractal_store::store::mailbox_wakes_tests_shared_delivery::{sent};
+
+    #[test]
+    fn semantic_batches_publish_after_all_identities_and_invalidations_are_staged() {
+        let wakes = Arc::new(Wakes::default());
+        let fence = Fence::new("agent/recipient", "boot", "delivery");
+        let mut subscription = wakes.subscribe(&fence);
+        let first = Dependency::Message("message/first".into(), fence.subject.clone());
+        let second = std::iter::once_with(|| {
+            // This runs during dispatch, after staging the first identity but before
+            // staging the owner invalidation. Publishing now would strand the latter.
+            assert!(!subscription.changed.has_changed().unwrap());
+            Dependency::Owner(fence.subject.clone(), fence.component.clone())
+        });
+        wakes.notify(std::iter::once(first).chain(second));
+        assert!(subscription.changed.has_changed().unwrap());
+        assert!(subscription.take_messages().is_none(), "owner changes require durable reconciliation");
+        wakes.notify([
+            Dependency::Message("message/first".into(), fence.subject.clone()),
+            Dependency::Message("message/second".into(), fence.subject.clone()),
+            Dependency::Message("message/first".into(), fence.subject.clone()),
+        ]);
+        assert_eq!(subscription.take_messages().unwrap(),
+            BTreeSet::from(["message/first".into(), "message/second".into()]));
+        assert_eq!(subscription.work.notifications.load(Ordering::Relaxed), 2);
+        wakes.notify((0..4_097).map(|index|
+            Dependency::Message(format!("message/{index}"), fence.subject.clone())));
+        assert!(subscription.take_messages().is_none(), "overflow requires durable reconciliation");
+    }
 
     #[tokio::test]
     async fn unrelated_writes_do_not_wake_a_stream_and_dependencies_are_released() {
@@ -380,7 +416,7 @@ mod tests {
         store.apply(&crate::graph::parse_intent(
             "version 2\nmessage \"declared\" { from \"person/fixture\"; to \"quartz\"; content \"A note.\"; }\n", "fixture").unwrap(), &BTreeMap::from([("message/declared".into(), vec![])]), "fixture").unwrap();
         let (next, deps, _) = store.mailbox_wake_batch(cursor).unwrap();
-        assert!(deps.contains(&Dependency::Recipient("agent/quartz".into())));
+        assert!(deps.contains(&Dependency::Message("message/declared".into(), "agent/quartz".into())));
         store
             .append_claim(&ClaimInput {
                 subject: "message/declared".into(),
@@ -394,7 +430,7 @@ mod tests {
             .unwrap();
         let (next, deps, _) = store.mailbox_wake_batch(next).unwrap();
         assert!(deps.contains(&Dependency::Subject("message/declared".into())));
-        assert!(deps.contains(&Dependency::Recipient("agent/quartz".into())));
+        assert!(deps.contains(&Dependency::Message("message/declared".into(), "agent/quartz".into())));
         store
             .append_claim(&ClaimInput {
                 subject: "agent/quartz".into(),
@@ -418,7 +454,7 @@ mod tests {
         assert_eq!(after.3, next.3 + 1);
         assert!(!full);
         assert!(deps.contains(&Dependency::Subject("message/declared".into())));
-        assert!(deps.contains(&Dependency::Recipient("agent/quartz".into())));
+        assert!(deps.contains(&Dependency::Message("message/declared".into(), "agent/quartz".into())));
         let (_, deps, _) = store.mailbox_wake_batch(after).unwrap();
         assert!(deps.is_empty(), "{deps:?}");
     }
