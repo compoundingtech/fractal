@@ -142,6 +142,53 @@ fn invalid_hysteresis_and_duplicate_rules_are_refused() {
 }
 
 #[test]
+fn custom_exclusions_warn_about_missing_seat_isolation_without_refusing_config() {
+    use tracing::{Event, Metadata, Subscriber, field::{Field, Visit}, span::{Attributes, Id, Record}};
+
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<std::sync::Mutex<Vec<String>>>);
+    impl Subscriber for Warnings {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id { Id::from_u64(1) }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            struct Message(String);
+            impl Visit for Message {
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    if field.name() == "message" { self.0 = format!("{value:?}"); }
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+    }
+
+    let warnings = Warnings::default();
+    tracing::subscriber::with_default(warnings.clone(), || {
+        assert!(Policy::default().validate().is_ok());
+        assert!(warnings.0.lock().unwrap().is_empty());
+        let mut policy: Policy = serde_json::from_str(
+            "{\"excludedCgroups\":[\"app-lanes.slice\",\"gate.slice\"]}").unwrap();
+        assert!(policy.validate().is_ok(), "existing explicit configurations remain valid");
+        let messages = warnings.0.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("excluded_cgroups omits app-agent-seats.slice"));
+        drop(messages);
+        warnings.0.lock().unwrap().clear();
+        policy.excluded_cgroups.push(
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/app-agent.slice/app-agent-seats.slice".into());
+        assert!(policy.validate().is_ok());
+        assert!(warnings.0.lock().unwrap().is_empty(), "absolute seat exclusions also isolate pressure");
+    });
+}
+
+#[test]
 fn kernel_decimal_pressure_parser_preserves_threshold_precision() {
     let line = "full avg10=4.07 avg60=3.14 avg300=1.28 total=4654995392";
     assert_eq!(parse_millipercent(line, Window::Avg60).unwrap(), 3140);

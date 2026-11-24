@@ -51,6 +51,9 @@ pub struct Policy {
     /// user-manager root; absolute paths are exact and mount-relative.
     pub job_parent_cgroups: Vec<PathBuf>,
     /// Additional excluded subtrees, resolved exactly like job parents.
+    /// Explicit lists replace the defaults: include `app-agent-seats.slice` (or
+    /// its absolute cgroup path) to isolate self-throttled seats. Validation
+    /// warns, but permits existing configurations, when that entry is omitted.
     pub excluded_cgroups: Vec<PathBuf>,
 }
 
@@ -131,6 +134,11 @@ impl Policy {
             ensure!(!self.rules[..index].iter().any(|other|
                 other.signal == rule.signal && other.window == rule.window),
                 "duplicate PSI signal/window rule");
+        }
+        if !self.excluded_cgroups.iter().any(|path|
+            path.file_name().is_some_and(|name| name == "app-agent-seats.slice"))
+        {
+            tracing::warn!("excluded_cgroups omits app-agent-seats.slice; include the seat subtree when overriding defaults to keep self-throttled seats out of host admission pressure");
         }
         Ok(())
     }
