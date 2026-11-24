@@ -879,14 +879,9 @@ fn fleet_size_full_inventory_fallback_cost() {
     let compact_ms = started.elapsed().as_secs_f64() * 1000.;
     assert_eq!(compact.inventory.envelopes.len(), 512);
     let started = std::time::Instant::now();
+    // An explicit full-inventory request: a bare different digest now gets range proofs.
     let full = store
-        .export_replication_exchange(
-            "fleet/example",
-            &ReplicationInventory {
-                digest: "different".into(),
-                ..Default::default()
-            },
-        )
+        .export_replication_exchange("fleet/example", &ReplicationInventory::default())
         .unwrap();
     let export_ms = started.elapsed().as_secs_f64() * 1000.;
     let started = std::time::Instant::now();
