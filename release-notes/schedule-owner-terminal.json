@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stop run-owned schedules during cleanup and fence terminal schedule owners",
+  "replay": {"status": "none", "detail": "No projection or replay changes. Stops and diagnostics use existing claim kinds."},
+  "schema": {"status": "none", "detail": "No storage or wire schema changes. Cancellation and reconciliation diagnostics add schedule-owner-run-terminal and schedule-owner-step-terminal codes."},
+  "rules": {"status": "changed", "detail": "Cleanup stops owned intake by exact subject identity before waiting on unresolved effects. Schedule arming, timer dispatch and queued-work admission reject terminal run or step owners independently of cleanup. A reconciliation pass durably stops leftover schedules whose owners are already terminal."},
+  "compatibility": {"status": "changed", "detail": "Run-owned schedules no longer outlive terminal runs; step-owned schedules no longer outlive completed, failed, cancelled or skipped steps. Existing leftovers are affected without a migration. Schedules intended to survive their creator must be declared independently without run or step ownership. Unowned schedules and already-started scheduled mission runs are unchanged."},
+  "downtime": {"status": "none", "detail": "No data migration or downtime is required; the lifetime fence takes effect when the updated daemon runs."},
+  "manual": {"status": "changed", "detail": "Review schedules intentionally created inside short-lived steps or runs. Declare long-lived schedules independently rather than relying on a terminal owner. During a mixed-version rollout, older daemons do not enforce the new dispatch fence."},
+  "recovery": {"status": "changed", "detail": "Durable stop declarations survive daemon restart and binary rollback. To restore an intentionally long-lived schedule, explicitly redeclare it independently; rolling back alone does not undo stops."}
+}
