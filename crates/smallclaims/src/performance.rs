@@ -14,6 +14,8 @@ struct Sample {
     total_us: u64,
     max_us: u64,
     cpu_us: u64,
+    sqlite_cache_miss_bytes: u64,
+    mmap_major_faults: Option<u64>,
 }
 #[derive(Default)]
 struct Bucket {
@@ -105,13 +107,14 @@ impl Meter {
         };
         map.entry(label).or_default()
     }
-    fn record(&mut self, now: Instant, table: Table, label: String, duration: Duration, cpu: u64) {
+    fn record(&mut self, now: Instant, table: Table, label: String, duration: Duration, cpu: u64) -> &mut Sample {
         let entry = self.sample(now, table, label);
         let us = duration.as_micros().min(u64::MAX as u128) as u64;
         entry.count += 1;
         entry.total_us = entry.total_us.saturating_add(us);
         entry.max_us = entry.max_us.max(us);
         entry.cpu_us = entry.cpu_us.saturating_add(cpu / 1000);
+        entry
     }
     /// Record one request under its kind and, when known, the client that sent it.
     fn record_request(
@@ -136,6 +139,10 @@ impl Meter {
                 entry.count += sample.count;
                 entry.total_us += sample.total_us;
                 entry.cpu_us += sample.cpu_us;
+                entry.sqlite_cache_miss_bytes = entry.sqlite_cache_miss_bytes.saturating_add(sample.sqlite_cache_miss_bytes);
+                if let Some(faults) = sample.mmap_major_faults {
+                    entry.mmap_major_faults = Some(entry.mmap_major_faults.unwrap_or(0).saturating_add(faults));
+                }
                 entry.max_us = entry.max_us.max(sample.max_us);
             }
         }
@@ -147,7 +154,9 @@ impl Meter {
             json!({"count":s.count,
                 "total_ms":s.total_us as f64 / 1000.0, "max_ms":s.max_us as f64 / 1000.0,
                 "mean_ms":s.total_us as f64 / s.count.max(1) as f64 / 1000.0,
-                "cpu_ms":s.cpu_us as f64 / 1000.0})
+                "cpu_ms":s.cpu_us as f64 / 1000.0,
+                "sqlite_cache_miss_bytes":s.sqlite_cache_miss_bytes,
+                "mmap_major_faults":s.mmap_major_faults})
         };
         let by_time = |table: Table| {
             let mut totals = self.totals(table);
@@ -217,6 +226,8 @@ impl Meter {
             "reconciler_wakes":wakes,"incremental_corrections":corrections,"incremental_evaluations":evaluations,
             "wal_escalations":crate::windows::wal::escalations(),
             "claim_signatures":crate::store::member_signatures::work_counts(),
+            "sqlite_cache_miss_bytes_note":"SQLite cache misses multiplied by the connection's main page size; includes OS page cache hits, excludes SQLite cache hits, mmap reads and filesystem read amplification. Nested scopes follow CPU attribution.",
+            "mmap_major_faults_note":"Linux thread major faults over synchronous CPU scopes; includes non-store faults, excludes minor faults and OS-cache hits. A count, not bytes: readahead varies. Null when unavailable or not sampled (including query rows).",
             "query_time_note":"Statement wall time includes row processing; concurrent times overlap."})
     }
 }
@@ -283,14 +294,15 @@ pub fn normalize_query(sql: &str) -> String {
     query_kind(sql)
 }
 pub fn record_query(sql: &str, duration: Duration) {
+    record_query_with_reads(sql, duration, 0);
+}
+
+pub(crate) fn record_query_with_reads(sql: &str, duration: Duration, bytes: u64) {
     let kind = query_kind(sql);
-    METER.get_or_init(Mutex::default).lock().unwrap().record(
-        Instant::now(),
-        Table::Queries,
-        kind,
-        duration,
-        0,
-    );
+    let mut meter = METER.get_or_init(Mutex::default).lock().unwrap();
+    let now = Instant::now();
+    let entry = meter.record(now, Table::Queries, kind, duration, 0);
+    entry.sqlite_cache_miss_bytes = entry.sqlite_cache_miss_bytes.saturating_add(bytes);
 }
 /// Record a finished request under its route and the client that sent it, when known.
 pub fn record_request(kind: &str, client: Option<&str>, duration: Duration) {
@@ -405,6 +417,12 @@ impl Charged {
     }
 }
 thread_local! {static CURRENT: RefCell<Option<Charged>> = const {RefCell::new(None)};}
+thread_local! {static SQLITE_READ_BYTES: std::cell::Cell<u64> = const {std::cell::Cell::new(0)};}
+
+/// Called synchronously by SQLite's trace dispatcher, without allocation or locking.
+pub(crate) fn sqlite_reads(bytes: u64) {
+    SQLITE_READ_BYTES.with(|total| total.set(total.get().wrapping_add(bytes)));
+}
 pub fn current() -> Option<Charged> {
     CURRENT.with(|label| label.borrow().clone())
 }
@@ -430,24 +448,38 @@ fn enter_cpu(kind: Option<&str>, client: Option<&str>) -> Option<Charge> {
         client: client.map(Into::into),
     };
     CURRENT.with(|label| *label.borrow_mut() = Some(charged.clone()));
-    Some(Charge { charged, started: thread_cpu_ns() })
+    Some(Charge {
+        charged,
+        started: thread_cpu_ns(),
+        reads_started: SQLITE_READ_BYTES.with(|total| total.get()),
+        faults_started: thread_major_faults(),
+    })
 }
 
 struct Charge {
     charged: Charged,
     started: u64,
+    reads_started: u64,
+    faults_started: Option<u64>,
 }
 
 impl Drop for Charge {
     fn drop(&mut self) {
         CURRENT.with(|label| label.borrow_mut().take());
         let cpu_us = thread_cpu_ns().saturating_sub(self.started) / 1000;
+        let read_bytes = SQLITE_READ_BYTES.with(|total| total.get()).wrapping_sub(self.reads_started);
+        let faults = self.faults_started.zip(thread_major_faults())
+            .map(|(before, after)| after.saturating_sub(before));
         let now = Instant::now();
         let Charged { kind, client } = &self.charged;
         let mut meter = METER.get_or_init(Mutex::default).lock().unwrap();
         let mut charge = |table, label| {
             let entry = meter.sample(now, table, label);
             entry.cpu_us = entry.cpu_us.saturating_add(cpu_us);
+            entry.sqlite_cache_miss_bytes = entry.sqlite_cache_miss_bytes.saturating_add(read_bytes);
+            if let Some(faults) = faults {
+                entry.mmap_major_faults = Some(entry.mmap_major_faults.unwrap_or(0).saturating_add(faults));
+            }
         };
         charge(Table::Requests, kind.clone());
         if let Some(client) = client {
@@ -471,9 +503,143 @@ fn thread_cpu_ns() -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn thread_major_faults() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage initializes the output on success; RUSAGE_THREAD is this
+    // synchronous scope's thread, not the whole process or an async task.
+    if unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) } == 0 {
+        // SAFETY: the successful call initialized usage.
+        Some(unsafe { usage.assume_init() }.ru_majflt.max(0) as u64)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_major_faults() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn page_read_fixture(page_size: u64) -> (tempfile::TempDir, rusqlite::Connection) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pages.sqlite3");
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.pragma_update(None, "page_size", page_size).unwrap();
+            connection.execute_batch(
+                "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB);
+                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<128)
+                 INSERT INTO claims(payload) SELECT zeroblob(2048) FROM n;"
+            ).unwrap();
+        }
+        let mut connection = rusqlite::Connection::open(path).unwrap();
+        connection.pragma_update(None, "mmap_size", 0).unwrap();
+        connection.pragma_update(None, "cache_size", 1024).unwrap();
+        crate::sqlite::observe(&mut connection);
+        (directory, connection)
+    }
+
+    fn assert_page_reads(connection: &rusqlite::Connection, label: &str, page_size: u64) {
+        let scan = || {
+            with_cpu(Some(label), Some(label), || {
+                let bytes: u64 = connection.query_row(
+                    "SELECT SUM(length(payload)) FROM claims", [], |row| row.get(0)
+                ).unwrap();
+                assert_eq!(bytes, 128 * 2048);
+            });
+        };
+        scan();
+        let sample = |table| {
+            METER.get().unwrap().lock().unwrap().totals(table)
+                .into_iter().find(|(kind, _)| *kind == label).unwrap().1
+        };
+        let cold = sample(Table::Requests).sqlite_cache_miss_bytes;
+        assert!(cold > 0);
+        assert_eq!(cold % page_size, 0);
+        assert_eq!(sample(Table::Clients).sqlite_cache_miss_bytes, cold);
+        scan();
+        assert_eq!(sample(Table::Requests).sqlite_cache_miss_bytes, cold,
+            "a SQLite cache hit must not count as a page read");
+
+        // Exercise the exact snapshot/serialization path without competing with other
+        // tests for the process-wide report's top twenty rows.
+        let mut meter = Meter::default();
+        *meter.sample(Instant::now(), Table::Requests, label.into()) = sample(Table::Requests);
+        let report: Value = serde_json::from_str(&serde_json::to_string(&meter.snapshot(Instant::now())).unwrap()).unwrap();
+        assert_eq!(report["requests"][0]["sqlite_cache_miss_bytes"], cold);
+        assert!(report["sqlite_cache_miss_bytes_note"].as_str().unwrap().contains("mmap"));
+        #[cfg(target_os = "linux")]
+        assert!(report["requests"][0]["mmap_major_faults"].is_u64());
+        #[cfg(not(target_os = "linux"))]
+        assert!(report["requests"][0]["mmap_major_faults"].is_null());
+    }
+
+    #[test]
+    fn performance_aggregates_major_fault_counts_and_preserves_unavailable() {
+        let mut meter = Meter::default();
+        let now = Instant::now();
+        meter.sample(now, Table::Requests, "faults".into()).mmap_major_faults = Some(2);
+        meter.sample(now + Duration::from_secs(11), Table::Requests, "faults".into()).mmap_major_faults = Some(3);
+        meter.sample(now + Duration::from_secs(11), Table::Requests, "unavailable".into());
+        let report = meter.snapshot(now + Duration::from_secs(12));
+        assert_eq!(report["requests"][0]["mmap_major_faults"], 5);
+        assert!(report["requests"][1]["mmap_major_faults"].is_null());
+    }
+
+    #[test]
+    fn performance_charges_batched_page_reads_to_the_submitting_route() {
+        let (_directory, connection) = page_read_fixture(4096);
+        let writer = crate::sqlite::WriterConnection::new(
+            connection, std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))
+        );
+        let route = "test/batched-page-reads";
+        with_cpu(Some(route), Some(route), || {
+            writer.batched(|transaction| -> rusqlite::Result<()> {
+                assert_eq!(current().unwrap().kind(), route);
+                let bytes: u64 = transaction.query_row(
+                    "SELECT SUM(length(payload)) FROM claims", [], |row| row.get(0)
+                )?;
+                assert_eq!(bytes, 128 * 2048);
+                transaction.execute("INSERT INTO claims(payload) VALUES (zeroblob(2048))", [])?;
+                Ok(())
+            }).unwrap().unwrap();
+        });
+        let meter = METER.get().unwrap().lock().unwrap();
+        let reads = |table| meter.totals(table).into_iter()
+            .find(|(label, _)| *label == route).unwrap().1.sqlite_cache_miss_bytes;
+        assert!(reads(Table::Requests) > 0, "writer-thread reads must reach the caller's route");
+        assert_eq!(reads(Table::Requests), reads(Table::Clients));
+        assert!(meter.totals(Table::Requests).iter().any(|(label, _)| *label == "writer.batch.commit"));
+        drop(meter);
+        writer.batched(|_| -> rusqlite::Result<()> {
+            assert_eq!(current().unwrap().kind(), "writer.batch.job",
+                "the previous caller's charge must not leak into the next job");
+            Ok(())
+        }).unwrap().unwrap();
+    }
+
+    #[test]
+    fn performance_counts_sqlite_page_reads_and_serializes_them() {
+        for (page_size, label) in [(1024, "test/page-reads-1k"), (8192, "test/page-reads-8k")] {
+            let (_directory, connection) = page_read_fixture(page_size);
+            assert_page_reads(&connection, label, page_size);
+        }
+    }
+
+    #[test]
+    fn performance_counts_page_reads_with_native_writer_dispatcher() {
+        let (_directory, connection) = page_read_fixture(4096);
+        let writer = crate::sqlite::WriterConnection::new(
+            connection, std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))
+        );
+        let connection = writer.write();
+        assert_page_reads(&connection, "test/writer-page-reads", 4096);
+    }
+
     #[test]
     fn performance_window_is_bounded_ranked_and_expires() {
         let mut meter = Meter::default();
