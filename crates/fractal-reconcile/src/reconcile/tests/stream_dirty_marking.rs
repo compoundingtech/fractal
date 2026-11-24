@@ -40,4 +40,16 @@ fn a_stream_message_marks_the_items_reading_its_mailbox_without_a_full_pass() {
     reconciler.incremental.evaluated(ITEM, reads(), None);
     reconciler.observe_stream().unwrap();
     assert!(!reconciler.incremental.needs(ITEM, now_ms()));
+    // Local receipt custody uses the durable lifecycle API, not replicated claims.
+    // A new receipt invalidates once; replaying its stable identity is no change.
+    let receipt = || crate::store::messages_shard::record_admitted_lifecycle(
+        &store, "message/stream-dirty", "message.read", Some(to), &BTreeMap::new());
+    assert!(receipt().unwrap());
+    reconciler.observe_stream().unwrap();
+    assert!(reconciler.incremental.needs(ITEM, now_ms()));
+    reconciler.incremental.evaluated(ITEM, reads(), None);
+    assert!(!receipt().unwrap());
+    reconciler.observe_stream().unwrap();
+    assert!(!reconciler.incremental.needs(ITEM, now_ms()),
+        "a duplicate durable receipt causes zero downstream evaluations");
 }
