@@ -57,6 +57,12 @@ fn every_persistent_table_has_a_projection_scope() {
     // tables must be classified; shared tables automatically join the row/digest comparison.
     let exceptions = [
         "meta",
+        // Host-local physical custody and home-owned authenticated request admission
+        // are authoritative fences, not replicated claim-derived projections.
+        "local_session_custody",
+        "home_run_authority_v1",
+        "home_run_epoch_fences_v1",
+        "home_run_request_receipts_v1",
         "batches",
         "claims",
         "idempotency",

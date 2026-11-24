@@ -26,7 +26,16 @@ fn execute_with_turn_hook<T: Send, E: From<FractalError> + Send>(
     mut after_turn: impl FnMut(),
 ) -> std::result::Result<T, E> {
     let deadline = budget.map(|budget| Instant::now() + budget);
-    let mut action = Some(action);
+    // `batched` executes on the SQLite writer thread, not the authenticated submitter.
+    // Carry scope with the action itself so both that path and the post-drain direct writer
+    // check the same captured identity at the actual effect admission, with unwind-safe restore.
+    let binding = run_credentials::request_context::capture();
+    let mut action = Some(move |transaction: &Transaction<'_>| {
+        run_credentials::request_context::with(binding, || {
+            run_credentials::request_context::admit_tx(transaction).map_err(E::from)?;
+            action(transaction)
+        })
+    });
     // The savepoint is gone, and the batched writer has returned, before we take
     // the projection gate. No callback or persisted request preparation runs on NeedsDrain.
     // The batched attempt gets its own stage scope, so its stages never enter a caller's scope

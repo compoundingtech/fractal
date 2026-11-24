@@ -75,6 +75,10 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [3, 0, 0, 0, 0],
         },
         Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install the selected home's run-authority, monotonic epoch fence and request-receipt schema before returning the store; these constructor-only acquisitions do not admit an execution or apply a request effect",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
             reason: "finish_open, open_with_ivm_views and open_shared_memory install host-local hold schema at startup; no run action decision",
             counts: [3, 0, 0, 0, 0],
         },
