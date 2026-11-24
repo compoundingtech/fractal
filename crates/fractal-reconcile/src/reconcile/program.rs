@@ -126,6 +126,10 @@ pub trait RunAuthority: Send + Sync {
     fn issue(&self, execution: &ProgramExecution, lifetime_ms: u64) -> Result<String>;
     fn revoke(&self, execution: &ProgramExecution) -> Result<()>;
 }
+struct AuthorityWait {
+    generation: u64,
+    execution: ProgramExecution,
+}
 struct Running {
     dispatch: Dispatch,
     /// The host generation running it; a host that exits takes exactly its own programs with it.
@@ -210,7 +214,7 @@ struct Inner {
     supervised: bool,
     running: HashMap<String, Running>,
     /// Register before issuing, so an ACK concurrent with the issuer cannot lose its wake.
-    authority_waits: HashMap<String, ProgramExecution>,
+    authority_waits: HashMap<String, AuthorityWait>,
     /// Exact worker identities awaiting termination, independent of their recorded outcomes.
     terminating: HashSet<(u64, String, u32)>,
     /// By step: the attempt and the last host or liveness failure that stopped it.
@@ -282,10 +286,13 @@ impl ProgramEngine {
         self.run_authority.set(authority).map_err(|_| anyhow::anyhow!("program run authority is already installed"))
     }
 
-    fn execution(&self, run: crate::store::run_credentials::RunBinding, generation: u64) -> ProgramExecution {
+    fn execution(&self, run: crate::store::run_credentials::RunBinding, generation: u64, issuance: Option<uuid::Uuid>) -> ProgramExecution {
         ProgramExecution {
             runtime: format!("program-step/{}", run.step_run),
-            incarnation: format!("{}:{generation}:{}", self.instance, run.attempt),
+            incarnation: match issuance {
+                Some(issuance) => format!("{}:{generation}:{}:{issuance}", self.instance, run.attempt),
+                None => format!("{}:{generation}:{}", self.instance, run.attempt),
+            },
             run,
         }
     }
@@ -307,10 +314,10 @@ impl ProgramEngine {
     }
 
     fn revoke_authority_wait(&self, inner: &mut Inner, step: &str) -> Result<()> {
-        if let Some(execution) = inner.authority_waits.get(step)
+        if let Some(wait) = inner.authority_waits.get(step)
             && let Some(authority) = self.run_authority.get()
         {
-            authority.revoke(execution)?;
+            authority.revoke(&wait.execution)?;
         }
         inner.authority_waits.remove(step);
         Ok(())
@@ -318,7 +325,7 @@ impl ProgramEngine {
 
     pub(super) fn authority_changed(&self) {
         let waiting = self.lock().authority_waits.values()
-            .map(|execution| (execution.run.step_run.clone(), execution.run.run.clone()))
+            .map(|wait| (wait.execution.run.step_run.clone(), wait.execution.run.run.clone()))
             .collect::<Vec<_>>();
         for (step, run) in waiting {
             (self.wake)(&step);
@@ -382,16 +389,19 @@ impl ProgramEngine {
         // minted only here, once the host runs and this attempt is about to start, so a refused,
         // already running or host-down dispatch leaves no row; each start or resume mints one, and
         // it never enters the journal or a log.
-        let execution = self.execution(run, generation);
         let (credential, execution) = if let Some(authority) = self.run_authority.get() {
-            if let Some(prior) = inner.authority_waits.get(&dispatch.step)
-                && prior != &execution
+            // An ACK retry belongs to the same issuance. Once issued (or revoked), the next
+            // dispatch needs a new identity even if its graph attempt and host did not change:
+            // durable authorization revisions cannot be resurrected after revocation.
+            if !inner.authority_waits.get(&dispatch.step)
+                .is_some_and(|wait| wait.generation == generation && wait.execution.run == run)
             {
-                authority.revoke(prior)?;
+                self.revoke_authority_wait(&mut inner, &dispatch.step)?;
+                let execution = self.execution(run, generation, Some(uuid::Uuid::new_v4()));
+                inner.authority_waits.insert(dispatch.step.clone(), AuthorityWait { generation, execution });
             }
-            inner.authority_waits.insert(dispatch.step.clone(), execution);
             let credential = match authority.issue(
-                inner.authority_waits.get(&dispatch.step).expect("registered authority wait"),
+                &inner.authority_waits.get(&dispatch.step).expect("registered authority wait").execution,
                 RUN_CREDENTIAL_LIFETIME_MS,
             ) {
                 Ok(credential) => credential,
@@ -402,8 +412,9 @@ impl ProgramEngine {
                 }
                 Err(error) => return Err(error),
             };
-            (credential, inner.authority_waits.remove(&dispatch.step).expect("registered authority wait"))
+            (credential, inner.authority_waits.remove(&dispatch.step).expect("registered authority wait").execution)
         } else {
+            let execution = self.execution(run, generation, None);
             (self.store.issue_run_credential(&dispatch.step, dispatch.attempt, RUN_CREDENTIAL_LIFETIME_MS)?, execution)
         };
         let trace = match self.start_trace(&dispatch) {
@@ -555,9 +566,9 @@ impl ProgramEngine {
                 send_cancel(&mut inner, *generation, step, *attempt, reason);
             }
             let abandoned_waits = inner.authority_waits.iter()
-                .filter(|(_, execution)| execution.run.run == run.subject)
-                .filter(|(_, execution)| terminal || !run.steps.iter().any(|view|
-                    view.subject == execution.run.step_run && view.attempt == execution.run.attempt
+                .filter(|(_, wait)| wait.execution.run.run == run.subject)
+                .filter(|(_, wait)| terminal || !run.steps.iter().any(|view|
+                    view.subject == wait.execution.run.step_run && view.attempt == wait.execution.run.attempt
                         && RUNNING_STATES.contains(&view.status.as_str())))
                 .map(|(step, _)| step.clone()).collect::<Vec<_>>();
             for step in abandoned_waits { self.revoke_authority_wait(&mut inner, &step)?; }
