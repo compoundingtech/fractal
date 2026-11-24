@@ -10,6 +10,7 @@ import { browserPath, clientRoute, Gateway, type GatewayOptions } from './gatewa
 import { RuntimeIdentity, StaticAssets } from './static.mts'
 import { requestSpanOptions } from './tracing.mts'
 import { handlePairing, pairingRoute, type BrowserPairingOptions } from './pairing.mts'
+import { createUsageHistoryRelay, isUsageHistoryRequest, type UsageHistoryProducer } from './usageHistory.mts'
 
 export interface AdmissionIdentity {
   readonly kind: 'login' | 'tag'
@@ -38,6 +39,8 @@ export interface MiddlewareOptions {
   readonly pairing?: BrowserPairingOptions
   /** Explicit cross-origin HTTP collectors; the gateway itself is always same-origin. */
   readonly connectOrigins?: readonly string[]
+  /** Interim loopback usage-history producer (see usageHistory.mts); unset registers no route. */
+  readonly usageHistory?: UsageHistoryProducer | undefined
 }
 export interface ServerOptions extends Omit<MiddlewareOptions, 'server'> {
   readonly dist: string
@@ -61,7 +64,9 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
     throw new TypeError('Explicit paired gateway socket, host, authorization and positive timeout are required')
   const scope = Scope.makeUnsafe()
   try {
-    const gateway = Context.get(Effect.runSync(Layer.buildWithScope(Gateway.layer({ ...options.gateway, browserPairing: options.pairing !== undefined }), scope)), Gateway)
+    const gatewayOptions = { ...options.gateway, browserPairing: options.pairing !== undefined }
+    const gateway = Context.get(Effect.runSync(Layer.buildWithScope(Gateway.layer(gatewayOptions), scope)), Gateway)
+    const usageHistory = options.usageHistory === undefined ? undefined : createUsageHistoryRelay({ producer: options.usageHistory, gateway: gatewayOptions })
     const staticAssets = assets === undefined ? undefined : Context.get(
       Effect.runSync(Layer.buildWithScope(StaticAssets.layer(assets.root, assets.identity, options.connectOrigins), scope)), StaticAssets,
     )
@@ -110,6 +115,9 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
         if (path === undefined) { reject(res, 404, 'Not found\n'); return }
         if (pairingRoute(url)) {
           return yield* Effect.promise(() => handlePairing(req, res, options.gateway, options.pairing))
+        }
+        if (usageHistory !== undefined && isUsageHistoryRequest(url)) {
+          return yield* Effect.promise(() => usageHistory.handle(req, res, preview))
         }
         if (clientRoute(url)) {
           const parent = yield* Effect.currentSpan.pipe(Effect.orDie)
