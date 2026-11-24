@@ -499,6 +499,9 @@ pub struct WriterGuard<'a> {
     /// The connection's changed-row count when it was lent, so the rows this thread changed are
     /// noted for it when it gives the connection back; see `touched::writes`.
     pub changes_at_lend: u64,
+    /// The synchronous level `commit_without_fsync` replaced, put back before the connection
+    /// returns.
+    restore_synchronous: Option<i64>,
 }
 
 impl WriterConnection {
@@ -893,6 +896,7 @@ impl WriterConnection {
         }
         let guard = WriterGuard {
             changes_at_lend: connection.total_changes(),
+            restore_synchronous: None,
             connection: Some(connection),
             give_back,
             committed_index: &self.committed_index,
@@ -1381,6 +1385,20 @@ fn run_write_batch(
 }
 
 impl WriterGuard<'_> {
+    /// Commit this loan's transactions without waiting on the disk, for work that redoes itself
+    /// after a crash (`store::durability::committing_without_fsync`): the writer's next ordinary
+    /// commit fsyncs the WAL and these frames with it. The level is put back before the
+    /// connection returns to the queue, on every path, so no other loan commits at it. Call it
+    /// outside a transaction, which cannot change it.
+    pub fn commit_without_fsync(&mut self) -> Result<()> {
+        if self.restore_synchronous.is_none() {
+            let level = self.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+            self.pragma_update(None, "synchronous", "NORMAL")?;
+            self.restore_synchronous = Some(level);
+        }
+        Ok(())
+    }
+
     /// Re-verify native observation after detecting writes through another connection.
     /// Unsupported coverage is reported through the observer's latched failure callback.
     pub fn reverify_observer_coverage(&self) {
@@ -1433,6 +1451,15 @@ impl Drop for WriterGuard<'_> {
         let Some(connection) = self.connection.take() else {
             return;
         };
+        if let Some(level) = self.restore_synchronous.take() {
+            // A transaction left open would refuse the change: end it first, as its drop would.
+            if !connection.is_autocommit() {
+                let _ = connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h986492ca6e90 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK");
+            }
+            if let Err(error) = connection.pragma_update(None, "synchronous", level) {
+                eprintln!("the writer's synchronous level was not put back to {level}: {error:#}");
+            }
+        }
         publish_writer_boundary(&connection, self.committed_index, self.observers, self.mutation_observer);
         crate::touched::note_writes(
             connection
@@ -1705,7 +1732,7 @@ impl Drop for PinnedRead<'_> {
         };
         connection.progress_handler(0, None::<fn() -> bool>);
         if connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h0a744b38f746 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "COMMIT").is_err() && !connection.is_autocommit() {
-            let _ = connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h986492ca6e90 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK");
+            let _ = connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3e88c31014e3 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK");
         }
         drop(self.transaction.take());
         configure_read_cancellation(&connection);
@@ -2018,7 +2045,7 @@ impl ReadPool {
                 // A cancelled read must not retain its snapshot in the pool. The connection
                 // is query_only; ending a leftover read transaction cannot commit writes.
                 if !connection.is_autocommit() {
-                    let _ = connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3e88c31014e3 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK");
+                    let _ = connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2143307ac389 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK");
                 }
                 if let Ok(connection) = Rc::try_unwrap(connection)
                     && connection.is_autocommit()
@@ -2119,7 +2146,7 @@ impl ReadPool {
         // it can pin WAL after its live-read entry is gone. Cleanup happens only at physical
         // return, after every legitimate pinned/outer owner has released the connection.
         if !connection.is_autocommit()
-            && (connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2143307ac389 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK").is_err() || !connection.is_autocommit())
+            && (connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9692d6c3e966 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK").is_err() || !connection.is_autocommit())
         {
             return; // Closing a failed-cleanup connection is safer than reusing it.
         }
@@ -3789,6 +3816,44 @@ mod read_cancellation_tests {
             assert!(pool.get().is_autocommit());
         })).unwrap();
         assert_eq!(pool.usage().idle, 1);
+    }
+}
+
+#[cfg(test)]
+mod commit_without_fsync_tests {
+    use super::*;
+
+    fn synchronous(connection: &Connection) -> i64 {
+        connection.query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap()
+    }
+
+    /// A loan that commits without fsync gives the writer back at its own level, whether its
+    /// transaction committed or was left open by an early return, so the next loan's commits
+    /// wait on the disk.
+    #[test]
+    fn the_next_loan_commits_at_the_writers_level() {
+        let file = tempfile::tempdir().unwrap();
+        let connection = Connection::open(file.path().join("state.sqlite3")).unwrap();
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE rows(value)").unwrap();
+        let writer = WriterConnection::new(connection, Arc::new(AtomicU64::new(0)));
+        {
+            let mut loan = writer.write_background();
+            loan.commit_without_fsync().unwrap();
+            assert_eq!(synchronous(&loan), 1, "NORMAL inside the loan");
+            let transaction = loan.transaction().unwrap();
+            transaction.execute("INSERT INTO rows VALUES (1)", []).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(synchronous(&writer.write()), 2, "FULL after a committed loan");
+        {
+            let mut loan = writer.write_background();
+            loan.commit_without_fsync().unwrap();
+            loan.execute_batch("BEGIN; INSERT INTO rows VALUES (2)").unwrap();
+        }
+        let next = writer.write();
+        assert_eq!(synchronous(&next), 2, "FULL after a loan left its transaction open");
+        let rows: i64 = next.query_row("SELECT COUNT(*) FROM rows", [], |row| row.get(0)).unwrap();
+        assert_eq!(rows, 1, "the open transaction was rolled back");
     }
 }
 

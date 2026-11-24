@@ -19,9 +19,10 @@ use super::*;
 use super::checkpoint::ClaimTombstone;
 use super::checkpoint_agreement::CheckpointAction;
 
-/// Whether a member deletes the claims its peers retired. Off until the convergence of mixed
-/// trims is proven on running members; it does not depend on releasing envelopes.
-pub const RETIREMENT_WINS: bool = false;
+/// Whether a member deletes the claims its peers retired. The deletion waits, as envelope release
+/// does, while a peer this member exchanged with in the last 14 days does not take signed claims
+/// (`envelope_release::Store::peers_lacking_signed_claims`).
+pub const RETIREMENT_WINS: bool = true;
 
 pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hd0a8c2a3ba86 owner=smallclaims::store::retirement_wins TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS peer_retired_claims (
@@ -78,19 +79,35 @@ pub fn deletable_on_a_peers_word(kind: &str, actor: Option<&str>) -> bool {
     checkpoint_trim::LOCAL_TRIM_KINDS.contains(&kind) && !actor.is_some_and(|actor| actor.starts_with("person/"))
 }
 
-/// The claims waiting for deletion that this member holds: their tombstones and claim rows. A
-/// signed claim whose batch is younger than the freshness window's forget bound (after ?2, from
-/// ?3 on) is not among them yet: the deletion would refuse it (`checkpoint::young_signed_claim_tx`),
-/// and left in the page it would hold back the claims behind it.
+/// The claims waiting for deletion that this member holds, after the ID ?4: their tombstones and
+/// claim rows. A signed claim whose batch is younger than the freshness window's forget bound
+/// (after ?2, from ?3 on) is not among them yet: the deletion would refuse it
+/// (`checkpoint::young_signed_claim_tx`). Nor is one another cut recorded: that cut deletes it,
+/// and a claim is recorded once. Left in the page, either would hold back the claims behind it.
 const PENDING_SQL: &str = "SELECT claims.id, claims.subject, claims.kind, claims.actor, claims.predecessors,
         claims.accepted_at_unix_ms, claims.batch_id, batches.origin, batches.replica_sequence, claims.body
      FROM peer_retired_claims AS learned INDEXED BY peer_retired_claims_state
      JOIN claims ON claims.id=learned.id
      JOIN batches ON batches.id=claims.batch_id
-     WHERE learned.state='pending'
+     WHERE learned.state='pending' AND learned.id > ?4
+       AND NOT EXISTS(SELECT 1 FROM checkpoint_claims AS recorded WHERE recorded.id=learned.id)
        AND NOT (CAST(batches.accepted_at_unix_ms AS INTEGER) > ?2 AND CAST(batches.accepted_at_unix_ms AS INTEGER) >= ?3
                 AND EXISTS(SELECT 1 FROM claim_signatures AS signed WHERE signed.claim_id=claims.id))
      ORDER BY learned.id LIMIT ?1";
+
+/// `meta`: the last learned retirement the deletion read, so the next step reads on from it. A
+/// claim that waits (the newest of its subject and kind here) would otherwise come first in every
+/// page, and a page of them would stop the deletion. Empty once a page reaches the end.
+const PENDING_AFTER: &str = "peer_retired_claims_after";
+
+/// The waiting retirements whose claim is gone, after the ID ?1 and through ?2 (to the end when
+/// ?2 is empty): the stretch one page read.
+const GONE_SQL: &str = "SELECT learned.id FROM peer_retired_claims AS learned INDEXED BY peer_retired_claims_state
+     WHERE learned.state='pending' AND learned.id > ?1 AND (?2 = '' OR learned.id <= ?2)
+       AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=learned.id)";
+
+/// The most waiting retirements one writer turn forgets.
+const CLEANUP_CHUNK: usize = 500;
 
 impl Store {
     /// Whether this member deletes what its peers retired: [`RETIREMENT_WINS`], or what a test
@@ -103,6 +120,15 @@ impl Store {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_retirement_wins(&self, on: bool) {
         self.retirement_wins.store(on, Ordering::Relaxed);
+    }
+
+    /// One step of deleting what peers retired, as the checkpoint worker runs it, for a
+    /// measurement on a copy of a store.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trim_peer_retired_step(&self) -> Result<Vec<CheckpointAction>> {
+        let mut actions = Vec::new();
+        self.trim_peer_retired(&mut actions)?;
+        Ok(actions)
     }
 
     /// How many claims peers retired that this member never held and no peer has supplied: it
@@ -130,6 +156,11 @@ impl Store {
     /// claim still the newest of its subject and kind here waits.
     pub(crate) fn trim_peer_retired(&self, actions: &mut Vec<CheckpointAction>) -> Result<()> {
         if !self.retirement_wins() || self.checkpoint_halted()? {
+            return Ok(());
+        }
+        // An older peer keeps what it holds whatever its peers retired: deleting on a peer's word
+        // waits until every recent peer is of a build that does too.
+        if !self.peers_lacking_signed_claims()?.is_empty() {
             return Ok(());
         }
         // A claim a peer supplied after its retirement was learned is held now: it waits for
@@ -174,6 +205,11 @@ impl Store {
                 i64::try_from(FRESHNESS_FROM_UNIX_MS.saturating_sub(FRESHNESS_WINDOW_MS)).unwrap_or(i64::MAX),
             )
         };
+        let limit = usize::try_from(left).unwrap_or(usize::MAX).min(STEP_CLAIMS);
+        let after: String = self.readers.get()
+            .query_row("SELECT value FROM meta WHERE key=?1", [PENDING_AFTER], |row| row.get(0))
+            .optional()?
+            .unwrap_or_default();
         let rows = {
             let connection = self.readers.get();
             let mut envelope = connection.prepare_cached(
@@ -181,7 +217,7 @@ impl Store {
             )?;
             let rows = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-h60e0bfc24ee7 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ PENDING_SQL)?
-                .query_map(params![usize::try_from(left).unwrap_or(usize::MAX).min(STEP_CLAIMS), youngest_forgettable, first_held], |row| {
+                .query_map(params![limit, youngest_forgettable, first_held, after], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -220,6 +256,8 @@ impl Store {
             }
             tombstones
         };
+        // The next step reads on from this page's last claim, and from the start after a short one.
+        let next = if rows.len() < limit { String::new() } else { rows.last().map(|claim| claim.id.clone()).unwrap_or_default() };
         // The newer claim a peer's cut kept may not be here yet; deleting the newest of a subject
         // and kind would change what its readers answer, so it waits for that one.
         let mut claims = Vec::with_capacity(rows.len());
@@ -236,12 +274,35 @@ impl Store {
             // A cut of time zero: the cut this member's own trim compares is never moved by it.
             self.trim_checkpoint(&checkpoint, 0, &digest, &[], &claims, actions)?;
         }
-        // What is gone now, by this deletion or any other, no longer waits.
-        self.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h48a82e903143 owner=smallclaims::store::retirement_wins TODO=prepare-body-and-predecessor-values */ "DELETE FROM peer_retired_claims WHERE state='pending'
-               AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=peer_retired_claims.id)",
-            [],
-        )?;
+        // What is gone now in the stretch this page read, by this deletion or any other, no
+        // longer waits: found on a reader, deleted by key a chunk at a time, so the writer is
+        // never held for a scan of every waiting retirement. A full cycle of the cursor covers
+        // them all.
+        let gone = self.readers.get()
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-he754c9f35e28 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ GONE_SQL)?
+            .query_map(params![after, next], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for chunk in gone.chunks(CLEANUP_CHUNK) {
+            let mut connection = self.connection.write_background();
+            connection.commit_without_fsync()?;
+            let transaction = connection.transaction()?;
+            {
+                let mut forget = transaction.prepare_cached(
+                    /* sqlite-large-value: allow-for-now lv-hf0070c539c4d owner=smallclaims::store::retirement_wins TODO=prepare-body-and-predecessor-values */ "DELETE FROM peer_retired_claims WHERE id=?1 AND state='pending'
+                       AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=?1)",
+                )?;
+                for id in chunk {
+                    forget.execute(/* sqlite-large-value: allow-for-now lv-h28391341bc83 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ [id])?;
+                }
+            }
+            transaction.commit()?;
+            drop(connection);
+            self.flush_trim_wal();
+        }
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h029d27f2492e owner=smallclaims::store::retirement_wins TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![PENDING_AFTER, next])?;
+        transaction.commit()?;
         Ok(())
     }
 }

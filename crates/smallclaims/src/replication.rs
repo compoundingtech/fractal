@@ -479,7 +479,8 @@ pub struct ReplicationStatus {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub refused_signed_envelopes: u64,
     /// Peers this node exchanged with in the last 14 days that do not take signed claims: while
-    /// any is listed, this node releases no envelope (`store::envelope_release`).
+    /// any is listed, this node releases no envelope (`store::envelope_release`) and deletes
+    /// nothing on a peer's word (`store::retirement_wins`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub envelope_release_paused_for: Vec<String>,
     /// Held claims a peer retired that this node keeps: a person's, or of a kind its own trim

@@ -462,6 +462,20 @@ impl Store {
         }
     }
 
+    /// Flush what a chunk committed without fsync (`WriterGuard::commit_without_fsync`), outside
+    /// the writer: left to the next ordinary commit, the flush would hold every write waiting on
+    /// it. A failed flush only leaves it to that commit.
+    pub(crate) fn flush_trim_wal(&self) {
+        if self.shared_memory {
+            return;
+        }
+        let mut wal = self.path.as_os_str().to_owned();
+        wal.push("-wal");
+        if let Ok(file) = std::fs::File::open(&wal) {
+            let _ = file.sync_data();
+        }
+    }
+
     fn pause_trim_chunk(&self, held: std::time::Duration) {
         std::thread::sleep(self.trim_pause_duration(held));
     }
@@ -931,6 +945,8 @@ impl Store {
             );
             let mut connection = self.connection.write_background();
             let held_since = std::time::Instant::now();
+            // Recording again changes nothing, so a crash loses only what the restart records.
+            connection.commit_without_fsync()?;
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
             let (envelope_before, claim_before) = (envelope, claim);
@@ -954,6 +970,7 @@ impl Store {
             drop(connection);
             chunks += 1;
             self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
+            self.flush_trim_wal();
             self.pause_trim_chunk(held);
         }
         {
@@ -1049,6 +1066,9 @@ impl Store {
             }
             let mut connection = self.connection.write_background();
             let held_since = std::time::Instant::now();
+            // The walk's cursor commits with the chunk, so a crash loses only what the next step
+            // deletes again.
+            connection.commit_without_fsync()?;
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
             #[cfg(test)]
@@ -1179,6 +1199,7 @@ impl Store {
                 hook(chunks);
             }
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
+            self.flush_trim_wal();
             pause(self.trim_pause_duration(held));
         }
         drop(delete);

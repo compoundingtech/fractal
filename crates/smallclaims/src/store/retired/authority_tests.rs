@@ -233,7 +233,14 @@ fn a_member_that_trims_locally_serves_nothing_it_retired_even_while_it_holds_a_c
 
     let served = local.replica_envelopes(vec![retired_envelope.clone(), kept_envelope.clone()]).unwrap();
     assert_eq!(served.iter().map(|envelope| envelope.sequence).collect::<Vec<_>>(), [kept_envelope.sequence]);
-    assert_eq!(local.envelopes_carrying_claims(&[retired.clone(), kept.clone()]).unwrap(), [kept_envelope]);
+    // A peer that asks for a retired claim by ID learned its retirement: while a retirement wins,
+    // the envelope still carrying it is served, so the peer makes its own tombstone from it.
+    assert_eq!(
+        local.envelopes_carrying_claims(&[retired.clone(), kept.clone()]).unwrap(),
+        [retired_envelope.clone(), kept_envelope.clone()]
+    );
+    local.set_retirement_wins(false);
+    assert_eq!(local.envelopes_carrying_claims(&[retired.clone(), kept.clone()]).unwrap(), std::slice::from_ref(&kept_envelope));
 
     let fresh = member("birch");
     push_everything(&local, &fresh);

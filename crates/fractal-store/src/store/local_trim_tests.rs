@@ -482,6 +482,51 @@ fn a_peers_retirement_deletes_a_held_observation() {
     assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_kept, 0);
 }
 
+/// Retirements that wait do not hold back the rest. One another cut already recorded is that
+/// cut's to delete, and one that waits for its subject's newer claim is read past: a page that met
+/// only such claims stopped the deletion for good (measured on a copy of a real member,
+/// 2026-11-22: 32,191 of 99,999 went, then none).
+#[test]
+fn retirements_that_wait_do_not_hold_back_the_rest() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    learn_retirements(&birch, &alder);
+    let pending = |store: &Store| -> i64 {
+        store.readers.get().query_row("SELECT COUNT(*) FROM peer_retired_claims WHERE state='pending'", [], |row| row.get(0)).unwrap()
+    };
+    assert_eq!(pending(&birch), 19);
+    // The first by ID, recorded by a cut of birch's own that has not deleted it yet.
+    birch.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h7bd3f2b25b4f owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
+             operation_id, request_digest, accepted_at_unix_ms, checkpoint)
+         SELECT claims.id, batches.origin, batches.replica_sequence, '', claims.subject, claims.kind, claims.actor,
+             claims.predecessors, NULL, NULL, CAST(claims.accepted_at_unix_ms AS INTEGER), 'checkpoint/elsewhere'
+         FROM peer_retired_claims AS learned JOIN claims ON claims.id=learned.id JOIN batches ON batches.id=claims.batch_id
+         ORDER BY learned.id LIMIT 1",
+        [],
+    ).unwrap();
+    // The newest observation, as if a peer retired it for a newer one not here yet.
+    birch.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hede50f612f6c owner=fractal_store::store::local_trim_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO peer_retired_claims(id, peer, state, learned_at_unix_ms)
+         SELECT id, 'alder', 'pending', 0 FROM claims WHERE kind='observer.observed'
+           AND id NOT IN (SELECT id FROM peer_retired_claims)",
+        [],
+    ).unwrap();
+    // One deletion a step: a page of one, at the end of the UTC day, when the whole paced
+    // allowance is available.
+    let day_end = CheckpointContext {
+        now_unix_ms: (quiet.now_unix_ms / smallclaims::store::checkpoint::DAY_MS + 1) * smallclaims::store::checkpoint::DAY_MS - 1,
+        ..quiet
+    };
+    for _ in 0..40 {
+        let deleted = 20 - claims_of(&birch, "observer.observed");
+        birch.trim_locally_at_most(u64::try_from(deleted).unwrap() + 1);
+        step(&birch, &day_end);
+    }
+    assert_eq!(claims_of(&birch, "observer.observed"), 2, "all but the two that wait went");
+    assert_eq!(pending(&birch), 2);
+}
+
 /// No member deletes a person's claim, or a kind its own trim keeps, on a peer's word: such a
 /// retirement is recorded, the claim kept, and the keeping counted.
 #[test]
@@ -2615,6 +2660,32 @@ fn a_peers_retirement_keeps_a_signed_claim_inside_the_forget_bound() {
     assert_eq!(set_aside, 0, "no cut is planned over a claim the bound holds, so none is set aside");
     // Past it, the same retirements delete them.
     assert!(kinds(&step(&birch, &at(&birch, past_bound))).contains(&"trimmed"));
+    assert_eq!(claims_of(&birch, "observer.observed"), 1);
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+}
+
+/// Deleting on a peer's word waits, as envelope release does, while a peer heard from in the last
+/// 14 days does not take signed claims: such a peer keeps what it holds whatever its peers
+/// retired. Once it does, the same retirements delete.
+#[test]
+fn a_peers_retirement_waits_while_a_recent_peer_cannot_take_signed_claims() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    let cedar = declared(Store::open_memory("cedar").unwrap(), true);
+    let hear = |capable: bool| {
+        let mut exchange = cedar.export_replication_exchange(TEST_FLEET, &birch.replication_inventory().unwrap()).unwrap();
+        if !capable {
+            exchange.inventory.capabilities.clear();
+        }
+        birch.receive_replication_exchange("cedar", TEST_FLEET, &exchange).unwrap();
+    };
+    hear(false);
+    learn_retirements(&birch, &alder);
+    step(&birch, &quiet);
+    assert_eq!(claims_of(&birch, "observer.observed"), 20, "nothing goes on a peer's word while cedar is older");
+    assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().envelope_release_paused_for, ["cedar"]);
+    hear(true);
+    assert!(kinds(&step(&birch, &quiet)).contains(&"trimmed"));
     assert_eq!(claims_of(&birch, "observer.observed"), 1);
     assert_eq!(retired_ids(&birch), retired_ids(&alder));
 }

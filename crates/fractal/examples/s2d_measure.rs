@@ -2,7 +2,8 @@
 //! build runs after an upgrade, with their switches forced on for the copy only: emptying valid
 //! records' bytes (S1), deleting valid records with no rollback window (S2b), and releasing
 //! envelopes (S2d) with the age gate measured from the copy's newest envelope rather than from
-//! now, so the copy's age profile is the member's. Then it gives the freed pages back. It prints
+//! now, so the copy's age profile is the member's, and deleting what peers retired (a retirement
+//! wins). Then it gives the freed pages back. It prints
 //! bytes per table, file size, each job's writer hold, the digests before and after, and why
 //! envelopes stay. Only counts, timings and digests are printed, never stored content.
 //!
@@ -80,11 +81,15 @@ fn main() -> anyhow::Result<()> {
     let node = args.get(2).ok_or_else(|| anyhow::anyhow!("the copy's node name is required"))?;
     let state_dir = args.get(3).map(Path::new);
     let run = Instant::now();
-    // S2D_PASSES picks the passes (sign, empty, delete, release, vacuum; all by default) and
-    // S2D_NO_SPACE skips the byte counts, to measure one pass again on a copy already measured.
+    // S2D_PASSES picks the passes (sign, empty, delete, release, retire, localtrim, vacuum; all but retire and localtrim
+    // by default) and S2D_NO_SPACE skips the byte counts, to measure one pass again on a copy
+    // already measured. S2D_RETIRE_CLAIMS sets how many retirements retire seeds (a day's cap).
     let passes_env = std::env::var("S2D_PASSES").unwrap_or_else(|_| "sign,empty,delete,release,vacuum".into());
     let passes: Vec<&str> = passes_env.split(',').collect();
     let count_space = std::env::var_os("S2D_NO_SPACE").is_none();
+    // S2D_QUIET_SECS: how long the control writer runs alone before a pass, the spikes it sees
+    // then being what the pass's are compared with (60 s by default).
+    let quiet_for = Duration::from_secs(std::env::var("S2D_QUIET_SECS").ok().and_then(|secs| secs.parse().ok()).unwrap_or(60));
     let before_space = if count_space { space(path, "before")? } else { BTreeMap::new() };
     let started = Instant::now();
     let store = Arc::new(Store::open(path, node)?);
@@ -118,6 +123,42 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // A copy has no peers, so nothing teaches it a retirement: retire seeds what a peer whose cut
+    // is later would retire, a day's cap of the observed claims a newer one of the same subject
+    // and kind replaced, as the claim-range walk records them. Seeded before the control starts.
+    let retire_claims: u64 = std::env::var("S2D_RETIRE_CLAIMS").ok().and_then(|claims| claims.parse().ok())
+        .unwrap_or(smallclaims::store::checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS);
+    if passes.contains(&"retire") {
+        let started = Instant::now();
+        let mut seeded = Vec::new();
+        {
+            let connection = store.readers.get();
+            let mut replaced = connection.prepare(
+                "SELECT id, kind, actor FROM claims AS held WHERE kind=?1 AND EXISTS(SELECT 1 FROM claims AS newer
+                   WHERE newer.subject=held.subject AND newer.kind=held.kind
+                     AND CAST(newer.accepted_at_unix_ms AS INTEGER) > CAST(held.accepted_at_unix_ms AS INTEGER))
+                 ORDER BY CAST(accepted_at_unix_ms AS INTEGER) LIMIT ?2",
+            )?;
+            for kind in smallclaims::store::checkpoint_trim::LOCAL_TRIM_KINDS {
+                let left = retire_claims.saturating_sub(seeded.len() as u64);
+                let rows = replaced
+                    .query_map(rusqlite::params![kind, left], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                seeded.extend(rows);
+            }
+        }
+        let pending = seeded.iter().filter(|(_, kind, actor)| smallclaims::store::retirement_wins::deletable_on_a_peers_word(kind, actor.as_deref())).count();
+        let now = i64::try_from(smallclaims::store::now_ms())?;
+        store.connection.batched(|tx| -> rusqlite::Result<()> {
+            let mut insert = tx.prepare("INSERT OR IGNORE INTO peer_retired_claims(id, peer, state, learned_at_unix_ms) VALUES (?1, 'peer/measure', ?2, ?3)")?;
+            for (id, kind, actor) in &seeded {
+                let state = if smallclaims::store::retirement_wins::deletable_on_a_peers_word(kind, actor.as_deref()) { "pending" } else { "kept" };
+                insert.execute(rusqlite::params![id, state, now])?;
+            }
+            Ok(())
+        }).map_err(|error| anyhow::anyhow!(error))??;
+        println!("retire_seeded={} retire_pending={pending} seed_ms={}", seeded.len(), started.elapsed().as_millis());
+    }
     let before = digests(&store, fleet.as_deref())?;
     // The control: one short write every 50 ms, as a busy member's own appends would queue.
     let control = Arc::new(std::sync::Mutex::new(Vec::<Duration>::new()));
@@ -129,7 +170,24 @@ fn main() -> anyhow::Result<()> {
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let job = Instant::now();
-                let _ = store.connection.batched(|tx| tx.execute("INSERT INTO measure_control VALUES (1)", []));
+                // The holds that end while it waits name what it waited for.
+                let watch = store.connection.writer_thread().map(smallclaims::windows::holds::WaitWatch::start);
+                let ran = std::sync::atomic::AtomicU64::new(0);
+                let _ = store.connection.batched(|tx| {
+                    let running = Instant::now();
+                    let done = tx.execute("INSERT INTO measure_control VALUES (1)", []);
+                    ran.store(running.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                    done
+                });
+                if job.elapsed() >= Duration::from_millis(100) {
+                    let blocked_by = watch.and_then(smallclaims::windows::holds::WaitWatch::blocked_by).unwrap_or_default();
+                    println!(
+                        "slow_job=control at_unix_ms={} hold_ms={} ran_ms={} blocked_by={blocked_by}",
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                        job.elapsed().as_millis(),
+                        ran.load(std::sync::atomic::Ordering::Relaxed) / 1000,
+                    );
+                }
                 control.lock().unwrap().push(job.elapsed());
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -257,6 +315,101 @@ fn main() -> anyhow::Result<()> {
             println!("kept_reason={reason} kept={count}");
         }
         report("release", &mut holds);
+    }
+
+    if passes.contains(&"retire") {
+        // A retirement wins: the checkpoint worker's retirement step deletes the pending ones through
+        // the trim's paced chunks, each its own write. A step is many writes, so the writer holds
+        // are read from the control writer: its waits while the steps run, beside a quiet minute.
+        store.trim_locally(true)?;
+        store.trim_locally_at_most(retire_claims);
+        // A cut the member's own trim left `trimming` holds every retirement back, as it would on
+        // the member. S2D_RETIRE_SET_ASIDE sets it aside on the copy, so the steps measure the
+        // retirements' own deletion rather than the cut's backlog.
+        if std::env::var_os("S2D_RETIRE_SET_ASIDE").is_some() {
+            let set_aside = store.connection.batched(|tx| tx.execute("UPDATE checkpoints SET state='set-aside' WHERE state='trimming'", []))
+                .map_err(|error| anyhow::anyhow!(error))??;
+            println!("retire_cuts_set_aside={set_aside}");
+        }
+        let pending = |store: &Store| -> anyhow::Result<u64> {
+            Ok(store.readers.get().query_row("SELECT COUNT(*) FROM peer_retired_claims WHERE state='pending'", [], |row| row.get(0))?)
+        };
+        // What the step's last write costs at this many pending: what is gone no longer waits.
+        let probe = Instant::now();
+        store.connection.batched(|tx| tx.execute(
+            "DELETE FROM peer_retired_claims WHERE state='pending' AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=peer_retired_claims.id)",
+            [],
+        )).map_err(|error| anyhow::anyhow!(error))??;
+        println!("retire_cleanup_probe_ms={} pending={}", probe.elapsed().as_millis(), pending(&store)?);
+        let quiet = control.lock().unwrap().len();
+        std::thread::sleep(quiet_for);
+        let from = control.lock().unwrap().len();
+        let mut quiet_holds = control.lock().unwrap()[quiet..from].to_vec();
+        let started = Instant::now();
+        let mut deleted = 0;
+        loop {
+            let waiting = pending(&store)?;
+            let job = Instant::now();
+            // The retirements' step alone: the member's own cut is the trim's business.
+            let actions = store.trim_peer_retired_step()?;
+            let took = job.elapsed();
+            let mut stop = actions.is_empty();
+            for action in &actions {
+                println!("retire_step_ms={} action={}", took.as_millis(), serde_json::to_string(action)?);
+                match action {
+                    smallclaims::store::checkpoint_agreement::CheckpointAction::Trimmed { claims, .. } => deleted += claims,
+                    smallclaims::store::checkpoint_agreement::CheckpointAction::TrimGraphChanged { .. } => stop = true,
+                    _ => {}
+                }
+            }
+            if stop || pending(&store)? == 0 || pending(&store)? == waiting {
+                break;
+            }
+        }
+        let to = control.lock().unwrap().len();
+        let mut retire_holds = control.lock().unwrap()[from..to].to_vec();
+        println!(
+            "retire_deleted={deleted} retire_left_pending={} retire_kept={} retire_ms={}",
+            pending(&store)?,
+            store.peer_retired_claims_kept()?,
+            started.elapsed().as_millis()
+        );
+        println!("control_quiet_over_100ms={}", quiet_holds.iter().filter(|took| took.as_millis() >= 100).count());
+        report("control_quiet", &mut quiet_holds);
+        println!("control_retire_over_100ms={}", retire_holds.iter().filter(|took| took.as_millis() >= 100).count());
+        report("control_retire", &mut retire_holds);
+    }
+
+    if passes.contains(&"localtrim") {
+        // The member's own cut, resumed through the same paced chunks under the day's cap
+        // (S2D_RETIRE_CLAIMS), with the control writer's waits beside a quiet minute.
+        store.trim_locally(true)?;
+        store.trim_locally_at_most(retire_claims);
+        let cuts: Vec<String> = store.readers.get()
+            .prepare("SELECT id FROM checkpoints WHERE state IN ('trimming', 'set-aside') AND id NOT LIKE 'checkpoint/retired-by-peers/%' ORDER BY cut_unix_ms")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        store.connection.batched(|tx| tx.execute("UPDATE checkpoints SET state='trimming' WHERE state='set-aside' AND id NOT LIKE 'checkpoint/retired-by-peers/%'", []))
+            .map_err(|error| anyhow::anyhow!(error))??;
+        let quiet = control.lock().unwrap().len();
+        std::thread::sleep(quiet_for);
+        let from = control.lock().unwrap().len();
+        let mut quiet_holds = control.lock().unwrap()[quiet..from].to_vec();
+        let started = Instant::now();
+        for cut in &cuts {
+            let mut actions = Vec::new();
+            store.finish_trim(cut, &mut actions)?;
+            for action in &actions {
+                println!("localtrim_cut={cut} action={}", serde_json::to_string(action)?);
+            }
+        }
+        let to = control.lock().unwrap().len();
+        let mut trim_holds = control.lock().unwrap()[from..to].to_vec();
+        println!("localtrim_ms={}", started.elapsed().as_millis());
+        println!("control_quiet_over_100ms={}", quiet_holds.iter().filter(|took| took.as_millis() >= 100).count());
+        report("control_quiet", &mut quiet_holds);
+        println!("control_localtrim_over_100ms={}", trim_holds.iter().filter(|took| took.as_millis() >= 100).count());
+        report("control_localtrim", &mut trim_holds);
     }
 
     if passes.contains(&"vacuum") {
