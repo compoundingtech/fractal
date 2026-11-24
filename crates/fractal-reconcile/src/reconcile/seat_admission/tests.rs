@@ -172,7 +172,7 @@ fn discovered_interactive_slice_keeps_default_admission_quiet_when_present() {
 #[test]
 fn changed_host_memory_observation_wakes_waiters_without_an_envelope_file() {
     use fractal_runtime::host::HostMemoryObservation;
-    fn outside() -> Option<HostMemoryObservation> {
+    fn outside(_: &fractal_runtime::resource_pressure::Policy) -> Option<HostMemoryObservation> {
         Some(HostMemoryObservation { outside_bytes: 42, psi_blocked: false })
     }
     let mut reconciler = reconciler();

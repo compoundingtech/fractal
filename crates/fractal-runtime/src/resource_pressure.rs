@@ -51,6 +51,9 @@ pub struct Policy {
     /// user-manager root; absolute paths are exact and mount-relative.
     pub job_parent_cgroups: Vec<PathBuf>,
     /// Additional excluded subtrees, resolved exactly like job parents.
+    /// Explicit lists replace the defaults: include `app-agent-seats.slice` (or
+    /// its absolute cgroup path) to isolate self-throttled seats. Validation
+    /// warns, but permits existing configurations, when that entry is omitted.
     pub excluded_cgroups: Vec<PathBuf>,
 }
 
@@ -71,7 +74,8 @@ impl Default for Policy {
             job_parent_cgroups: vec!["gate.slice".into(), "app-lanes.slice".into(),
                 "app-capped.slice".into(), "app-capped-heavy.slice".into(),
                 "app-batch.slice".into(), "app-batch-heavy.slice".into()],
-            excluded_cgroups: vec!["app-lanes.slice".into(), "gate.slice".into()],
+            excluded_cgroups: vec!["app-lanes.slice".into(), "gate.slice".into(),
+                "app-agent-seats.slice".into()],
         }
     }
 }
@@ -130,6 +134,11 @@ impl Policy {
             ensure!(!self.rules[..index].iter().any(|other|
                 other.signal == rule.signal && other.window == rule.window),
                 "duplicate PSI signal/window rule");
+        }
+        if !self.excluded_cgroups.iter().any(|path|
+            path.file_name().is_some_and(|name| name == "app-agent-seats.slice"))
+        {
+            tracing::warn!("excluded_cgroups omits app-agent-seats.slice; include the seat subtree when overriding defaults to keep self-throttled seats out of host admission pressure");
         }
         Ok(())
     }
@@ -507,6 +516,22 @@ impl Reader {
             Path::new("/sys/fs/cgroup"), Path::new("/proc/meminfo"))
     }
 
+    /// ARC eligibility uses the same configured frontier, independent of brake rules.
+    pub fn memory_full_avg60(&mut self, policy: &Policy) -> Result<u32> {
+        self.memory_full_avg60_layout(policy, Path::new("/proc/self/cgroup"),
+            Path::new("/sys/fs/cgroup"), Path::new("/proc/meminfo"))
+    }
+
+    fn memory_full_avg60_layout(&mut self, policy: &Policy, placement: &Path,
+        root: &Path, meminfo: &Path) -> Result<u32>
+    {
+        let rules = [Rule { signal: Signal::MemoryFull, window: Window::Avg60,
+            threshold_millipercent: 1000, resume_millipercent: 500 }];
+        let readings = self.read_layout_rules(policy, &rules, 0, placement, root, meminfo)?;
+        ensure!(!readings[0].memory_shortage, "host memory below admission floor");
+        Ok(readings[0].millipercent)
+    }
+
     fn protected(&mut self, policy: &Policy, placement_path: &Path, root: &Path) -> Result<Vec<PathBuf>> {
         if !policy.protected_cgroups.is_empty() {
             return Ok(policy.protected_cgroups.iter().map(|path| rooted(root, path)).collect());
@@ -601,10 +626,10 @@ impl Reader {
 
     // A child from an enumeration snapshot may disappear before either PSI read.
     // Only absence of the cgroup itself permits skipping it, never absence of PSI.
-    fn sample_cgroup(&mut self, policy: &Policy, root: &Path, path: &Path, vanished_ok: bool) -> Result<()> {
-        let needs_memory = policy.rules.iter().any(|rule|
+    fn sample_cgroup(&mut self, rules: &[Rule], root: &Path, path: &Path, vanished_ok: bool) -> Result<()> {
+        let needs_memory = rules.iter().any(|rule|
             matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull));
-        let needs_io = policy.rules.iter().any(|rule|
+        let needs_io = rules.iter().any(|rule|
             matches!(rule.signal, Signal::IoSome | Signal::IoFull));
         let result = (|| {
             if needs_memory { read_file(&path.join("memory.pressure"), &mut self.memory)?; }
@@ -619,7 +644,7 @@ impl Reader {
             return Err(error);
         }
         let mut identity = None;
-        for (rule, reading) in policy.rules.iter().zip(&mut self.readings) {
+        for (rule, reading) in rules.iter().zip(&mut self.readings) {
             let (source, name) = match rule.signal {
                 Signal::MemoryFull => (&self.memory, "full"),
                 Signal::MemorySome => (&self.memory, "some"),
@@ -646,7 +671,7 @@ impl Reader {
     /// One level of the split frontier. Configured job-parent and excluded
     /// endpoints are skipped whole; descent continues only along configured
     /// paths; every other child is sampled directly.
-    fn sample_frontier(&mut self, policy: &Policy, root: &Path, children: &[PathBuf],
+    fn sample_frontier(&mut self, rules: &[Rule], root: &Path, children: &[PathBuf],
         protected: &[PathBuf], excluded: &[PathBuf], bounds: &mut Enumeration,
     ) -> Result<()> {
         for child in children {
@@ -662,16 +687,22 @@ impl Reader {
                         Err(missing) if missing.kind() == std::io::ErrorKind::NotFound) => continue,
                     Err(error) => return Err(error),
                 };
-                self.sample_frontier(policy, root, &descendants, protected, excluded, bounds)?;
+                self.sample_frontier(rules, root, &descendants, protected, excluded, bounds)?;
                 continue;
             }
-            self.sample_cgroup(policy, root, child, true)?;
+            self.sample_cgroup(rules, root, child, true)?;
         }
         Ok(())
     }
 
     fn read_layout(&mut self, policy: &Policy, now_ms: u64, placement_path: &Path,
         cgroup_root: &Path, meminfo_path: &Path) -> Result<&[Reading]>
+    {
+        self.read_layout_rules(policy, &policy.rules, now_ms, placement_path, cgroup_root, meminfo_path)
+    }
+
+    fn read_layout_rules(&mut self, policy: &Policy, rules: &[Rule], now_ms: u64,
+        placement_path: &Path, cgroup_root: &Path, meminfo_path: &Path) -> Result<&[Reading]>
     {
         let mut available = None;
         if policy.memory_available_floor_bytes > 0 {
@@ -680,7 +711,7 @@ impl Reader {
             available = Some(meminfo_bytes(&self.meminfo, "MemAvailable:")?);
         }
         self.readings.clear();
-        self.readings.extend(policy.rules.iter().map(|rule| Reading {
+        self.readings.extend(rules.iter().map(|rule| Reading {
             signal: rule.signal, window: rule.window, millipercent: 0, observed_at_ms: now_ms,
             memory_shortage: available.is_some_and(|bytes| bytes < policy.memory_available_floor_bytes),
             memory_available_bytes: available, cgroup: None,
@@ -722,10 +753,10 @@ impl Reader {
                 // Split along the configured paths: observe the remaining
                 // immediate children, never this contaminated ancestor.
                 let children = Self::children(path, &mut bounds)?;
-                self.sample_frontier(policy, cgroup_root, &children, &groups, &excluded, &mut bounds)?;
+                self.sample_frontier(rules, cgroup_root, &children, &groups, &excluded, &mut bounds)?;
             } else {
                 // No configured path lives inside; observe it directly.
-                self.sample_cgroup(policy, cgroup_root, path, false)?;
+                self.sample_cgroup(rules, cgroup_root, path, false)?;
             }
         }
         Ok(&self.readings)
