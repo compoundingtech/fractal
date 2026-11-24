@@ -682,7 +682,7 @@ pub fn executable_identity_ready(path: &Path) -> Result<Option<String>> {
     executable_identity_ready_with(path, &resolve_executable)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct IdentityMetadata {
     device: u64,
     inode: u64,
@@ -705,13 +705,17 @@ impl From<fs::Metadata> for IdentityMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct IdentityDependency {
     path: PathBuf,
     resolved: Option<PathBuf>,
     link: Option<IdentityMetadata>,
     target: Option<IdentityMetadata>,
 }
+
+/// The exact filesystem snapshot a background identity measurement answers for.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IdentityMeasurement(Vec<IdentityDependency>);
 
 fn identity_dependency(path: &Path) -> Result<IdentityDependency> {
     fn optional<T>(result: std::io::Result<T>) -> Result<Option<T>> {
@@ -754,14 +758,16 @@ pub fn executable_identity_ready_with(
     path: &Path,
     resolve: &dyn Fn(&str) -> Result<PathBuf>,
 ) -> Result<Option<String>> {
-    executable_identity_ready_recorded(path, resolve, SystemTime::now, &|_| Ok(()))
+    executable_identity_ready_recorded(path, resolve, SystemTime::now, &|_| Ok(()), &|_| {})
 }
 
-/// Observe resolution dependencies even while identity measurement is pending.
+/// Observe resolution paths and the exact measurement dependency before background work can
+/// complete, allowing callers to register scoped completion listeners without a race.
 pub fn executable_identity_ready_observed(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>,
     input: &dyn Fn(&Path) -> Result<()>,
+    measurement: &dyn Fn(&IdentityMeasurement),
 ) -> Result<Option<String>> {
-    executable_identity_ready_recorded(path, resolve, SystemTime::now, input)
+    executable_identity_ready_recorded(path, resolve, SystemTime::now, input, measurement)
 }
 
 fn executable_identity_ready_recorded(
@@ -769,9 +775,12 @@ fn executable_identity_ready_recorded(
     resolve: &dyn Fn(&str) -> Result<PathBuf>,
     recorded_at: fn() -> SystemTime,
     input: &dyn Fn(&Path) -> Result<()>,
+    measurement: &dyn Fn(&IdentityMeasurement),
 ) -> Result<Option<String>> {
     let (files, probes) = identity_inputs(path, resolve, input)?;
-    let dependencies = identity_snapshot(&probes)?;
+    let snapshot = IdentityMeasurement(identity_snapshot(&probes)?);
+    measurement(&snapshot);
+    let dependencies = snapshot.0;
     if let Some(identity) = cached_identity(&dependencies) {
         return Ok(Some(identity));
     }
@@ -834,8 +843,9 @@ fn start_measurement(
         measuring.retain(|pending| *pending != dependencies);
         IDENTITY_MEASURING.1.notify_all();
         drop(measuring);
+        let completed = IdentityMeasurement(dependencies);
         IDENTITY_WAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|wake| {
-            if let Some(wake) = wake.upgrade() { wake(); true } else { false }
+            if let Some(wake) = wake.upgrade() { wake(&completed); true } else { false }
         });
     });
 }
@@ -849,7 +859,7 @@ struct ReadyIdentity {
 
 static IDENTITY_READY: Mutex<Vec<ReadyIdentity>> = Mutex::new(Vec::new());
 
-type IdentityWake = dyn Fn() + Send + Sync;
+pub type IdentityWake = dyn Fn(&IdentityMeasurement) + Send + Sync;
 static IDENTITY_WAKES: Mutex<Vec<std::sync::Weak<IdentityWake>>> = Mutex::new(Vec::new());
 /// Subscribe without retaining the host reconciler after it shuts down.
 pub fn watch_identity_measurements(wake: std::sync::Weak<IdentityWake>) {
@@ -1710,13 +1720,17 @@ pub(crate) mod tests {
         fs::write(&binary, "binary").unwrap();
         fs::write(root.path().join("package.json"), "{}").unwrap();
         let (send, receive) = std::sync::mpsc::channel();
-        let wake: std::sync::Arc<IdentityWake> = std::sync::Arc::new(move || { let _ = send.send(()); });
+        let wake: std::sync::Arc<IdentityWake> = std::sync::Arc::new(move |measurement| { let _ = send.send(measurement.clone()); });
         watch_identity_measurements(std::sync::Arc::downgrade(&wake));
         let seen = std::cell::RefCell::new(Vec::new());
+        let expected = std::cell::RefCell::new(None);
         assert!(executable_identity_ready_observed(&binary, &|_| unreachable!(),
-            &|path| { seen.borrow_mut().push(path.to_owned()); Ok(()) }).unwrap().is_none());
+            &|path| { seen.borrow_mut().push(path.to_owned()); Ok(()) },
+            &|measurement| { *expected.borrow_mut() = Some(measurement.clone()); }).unwrap().is_none());
         assert!(seen.borrow().contains(&root.path().join("package-lock.json")));
-        receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        let expected = expected.into_inner().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while receive.recv_timeout(deadline.saturating_duration_since(Instant::now())).unwrap() != expected {}
         identity_measurements_settled();
         assert!(executable_identity_ready_with(&binary, &|_| unreachable!()).unwrap().is_some());
     }

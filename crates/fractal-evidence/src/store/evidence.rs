@@ -17,6 +17,8 @@ pub struct AgentsPublicationSource {
 pub trait EvidenceStore {
     fn agents_publication(&self) -> Option<Arc<crate::store::agents_publication::AgentsPublication>>;
     fn subscribe_agents_publications(&self) -> tokio::sync::watch::Receiver<u64>;
+    /// Observe completed presented publications without requesting a roster refresher.
+    fn subscribe_agents_publication_changes(&self) -> tokio::sync::watch::Receiver<u64>;
     fn agents_publication_build(&self) -> Result<PublicationBuild>;
     fn agents_publication_demand(&self) -> bool;
     fn agents_publication_source(&self, index: u64) -> Result<AgentsPublicationSource>;
@@ -117,6 +119,10 @@ impl EvidenceStore for Store {
         receiver
     }
 
+    fn subscribe_agents_publication_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.fractal.agents_publication_changes.subscribe()
+    }
+
     fn agents_publication_build(&self) -> Result<PublicationBuild> {
         self.fractal.presented_agents.begin_materialization()
             .context("the agents publication materialization counter is exhausted")
@@ -150,6 +156,7 @@ impl EvidenceStore for Store {
         use crate::store::{agents_publication::PresentedAgents, published_list::Publication};
         if let Some(current) = self.agents_publication()
             && current.metadata().status_watermark == source.watermark && current.rows() == rows
+            && current.valid_until_unix_ms == valid_until.map(u128::from)
             && self.fractal.presented_agents.retain_materialization(build, &current)
         {
             return Ok(());
@@ -169,6 +176,7 @@ impl EvidenceStore for Store {
         }
         // Serialize once outside the shared owner lock.
         if let Some(publication) = self.agents_publication() { let _ = publication.encoded(); }
+        self.fractal.agents_publication_changes.send_modify(|revision| *revision += 1);
         Ok(())
     }
 
@@ -569,6 +577,39 @@ impl EvidenceStore for Store {
             .optional()?
             .map(|body| Ok(serde_json::from_str::<Value>(&body)?["fields"].clone()))
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod publication_change_tests {
+    use super::*;
+
+    #[test]
+    fn observer_does_not_create_demand_and_deadline_changes_publish() {
+        let store = Store::open_memory("node").unwrap();
+        let mut changes = store.subscribe_agents_publication_changes();
+        assert!(!store.agents_publication_demand());
+        let rows = vec![json!({"id":"agent/example","name":"Example"})];
+        let publish = |deadline| {
+            let source = AgentsPublicationSource {
+                watermark: crate::store::agents_publication::AgentsStatusWatermark {
+                    store_index: 0, local_frontier: 0,
+                },
+                rows: Arc::new(rows.clone()),
+                valid_until_ms: deadline,
+            };
+            store.publish_presented_agents(store.agents_publication_build().unwrap(),
+                source, 100, deadline, rows.clone()).unwrap();
+        };
+        publish(Some(200));
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        publish(Some(200));
+        assert!(!changes.has_changed().unwrap(), "identical materialization is retained");
+        publish(Some(300));
+        assert!(changes.has_changed().unwrap(), "a moved evidence deadline is published");
+        assert_eq!(store.agents_publication().unwrap().valid_until_unix_ms, Some(300));
+        assert!(!store.agents_publication_demand());
     }
 }
 
