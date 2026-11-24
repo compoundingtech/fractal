@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Pre-push: an agent's push goes only when its tree is covered by signed evidence; anyone else's is signed here, then goes.
+"""Pre-push: accepted policy on main selects hosted PR proof or the default local evidence flow.
+
+With `"pr-proof": "hosted"` in the base's `.fractal/prepush-policy.json` (falling back to `.st/prepush-policy.json`),
+PR proof is hosted CI at the exact head. For everyone, including agents with listed signers, the hook prints one line,
+records `hosted_proof`, and lets the push go without a status query or local signing. Candidate policy has no effect.
+The installed content guard still runs first and blocks unsafe publication; this policy never bypasses it.
+Without that setting the existing local evidence flow applies:
 
 An agent (ST_AGENT set) on a machine whose signer is listed on main runs the tests deliberately, with `scripts/fractal-test
 --push REMOTE`, before it pushes: that runner signs what it ran. This hook only asks `scripts/fractal-test --status` whether
@@ -145,6 +151,35 @@ def config_path(base, name):
     return path if probe.stdout else f'.st/{name}'
 
 
+def hosted_proof(base):
+    """Only accepted base policy can select hosted proof; absent policy keeps the local flow."""
+    try:
+        path = config_path(base, 'prepush-policy.json')
+        probe = git('ls-tree', '--full-tree', '-z', base, '--', path)
+        if probe.returncode != 0:
+            raise RuntimeError('cannot inspect accepted pre-push policy')
+        if not probe.stdout:
+            return False
+        policy = git('show', f'{base}:{path}')
+        if policy.returncode != 0:
+            raise RuntimeError(f'cannot read accepted pre-push policy {path}')
+        try:
+            setting = json.loads(policy.stdout)
+        except ValueError:
+            raise ValueError(f'{path}: invalid JSON') from None
+        if not isinstance(setting, dict):
+            raise ValueError(f'{path}: expected a JSON object')
+        if 'pr-proof' not in setting:
+            return False
+        if setting['pr-proof'] != 'hosted':
+            raise ValueError(f'{path}: unknown pr-proof value {setting["pr-proof"]!r}')
+        return True
+    except Exception as error:
+        # Policy lookup must never reach main's non-blocking signing-error handler.
+        say(f'{base}:{error}; using the default local evidence flow')
+        return False
+
+
 def positive(name, default):
     raw = os.environ.get(name)
     if raw is None:
@@ -259,6 +294,9 @@ def hook(argv):
             say(message)
         receipt(tree, pushed, name)
         return 0
+
+    if remote in git('remote').stdout.split() and hosted_proof(f'{remote}/{BASE}'):
+        return outcome('hosted_proof', 'PR proof is hosted CI at the exact head (policy on main); no local evidence run')
 
     # arn:lmig:smalltalk:2026-10-27-st-test-shim — copy-only base readers need the self-contained implementation, not its shim.
     script = Path(__file__).resolve().parent / 'st-test'

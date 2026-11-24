@@ -5,6 +5,7 @@ use crate::OwnedSetsStore;
 use super::owned_sets::{Options, Source};
 use super::*;
 use crate::parse_intent;
+use fractal_attention::store::identities::IdentityStore;
 use fractal_attention::store::card_fold_tests_shared::*;
 use fractal_attention::store::card_fold_tests_shared::{agent_subjects, assert_card_fold_parity, assert_card_reads_parity, assert_card_reads_parity_with, per_subject_card_status};
 use fractal_attention::store::owned_sets_tests_shared::*;
@@ -856,6 +857,114 @@ fn same_source_retry_is_noop_and_new_source_does_not_relaunch_unchanged_members(
         token
     );
     assert_eq!(store.owned_sets().unwrap()[0].receipt.source.sequence, 20);
+}
+
+#[test]
+fn canonical_agent_publication_after_rename_keeps_owned_identity_live() {
+    let store = Store::open_memory("amber").unwrap();
+    apply(&store, &bundle("true", false), 10);
+    let original = "agent/garden/orchard";
+    let canonical = "agent/garden/grove";
+    let token = store.selected_desired_token(original).unwrap();
+    store.rename_identity(
+        identities::IdentityKind::Agent,
+        &identities::RenameRequest {
+            from: original.into(),
+            to: canonical.into(),
+            actor: "person/operator".into(),
+            reason: "Clarify the owned agent name".into(),
+            expected_naming_revision: None,
+            expected_declaration: token.clone(),
+            idempotency_key: "rename-owned-agent".into(),
+        },
+        &[],
+    ).unwrap();
+    let input = parse_intent(
+        "version 2\nagent \"garden/grove\" { command \"true\" }",
+        "amber",
+    ).unwrap();
+    assert!(input.subjects.contains_key(canonical));
+    assert!(!input.subjects.contains_key(original));
+    let mut opts = options(&store, 20);
+    let preview = store.owned_set_preview(&input, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    assert!(!preview.mass_retirement);
+    assert!(preview.changes.values().all(|change| change != "retiring" && change != "retired"));
+    assert!(preview.expected_subjects.contains_key(original));
+    assert!(!preview.expected_subjects.contains_key(canonical));
+    opts.expected_subjects = preview.expected_subjects;
+    store.apply_owned_set(&input, &opts, "canonical-agent", "person/operator").unwrap();
+    let view = store.owned_sets().unwrap().remove(0);
+    assert!(view.receipt.members.contains_key(original));
+    assert!(!view.receipt.members.contains_key(canonical));
+    assert!(view.receipt.retired.is_empty());
+    let desired = store.desired_subjects().unwrap();
+    let agent = desired.iter().find(|desired| desired.subject == original).unwrap();
+    assert_eq!(agent.kind, "agent");
+    assert!(agent.member.is_some());
+    store.owned_desired_guard(agent).unwrap();
+    assert!(store.latest_claim(original, Some("agent.retired")).unwrap().is_none());
+}
+
+#[test]
+fn canonical_mission_publication_after_rename_keeps_owned_definition_and_runs_live() {
+    let store = Store::open_memory("amber").unwrap();
+    let input = parse_intent(
+        "version 2\nmission \"harvest\" state=\"ready\" { concurrent-runs max=2; goal \"Harvest\"; step \"work\" { agentless } }",
+        "amber",
+    ).unwrap();
+    apply(&store, &input, 10);
+    let original = "mission/harvest";
+    let canonical = "mission/gather";
+    let mut request = crate::model::MissionRunRequest {
+        mission: "harvest".into(),
+        revision: Some(input.missions["harvest"].revision.clone()),
+        workspace: "/tmp".into(),
+        requester: Some("person/operator".into()),
+        mode: Some("run".into()),
+        inputs: Default::default(),
+        idempotency_key: "before-owned-rename".into(),
+    };
+    let active = store.create_mission_run(&request).unwrap();
+    store.rename_identity(
+        identities::IdentityKind::Mission,
+        &identities::RenameRequest {
+            from: original.into(),
+            to: canonical.into(),
+            actor: "person/operator".into(),
+            reason: "Clarify the owned mission name".into(),
+            expected_naming_revision: None,
+            expected_declaration: None,
+            idempotency_key: "rename-owned-mission".into(),
+        },
+        &[],
+    ).unwrap();
+    let input = parse_intent(
+        "version 2\nmission \"gather\" state=\"ready\" { concurrent-runs max=2; goal \"Harvest\"; step \"work\" { agentless } }",
+        "amber",
+    ).unwrap();
+    assert!(input.missions.contains_key("gather"));
+    assert!(!input.missions.contains_key("harvest"));
+    let mut opts = options(&store, 20);
+    let preview = store.owned_set_preview(&input, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    assert!(!preview.mass_retirement);
+    assert!(preview.changes.values().all(|change| change != "retiring" && change != "retired"));
+    assert!(preview.expected_subjects.contains_key(original));
+    assert!(!preview.expected_subjects.contains_key(canonical));
+    opts.expected_subjects = preview.expected_subjects;
+    store.apply_owned_set(&input, &opts, "canonical-mission", "person/operator").unwrap();
+    let view = store.owned_sets().unwrap().remove(0);
+    assert!(view.receipt.members.contains_key(original));
+    assert!(!view.receipt.members.contains_key(canonical));
+    assert!(view.receipt.retired.is_empty());
+    assert_eq!(store.mission_spec("gather", None).unwrap().unwrap().state, MissionState::Ready);
+    assert_eq!(store.mission_run(&active.id).unwrap().unwrap().status, "running");
+    request.mission = "gather".into();
+    request.idempotency_key = "after-owned-rename".into();
+    let next = store.create_mission_run(&request).unwrap();
+    assert_eq!(next.mission, original);
+    assert_eq!(next.status, "running");
 }
 
 #[test]

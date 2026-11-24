@@ -253,6 +253,35 @@ pub struct Meter {
     client_intervals: BTreeMap<(String, String, Option<String>), smallclaims::windows::IntervalSeries>,
 }
 
+/// Owned in-memory evidence. Finish only after releasing the shared request meter:
+/// attaching native budgets and store evidence can wait on ledger SQLite I/O.
+pub struct WindowSnapshot {
+    now: Instant,
+    targets: Vec<(usize, Value)>,
+    cpu: Value,
+    client: Vec<Value>,
+    paths: Option<Vec<Value>>,
+}
+
+impl WindowSnapshot {
+    pub fn finish(self) -> Value {
+        let mut rows = self.targets.into_iter().map(|(index, mut row)| {
+            row["budget"] = crate::slo::latency_budget(index, false, self.now);
+            if row.get("remote_p99_ms").is_some() {
+                row["remote_budget"] = crate::slo::latency_budget(index, true, self.now);
+            }
+            row
+        }).collect::<Vec<_>>();
+        rows.extend(crate::slo::store_report(self.cpu));
+        rows.extend(self.client);
+        let mut report = json!({"targets": rows});
+        if let Some(paths) = self.paths {
+            report["paths"] = json!(paths);
+        }
+        report
+    }
+}
+
 /// How a completed sample is counted in the windows. Build it with [`Timed::resolve`] before
 /// taking the meter's lock: the key and the target lookup allocate and scan.
 pub struct Timed {
@@ -345,24 +374,22 @@ impl Meter {
                     .resize_with(targets.latency.len(), Default::default);
             }
             self.targets[target][usize::from(remote)].record(now, elapsed, over);
+            crate::slo::note_latency(target, remote, now, over);
         }
     }
 
-    /// Every target's windows, then every path's that has a sample in its last hour.
-    pub fn windows(&mut self, now: Instant) -> Value {
-        let rows = self.target_rows(now);
-        json!({"targets": rows, "paths": self.path_rows(now)})
+    /// Snapshot every target and sampled path without consulting the native ledger.
+    pub fn windows_snapshot(&mut self, now: Instant) -> WindowSnapshot {
+        let mut snapshot = self.targets_snapshot(now);
+        snapshot.paths = Some(self.path_rows(now));
+        snapshot
     }
 
-    /// Only the targets' windows: what the collector gets, without every path's snapshot.
-    pub fn targets_only(&mut self, now: Instant) -> Value {
-        json!({"targets": self.target_rows(now)})
-    }
-
-    fn target_rows(&mut self, now: Instant) -> Vec<Value> {
+    /// Snapshot the collector's in-memory evidence; finish after dropping the meter guard.
+    pub fn targets_snapshot(&mut self, now: Instant) -> WindowSnapshot {
         let targets = crate::slo::targets();
         let empty = smallclaims::windows::Series::default();
-        let mut rows = targets
+        let rows = targets
             .latency
             .iter()
             .enumerate()
@@ -384,21 +411,21 @@ impl Meter {
                     row["remote_p99_ms"] = json!(remote);
                     row["remote_windows"] = windows(true);
                 }
-                row
+                (index, row)
             })
             .collect::<Vec<_>>();
         let wall = crate::api::client_now_ms() as u64;
-        rows.extend(crate::slo::store_report(self.cpu.report(wall)));
+        let mut client = Vec::new();
         for latency in targets.latency.iter().filter(|t| t.paths.iter().any(|p| p.starts_with("client/ios/"))) {
             let windows = self.client_windows(wall, &latency.name, false);
-            rows.push(json!({"name":latency.name,"about":latency.about,"p99_ms":latency.p99_ms,
+            client.push(json!({"name":latency.name,"about":latency.about,"p99_ms":latency.p99_ms,
                 "population":"client-observed-latencies", "windows":windows}));
         }
         for share in &targets.share {
-            rows.push(json!({"name":share.name,"about":share.about,"min_percent":share.min_percent,
+            client.push(json!({"name":share.name,"about":share.about,"min_percent":share.min_percent,
                 "population":"client-observed-foreground-ms","windows":self.client_windows(wall,&share.name,true)}));
         }
-        rows
+        WindowSnapshot { now, targets: rows, cpu: self.cpu.report(wall), client, paths: None }
     }
 
     fn path_rows(&self, now: Instant) -> Vec<Value> {
@@ -490,6 +517,171 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_completion_never_waits_for_blocked_ledger_reports() {
+        use std::sync::mpsc;
+
+        const CHILD: &str = "FRACTAL_METER_LEDGER_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::request_latency::tests::http_completion_never_waits_for_blocked_ledger_reports", "--nocapture"])
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(output.status.success(), "isolated ledger regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("blocked-writer projection regression completed"),
+                "isolated child did not execute the regression:\n{}", String::from_utf8_lossy(&output.stdout));
+            return;
+        }
+
+        // Both globals are isolated so this ledger cannot affect another test.
+        std::thread_local! {
+            static BLOCKED: std::cell::RefCell<Option<mpsc::Sender<()>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let app = crate::api::router(state.clone());
+        let path = root.path().join("native-budget.sqlite");
+        crate::slo::install_budget_ledger(&path, "node").unwrap();
+        smallclaims::windows::budgets::set_busy_handler_for_tests(Some(|attempt| {
+            if attempt == 0 {
+                BLOCKED.with(|sender| { let _ = sender.borrow().as_ref().unwrap().send(()); });
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            true
+        })).unwrap();
+
+        for (name, render) in [
+            ("collector", crate::api::request_latency_target_windows as fn() -> Value),
+            ("diagnostics", crate::api::request_latency_windows as fn() -> Value),
+        ] {
+            let baseline = render();
+            let as_of = baseline["targets"][0]["budget"]["as_of_unix_ms"].clone();
+            let blocker = rusqlite::Connection::open(&path).unwrap();
+            blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+            let (entered, blocked) = mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                BLOCKED.with(|sender| *sender.borrow_mut() = Some(entered));
+                crate::slo::checkpoint_budgets()
+            });
+            // A real checkpoint owns LEDGER and SQLite acknowledges its actual wait.
+            let entered_io = blocked.recv_timeout(Duration::from_secs(5));
+            let (reported, reports) = mpsc::channel();
+            let reporting = std::thread::spawn(move || {
+                let _ = reported.send(render());
+            });
+            let (projected, projected_rows) = mpsc::channel();
+            let projection = std::thread::spawn({
+                let state = state.clone();
+                move || {
+                    // Match the frozen assistant caller's pinned store-read boundary.
+                    let rows = state.store.read_snapshot(|_| {
+                        crate::api::operations::current_slo_rows(&state.store, &state.state_dir)
+                    });
+                    let _ = projected.send(rows);
+                }
+            });
+            let (native_sent, native_reports) = mpsc::channel();
+            let native = std::thread::spawn(move || {
+                let targets = crate::slo::targets();
+                let target = &targets.latency[0];
+                let event_stream = format!("latency/{}/local/{}", target.name, target.p99_ms);
+                let gauge_stream = format!("database/{}/{}",
+                    targets.database.max_live_gb, targets.database.max_growth_mb_per_day);
+                let event = smallclaims::windows::budgets::report(&event_stream);
+                let gauge = smallclaims::windows::budgets::gauge_report(&gauge_stream,
+                    smallclaims::windows::budgets::unix_ms(), 2 * 60 * 60 * 1000, 1.0);
+                let _ = native_sent.send((event, gauge));
+            });
+            let (sent, completed) = mpsc::channel();
+            let request = std::thread::spawn({
+                let app = app.clone();
+                move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all().build().unwrap();
+                    let response = runtime.block_on(
+                        crate::api::tests_shared_client_v0_tests::get_request(app, "/v1/health"));
+                    let _ = sent.send(response);
+                }
+            });
+            let response = completed.recv_timeout(Duration::from_secs(1));
+            let report = reports.recv_timeout(Duration::from_secs(1));
+            let current_rows = projected_rows.recv_timeout(Duration::from_secs(1));
+            let native_result = native_reports.recv_timeout(Duration::from_secs(1));
+            let writer_still_blocked = !writer.is_finished();
+            // Never assert a timeout while a worker can still be stranded on LEDGER.
+            let rollback = blocker.execute_batch("ROLLBACK");
+            drop(blocker);
+            let written = writer.join();
+            let reported = reporting.join();
+            let projected = projection.join();
+            let native_joined = native.join();
+            let requested = request.join();
+            rollback.unwrap();
+            written.unwrap().unwrap();
+            reported.unwrap();
+            projected.unwrap();
+            native_joined.unwrap();
+            requested.unwrap();
+            assert!(entered_io.is_ok(), "{name} checkpoint never reached SQLite busy wait: {entered_io:?}");
+            assert!(writer_still_blocked, "{name} checkpoint finished with disk still locked");
+            assert_eq!(response.expect("HTTP completion waited for ledger I/O").0, axum::http::StatusCode::OK);
+            let report = report.expect("report wrapper waited for the blocked native ledger writer");
+            let current_rows = current_rows.expect("current_slo_rows waited for the blocked native ledger writer").unwrap();
+            assert!(!current_rows.is_empty());
+            assert!(current_rows.iter().all(|row| row["id"].is_string()));
+            for id in [crate::slo::targets().latency[0].name.as_str(), "database", "transaction/read"] {
+                let row = current_rows.iter().find(|row| row["id"] == id)
+                    .unwrap_or_else(|| panic!("current_slo_rows omitted native objective {id}"));
+                assert_eq!(row["kind"], "objective");
+                assert_eq!(row["status"], "no-data");
+                assert!(row["remaining_percent"].is_null());
+            }
+            assert!(as_of.is_u64(), "installed native projection omitted its as-of timestamp");
+            let (event, gauge) = native_result.expect("public report APIs waited for the blocked native ledger writer");
+            for evidence in [event.unwrap(), gauge.unwrap()] {
+                assert_eq!(evidence["as_of_unix_ms"], as_of);
+                assert!(evidence["stale"].is_boolean());
+                assert_eq!(evidence["available"], !evidence["stale"].as_bool().unwrap());
+                assert!(evidence["windows"].is_object());
+            }
+
+            let rows = report["targets"].as_array().unwrap();
+            let targets = crate::slo::targets();
+            let server = targets.latency.iter()
+                .filter(|latency| !latency.paths.iter().any(|path| path.starts_with("client/ios/")))
+                .collect::<Vec<_>>();
+            for (row, target) in rows.iter().zip(&server) {
+                assert_eq!(row["name"], target.name);
+                assert_eq!(row["budget"]["as_of_unix_ms"], as_of);
+                assert_eq!(row["budget"]["available"], !row["budget"]["stale"].as_bool().unwrap());
+                assert!(row["windows"].is_object());
+                if target.remote_p99_ms.is_some() {
+                    assert_eq!(row["remote_budget"]["as_of_unix_ms"], as_of);
+                    assert_eq!(row["remote_budget"]["available"], !row["remote_budget"]["stale"].as_bool().unwrap());
+                    assert!(row["remote_windows"].is_object());
+                }
+            }
+            let store = &rows[server.len()..server.len() + 5];
+            assert_eq!(store.iter().map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>(),
+                ["sql-statement", "transaction", "writer-hold", "cpu", "database"]);
+            assert_eq!(store[4]["budget"]["as_of_unix_ms"], as_of);
+            assert_eq!(store[4]["budget"]["available"], !store[4]["budget"]["stale"].as_bool().unwrap());
+            let client = targets.latency.iter()
+                .filter(|latency| latency.paths.iter().any(|path| path.starts_with("client/ios/")))
+                .map(|latency| latency.name.as_str())
+                .chain(targets.share.iter().map(|share| share.name.as_str())).collect::<Vec<_>>();
+            assert_eq!(rows[server.len() + 5..].iter()
+                .map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>(), client);
+            assert_eq!(report.get("paths").is_some(), name == "diagnostics");
+        }
+        let rows = crate::api::request_latency_snapshot();
+        assert_eq!(rows.iter().find(|row| row["scope"] == "route" && row["route"] == "/v1/health")
+            .unwrap()["count"], 2);
+        println!("blocked-writer projection regression completed");
+    }
 
     const WORK: &str = "/v1/work/{action}/{*subject}";
 
@@ -611,7 +803,7 @@ mod tests {
         time(&mut meter, "stream conversation", true, false, 350);
         time(&mut meter, "GET /v1/client/conversations/{id}/changes", false, true, 30_000);
         time(&mut meter, "GET /v1/health", false, false, 1);
-        let report = meter.windows(now);
+        let report = meter.windows_snapshot(now).finish();
         let target = |name: &str| {
             report["targets"]
                 .as_array()
@@ -669,7 +861,7 @@ mod tests {
         // The target is inclusive: exactly 300 ms is not over it (Meter::time uses >).
         meter.time(now, Timed::resolve("GET /v1/client/agents", false, Wait::No), Duration::from_millis(300));
         meter.time(now, Timed::resolve("GET /v1/client/agents", false, Wait::No), Duration::from_millis(350));
-        let report = meter.windows(now);
+        let report = meter.windows_snapshot(now).finish();
         let row = |name: &str| {
             report["targets"].as_array().unwrap().iter().find(|row| row["name"] == name).unwrap().clone()
         };
@@ -692,7 +884,7 @@ mod tests {
                 Duration::from_millis(ms),
             );
         }
-        let report = meter.windows(now);
+        let report = meter.windows_snapshot(now).finish();
         let fresh = report["targets"]
             .as_array()
             .unwrap()

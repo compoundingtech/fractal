@@ -32,6 +32,11 @@ use crate::objectives::{clamp_percent, duration, nearest_rank, plural};
 use crate::store::Store;
 use crate::store::declared_objectives::DeclaredObjective;
 use smallclaims::error::internal;
+use crate::store::objective_series::time_ms;
+
+#[path = "declared_objectives_budget.rs"]
+mod budget;
+pub(crate) use budget::{BudgetEvidence, classify_budget};
 
 /// Claims read per page while catching up.
 const PAGE: usize = 1_000;
@@ -51,6 +56,7 @@ struct Tracked {
     samples: BTreeMap<String, Sample>,
     /// A count's events in the window, by subject.
     events: BTreeMap<String, Counted>,
+    numeric: budget::Observations,
     /// Whether a count has read an event claim for this revision.
     seen: bool,
     /// Each label's values on the event claims a count has read for this revision: a value's row
@@ -68,6 +74,8 @@ struct Tracked {
 enum Measure {
     Interval(Box<Interval>),
     Count(Box<Count>),
+    Ratio(Box<crate::objective::Ratio>),
+    Gauge(Box<crate::objective::Gauge>),
 }
 
 /// A subject's event: its earliest event claim's time and id (the id breaks a tie, so every member
@@ -122,9 +130,136 @@ struct Point<'a> {
     member: Option<&'a str>,
     class: Class,
 }
+/// Bucket explicitly selected claims, or the events/closed samples of one declared objective.
+#[allow(clippy::too_many_arguments)]
+pub fn claim_series(
+    store: &Store,
+    objective: Option<&str>,
+    kinds: &[String],
+    subject_prefix: Option<&str>,
+    group_by: Option<&str>,
+    from: u64,
+    to: u64,
+    bucket_seconds: u64,
+) -> Result<Value, FractalError> {
+    let (width, bucket_count) = series_bounds(from, to, bucket_seconds)?;
+    if let Some(id) = objective {
+        if !kinds.is_empty() || subject_prefix.is_some() || group_by.is_some() {
+            return Err(FractalError::new("invalid-series", "objective cannot be combined with kind, subject_prefix or group_by"));
+        }
+        return objective_series(store, id, from, to, bucket_seconds, width, bucket_count);
+    }
+    if kinds.is_empty() || kinds.iter().any(String::is_empty) || group_by == Some("") {
+        return Err(FractalError::new("invalid-series", "require at least one nonempty kind, and a nonempty group_by when supplied"));
+    }
+    let claims = store.series_claims(kinds, subject_prefix, from, to).map_err(internal)?;
+    let mut counts = vec![0u64; bucket_count];
+    let mut groups = group_by.map(|_| vec![BTreeMap::<String, (Value, u64)>::new(); bucket_count]);
+    for claim in claims.into_iter().filter(crate::api::records::generic_claim_visible) {
+        let fields = claim.body.get("fields").and_then(Value::as_object);
+        let at = ["at", "occurred_at_unix_ms", "occurred_at"].into_iter()
+            .find_map(|field| fields.and_then(|fields| fields.get(field)))
+            .map_or_else(|| u64::try_from(claim.accepted_at_unix_ms).ok(), time_ms);
+        let Some(at) = at.filter(|at| *at >= from && *at < to) else {
+            continue;
+        };
+        let index = ((at - from) / width) as usize;
+        counts[index] += 1;
+        if let (Some(field), Some(groups)) = (group_by, &mut groups) {
+            let value = fields.and_then(|fields| fields.get(field))
+                .map_or(Value::Null, smallclaims::hash::canonical_json_value);
+            let key = serde_json::to_string(&value).map_err(internal)?;
+            groups[index].entry(key).or_insert((value, 0)).1 += 1;
+        }
+    }
+    let buckets: Vec<Value> = counts.into_iter().enumerate().map(|(index, count)| {
+        let start = from + index as u64 * width;
+        let mut bucket = json!({"start": start, "end": start.saturating_add(width).min(to), "count": count});
+        if let Some(groups) = &mut groups {
+            bucket["groups"] = Value::Array(std::mem::take(&mut groups[index]).into_values()
+                .map(|(value, count)| json!({"value": value, "count": count})).collect());
+        }
+        bucket
+    }).collect();
+    let mut response = json!({"from": from, "to": to, "bucket_seconds": bucket_seconds, "buckets": buckets});
+    if let Some(field) = group_by {
+        response["group_by"] = json!(field);
+    }
+    Ok(response)
+}
+
+fn series_bounds(from: u64, to: u64, bucket_seconds: u64) -> Result<(u64, usize), FractalError> {
+    let invalid = || FractalError::new("invalid-series", "require from < to, at most 31 days, positive bucket_seconds, and at most 1000 buckets");
+    let width = bucket_seconds.saturating_mul(1_000);
+    if width == 0 {
+        return Err(invalid());
+    }
+    let span = to.checked_sub(from).filter(|span| *span > 0 && *span <= 31 * 86_400_000).ok_or_else(invalid)?;
+    let bucket_count = span.div_ceil(width);
+    if bucket_count > 1_000 {
+        return Err(invalid());
+    }
+    Ok((width, bucket_count as usize))
+}
+
+fn objective_series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds: u64, width: u64, bucket_count: usize) -> Result<Value, FractalError> {
+    let declaration = store.declared_objectives().map_err(internal)?.into_iter().find(|declaration| declaration.name() == id);
+    let unsupported = || FractalError::new("unsupported-objective-series", format!("`{id}` is not a declared count or interval objective"));
+    let declaration = match declaration {
+        Some(declaration) => declaration,
+        None if crate::slo::shipped().iter().any(|objective| objective.name == id) => return Err(unsupported()),
+        None => return Err(FractalError::new("unknown-objective", format!("unknown objective `{id}`"))),
+    };
+    let objective = declaration.objective.as_ref().map_err(|_| unsupported())?;
+    if !objective.declarable() {
+        return Err(unsupported());
+    }
+    let mut tracked = Tracked::new(&declaration);
+    let mut counts = vec![0u64; bucket_count];
+    let mut tally = |at: u64| {
+        if at >= from && at < to {
+            counts[((at - from) / width) as usize] += 1;
+        }
+    };
+    match &objective.indicator {
+        Indicator::Count(count) => {
+            let claims = store.objective_series_claims(&[(&count.event, Some(&count.at))], &[&count.event], &count.subject_prefix, from, to).map_err(internal)?;
+            for claim in claims.iter().filter(|claim| crate::api::records::generic_claim_visible(claim)) {
+                tracked.observe_count(count, claim, 0);
+            }
+            for event in tracked.events.values().filter(|event| !left_out(count, &event.fields)) {
+                tally(event.at);
+            }
+        }
+        Indicator::Interval(interval) => {
+            // A completion is a stop, an empty expected set, or (when expect precedes start)
+            // the start itself. Each seek is bounded; all context for candidates is retained.
+            let mut events = vec![(interval.stop.0.kind.as_str(), interval.stop.0.at.as_deref()), (interval.start.kind.as_str(), interval.start.at.as_deref())];
+            if let Some((expect, _)) = &interval.expect {
+                events.push((expect.kind.as_str(), expect.at.as_deref()));
+            }
+            let claims = store.objective_series_claims(&events, &interval.kinds(), &interval.subject_prefix, from, to).map_err(internal)?;
+            for claim in claims.iter().filter(|claim| crate::api::records::generic_claim_visible(claim)) {
+                tracked.observe(interval, claim);
+            }
+            for sample in tracked.samples.values() {
+                if let Class::Closed { stop, .. } = sample.class(interval, None, to) {
+                    tally(stop);
+                }
+            }
+        }
+        _ => return Err(unsupported()),
+    }
+    let buckets: Vec<Value> = counts.into_iter().enumerate().map(|(index, count)| {
+        let start = from + index as u64 * width;
+        json!({"start": start, "end": start.saturating_add(width).min(to), "count": count})
+    }).collect();
+    Ok(json!({"from": from, "to": to, "bucket_seconds": bucket_seconds, "buckets": buckets}))
+}
+
 
 /// The declared objectives' rows, evaluated at `now`.
-pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
+pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Vec<Value>> {
     let declared = store.declared_objectives()?;
     let evaluations = store.fractal.extensions.get::<Evaluations>();
     let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -138,10 +273,60 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
             *entry = Tracked::new(&declaration);
         }
         let name = declaration.name();
+        if let Ok(objective) = &entry.objective
+            && let Indicator::Native { objective: source } = &objective.indicator
+        {
+            let response = objective.on_breach.as_ref().map_or_else(
+                || response(store, None),
+                |breach| format!(
+                    "A burning or exhausted native row opens one member-local operational.failure `{}` on daemon/{} addressed to {}; delivery requires that owner to remain a live declared reviewer, regardless of its host.",
+                    breach.condition, store.origin(), breach.owner,
+                ),
+            );
+            let mut produced = Vec::new();
+            for source_row in native_rows {
+                if source_row["kind"] != "objective" { continue; }
+                let Some(id) = source_row["id"].as_str() else { continue };
+                if !native_owns(source, id) { continue; }
+                let mut row = source_row.clone();
+                row["id"] = Value::String(format!("{}{}", objective.name, &id[source.len()..]));
+                row["about"] = Value::String(objective.about.clone());
+                row["explain"] = Value::String(format!(
+                    "{} Bound as {} at revision {} to native objective {source}. {response}",
+                    source_row["explain"].as_str().unwrap_or(""), declaration.subject, entry.short_revision(),
+                ));
+                produced.push(row);
+            }
+            if produced.is_empty() {
+                // A wholly missing source is unknown, not proof its previously burning children ended.
+                let mut ids = entry.ids.clone();
+                ids.extend(crate::objective_faults::owned_rows(store, &objective.name)?);
+                if ids.is_empty() { ids.insert(objective.name.clone()); }
+                for id in ids {
+                    produced.push(json!({
+                        "id": id, "kind": "objective", "about": objective.about,
+                        "target": "native objective", "current": "native source unavailable", "window": "now",
+                        "remaining_percent": null, "status": "no-data",
+                        "explain": format!("Native objective {source} has no source row on this member. {response}"),
+                    }));
+                }
+            }
+            entry.ids = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
+            rows.extend(produced);
+            continue;
+        }
         let measure = match &entry.objective {
             Ok(objective) if objective.declarable() => match (&objective.indicator, objective.window) {
                 (Indicator::Interval(interval), Some(window)) => Some((Measure::Interval(interval.clone()), window)),
                 (Indicator::Count(count), Some(window)) => Some((Measure::Count(count.clone()), window)),
+                (Indicator::Ratio(ratio), _) => objective.budget.as_ref().map(|budget| (
+                    Measure::Ratio(ratio.clone()),
+                    Window { ms: budget.horizon_ms, min_samples: budget.min_samples },
+                )),
+                (Indicator::Gauge(gauge), _) => objective.budget.as_ref().map(|budget| (
+                    Measure::Gauge(gauge.clone()),
+                    Window { ms: budget.horizon_ms, min_samples: budget.min_samples },
+                )),
                 _ => None,
             },
             _ => None,
@@ -170,6 +355,33 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
                 let judged = produced.first().and_then(|row| row["id"].as_str()).map(str::to_owned).into_iter().collect();
                 (produced, judged)
             }
+            Measure::Ratio(ratio) => {
+                entry.read(store, &[&ratio.event], &ratio.subject_prefix, |entry, claim| {
+                    entry.observe_numeric(claim, &ratio.at, &ratio.field, &ratio.labels, &ratio.excludes, &ratio.only);
+                })?;
+                entry.numeric.prune(now.saturating_sub(window.ms), false);
+                let produced = entry.budget_rows(&declaration.subject, None, now, &response);
+                let judged = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
+                (produced, judged)
+            }
+            Measure::Gauge(gauge) => {
+                entry.read(store, &[&gauge.event], &gauge.subject_prefix, |entry, claim| {
+                    entry.observe_numeric(claim, &gauge.at, &gauge.field, &gauge.labels, &gauge.excludes, &gauge.only);
+                })?;
+                let policy = entry.objective.as_ref().expect("decoded objective").budget.as_ref().expect("gauge budget");
+                let retention = window.ms
+                    .max(policy.fast.long_ms)
+                    .max(policy.fast.short_ms)
+                    .max(policy.slow.long_ms)
+                    .max(policy.slow.short_ms)
+                    .max(gauge.cadence_ms.saturating_mul(2));
+                // Keep every evaluated window and its immediate predecessor. Measurement
+                // clips that predecessor's held value to max-age; older points cannot help.
+                entry.numeric.prune(now.saturating_sub(retention), true);
+                let produced = entry.budget_rows(&declaration.subject, Some(gauge), now, &response);
+                let judged = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
+                (produced, judged)
+            }
         };
         entry.ids = judged;
         rows.extend(produced);
@@ -195,22 +407,25 @@ pub fn check_and_report(store: &Store, rows: &[Value]) {
 /// fault for each of its missed rows and end it when the row is met again, or once the objective
 /// no longer judges the row.
 pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalError> {
-    let responders: Vec<(String, Breach, BTreeSet<String>)> = {
+    let responders: Vec<(String, Breach, BTreeSet<String>, bool)> = {
         let evaluations = store.fractal.extensions.get::<Evaluations>();
         let tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
         tracked
             .values()
             .filter_map(|tracked| {
                 let objective = tracked.objective.as_ref().ok()?;
-                Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone()))
+                let native = matches!(objective.indicator, Indicator::Native { .. });
+                Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone(), native))
             })
             .collect()
     };
     let mut total = ObjectiveFaults::default();
-    for (name, breach, ids) in responders {
-        if store.agent_host(&breach.owner).map_err(internal)?.as_deref() != Some(store.origin()) {
+    for (name, breach, ids, native) in responders {
+        // Replicated claim evidence has one delivery host; native evidence belongs to this member.
+        if !native && store.agent_host(&breach.owner).map_err(internal)?.as_deref() != Some(store.origin()) {
             continue;
         }
+        let owned = crate::objective_faults::owned_rows(store, &name)?;
         let check = check_with_response(
             store,
             rows,
@@ -218,10 +433,16 @@ pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalEr
             ObjectiveResponse { reviewer: &breach.owner, condition: &breach.condition, title: &name },
         )?;
         total.opened += check.opened;
-        total.recovered += check.recovered + end_unjudged(store, |id| owns(&name, id), &ids)?;
+        total.recovered += check.recovered
+            + end_unjudged(store, |id| owned.contains(id) || (!native && owns(&name, id)), &ids)?;
         total.unowned += check.unowned;
     }
     Ok(total)
+}
+
+/// Native objectives can expose independent child rows (transactions, remote paths, CPU modes).
+fn native_owns(name: &str, id: &str) -> bool {
+    id.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('{'))
 }
 
 /// Whether row `id` is one of objective `name`'s: `NAME` or `NAME/pNN`, either with a
@@ -249,6 +470,7 @@ impl Tracked {
             cursor: 0,
             samples: BTreeMap::new(),
             events: BTreeMap::new(),
+            numeric: budget::Observations::default(),
             seen: false,
             labels: BTreeMap::new(),
             unreadable: 0,
@@ -329,7 +551,7 @@ impl Tracked {
         let why = match &self.objective {
             Err(error) => format!("does not decode on this build: {error}"),
             Ok(objective) => format!(
-                "is a `{}` indicator named `{}`, and a fleet declares only an interval or count named NAMESPACE/NAME",
+                "is a `{}` indicator named `{}`, and is not a supported fleet declaration named NAMESPACE/NAME",
                 objective.indicator.kind(),
                 objective.name
             ),
@@ -701,18 +923,6 @@ fn holds(only: &[Only], fields: &BTreeMap<String, String>) -> bool {
     only.iter().all(|only| fields.get(&only.field).is_some_and(|value| only.values.contains(value)))
 }
 
-/// A time from an RFC 3339 string or Unix milliseconds, either possibly JSON-encoded in a string.
-fn time_ms(value: &Value) -> Option<u64> {
-    match value {
-        Value::Number(number) => number.as_u64(),
-        Value::String(text) => chrono::DateTime::parse_from_rfc3339(text)
-            .ok()
-            .and_then(|at| u64::try_from(at.timestamp_millis()).ok())
-            .or_else(|| text.parse().ok())
-            .or_else(|| serde_json::from_str::<Value>(text).ok().filter(Value::is_string).and_then(|value| time_ms(&value))),
-        _ => None,
-    }
-}
 
 /// A field's text: a string (a JSON-encoded one decoded), a number or a boolean.
 fn text(value: &Value) -> Option<String> {

@@ -192,6 +192,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st agents rename-proof": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st agents repos": {
         "actor": "none",
         "accepts_person": false,
@@ -1677,6 +1686,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st missions rename-proof": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st missions report-to": {
         "actor": "required",
         "accepts_person": true,
@@ -2308,6 +2326,15 @@
         "ignores_actor": false
       },
       "st sekrets whoami": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st series": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,

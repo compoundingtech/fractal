@@ -108,6 +108,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case mailBacklogSummary = "mail-backlog.summary"
     case sloList = "slo.list"
     case sloHistory = "slo.history"
+    case seriesRead = "series.read"
     case usagePeriod = "usage.period"
     case usageHubQuota = "usage-hub.quota"
     case githubPluginPullRequest = "github-plugin.pull-request"
@@ -217,6 +218,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .mailBacklogSummary: "/v1/client/mail-backlog",
     .sloList: "/v1/client/slo",
     .sloHistory: "/v1/client/slo/history",
+    .seriesRead: "/v1/client/series",
     .usagePeriod: "/v1/client/usage",
     .usageHubQuota: "/v1/client/usage/quota",
     .githubPluginPullRequest: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}",

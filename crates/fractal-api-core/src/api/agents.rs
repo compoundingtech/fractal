@@ -686,6 +686,66 @@ async fn rename_identity_id(
     Ok(Json(receipt))
 }
 
+pub async fn plan_agent_rename_id(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::identities::RenameRequest>,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    plan_identity_rename(state, crate::store::identities::IdentityKind::Agent, request).await
+}
+
+pub async fn plan_mission_rename_id(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::identities::RenameRequest>,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    plan_identity_rename(state, crate::store::identities::IdentityKind::Mission, request).await
+}
+
+async fn plan_identity_rename(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    request: crate::store::identities::RenameRequest,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    use crate::store::identities::IdentityStore;
+    person_or_agent_actor(&request.actor, "invalid-rename-actor")?;
+    let store = state.store.clone();
+    let peers = state.configured_peers.clone();
+    blocking_action(move || store.plan_rename_identity(kind, &request, &peers)).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProofQuery {
+    from: String,
+    to: String,
+    request_digest: Option<String>,
+}
+
+pub async fn agent_rename_proof(
+    State(state): State<AppState>,
+    Query(query): Query<RenameProofQuery>,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    identity_rename_proof(state, crate::store::identities::IdentityKind::Agent, query).await
+}
+
+pub async fn mission_rename_proof(
+    State(state): State<AppState>,
+    Query(query): Query<RenameProofQuery>,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    identity_rename_proof(state, crate::store::identities::IdentityKind::Mission, query).await
+}
+
+async fn identity_rename_proof(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    query: RenameProofQuery,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    use crate::store::identities::IdentityStore;
+    let store = state.store.clone();
+    blocking_action(move || {
+        store.rename_proof(kind, &query.from, &query.to, query.request_digest.as_deref())
+    }).await.map(Json)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenameProofExportRequest {

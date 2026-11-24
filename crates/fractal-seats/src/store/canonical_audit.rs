@@ -169,6 +169,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_usage_credit_pending",
         "local_usage_credit_progress",
         "local_latest_slots",
+        // Member-local timestamp seeks and capture queue, rebuilt from authoritative claim bodies.
+        "local_objective_times_v1",
+        "local_objective_times_pending_v1",
         "local_resource_projection_pending",
         // Member-local mission-head work, rebuilt from selected published revisions.
         "local_mission_supersession_heads_v3",

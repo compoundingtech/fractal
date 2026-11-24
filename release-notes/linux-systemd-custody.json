@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve Linux process-tree custody through systemd observation admission and unit collection races",
+  "replay": {"status": "none", "detail": "No graph replay or stored-state conversion is introduced; synchronous runtime custody waits for the existing fresh-observation admission boundary."},
+  "schema": {"status": "none", "detail": "No persisted schema or claim contract changes are introduced by this fix."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or admission budget policy changes; manager observations retain their existing admission and freshness requirements."},
+  "compatibility": {"status": "none", "detail": "No CLI flags, wire contracts or client capabilities change. The fixes operate within each Linux execution host and require no coordinated member upgrade."},
+  "downtime": {"status": "none", "detail": "No additional interruption beyond the normal binary rollout is required; no production daemon restart was performed for the isolated proof."},
+  "manual": {"status": "none", "detail": "No user state migration or manual cleanup is required by the fix. Runtime tests now own finite-tree fixture cleanup during unwinding."},
+  "recovery": {"status": "changed", "detail": "Synchronous teardown waits for fresh admitted observation instead of abandoning custody after invalidation. Complete not-found records from list/show collection races no longer poison unrelated observation; scope absence still requires fresh verification. PTY launcher completion and verified server migration finish scope joins so retirement can confirm the whole tree is empty."}
+}

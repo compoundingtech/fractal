@@ -59,6 +59,14 @@ it('reports only what the client holds about this device, and no credential', as
   expect(facts).not.toMatch(/bearer/i)
 })
 
+it('describes every listed grant without implying unrestricted access', async () => {
+  const grants: Grants = { actions: 'granted', messageSend: 'granted', attachmentUpload: 'granted', terminalInput: 'granted', terminalControl: 'granted' }
+  const { dialog } = await mount(() => undefined, undefined, grants)
+  const facts = within(dialog).getByRole('region', { name: 'Device and connection' }).textContent
+  expect(facts).toContain('All listed controls granted')
+  expect(facts).not.toContain('Full control')
+})
+
 it('moves theme switching here as a named Light, Dark or System choice', async () => {
   const change = vi.fn()
   const { dialog } = await mount(change)

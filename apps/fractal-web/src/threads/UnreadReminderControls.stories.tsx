@@ -121,7 +121,7 @@ const ReminderScene = ({ label, ...args }: Omit<Args, 'scheme'> & { readonly lab
 }
 
 const Canvas = ({ scheme, children }: { readonly scheme: Args['scheme']; readonly children: React.ReactNode }) =>
-  <main data-scheme={scheme} {...stylex.props(styles.canvas, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>{children}</main>
+  <main data-scheme={scheme} {...stylex.props(styles.canvas, scheme === 'dark' ? styles.darkScheme : styles.lightScheme, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>{children}</main>
 
 const UnreadReminderStory = ({ scheme, ...args }: Args) =>
   <Canvas scheme={scheme}><ReminderScene key={`${args.read}:${args.grant}:${args.seek}:${args.change}`} {...args} /></Canvas>
@@ -168,6 +168,23 @@ const markRead = 'Mark read, clearing the unread reminder'
 const jump = 'Jump to the reply marked unread'
 const controls = (canvasElement: HTMLElement) => canvasElement.querySelector('[data-thread-unread-reminder-controls]')
 const indicators = (canvasElement: HTMLElement) => canvasElement.querySelectorAll('[data-thread-unread-reminder]')
+/** These are text actions on the themed heading, not native buttons with a browser-default face. */
+const expectHeadingActions = async (canvasElement: HTMLElement) => {
+  const themedCanvas = canvasElement.querySelector<HTMLElement>('main[data-scheme]')!
+  await expect(getComputedStyle(themedCanvas).colorScheme).toBe(themedCanvas.dataset.scheme)
+  const canvas = within(canvasElement)
+  const naturalRead = await canvas.findAllByRole('button', { name: 'Mark visible replies read' })
+  const reminderActions = canvasElement.querySelectorAll<HTMLButtonElement>('[data-thread-unread-reminder-controls] button')
+  for (const button of [...naturalRead, ...reminderActions]) {
+    await userEvent.unhover(button)
+    const heading = button.closest<HTMLElement>('[data-thread-read-heading]')!.getBoundingClientRect()
+    const bounds = button.getBoundingClientRect()
+    await expect(bounds.left).toBeGreaterThanOrEqual(heading.left)
+    await expect(bounds.right).toBeLessThanOrEqual(heading.right)
+    await expect(getComputedStyle(button).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    await expect(getComputedStyle(button).borderTopWidth).toBe('0px')
+  }
+}
 const rowInView = (canvasElement: HTMLElement, id: string) => {
   const timeline = canvasElement.querySelector<HTMLElement>('ol[aria-label="Worker tests replies"]')!
   const row = [...timeline.querySelectorAll<HTMLElement>(threadAnchorSelector)].find(row => row.getAttribute(threadAnchorAttribute) === id)!
@@ -177,8 +194,10 @@ const rowInView = (canvasElement: HTMLElement, id: string) => {
 /** Jump answered without moving the view: only the reason shows, the reminder and the loaded replies are unchanged. */
 const jumpStops = (detail: string): NonNullable<Story['play']> => async ({ canvasElement }) => {
   const canvas = within(canvasElement)
+  await expectHeadingActions(canvasElement)
   await userEvent.click(await canvas.findByRole('button', { name: jump }))
   await expect(await canvas.findByRole('status')).toHaveTextContent(detail)
+  await expectHeadingActions(canvasElement)
   await expect(canvas.queryByRole('alert')).toBeNull()
   await expect(indicators(canvasElement)).toHaveLength(1)
   await expect(canvasElement.querySelectorAll(threadAnchorSelector)).toHaveLength(replies.length)
@@ -189,7 +208,10 @@ const jumpStops = (detail: string): NonNullable<Story['play']> => async ({ canva
 export const Reminded: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(await canvas.findByText('Marked unread')).toBeVisible()
+    await expectHeadingActions(canvasElement)
+    const indicator = canvasElement.querySelector<HTMLElement>('[data-thread-unread-reminder]')!
+    await expect(indicator).toBeVisible()
+    await expect(indicator).toHaveTextContent('Marked unread')
     await expect(canvas.getByRole('button', { name: jump })).toBeEnabled()
     // Natural read stays its own action beside the reminder.
     await expect(canvas.getByRole('button', { name: 'Mark visible replies read' })).toBeEnabled()
@@ -222,7 +244,10 @@ export const ReadOnly: Story = {
   args: { grant: false },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(await canvas.findByText('Marked unread')).toBeVisible()
+    await expectHeadingActions(canvasElement)
+    const indicator = canvasElement.querySelector<HTMLElement>('[data-thread-unread-reminder]')!
+    await expect(indicator).toBeVisible()
+    await expect(indicator).toHaveTextContent('Marked unread')
     await expect(canvas.getByRole('button', { name: jump })).toBeEnabled()
     await expect(canvas.queryByRole('button', { name: markUnread })).toBeNull()
     await expect(canvas.queryByRole('button', { name: markRead })).toBeNull()
@@ -287,6 +312,7 @@ export const AllStates: Story = {
   play: async ({ canvasElement }) => {
     const scene = (label: string) => canvasElement.querySelector<HTMLElement>(`[data-reminder-scene="${label}"]`)!
     await waitFor(() => expect(canvasElement.querySelectorAll('[data-thread-panel]')).toHaveLength(allStates.length))
+    await expectHeadingActions(canvasElement)
     await expect(indicators(scene('Reminded, granted'))).toHaveLength(1)
     await expect(indicators(scene('No reminder, granted'))).toHaveLength(0)
     await expect(within(scene('Reminded, read-only')).queryByRole('button', { name: markRead })).toBeNull()
@@ -296,6 +322,8 @@ export const AllStates: Story = {
 
 const styles = stylex.create({
   canvas: { minHeight: '100vh', boxSizing: 'border-box', padding: s.section, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize },
+  darkScheme: { colorScheme: 'dark' },
+  lightScheme: { colorScheme: 'light' },
   scene: { display: 'flex', flexDirection: 'column', gap: s.sm, maxWidth: g.lane, width: '100%', marginInline: 'auto', minWidth: 0 },
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 360px), 1fr))', gap: s.section },
   label: { margin: 0, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },

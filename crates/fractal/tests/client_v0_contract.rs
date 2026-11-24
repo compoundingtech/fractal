@@ -1218,6 +1218,17 @@ fn availability_history_fixture_conforms_and_always_names_presence() {
     assert!(!history.is_valid(&negative));
 }
 
+#[test]
+fn series_fixtures_conform_to_their_read_and_envelope() {
+    let envelope = contract_validator("Envelope");
+    let series = contract_validator("Series");
+    for file in ["series.json", "series-grouped.json"] {
+        let read = fixture(file);
+        assert_conforms(&envelope, file, &read);
+        assert_conforms(&series, file, &read["value"]);
+    }
+}
+
 /// The GitHub plugin's reads: each fixture conforms to its read definition, and an envelope
 /// carrying it (as the client-v0 middleware serves it) conforms to `Envelope`.
 #[test]

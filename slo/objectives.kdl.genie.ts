@@ -19,6 +19,16 @@ import * as Fractal from '../packages/fractal/src/objective.ts'
 
 const { indicator } = Fractal
 
+/** Operational budgets are distinct from the stricter percentile and maximum diagnostics. */
+const budget = (allowance: number): Fractal.BudgetPolicy => ({
+  allowance,
+  horizon: '30d',
+  minCoverage: 0.9,
+  minSamples: 1,
+  fast: { burnRate: 14.4, long: '1h', short: '5m' },
+  slow: { burnRate: 6, long: '6h', short: '30m' },
+})
+
 /** The objectives, in the order `slo/objectives.kdl` lists them. */
 export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: string })[] = [
   Fractal.objective({
@@ -57,6 +67,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
         'GET /v1/documents/content',
       ],
     }),
+    budget: budget(0.05),
     targets: [
       { stat: 'p99', within: '300ms' },
       // The same reads through this daemon from another machine that owns them.
@@ -68,6 +79,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
     about:
       'An agents list with legacy fresh=true or an explicit min_cut asks to wait for publication; ordinary st agents ls and tree do not. Explicit waits have their own target and count toward no other',
     indicator: indicator.latency({ paths: ['GET /v1/client/agents (fresh)'] }),
+    budget: budget(0.05),
     targets: [{ stat: 'p99', within: '300ms' }],
   }),
   Fractal.objective({
@@ -77,6 +89,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
     indicator: indicator.latency({
       paths: ['publish missions', 'publish agents', 'publish attention'],
     }),
+    budget: budget(0.05),
     targets: [{ stat: 'p99', within: '1500ms' }],
   }),
   Fractal.objective({
@@ -99,6 +112,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
         'POST /v1/messages/read/{*subject}',
       ],
     }),
+    budget: budget(0.05),
     targets: [{ stat: 'p99', within: '300ms' }],
   }),
   Fractal.objective({
@@ -107,6 +121,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
     indicator: indicator.latency({
       paths: ['GET /v1/client/terminals/{id}/screen', 'stream terminal'],
     }),
+    budget: budget(0.05),
     targets: [{ stat: 'p99', within: '200ms' }],
   }),
   Fractal.objective({
@@ -122,6 +137,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
     name: 'transaction',
     about: "Any transaction, read or write, and any hold of the store's writer",
     indicator: indicator.transaction(),
+    budget: budget(0.01),
     targets: [{ stat: 'max', within: '300ms' }],
   }),
   Fractal.objective({
@@ -205,6 +221,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
     about:
       "This member's store: the pages in use, and how much they grow a day once checkpoints and retention have run",
     indicator: indicator.database(),
+    budget: budget(0.05),
     targets: [
       { stat: 'live-gb', max: 8.0 },
       { stat: 'growth-mb-per-day', max: 300 },

@@ -814,6 +814,10 @@ impl PtyRuntime {
                 }
             };
             self.acknowledge_launcher(&mut producer, true)?;
+            // A completed scope launcher cannot still have a pending join.
+            // Keep its freshness boundary even if the detached server migrates
+            // before the first manager snapshot observes the original scope.
+            crate::isolate::finish_scope_join(&unit);
             if output.status.success() {
                 let published = self.wait_for_publication(id, previous_incarnation.as_deref())?;
                 std::fs::remove_file(&fence)
@@ -2924,6 +2928,7 @@ exit 0
             let harness = read_pid(&pid_file);
             let observed = runtime.session(id).map(observation).unwrap().unwrap();
             let server = observed.pid.unwrap();
+            let server_token = crate::process_start_token(server).unwrap();
             assert_eq!(cgroup_leaf(server), unit);
             assert_eq!(cgroup_leaf(harness), unit);
             // Raw launch above deliberately bypasses normal publication protection.
@@ -2937,12 +2942,22 @@ exit 0
                     Some(&operation), observation_incarnation(&observed).as_deref(),
                 ).unwrap();
             }
-            assert_eq!(cgroup_leaf(server), crate::server_unit(id, server));
-            assert!(process_runs(server).unwrap(), "the supporting server must still be live");
+            // The real server may exit naturally once the harness is killed.
+            // Assert its durable generation ownership rather than racing that
+            // exit by requiring /proc to remain readable after teardown.
+            let producer = runtime.spawn_state_path(id, "producers")
+                .join(format!("{:x}", Sha256::digest(operation.as_bytes())));
+            let recorded: serde_json::Value = serde_json::from_reader(
+                File::open(producer.join(format!("server-{server}.json"))).unwrap(),
+            ).unwrap();
+            assert_eq!(recorded["unit"], crate::server_unit(id, server));
+            assert_eq!(recorded["pid"], server);
+            assert_eq!(recorded["start_token"], server_token);
             assert!(crate::isolate::observe_closed_scope(&unit).unwrap().is_some(),
                 "only the server scope should remain populated");
-            assert!(!runtime.start_operation_closed(id, &operation).unwrap(),
-                "an unrecorded live server would incorrectly certify closure");
+            let closed = runtime.start_operation_closed(id, &operation).unwrap();
+            assert!(!closed || !crate::process_generation_alive(server, server_token).unwrap(),
+                "a live recorded server must prevent producer closure");
         }
     }
 

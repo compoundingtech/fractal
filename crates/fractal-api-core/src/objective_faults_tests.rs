@@ -91,6 +91,24 @@ fn a_missed_objective_is_one_fault_for_its_reviewer_until_it_is_met_again() {
 }
 
 #[test]
+fn budget_burn_and_exhaustion_share_one_owner_episode_until_evidence_recovers() {
+    let store = Store::open_memory("node").unwrap();
+    with_reviewer(&store);
+    assert_eq!(check(&store, &[row(ROLLOUT, "burning")]).opened, 1);
+    let first = open(&store);
+    assert_eq!(check(&store, &[row(ROLLOUT, "exhausted")]), ObjectiveFaults::default());
+    for status in ["no-data", "not-eligible", "no-qualifying-events"] {
+        assert_eq!(check(&store, &[row(ROLLOUT, status)]), ObjectiveFaults::default());
+        assert_eq!(open(&store), first, "{status} cannot manufacture recovery");
+    }
+    assert_eq!(check(&store, &[row(ROLLOUT, "met")]).recovered, 1);
+    assert!(open(&store).is_empty());
+    assert_eq!(check(&store, &[row(ROLLOUT, "exhausted")]).opened, 1);
+    assert_ne!(open(&store), first);
+    assert!(store.attention_snapshot(Some("person/operator"), crate::gate_check::now_ms() + 1).unwrap().is_empty());
+}
+
+#[test]
 fn an_undeclared_reviewer_never_falls_back_to_the_fleet_fault_agent() {
     let store = Store::open_memory("node").unwrap();
     with_reviewer(&store);

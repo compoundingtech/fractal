@@ -13,6 +13,127 @@ complete co-batched claims and blobs of the required sealed envelopes.
 explicit `--include-co-batched-claims` consent; HTTP callers must set
 `include_co_batched_claims: true`. Missing consent is refused with an explanation.
 
+## Plan and inspect a local rename
+
+Agents and missions share the same operator contract:
+
+```sh
+fractal agents rename-id agent/example-old agent/example-new --as person/operator --reason "Clarify responsibility" --idempotency-key example-agent-rename --plan --json
+fractal missions rename-id mission/example-old mission/example-new --as person/operator --reason "Clarify responsibility" --idempotency-key example-mission-rename --plan --json
+fractal agents rename-proof agent/example-old agent/example-new --request-digest '<planned-request-digest>' --json
+fractal missions rename-proof mission/example-old mission/example-new --request-digest '<planned-request-digest>' --json
+```
+
+`POST /v1/{agents,missions}/rename-id/plan` accepts the same `RenameRequest`
+body as `POST /v1/{agents,missions}/rename-id`, including actor, reason,
+idempotency key, and optional `expected_naming_revision` / `expected_declaration`
+fences (`--if-naming-revision` / `--if-declaration`). It evaluates the request
+without writing a claim, changing a name, or signaling reconciliation. The plan
+echoes the exact request and its digest; `naming_revision` is the head **before**
+the proposed rename. Keep the echoed request, especially its idempotency key, and
+submit it unchanged to apply. Without an explicit key the CLI generates one and
+includes it in the echoed request. A plan does not reserve a name or guarantee a
+later apply against changed state.
+
+`GET /v1/{agents,missions}/rename-proof?from=...&to=...&request_digest=...`
+reads local evidence; `from` and `to` are required and `request_digest` is optional.
+Query values must be URL-encoded. The CLI encodes them automatically. Both routes
+use the native `st3.v1` value envelope, and `--json` prints its value.
+Proof availability distinguishes selected or superseded evidence from unavailable
+evidence; nullable metadata must not be interpreted as a successful proof.
+The proof's previous revision and declaration describe the rename claim, while
+`naming_revision` and `current_canonical_id` describe the current naming head.
+The optional digest restricts evidence to the exact planned request.
+
+### Factory source transition carrier
+
+Factory authors the full typed transition
+`{kind, request: RenameRequest, request_digest}` in source. `request` contains
+`from`, `to`, `actor`, `reason`, `idempotency_key`, `expected_naming_revision`,
+and `expected_declaration`; it is not stored separately from the carrier.
+The first PLAN supplies the pre-rename pins. If those pins are added to the
+request, run PLAN again: the digest covers the entire echoed request.
+Preview POSTs exactly the carrier's `request`, requires `admissible: true`,
+and compares the echoed request, pins, and digest. The execution slot submits
+exactly that same request. No claim ID belongs in the source carrier.
+
+#### Rename claim body and final admission
+
+The native writer constructs these claim fields in
+[`identities.rs:482–491`](../../crates/fractal-store/src/store/identities.rs#L482-L491):
+
+```text
+body.fields = {
+  from: string, to: string, reason: string, owner_host: string,
+  declaration: string, previous_revision?: string,
+  request: {
+    from: string, to: string, actor: string, reason: string,
+    idempotency_key: string,
+    expected_naming_revision: string | null,
+    expected_declaration: string | null
+  },
+  preserved_incarnation?: string
+}
+body.evidence = []
+```
+
+`previous_revision` is omitted before the first rename, not serialized as null.
+`preserved_incarnation` is omitted when unavailable (including mission renames).
+Both request pins remain present as null when unpinned. The `from` field is the
+pre-rename canonical name; `request.from` preserves the caller's spelling.
+[`store.rs:24887–24897`](../../crates/fractal-store/src/store.rs#L24887-L24897)
+wraps the fields and evidence and adds
+`body._operation = {id: string, request_digest: string}`. `ClaimRecord` also
+exposes that operation ID and digest as top-level metadata.
+
+Final Factory admission must require:
+
+- PROOF availability `selected` or `superseded`, and proof kind/from/to matching
+  the carried kind/request transition.
+- Both proof and embedded claim request digests equal the carried digest, and
+  `claim.body.fields.request` deeply equal the full carried request.
+- Claim kind `agent.renamed` or `mission.renamed` matching the carried kind;
+  claim ID/subject matching proof claim ID/identity; and claim fields `from`,
+  `to`, and `reason` matching the intended source transition/request.
+- Claim declaration and previous revision matching the carried pins (an absent
+  previous revision represents a null pre-first-rename pin), and matching the
+  proof's declaration/previous revision. A final Factory request pins declaration.
+- Claim `owner_host` matching claim origin and proof owner host; operation ID
+  and digest matching the claim's `_operation` metadata; and evidence `[]`.
+
+Compare the request's actor within the exact request, not by blindly equating
+it with `claim.actor`: the native writer resolves an actor alias to immutable
+identity. `preserved_incarnation` is descriptive, not a source rename pin.
+For `superseded`, do not require current canonical ID to equal the edge target
+or current naming revision to equal this historical claim ID.
+
+`selected` means the requested edge is the current naming head; `superseded`
+means it remains on the selected chain but a later rename advanced the head.
+Both names must resolve to the same immutable identity in the same store snapshot.
+`conflicted`, `pending-replication`, `not-found`, and `unavailable` are not proofs.
+A digest mismatch returns `not-found` without a claim. `snapshot_index` is the
+snapshot's highest local claim store index, not a fleet-wide freshness guarantee.
+The PROOF declaration and previous revision come from the selected edge's claim;
+the request digest and operation ID come from its `ClaimRecord`. An idempotent
+replay preserves that claim and digest and returns `already-applied`.
+
+PLAN metadata is nullable when its source cannot be resolved. Refusal is
+`{code, detail}` and is omitted on success. PROOF metadata and `claim` are
+nullable when no admissible edge evidence is available. Store failures remain
+errors, not successful proof evidence. PLAN and PROOF are one-subject operator
+reads; neither performs namespace renames.
+
+Complete-membership owned-set publications compare immutable full subject keys:
+after A→B, the membership key remains A. Both preview and apply normalize authored
+B through the identity resolver before the omission diff, so listing B without A
+does not retire or stop that identity. A mission's existing runs remain bound to
+its immutable mission identity and revision.
+
+This local read is distinct from the portable signed bundle commands below:
+it neither exports a bundle nor independently verifies a fleet trust chain.
+The existing `rename-id proof export` and `rename-id proof verify` commands
+remain unchanged.
+
 ## Export the public fleet anchor
 
 On a trusted fleet member with its daemon running, print the pinned public key:

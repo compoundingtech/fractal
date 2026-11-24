@@ -29,6 +29,68 @@ const workflow = scopeLinuxNixSandbox(readyPRJobs(withCompatArchives(auditCaches
   },
   actionlint: defaultActionlintConfig,
   jobs: {
+    'fractal-mac-changes': {
+      name: 'fractal-mac-changes',
+      if: "github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')",
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      outputs: { relevant: '${{ steps.detect.outputs.relevant }}' },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        {
+          name: 'Detect native Mac inputs',
+          id: 'detect',
+          env: { BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.before }}' },
+          run: `python3 - <<'PY'
+import fnmatch
+import os
+import subprocess
+
+patterns = (
+    'apps/macos/Fractal/**',
+    'apps/macos/shared/build-identity/**',
+    'clients/swift/FractalClient/**',
+    'nix/fractal-mac.nix',
+    'nix/build-stamp.nix',
+    'flake.nix',
+    'flake.lock',
+    '.github/workflows/macos.yml*',
+)
+base = os.environ.get('BASE_SHA', '')
+relevant = True
+if base and set(base) != {'0'}:
+    subprocess.run(['git', 'fetch', '--no-tags', '--depth=1', 'origin', base], check=True)
+    names = subprocess.check_output(['git', 'diff', '--name-only', '--no-renames', '-z', base, 'HEAD']).decode().split('\\0')
+    relevant = any(fnmatch.fnmatchcase(name, pattern) for name in names for pattern in patterns)
+with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+    output.write(f'relevant={str(relevant).lower()}\\n')
+PY`,
+        },
+      ],
+    },
+    'fractal-mac': {
+      name: 'fractal-mac',
+      needs: ['fractal-mac-changes'],
+      if: "${{ !cancelled() && needs.fractal-mac-changes.result == 'success' && needs.fractal-mac-changes.outputs.relevant == 'true' }}",
+      'runs-on': macosRunner,
+      'timeout-minutes': 20,
+      defaults: { run: { shell: 'bash' } },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        {
+          name: 'Build the native Mac release executable',
+          run: 'swift build --package-path apps/macos/Fractal --configuration release --jobs 2 --disable-sandbox --product Fractal',
+        },
+        {
+          name: 'Test the native Mac package',
+          run: 'swift test --package-path apps/macos/Fractal --jobs 2 --disable-sandbox',
+        },
+        {
+          name: 'Test shared Swift build identity',
+          run: 'swift test --package-path apps/macos/shared/build-identity --jobs 2 --disable-sandbox',
+        },
+      ],
+    },
     'ios-rust-toolchain-cache': {
       name: 'Publish iOS Rust toolchain cache',
       if: publisherOnly,
@@ -105,6 +167,8 @@ nix path-info --recursive "$toolchain" | cachix push "$FRACTAL_CACHIX_CACHE"`,
   },
 }, {
   'ios-rust-toolchain-cache': 'This producer publishes the explicit iOS Rust toolchain closure to Cachix, including substituted paths; no Actions build cache is configured.',
+  'fractal-mac-changes': 'Only inspects changed paths; no build inputs.',
+  'fractal-mac': 'Deliberately uncached host-Swift lane with repository-local dependencies; no downloaded dependency closure. Gallery rendering requires a login session and remains manual.',
 }))))
 
 // Keep the publisher's positive main-push conjuncts visible to cache-policy validation.

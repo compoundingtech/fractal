@@ -182,10 +182,41 @@ pub struct ProgramEngine {
     inner: Mutex<Inner>,
 }
 
+/// Isolated-daemon fault injection only. Production builds contain neither registry nor hook.
+#[cfg(feature = "test-support")]
+fn test_engines() -> &'static Mutex<HashMap<usize, Weak<ProgramEngine>>> {
+    static ENGINES: std::sync::LazyLock<Mutex<HashMap<usize, Weak<ProgramEngine>>>> =
+        std::sync::LazyLock::new(Mutex::default);
+    &ENGINES
+}
+
+/// Consume an exact effect/stage arm and terminate only this store's program host before its
+/// command can journal a result. The daemon stays alive and resumes the same attempt.
+#[cfg(feature = "test-support")]
+pub fn interrupt_message_for_test(store: &Arc<Store>, state_dir: &Path, operation: &str, stage: &str) -> Result<bool> {
+    let operation = operation.strip_prefix("op/").context("native-message checkpoint requires an operation ID")?;
+    let checkpoint = state_dir.join("test-native-message").join(format!("{operation}.{stage}"));
+    let arm = checkpoint.with_extension(format!("{stage}.arm"));
+    if !arm.try_exists()? { return Ok(false); }
+    let engine = test_engines().lock().unwrap_or_else(PoisonError::into_inner)
+        .get(&(Arc::as_ptr(store) as usize)).and_then(Weak::upgrade)
+        .context("native-message checkpoint requires an isolated program engine")?;
+    let mut inner = engine.lock();
+    let host = inner.host.as_mut().context("native-message checkpoint requires a live program host")?;
+    // Rename is the one-shot consumption and durable operator observation. No sleep or polling.
+    std::fs::rename(&arm, checkpoint.with_extension(format!("{stage}.reached")))?;
+    host.child.kill().context("interrupting the isolated program host")?;
+    Ok(true)
+}
+
 impl ProgramEngine {
     /// `wake(step)` tells the reconciler a program step changed outside its evaluation.
     pub fn new(store: Arc<Store>, wake: Arc<dyn Fn(&str) + Send + Sync>, dir: PathBuf, liveness: Liveness) -> Arc<Self> {
-        Arc::new(Self { store, wake, dir, liveness, inner: Mutex::default() })
+        let engine = Arc::new(Self { store, wake, dir, liveness, inner: Mutex::default() });
+        #[cfg(feature = "test-support")]
+        test_engines().lock().unwrap_or_else(PoisonError::into_inner)
+            .insert(Arc::as_ptr(&engine.store) as usize, Arc::downgrade(&engine));
+        engine
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {

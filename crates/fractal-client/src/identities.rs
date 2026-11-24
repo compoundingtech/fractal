@@ -72,6 +72,36 @@ struct RenameResponse {
 }
 
 impl Client {
+    /// Inspect native rename admission without writing or reserving the target.
+    pub async fn identity_rename_plan(
+        &self,
+        kind: IdentityKind,
+        request: &RenameRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        let family = match kind { IdentityKind::Agent => "agents", IdentityKind::Mission => "missions" };
+        Ok(self.post::<NativeValue<serde_json::Value>>(
+            &format!("/v1/{family}/rename-id/plan"), request,
+        ).await?.value)
+    }
+
+    /// Read a selected native naming edge in the daemon's local snapshot.
+    pub async fn identity_rename_proof(
+        &self,
+        kind: IdentityKind,
+        from: &str,
+        to: &str,
+        request_digest: Option<&str>,
+    ) -> Result<serde_json::Value, ClientError> {
+        let family = match kind { IdentityKind::Agent => "agents", IdentityKind::Mission => "missions" };
+        let mut path = format!("/v1/{family}/rename-proof?from={}&to={}",
+            crate::percent_encode(from), crate::percent_encode(to));
+        if let Some(digest) = request_digest {
+            path.push_str("&request_digest=");
+            path.push_str(&crate::percent_encode(digest));
+        }
+        Ok(self.get::<NativeValue<serde_json::Value>>(&path).await?.value)
+    }
+
     /// Export the exact signed evidence, preserving the versioned bundle's wire shape.
     pub async fn agent_rename_proof_export(
         &self,

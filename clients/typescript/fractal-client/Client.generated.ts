@@ -12,7 +12,7 @@ import type {
     AvailabilitySet, AvailabilityHistory, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
-    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, Series, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     AttentionBudgetReport,
     MissionDeclaration, SubjectSourceMap, SourceBlob,
     GithubPullRequestRead, GithubIssueRead, GithubCommentRead, GithubConversationRead, GithubChecksRead, GithubFilesRead, GithubRunRead,
@@ -772,6 +772,7 @@ export class FractalClient {
     async mailBacklogSummary(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MailBacklog>> { return this.get('/v1/client/mail-backlog', undefined, requestOptions); }
     async sloList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloList>> { return this.get('/v1/client/slo', undefined, requestOptions); }
     async sloHistory(id: string, options: { since_ms?: number; until_ms?: number; steps?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloHistory>> { return this.get('/v1/client/slo/history' + query({ id, ...options }), undefined, requestOptions); }
+    async series(options: { objective?: string; kind?: string[]; subject_prefix?: string; group_by?: string; from: number; to: number; bucket_seconds: number }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Series>> { const { kind, ...single } = options; const suffix = query(single) + (kind ?? []).map(value => '&kind=' + encodeURIComponent(value)).join(''); return this.get('/v1/client/series' + suffix, undefined, requestOptions); }
     async usagePeriod(options: { since_ms?: number; until_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsagePeriod>> { return this.get('/v1/client/usage' + query(options), undefined, requestOptions); }
     async usageHubQuota(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsageHubQuota>> { return this.get('/v1/client/usage/quota', undefined, requestOptions) }
     async githubPluginPullRequest(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubPullRequestRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`, undefined, requestOptions); }

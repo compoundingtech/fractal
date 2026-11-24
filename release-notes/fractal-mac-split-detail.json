@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Open native Mac attention cards instantly beside the inbox with readable conversation and deliberate answer sending",
+  "replay": { "status": "none", "detail": "No replay or projection changes." },
+  "schema": { "status": "none", "detail": "Client-only rendering of existing attention snapshots and timeline excerpts; no schema, codegen, threads or composer changes." },
+  "rules": { "status": "none", "detail": "Authoritative attention reread and fenced answer submission are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Cards open in a 760 pt list/detail split with a sticky decision footer. Recommended choices are preselected; selecting only picks, and Send or Command-Return submits. Bare Return never sends. Conversation prompts and reasoning have disclosures, prose is attributed, and GitHub references are shortened. One bounded stale-while-revalidate cache enriches synchronous list snapshots." },
+  "downtime": { "status": "none", "detail": "No daemon downtime is required." },
+  "manual": { "status": "none", "detail": "No user migration is required." },
+  "recovery": { "status": "changed", "detail": "Restore the prior native app package to roll back; daemon state is unchanged." }
+}

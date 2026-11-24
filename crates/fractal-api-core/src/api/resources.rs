@@ -287,8 +287,10 @@ mod tests {
     async fn shell_wait_subscribes_before_reading_and_exports_no_launch_credentials() {
         let directory = tempfile::tempdir().unwrap();
         let state = super::super::tests::state(directory.path());
+        let mut lane = request();
+        lane.host.clone_from(&state.node);
         let execution = state.store.submit_shell_resource(Command {
-            id:"waiter".into(), lane:request(), argv:vec!["true".into()], cwd:"/work".into(),
+            id:"waiter".into(), lane, argv:vec!["true".into()], cwd:"/work".into(),
             environment:BTreeMap::from([("EXAMPLE_TOKEN".into(),"private-test-value".into())]), timeout_ms:None, parent:None,
         }, 10).unwrap();
         let waiting = wait(State(state.clone()),None,None,AxumPath("waiter".into()),Query(WaitQuery { after:0 }));

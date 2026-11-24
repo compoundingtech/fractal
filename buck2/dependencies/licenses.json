@@ -2,7 +2,7 @@
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
   "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback) or recognized LICENSE fingerprint; missing packages from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "9d406ea3c68e654a948234ed7219c091da5bf8cf7199f71d2acbdb4c8376a6f9",
+  "lockfileSha256": "e3c3a943ad14435ad5b1f32658a9d09d2bf1655ea6c4ea52f5e0df3b42d5c417",
   "packages": [
     {
       "name": "@adobe/css-tools",
@@ -362,6 +362,11 @@
     {
       "name": "@babel/types",
       "version": "7.29.8",
+      "license": "MIT"
+    },
+    {
+      "name": "@blazediff/core",
+      "version": "1.10.0",
       "license": "MIT"
     },
     {
@@ -4132,6 +4137,11 @@
     {
       "name": "pngjs",
       "version": "3.4.0",
+      "license": "MIT"
+    },
+    {
+      "name": "pngjs",
+      "version": "7.0.0",
       "license": "MIT"
     },
     {

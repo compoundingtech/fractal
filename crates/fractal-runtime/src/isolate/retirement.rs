@@ -201,9 +201,9 @@ fn properties(unit: &str, output: &str) -> Result<ScopeRetirementProof> {
 }
 
 fn observe(unit: &str) -> Result<ScopeRetirementProof> {
-    let snapshot = crate::systemd::snapshot()?;
+    let snapshot = crate::systemd::snapshot_after_admission()?;
     let observed = snapshot.units.get(unit);
-    if observed.is_none() {
+    if observed.is_none_or(|unit| unit.load == "not-found") {
         verify_scope_absence(unit, snapshot.captured_at)?;
     }
     let mut proof = ScopeRetirementProof {

@@ -2,9 +2,10 @@
 
 For package choices and a runnable client, see [Build your own client](build-your-own.md).
 
-What every Fractal client shows and does. Three clients implement it: the terminal UI
-(`crates/fractal-tui/src/ui`), the iOS app (`apps/ios`, the Expo way) and the web app, Fractal
-(`apps/fractal-web`). Each part of the contract has one lead:
+What every Fractal client shows and does. The terminal UI (`crates/fractal-tui/src/ui`),
+the iOS app (`apps/ios`, the Expo way), the web app (`apps/fractal-web`) and the native
+Mac menu-bar client (`apps/macos/Fractal`) implement their applicable surfaces.
+Each part of the contract has one lead:
 
 - **Screens and navigation:** the terminal UI is the reference.
 - **The conversation view:** the web app leads (see
@@ -34,6 +35,40 @@ view's contract; the web app updates them (see below).
 | `transcripts/*.json` | Real Claude and Codex timelines, scrubbed of private names. |
 | `transcripts/*.expected.json` | The conversation a client must derive from each (display times omitted). |
 | `documents-v1.json` | Document links, the link-cycle trail, and the error states a document view shows. |
+
+## Native Mac client
+
+Fractal for Mac is a macOS 14+ SwiftUI menu-bar client, not a second daemon or a
+replacement for the web conversation view. Its panel exposes the attention inbox,
+availability and directive note, speech controls, objectives and signal tiles.
+It reads Fractal through the repository-local `clients/swift/FractalClient` package;
+server projections remain authoritative. Missing, loading and failed reads stay
+distinct, and a failed refresh retains the last observed value with a failure notice.
+
+Attention actions follow the same read-before-write contract as the web client:
+re-read the card, require its observed revision and offered action, submit the fenced
+answer, and show commitment only after the server receipt. Refusals remain visible;
+rows are never removed optimistically. Snooze and dismiss are attention controls,
+not answers. Updates are separate from counted asks. The status item displays asks,
+not an invented aggregate of objective or signal state.
+
+The SwiftPM modules are `FractalMacCore`, `FractalMacUI`, `FractalMac` (the `Fractal`
+executable), `FractalMacGallery` and `FractalMacCoreTests`; shared build identity lives
+at `apps/macos/shared/build-identity`. See the [Mac app README](../../apps/macos/Fractal/README.md)
+for panel behavior, configuration and manual fixture-gallery rendering.
+
+The root flake exposes `fractal-mac` and `fractal-mac-gallery` only on
+`aarch64-darwin`. The unsigned app is `Applications/Fractal.app`, with bundle identity
+`tech.compounding.fractal.mac`, the app icon and SwiftPM resource bundles installed
+under `Contents/Resources`. Packaging uses host Swift and the Apple SDK, embeds the
+app's `Build.swift` base version with the root repository revision through
+`nix/build-stamp.nix`, and records that same full revision as `FractalClientRevision`.
+There is no independent app flake or separately pinned Swift client.
+
+The optional `macOS CI` workflow builds the release executable and tests the app and
+shared build-identity packages when their source closure or packaging inputs change.
+PR execution requires the `macos-ci` label; main pushes use the same path filter.
+Gallery rendering remains manual because it requires a macOS login session.
 
 ## Definition of good
 

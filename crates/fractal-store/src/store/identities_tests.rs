@@ -1,4 +1,5 @@
 use super::*;
+use super::identities::RenameProofAvailability;
 use proptest::prelude::*;
 use crate::store::fleet_admission_tests_shared_seats::{node, sync};
 
@@ -22,6 +23,144 @@ fn request(from: &str, to: &str, key: &str) -> RenameRequest {
         reason: "Clarify responsibility".into(), expected_naming_revision: None,
         expected_declaration: None, idempotency_key: key.into(),
     }
+}
+
+fn claim_count(store: &Store) -> u64 {
+    store.readers.get().query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn rename_plan_pins_and_digest_match_selected_and_superseded_proof() {
+    for kind in [IdentityKind::Agent, IdentityKind::Mission] {
+        let store = Store::open_memory("example").unwrap();
+        let (from, to, third, declaration) = match kind {
+            IdentityKind::Agent => (
+                ORIGINAL, RENAMED, "agent/example-third/worker", declare(&store, ORIGINAL),
+            ),
+            IdentityKind::Mission => {
+                crate::store::tests_shared_seats::publish_mission(
+                    &store,
+                    "version 2\nmission \"example-original\" state=\"ready\" { goal \"Deliver the result.\"; step \"work\" { agentless } }\n",
+                    "publish-mission",
+                );
+                let from = "mission/example-original";
+                let declaration = store.latest_claim(from, Some("mission.published")).unwrap().unwrap().id;
+                (from, "mission/example-renamed", "mission/example-third", declaration)
+            }
+        };
+        let mut input = request(from, to, "planned-rename");
+        input.expected_declaration = Some(declaration.clone());
+        let before = claim_count(&store);
+        let plan = store.plan_rename_identity(kind, &input, &[]).unwrap();
+        assert!(plan.admissible);
+        assert!(plan.refusal.is_none());
+        assert_eq!(plan.kind, kind);
+        assert_eq!(plan.request, input);
+        assert_eq!(plan.from, from);
+        assert_eq!(plan.to, to);
+        assert_eq!(plan.identity.as_deref(), Some(from));
+        assert_eq!(plan.current_canonical_id.as_deref(), Some(from));
+        assert_eq!(plan.declaration.as_deref(), Some(declaration.as_str()));
+        assert_eq!(plan.naming_revision, None);
+        assert_eq!(
+            plan.request_digest,
+            request_digest(kind.claim_kind(), &serde_json::to_value(&input).unwrap()).unwrap(),
+        );
+        assert_eq!(claim_count(&store), before);
+
+        let receipt = store.rename_identity(kind, &plan.request, &[]).unwrap();
+        let claim = store.claim_by_id(&receipt.claim_id).unwrap().unwrap();
+        let proof = store.rename_proof(kind, from, to, Some(&plan.request_digest)).unwrap();
+        assert_eq!(proof.availability, RenameProofAvailability::Selected);
+        assert_eq!(proof.kind, kind);
+        assert_eq!(proof.from, from);
+        assert_eq!(proof.to, to);
+        assert_eq!(proof.identity.as_deref(), Some(from));
+        assert_eq!(proof.current_canonical_id.as_deref(), Some(to));
+        assert_eq!(proof.naming_revision.as_deref(), Some(receipt.naming_revision.as_str()));
+        assert_eq!(proof.declaration, plan.declaration);
+        assert_eq!(proof.previous_revision, plan.naming_revision);
+        assert_eq!(proof.request_digest.as_deref(), Some(plan.request_digest.as_str()));
+        assert_eq!(proof.claim_id.as_deref(), Some(receipt.claim_id.as_str()));
+        assert_eq!(proof.operation_id.as_deref(), Some(receipt.operation_id.as_str()));
+        assert_eq!(proof.actor.as_deref(), Some("person/robin"));
+        assert_eq!(proof.owner_host.as_deref(), Some(store.origin()));
+        assert_eq!(proof.claim.as_ref().unwrap().id, claim.id);
+        assert_eq!(proof.claim.as_ref().unwrap().body, claim.body);
+        assert!(proof.accepted_at_unix_ms.is_some());
+        assert!(proof.snapshot_index >= claim.store_index);
+        let unfiltered = store.rename_proof(kind, from, to, None).unwrap();
+        assert_eq!(unfiltered.availability, RenameProofAvailability::Selected);
+        assert_eq!(unfiltered.claim_id, proof.claim_id);
+        let mismatched = store.rename_proof(kind, from, to, Some("not-the-request-digest")).unwrap();
+        assert_eq!(mismatched.availability, RenameProofAvailability::NotFound);
+        assert!(mismatched.claim.is_none());
+        assert!(mismatched.claim_id.is_none());
+
+        let before_retry = claim_count(&store);
+        let replay_plan = store.plan_rename_identity(kind, &plan.request, &[]).unwrap();
+        assert!(replay_plan.admissible);
+        assert_eq!(replay_plan.request_digest, plan.request_digest);
+        assert_eq!(replay_plan.current_canonical_id, plan.current_canonical_id);
+        assert_eq!(replay_plan.naming_revision, plan.naming_revision);
+        assert_eq!(replay_plan.declaration, plan.declaration);
+        let repeated = store.rename_identity(kind, &plan.request, &[]).unwrap();
+        assert_eq!(repeated.applied, "already-applied");
+        assert_eq!(repeated.claim_id, receipt.claim_id);
+        assert_eq!(claim_count(&store), before_retry);
+        let repeated_proof = store.rename_proof(kind, from, to, Some(&plan.request_digest)).unwrap();
+        assert_eq!(repeated_proof.availability, RenameProofAvailability::Selected);
+        assert_eq!(repeated_proof.request_digest, proof.request_digest);
+        assert_eq!(repeated_proof.claim_id, proof.claim_id);
+
+        let mut next = request(to, third, "second-planned-rename");
+        next.expected_declaration = Some(declaration.clone());
+        next.expected_naming_revision = Some(receipt.naming_revision.clone());
+        let next_plan = store.plan_rename_identity(kind, &next, &[]).unwrap();
+        assert!(next_plan.admissible);
+        assert_eq!(next_plan.current_canonical_id.as_deref(), Some(to));
+        assert_eq!(next_plan.naming_revision.as_deref(), Some(receipt.naming_revision.as_str()));
+        assert_eq!(next_plan.declaration.as_deref(), Some(declaration.as_str()));
+        let second = store.rename_identity(kind, &next_plan.request, &[]).unwrap();
+        let current = store.rename_proof(kind, to, third, Some(&next_plan.request_digest)).unwrap();
+        assert_eq!(current.availability, RenameProofAvailability::Selected);
+        assert_eq!(current.previous_revision.as_deref(), Some(receipt.naming_revision.as_str()));
+        assert_eq!(current.naming_revision.as_deref(), Some(second.naming_revision.as_str()));
+        let superseded = store.rename_proof(kind, from, to, Some(&plan.request_digest)).unwrap();
+        assert_eq!(superseded.availability, RenameProofAvailability::Superseded);
+        assert_eq!(superseded.current_canonical_id.as_deref(), Some(third));
+        assert_eq!(superseded.naming_revision.as_deref(), Some(second.naming_revision.as_str()));
+        assert_eq!(superseded.previous_revision, plan.naming_revision);
+        assert_eq!(superseded.declaration, plan.declaration);
+        assert_eq!(superseded.claim_id.as_deref(), Some(receipt.claim_id.as_str()));
+        assert_eq!(superseded.request_digest.as_deref(), Some(plan.request_digest.as_str()));
+
+        // Both names resolve to this identity, but no direct rename connects this pair.
+        let unrelated = store.rename_proof(kind, from, third, None).unwrap();
+        assert_eq!(unrelated.availability, RenameProofAvailability::NotFound);
+        assert!(unrelated.claim.is_none());
+        assert!(unrelated.claim_id.is_none());
+    }
+}
+
+#[test]
+fn occupied_rename_plan_refuses_without_appending_claims() {
+    let store = Store::open_memory("example").unwrap();
+    declare(&store, ORIGINAL);
+    declare(&store, RENAMED);
+    let input = request(ORIGINAL, RENAMED, "occupied-plan");
+    let before = claim_count(&store);
+    let plan = store.plan_rename_identity(IdentityKind::Agent, &input, &[]).unwrap();
+    assert!(!plan.admissible);
+    let refusal = plan.refusal.unwrap();
+    assert_eq!(refusal.code, "identity-occupied");
+    assert!(!refusal.detail.is_empty());
+    assert_eq!(claim_count(&store), before);
+    assert_eq!(
+        store.rename_identity(IdentityKind::Agent, &input, &[]).unwrap_err().code,
+        refusal.code,
+    );
+    assert_eq!(claim_count(&store), before);
 }
 
 #[test]
@@ -215,10 +354,18 @@ fn retiring_storage_identity_refuses_rename_through_every_alias() {
         ClaimCommitContext { retirement_writer: true, ..Default::default() },
     ).unwrap();
     for (index, source) in [ORIGINAL, RENAMED].into_iter().enumerate() {
+        let before = claim_count(&store);
+        let plan = store.plan_rename_identity(
+            IdentityKind::Agent, &request(source, "agent/example-successor", &format!("retired-plan-{index}")), &[],
+        ).unwrap();
+        assert!(!plan.admissible);
+        assert_eq!(plan.refusal.unwrap().code, "identity-retired-source");
+        assert_eq!(claim_count(&store), before);
         let error = store.rename_identity(
             IdentityKind::Agent, &request(source, "agent/example-successor", &format!("retired-{index}")), &[],
         ).unwrap_err();
         assert_eq!(error.code, "identity-retired-source");
+        assert_eq!(claim_count(&store), before);
     }
 }
 
@@ -256,6 +403,8 @@ fn partition_target_collision_has_same_winner_in_both_arrival_orders() {
         let error = store.rename_identity(IdentityKind::Agent, &retry, &[]).unwrap_err();
         assert_eq!(error.code, "lifecycle-unavailable");
         assert_eq!(error.details["reason"], "conflict");
+        let proof = store.rename_proof(IdentityKind::Agent, loser, target, None).unwrap();
+        assert_eq!(proof.availability, RenameProofAvailability::Conflicted);
     }
 }
 

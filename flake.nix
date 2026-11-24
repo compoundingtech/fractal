@@ -919,6 +919,10 @@
         };
         checks.fractal-web-publisher = fractalWebPublisher;
         packages.fractal = fractal;
+        packages.${if system == "aarch64-darwin" then "fractal-mac" else null} =
+          (import ./nix/fractal-mac.nix { inherit pkgs; source = self; }).app;
+        packages.${if system == "aarch64-darwin" then "fractal-mac-gallery" else null} =
+          (import ./nix/fractal-mac.nix { inherit pkgs; source = self; }).gallery;
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;
         packages.fractal-chatgpt = fractalChatgpt;

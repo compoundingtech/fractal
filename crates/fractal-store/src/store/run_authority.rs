@@ -172,6 +172,17 @@ pub(super) fn needed_tx(
                 grant(AuthorityVerb::Write, subject.into())
             }
         }
+        // Daemon-owned effect receipts are the run's own journal, not additional outward
+        // authority. The provider's message.sent still needs its declared message write.
+        "effect.intended" | "effect.in-flight" | "effect.confirmed" | "effect.unresolved" => {
+            let owner = field("bound_step_run")
+                .map(|step| owning_run_tx(transaction, step)).transpose()?.flatten();
+            if owner.as_deref() == Some(run) {
+                Ok(None)
+            } else {
+                grant(AuthorityVerb::Write, subject.into())
+            }
+        }
         "mission.published" => grant(AuthorityVerb::Publish, subject.trim_start_matches("mission/").into()),
         "mission-run.created" => grant(AuthorityVerb::Start, field("mission").unwrap_or_default().trim_start_matches("mission/").into()),
         // Only a revision's generation has a predecessor; its free-text reason decides nothing.

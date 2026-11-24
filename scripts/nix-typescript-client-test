@@ -19,20 +19,18 @@ loader.exec_module(refresh)
 
 
 class ManifestTests(unittest.TestCase):
-    def test_the_hash_file_pins_the_output_and_its_source_identity(self):
+    def test_the_hash_file_pins_the_output_and_semantic_inputs(self):
         pin = json.loads((root / 'nix/typescript-client-deps.hash').read_text())
-        self.assertEqual(set(pin), {'hash', 'effectUtilsNarHash'})
-        for value in pin.values():
-            self.assertRegex(value, r'^sha256-[A-Za-z0-9+/]{43}=\Z')
-        lock = json.loads((root / 'flake.lock').read_text())
-        source = lock['nodes'][lock['nodes']['root']['inputs']['effect-utils']]['locked']
-        self.assertEqual(pin['effectUtilsNarHash'], source['narHash'])
+        self.assertEqual(set(pin), {'hash', 'installationInputHash'})
+        self.assertRegex(pin['hash'], r'^sha256-[A-Za-z0-9+/]{43}=\Z')
+        self.assertRegex(pin['installationInputHash'], r'^[a-f0-9]{64}\Z')
 
-    def test_the_installation_name_carries_the_lockfile_and_the_effect_utils_revision(self):
+    def test_the_installation_uses_only_the_fingerprinted_upstream_tree(self):
         derivation = (root / 'nix/typescript-client.nix').read_text()
-        self.assertIn('typescript-client-installation-${lockHash}-${sourcesHash}', derivation)
-        self.assertRegex(derivation, r'sourcesHash = [^\n]*effect-utils\.narHash')
-        self.assertRegex(derivation, r'lockHash = [^\n]*pnpm-lock\.yaml')
+        self.assertIn('typescript-client-installation-${builtins.substring 0 24 inputs.fingerprint}', derivation)
+        self.assertIn('outputHash = inputs.outputHash dependencyPin;', derivation)
+        self.assertIn('ln -s ${inputs.sources} repos/effect-utils', derivation)
+        self.assertNotIn('${effect-utils}/', derivation)
 
     def test_every_workspace_member_manifest_is_a_derivation_input(self):
         workspace = (root / 'pnpm-workspace.yaml').read_text()
@@ -63,20 +61,73 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(unrelated.read_text(), 'keep\n')
 
 
+class SemanticInputsTests(unittest.TestCase):
+    def test_source_changes_and_stale_pin_refusal(self):
+        # Exercise the production Nix fingerprint and guard, not a Python replica.
+        scratch = root / 'tmp'
+        scratch.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            tree = Path(directory)
+            upstream = tree / 'effect-utils'
+            manifests = tree / 'manifests'
+            manifests.mkdir()
+            (manifests / 'pnpm-source-inputs.json').write_text(json.dumps({
+                'sourceInputPaths': ['repos/effect-utils/packages/staged'],
+            }))
+            staged = upstream / 'packages/staged/index.ts'
+            staged.parent.mkdir(parents=True)
+            staged.write_text('export const value = 1\n')
+            unrelated = upstream / 'unrelated.txt'
+            unrelated.write_text('before\n')
+            expression = f'''let inputs = import {root}/nix/typescript-client-inputs.nix {{
+                manifests = builtins.path {{ path = {manifests}; name = "manifests"; }};
+                effectUtils = {upstream};
+                nixpkgsNarHash = "pinned-toolchain";
+                recipe = {root}/nix/typescript-client.nix;
+            }}; in '''
+
+            def evaluate(value, success=True):
+                result = subprocess.run(['nix', 'eval', '--impure', '--json',
+                                         '--expr', expression + value], text=True, capture_output=True)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                return json.loads(result.stdout) if success else result.stderr
+
+            before = evaluate('inputs.fingerprint')
+            unrelated.write_text('after\n')
+            self.assertEqual(evaluate('inputs.fingerprint'), before)
+            pin = json.dumps({'installationInputHash': before, 'hash': 'measured-output'})
+            pin_expr = f'builtins.fromJSON {json.dumps(pin)}'
+            self.assertEqual(evaluate(f'inputs.outputHash ({pin_expr})'), 'measured-output')
+            staged.write_text('export const value = 2\n')
+            changed = evaluate('inputs.fingerprint')
+            self.assertNotEqual(changed, before)
+            self.assertIn('stale installationInputHash',
+                          evaluate(f'inputs.outputHash ({pin_expr})', success=False))
+            # Lock/workspace authority and staging/pnpm code also affect identity.
+            for path in (manifests / 'pnpm-lock.yaml', upstream / 'nix/pnpm.nix',
+                         upstream / 'nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs',
+                         upstream / 'packages/@overeng/genie/src/core/import-map/sync-resolver.ts'):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('changed authority\n')
+                next_identity = evaluate('inputs.fingerprint')
+                self.assertNotEqual(next_identity, changed, str(path))
+                changed = next_identity
+
+
 class RefreshTests(unittest.TestCase):
     def run_refresh(self, stderr, returncode, system='x86_64-linux', eval_returncode=0, build_error=None):
         with tempfile.TemporaryDirectory() as directory:
             hash_file = Path(directory) / 'deps.hash'
             before = json.dumps({'hash': 'sha256-' + 'B' * 43 + '=',
-                                 'effectUtilsNarHash': 'sha256-' + 'D' * 43 + '='}) + '\n'
+                                 'installationInputHash': 'd' * 64}) + '\n'
             hash_file.write_text(before)
-            source = 'sha256-' + 'E' * 43 + '='
+            source = 'e' * 64
             seen = []
             target = f'.#checks.{system}.typescript-client.installation'
 
             def run(command, **kwargs):
                 if command[1] == 'eval':
-                    self.assertEqual(command, ['nix', 'eval', '--raw', f'{target}.effectUtilsNarHash'])
+                    self.assertEqual(command, ['nix', 'eval', '--raw', f'{target}.installationInputHash'])
                     self.assertEqual(hash_file.read_text(), before)
                     return subprocess.CompletedProcess(command, eval_returncode, source, 'evaluation failed')
                 self.assertEqual(command, ['nix', 'build', target, '--no-link', '-L'])
@@ -100,8 +151,8 @@ class RefreshTests(unittest.TestCase):
         for system in ('x86_64-linux', 'aarch64-linux', 'aarch64-darwin'):
             with self.subTest(system=system):
                 status, written, seen, _, source = self.run_refresh(f'error: hash mismatch in fixed-output derivation\n         specified: x\n            got:    {good}\n', 1, system)
-                self.assertEqual(seen, [{'hash': refresh.PLACEHOLDER, 'effectUtilsNarHash': source}])
-                self.assertEqual((status, json.loads(written)), (0, {'hash': good, 'effectUtilsNarHash': source}))
+                self.assertEqual(seen, [{'hash': refresh.PLACEHOLDER, 'installationInputHash': source}])
+                self.assertEqual((status, json.loads(written)), (0, {'hash': good, 'installationInputHash': source}))
 
     def test_another_build_failure_restores_the_exact_file(self):
         for returncode in (0, 1):

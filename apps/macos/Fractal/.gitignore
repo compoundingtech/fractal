@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+result
+result-*
+design/renders/capture.partial/

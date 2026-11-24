@@ -136,6 +136,12 @@ fn a_claims_needed_grant_follows_its_operation() {
     // A run journals its own steps freely; another run's journal is a write like any other.
     assert_eq!(needs("program.step", &land.steps[0].subject, json!({})), None);
     assert_eq!(needs("program.step", &check.steps[0].subject, json!({})), Some(format!("write {}", check.steps[0].subject)));
+    for kind in ["effect.intended", "effect.in-flight", "effect.confirmed", "effect.unresolved"] {
+        assert_eq!(needs(kind, "effect/op/example", json!({"bound_step_run": land.steps[0].subject})), None);
+        assert_eq!(needs(kind, "effect/op/example", json!({"bound_step_run": check.steps[0].subject})),
+            Some("write effect/op/example".into()));
+        assert_eq!(needs(kind, "effect/op/example", json!({})), Some("write effect/op/example".into()));
+    }
     assert_eq!(needs("custom.test.observed", "custom/factory/x", json!({})), Some("write custom/factory/x".into()));
 }
 

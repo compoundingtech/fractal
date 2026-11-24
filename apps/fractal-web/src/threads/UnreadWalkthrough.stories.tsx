@@ -28,6 +28,7 @@ import { fixtureSidebarState } from '../shell/sidebar/state.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { LiveAgentWorkspace, type WorkspaceNavigation } from '../web/LiveAgentWorkspace.tsx'
 import { workspaceHref } from '../web/workspaceView.ts'
+import { threadAnchorAttribute } from './threadAnchor.ts'
 import type { ThreadDraft, ThreadSource } from './threadSource.ts'
 import { gatewayUnreadActions } from './unread-action-port.ts'
 
@@ -35,7 +36,7 @@ const legend = 'Demo data; nothing is sent to Fractal'
 const agentRef = 'agent/build-host-a/release-worker'
 const actor = 'person/operator'
 const now = Date.parse('2026-11-16T12:00:00Z')
-/** The workspace is laid out at a fixed size so the sidebar, pane and timeline geometry repeat run to run. */
+/** Cap the workspace for recordings, but let its real narrow layout fit smaller canvases. */
 const stage = { width: 1200, height: 660 } as const
 /** Fixture latency, so a recording sees each read and write in flight; plays also use it to outlast the 500 ms dwell. */
 const settle = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -411,6 +412,16 @@ function useForeground() {
 function Walkthrough() {
   const [paging, setPaging] = React.useState<Paging>('single')
   const [world, setWorld] = React.useState(() => createWorld('revisit', 'single'))
+  const [stageNode, setStageNode] = React.useState<HTMLDivElement | null>(null)
+  const [stageWidth, setStageWidth] = React.useState<number>(stage.width)
+  React.useLayoutEffect(() => {
+    if (stageNode === null) return
+    const measure = () => setStageWidth(stageNode.clientWidth)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(stageNode)
+    return () => observer.disconnect()
+  }, [stageNode])
   // Each world owns its registry: dispose the replaced one after its workspace unmounts, and the last on unmount.
   React.useEffect(() => () => world.registry.dispose(), [world])
   const location = React.useSyncExternalStore(world.navigation.subscribe, world.navigation.getLocation, world.navigation.getLocation)
@@ -430,8 +441,8 @@ function Walkthrough() {
         onScenario={next => setWorld(createWorld(next, paging))}
         onPaging={next => { setPaging(next); world.registry.set(world.paging, next) }} />
       <style>{'[data-unread-walkthrough-stage] [data-testid="live-agent-workspace"] { height: 100% !important; min-height: 0; }'}</style>
-      <div data-unread-walkthrough-stage="" {...stylex.props(styles.stage)} style={{ width: stage.width, height: stage.height }}>
-        <LiveAgentWorkspace navigation={world.navigation} persistGeometry={false} dimensions={stage} />
+      <div ref={setStageNode} data-unread-walkthrough-stage="" {...stylex.props(styles.stage)} style={{ maxWidth: stage.width, height: stage.height }}>
+        <LiveAgentWorkspace navigation={world.navigation} persistGeometry={false} dimensions={{ width: stageWidth, height: stage.height }} />
       </div>
     </main>
   </DataSourceProvider>
@@ -469,7 +480,28 @@ export const ControlledWorld: Story = {
     const stageView = () => within(need(root().querySelector<HTMLElement>('[data-unread-walkthrough-stage]'), 'stage'))
     const indicator = () => root().querySelector('[data-unread-walkthrough-stage] [data-thread-unread-reminder]')
     const row = (id: string) => canvasElement.querySelector<HTMLElement>(`[data-marked-unread-thread="${id}"]`)
-    const openRow = async (id: string) => userEvent.click(within(await waitFor(() => need(row(id), `${id} row`), { timeout: 60_000 })).getByRole('button'))
+    const openRow = async (id: string) => {
+      const target = await waitFor(() => need(row(id), `${id} row`), { timeout: 60_000 })
+      // On a phone the Inbox is in the real Agents drawer, not beside the thread.
+      const opener = stageView().queryByRole('button', { name: 'Expand sidebar' })
+      if (opener !== null) await userEvent.click(opener)
+      await userEvent.click(within(target).getByRole('button'))
+      await waitFor(() => expect(target).toHaveAttribute('aria-busy', 'false'))
+      const close = stageView().queryByRole('button', { name: 'Close agents' })
+      if (close !== null) await userEvent.click(close)
+    }
+    const viewReply = async (id: string) => {
+      const body = await waitFor(() => need(root().querySelector<HTMLElement>(`[${threadAnchorAttribute}="${id}"] [data-thread-message-content]`), `${id} body`))
+      // Route changes do not scroll the outer story. Actually expose the reply,
+      // including after returning from the controls above the workspace.
+      body.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' })
+      await waitFor(() => {
+        const rect = body.getBoundingClientRect()
+        expect(rect.left).toBeGreaterThanOrEqual(0)
+        expect(rect.right).toBeLessThanOrEqual(window.innerWidth)
+        expect(rect.bottom).toBeLessThanOrEqual(window.innerHeight)
+      })
+    }
     const radios = (name: string) => within(canvas.getByRole('radiogroup', { name }))
     await waitFor(root, { timeout: 60_000 })
     await expect(canvasElement.querySelector('[data-walkthrough-legend]')?.textContent).toBe(legend)
@@ -480,6 +512,7 @@ export const ControlledWorld: Story = {
     await waitFor(() => expect(fact('route')).toBe(release), { timeout: 10_000 })
     await expect(canvasElement.querySelector('[data-walkthrough-log-kind="seek"]')?.textContent).toContain('Opened the reminded message')
     // The entry captured the reminder; seeing its reply for a stable 500 ms clears it.
+    await viewReply('message/checklist-ready')
     await waitFor(() => expect(fact('clears')).toBe('1'), { timeout: 10_000 })
     await waitFor(() => expect(indicator()).toBeNull())
     await canvas.findByText('No marked-unread threads')
@@ -503,6 +536,7 @@ export const ControlledWorld: Story = {
     // 4. A deliberate return is a new visit: it captures the mark and clears it once seen.
     await userEvent.click(radios('View').getByRole('radio', { name: 'Thread tab' }))
     await waitFor(() => expect(fact('route')).toBe(release))
+    await viewReply('message/checklist-ready')
     await waitFor(() => expect(fact('clears')).toBe('2'), { timeout: 10_000 })
     await waitFor(() => expect(indicator()).toBeNull())
 
@@ -529,6 +563,7 @@ export const ControlledWorld: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Deliver the pending reply' }))
     await openRow(cancellation)
     await waitFor(() => expect(fact('route')).toBe(cancellation), { timeout: 10_000 })
+    await viewReply('message/cancellation-retry')
     await waitFor(() => expect(fact('clears')).toBe('1'), { timeout: 10_000 })
     await userEvent.click(radios('List paging').getByRole('radio', { name: 'One page' }))
 
@@ -538,6 +573,7 @@ export const ControlledWorld: Story = {
     await openRow(rollout)
     await waitFor(() => expect(fact('route')).toBe(rollout), { timeout: 10_000 })
     await stageView().findByText('This thread is closed. Replying won’t reopen it.', {}, { timeout: 10_000 })
+    await viewReply('message/rollout-done')
     await waitFor(() => expect(fact('clears')).toBe('1'), { timeout: 10_000 })
     await expect(stageView().getByRole('button', { name: 'Reopen thread' })).toBeVisible()
 
@@ -551,7 +587,7 @@ export const ControlledWorld: Story = {
 }
 
 const styles = stylex.create({
-  page: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minHeight: '100vh', boxSizing: 'border-box', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize },
+  page: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', width: '100%', minHeight: '100vh', boxSizing: 'border-box', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize },
   controls: { display: 'flex', flexDirection: 'column', gap: s.sm, boxSizing: 'border-box', width: '100%', maxWidth: 1232, padding: s.md },
   line: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
   legend: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.primary, borderRadius: r.sm, color: c.fg, fontSize: t.metaSize, fontWeight: 600, whiteSpace: 'nowrap' },
@@ -569,5 +605,5 @@ const styles = stylex.create({
   value: { margin: 0, minWidth: 0, overflowWrap: 'anywhere', fontVariantNumeric: 'tabular-nums' },
   log: { display: 'flex', flexDirection: 'column', gap: 2, margin: 0, paddingInlineStart: 0, listStyle: 'none', color: c.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums' },
   logEntry: { minWidth: 0, overflowWrap: 'anywhere' },
-  stage: { position: 'relative', flexShrink: 0, overflow: 'hidden', marginInline: s.md, marginBlockEnd: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border },
+  stage: { position: 'relative', flexShrink: 0, width: `calc(100% - ${s.md} - ${s.md})`, boxSizing: 'border-box', overflow: 'hidden', marginInline: s.md, marginBlockEnd: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border },
 })
