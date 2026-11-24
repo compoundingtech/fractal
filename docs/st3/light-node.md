@@ -26,6 +26,8 @@ A command binds a stable command/execution ID, selected control epoch, host and 
 
 Inside the current full node, `fractal-reconcile` separates command execution in `reconcile/host_executor.rs` from physical observation/watch acquisition in `reconcile/host_observations.rs`. Start admission and results still use the existing durable runtime-start journal; graph adoption stays in the planner. Retained native snapshots are fenced by registry events, command execution and existing safety/deadline wakes, not fleet graph writes. The `host-executor-observation` and `host-executor-process` performance labels count actual backend evaluations. The separate `graph-mail-observation` label belongs to the full-node shard adapter: it preserves remote mission dependencies and is not an own-seat mail transport or an offload saving. This extraction does not implement the remote control epoch/session described below.
 
+Finite program/shell payloads, exact-generation signals, lane/root retirement and host recovery use typed resource commands in `reconcile/host_executor/resource_commands.rs`. Their existing native membership/root journals remain the admission and receipt authority; graph attempts and shell ownership are rechecked at physical release. Signal acceptance is not retirement proof, and asynchronous retirement invalidates host evidence before notifying graph adoption.
+
 ### Authorization, withdrawal and host admission
 
 During Phase 1, graph-side adapters retain the existing last-moment checks in `start_jobs.rs` and `runtime_starts.rs`: current start intent, selected desired token, owned desired guard, helper lifetime, rollout state, publication and declaration contents. Extraction does not remove those checks or claim graph-free operation.
