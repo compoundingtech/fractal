@@ -198,11 +198,12 @@ fn a_closing_epoch_drains_old_reports_without_reopening_effect_authority() {
 #[test]
 fn closed_epoch_fences_survive_reopening_the_home_store() {
     let directory = tempfile::tempdir().unwrap();
-    let home = Store::open(directory.path(), "home").unwrap();
+    let database = directory.path().join("home.sqlite3");
+    let home = Store::open(&database, "home").unwrap();
     home.install_run_epoch("execution-host", 4).unwrap();
     home.close_run_epoch("execution-host", 4).unwrap();
     drop(home);
-    let reopened = Store::open(directory.path(), "home").unwrap();
+    let reopened = Store::open(&database, "home").unwrap();
     assert!(reopened.install_run_epoch("execution-host", 4).is_err());
     assert!(reopened.install_run_epoch("execution-host", 3).is_err());
     reopened.install_run_epoch("execution-host", 5).unwrap();
