@@ -4055,7 +4055,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         active: &[&DesiredSubject],
         task_stop_subjects: &[&DesiredSubject],
         eligible: &BTreeSet<String>,
-        ptys: &Option<HashMap<String, RuntimeObservation>>,
+        ptys: &Option<HashMap<&str, &RuntimeObservation>>,
         scoped: bool,
     ) -> Result<MemberEvaluation> {
         let eligible = |subject: &DesiredSubject| eligible.contains(&subject.subject);
@@ -12370,9 +12370,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let _observation_capture = self.store.capture_runtime_observations()?;
                 // Unknown runtime state remains unknown; the common path will not admit
                 // a terminal member without a successful observation snapshot.
-                let ptys = self.runtime.snapshot_ptys_with_provenance().ok().map(|snapshot|
-                    snapshot.observations.into_iter()
-                        .map(|observation| (observation.runtime_id.clone(), observation)).collect());
+                let pty_observations = self.runtime.snapshot_ptys_with_provenance().ok();
+                let ptys = pty_observations.as_ref().map(|snapshot|
+                    snapshot.observations.iter()
+                        .map(|observation| (observation.runtime_id.as_str(), observation)).collect());
                 let mut evaluation = self.evaluate_members(&[&desired], &[], &eligible, &ptys, true)?;
                 self.deliver_member_work(evaluation.work_message_agents,
                     &mut evaluation.deferred_member_faults, &evaluation.evaluated_member_wakes,
