@@ -16,4 +16,4 @@ export WF_ST_GATEWAY
 export WF_ST_CREDENTIAL_FILE
 # Never forward an inherited legacy bearer to the long-lived preview process.
 unset WF_ST_AUTHORIZATION
-exec pnpm exec vite --config "$WF_VITE_CONFIG" --configLoader runner --port "$PORT" --host 127.0.0.1 --strictPort
+exec "$app_dir/node_modules/.bin/vite" --config "$WF_VITE_CONFIG" --configLoader runner --port "$PORT" --host 127.0.0.1 --strictPort

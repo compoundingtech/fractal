@@ -25,7 +25,7 @@ devnet up <purpose> --ready-path / -- scripts/devnet/launch.sh <purpose> <build-
   `vite.config.ts` is loopback-only and cannot serve edge traffic; setting allowed
   hosts alone does not change its gateway admission policy. Config paths and the
   working directory resolve relative to the app, not the caller. Preview needs
-  installed app dependencies (Vite), pnpm, Bash, and Python 3.
+  installed app dependencies (Vite), Bash, and Python 3.
 - Immutable launch keeps `<purpose> <build-dir>` compatibility; purpose is unused.
   The build directory resolves with `realpath` from the caller's directory. It
   exports `WF_PORT=$PORT` and passes `WF_ST_CREDENTIAL_FILE` to the build's

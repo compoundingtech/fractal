@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +14,8 @@ const authorization = `Bearer ${token}`
 it.each([token, authorization])('keeps preview credentials out of the child environment and authorizes gateway requests (%#)', async (credential) => {
   const root = await mkdtemp(join(tmpdir(), 'fractal-preview-test-'))
   const credentialFile = join(root, 'credential')
+  const launcher = join(root, 'app/scripts/devnet/preview-launch.sh')
+  const vite = join(root, 'app/node_modules/.bin/vite')
   const environmentFile = join(root, 'environment.json')
   const configFile = join(root, 'vite.config.mjs')
   const socketPath = join(root, 'gateway.sock')
@@ -26,6 +28,20 @@ it.each([token, authorization])('keeps preview credentials out of the child envi
   let child: ChildProcess | undefined
   let exited: Promise<unknown> | undefined
   try {
+    // Recreate the launcher's app-local binary boundary without depending on a node linker layout.
+    // The binary harness starts real Vite and the real gateway plugin through the public API.
+    await mkdir(join(root, 'app/scripts/devnet'), { recursive: true })
+    await mkdir(join(root, 'app/node_modules/.bin'), { recursive: true })
+    await copyFile(join(app, 'scripts/devnet/preview-launch.sh'), launcher)
+    await writeFile(vite, `#!/usr/bin/env node
+      import { createServer } from ${JSON.stringify(import.meta.resolve('vite'))}
+      const server = await createServer({
+        configFile: process.env.WF_VITE_CONFIG,
+        configLoader: 'runner',
+        server: { host: '127.0.0.1', port: 0, strictPort: true },
+      })
+      await server.listen()
+    `, { mode: 0o700 })
     await writeFile(credentialFile, `${credential}\n`, { mode: 0o600 })
     await writeFile(configFile, `
       import { writeFileSync } from 'node:fs'
@@ -47,7 +63,7 @@ it.each([token, authorization])('keeps preview credentials out of the child envi
     `)
     gateway.listen(socketPath)
     await once(gateway, 'listening')
-    child = spawn('bash', [join(app, 'scripts/devnet/preview-launch.sh')], {
+    child = spawn('bash', [launcher], {
       // Only synthetic configuration reaches this subprocess, never the test runner's credentials.
       env: {
         PATH: process.env.PATH,
