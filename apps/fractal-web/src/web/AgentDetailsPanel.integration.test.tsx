@@ -250,6 +250,12 @@ describe('OMP inspector copy guard', () => {
 })
 
 describe('OMP subagent activity on the production inspector', () => {
+  // The file-level mount uses the build's supplement hook; these tests supply their own, and a
+  // hook cannot change under a mounted pane, so each starts from a fresh root.
+  beforeEach(async () => {
+    await act(async () => root.unmount())
+    root = createRoot(host)
+  })
   const mount = async (state?: OmpSupplementState) => {
     await act(async () => root.render(<DataSourceProvider source={ompDetailsSource()} registry={registry}>
       <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} {...(state === undefined ? {} : { detailsSupplement: ompSupplementFeeds[state] })} />
