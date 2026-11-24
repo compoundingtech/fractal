@@ -217,19 +217,12 @@ fn credentials_wait_for_home_admission_and_then_remint_offline() {
 }
 
 #[test]
-fn start_is_a_typed_unsupported_operation_and_never_reaches_custody() {
+fn start_without_provisioned_grant_never_reaches_custody() {
     let root=tempfile::tempdir().unwrap(); let selected=selection(); let (home,seat)=pair(root.path(),&selected);
-    let mut unsupported=draft(&selected,"decision/start");
-    unsupported.operation=Operation::Start;
-    let error=home.enqueue(unsupported).unwrap_err();
-    assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,"light-node-start-not-supported");
+    let candidate=super::start_tests::start_draft(&selected,"decision/start",1);
+    assert!(home.enqueue(candidate).is_err());
     assert!(home.pending_commands().unwrap().is_empty());
-    let command=Command {version:VERSION,sequence:1,execution_id:"execution/unsupported-start".into(),decision_id:"decision/start".into(),binding:draft(&selected,"fixture").binding,operation:Operation::Start};
-    let error=seat.admit(&command).unwrap_err();
-    assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,"light-node-start-not-supported");
     assert!(seat.pending_receipts().unwrap().is_empty());
-    assert!(seat.undispatched().unwrap().is_empty()); assert!(seat.recoverable().unwrap().is_empty());
-    assert!(seat.enter(&command.execution_id,|_,_|panic!("unsupported Start cannot enter any native backend")).is_err());
 }
 
 #[test]
