@@ -224,6 +224,73 @@ impl PressureFixture {
     }
 }
 
+fn arc_observation(fixture: &mut PressureFixture) -> crate::host::HostMemoryObservation {
+    let root = fixture.root.path();
+    let pressure = fixture.reader.memory_full_avg60_layout(&fixture.policy,
+        &root.join("proc/self/cgroup"), &root.join("cgroup"), &root.join("proc/meminfo")).ok();
+    crate::host::outside_memory(
+        &std::fs::read_to_string(root.join("proc/meminfo")).unwrap(),
+        Some("size 4 1000\nc_min 4 100\nmru_evictable_data 4 350\n\
+            mru_evictable_metadata 4 0\nmfu_evictable_data 4 0\nmfu_evictable_metadata 4 0\n"),
+        None, pressure).unwrap()
+}
+
+#[test]
+fn self_throttled_seat_does_not_brake_peers_or_remove_arc_credit() {
+    let mut fixture = PressureFixture::new();
+    let seat = "app.slice/app-agent.slice/app-agent-seats.slice/seat-one.scope";
+    for path in ["app.slice", "app.slice/app-agent.slice",
+        "app.slice/app-agent.slice/app-agent-seats.slice", seat]
+    {
+        fixture.cgroup(path, "69", "0");
+    }
+    fixture.cgroup("app.slice/app-agent.slice/app-agent-seats.slice/seat-two.scope", "0", "0");
+    fixture.cgroup("app.slice/app-agent.slice/interactive.service", "0", "0");
+    fixture.write(&format!("cgroup/{seat}/memory.high"), "6442450944\n");
+    fixture.write(&format!("cgroup/{seat}/memory.events"), "high 1000\n");
+    for now in (0..=180000).step_by(2500) {
+        assert!(!fixture.observe(now).blocked);
+    }
+    let credited = arc_observation(&mut fixture);
+    assert!(!credited.psi_blocked);
+    assert_eq!(credited.outside_bytes, (8 << 30) - 350);
+
+    // Local observation can still explicitly protect the seat itself.
+    fixture.policy.protected_cgroups = vec![format!("/{seat}").into()];
+    fixture.policy.excluded_cgroups.clear();
+    fixture.policy.job_parent_cgroups.clear();
+    assert!(arc_observation(&mut fixture).psi_blocked);
+    for now in (182500..242500).step_by(2500) {
+        assert!(!fixture.observe(now).blocked);
+    }
+    assert!(fixture.observe(242500).blocked);
+}
+
+#[test]
+fn admission_slice_pressure_brakes_and_withholds_arc_credit() {
+    let mut fixture = PressureFixture::new();
+    fixture.cgroup("app.slice/editor.service", "3.14", "0");
+    for now in (0..60000).step_by(2500) {
+        assert!(!fixture.observe(now).blocked);
+    }
+    assert!(fixture.observe(60000).blocked);
+    assert!(arc_observation(&mut fixture).psi_blocked);
+}
+
+#[test]
+fn admission_arc_scope_honors_custom_exclusions_and_host_memory_floor() {
+    let mut fixture = PressureFixture::new();
+    fixture.policy.excluded_cgroups.push("app-custom.slice".into());
+    fixture.cgroup("app.slice/app-custom.slice", "69", "0");
+    assert!(!arc_observation(&mut fixture).psi_blocked);
+    fixture.available(1 << 30);
+    assert!(arc_observation(&mut fixture).psi_blocked);
+    for now in (0..60000).step_by(2500) {
+        assert!(!fixture.observe(now).blocked);
+    }
+    assert!(fixture.observe(60000).blocked);
+}
+
 #[test]
 fn admitted_high_24_5_job_does_not_contaminate_protected_memory_or_io() {
     let mut fixture = PressureFixture::new();
@@ -390,9 +457,9 @@ fn vanished_snapshot_child_is_skipped_only_when_its_cgroup_is_gone() {
     let children = Reader::children(&root.join("app.slice"), &mut Enumeration::default()).unwrap();
     let child = children.into_iter().find(|path| path.ends_with("editor.service")).unwrap();
     std::fs::remove_dir_all(&child).unwrap();
-    fixture.reader.sample_cgroup(&fixture.policy, &root, &child, true).unwrap();
+    fixture.reader.sample_cgroup(&fixture.policy.rules, &root, &child, true).unwrap();
     std::fs::create_dir(&child).unwrap();
-    let error = fixture.reader.sample_cgroup(&fixture.policy, &root, &child, true).unwrap_err();
+    let error = fixture.reader.sample_cgroup(&fixture.policy.rules, &root, &child, true).unwrap_err();
     assert_eq!(ObservationCause::from_error(&error), ObservationCause::Io {
         os_error: Some(libc::ENOENT),
         path: Some(child.join("memory.pressure").to_string_lossy().into()),
@@ -410,13 +477,13 @@ fn vanished_intermediate_frontier_child_is_skipped_only_when_gone() {
     let children = Reader::children(&root.join("custom.slice"), &mut Enumeration::default()).unwrap();
     let excluded = [nested.join("jobs")];
     std::fs::remove_dir_all(&nested).unwrap();
-    fixture.reader.sample_frontier(&fixture.policy, &root, &children,
+    fixture.reader.sample_frontier(&fixture.policy.rules, &root, &children,
         &[], &excluded, &mut Enumeration::default()).unwrap();
     assert!(fixture.reader.readings.iter().all(|reading|
         reading.millipercent == 0 && reading.cgroup.as_deref() != Some("/custom.slice")));
     // An existing but unreadable intermediate must still fail closed.
     std::fs::write(&nested, "not a cgroup directory").unwrap();
-    let error = fixture.reader.sample_frontier(&fixture.policy, &root, &children,
+    let error = fixture.reader.sample_frontier(&fixture.policy.rules, &root, &children,
         &[], &excluded, &mut Enumeration::default()).unwrap_err();
     assert_eq!(ObservationCause::from_error(&error), ObservationCause::Io {
         os_error: Some(libc::ENOTDIR), path: Some(nested.to_string_lossy().into()),

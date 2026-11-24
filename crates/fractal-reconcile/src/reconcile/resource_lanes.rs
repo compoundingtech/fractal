@@ -186,7 +186,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::note_read(|| "host-lane-memory".into());
             fit.held_bytes = self.lanes_held(&request.id, now, true, false)?;
             fit.reserve_bytes = self.finite_burst_reserve(&request.id)?.kept;
-            let observation = (host.outside)().context("UnsupportedCoverage: outside-lane host observation unavailable")?;
+            let observation = (host.outside)(&self.seat_admission.finite_policy.psi_brake).context("UnsupportedCoverage: outside-lane host observation unavailable")?;
             fit.outside_bytes = observation.outside_bytes;
             fit.psi_blocked = observation.psi_blocked;
         } else if request.coverage == Coverage::Logical {
@@ -211,7 +211,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             subject: request.id.clone(), room: fit.room, seat_held_bytes: fit.held_bytes,
             finite_held_bytes: self.store.held_resource_membership_bytes(&self.host, &request.id)?,
             outside_bytes: fit.outside_bytes, reserve_bytes: fit.reserve_bytes,
-            arc_credit_bytes: fractal_runtime::host::arc_credit_bytes(), observed_at: now,
+            arc_credit_bytes: fractal_runtime::host::arc_credit_bytes(&policy.psi_brake), observed_at: now,
         });
         Ok(fit)
     }
@@ -730,11 +730,11 @@ mod tests {
         use fractal_runtime::{Capacity, host};
         const GIB: u64 = 1 << 30;
         thread_local! { static HIGH_PSI: std::cell::Cell<bool> = const { std::cell::Cell::new(true) }; }
-        fn outside() -> Option<host::HostMemoryObservation> {
+        fn outside(_: &fractal_runtime::resource_pressure::Policy) -> Option<host::HostMemoryObservation> {
             let pressure = HIGH_PSI.with(|high| if high.get() {
-                "full avg10=0.00 avg60=2.00 avg300=0.00 total=50\n"
+                2000
             } else {
-                "full avg10=0.00 avg60=0.99 avg300=0.00 total=50\n"
+                990
             });
             host::outside_memory(
                 "MemTotal: 131072000 kB\nMemAvailable: 15309210 kB\n",
