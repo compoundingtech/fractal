@@ -1,5 +1,6 @@
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs } from './ready-pr.ts'
+import { noBuildCache } from './cache-audit.ts'
 import { cachixPushStep, defaultActionlintConfig, githubWorkflow, installNixStep } from '../../repos/effect-utils/genie/external.ts'
 import { readOnlyBinaryCaches } from './workspace-ci.ts'
 
@@ -149,6 +150,7 @@ cachix=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#cachix)
 "$cachix/bin/cachix" push "$CACHE_NAME" < "$RUNNER_TEMP/ghostty-cache.paths"`,
           },
         }),
+        noBuildCache('Publishes the two PTY contract outputs to the public Cachix cache; no separate Actions build archive.'),
       ],
     },
     ...readyPRJobs({ jobs: {

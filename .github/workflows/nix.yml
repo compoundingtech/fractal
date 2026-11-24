@@ -146,6 +146,12 @@ jobs:
           cachix=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#cachix)
           "$cachix/bin/cachix" push "$CACHE_NAME" < "$RUNNER_TEMP/ghostty-cache.paths"
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push')
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Publishes the two PTY contract outputs to the public Cachix cache; no separate Actions build archive.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   nix-release-x86_64-linux:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
     runs-on: ci1
