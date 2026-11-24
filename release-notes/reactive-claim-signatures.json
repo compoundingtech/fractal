@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Wake own-claim signing and pending signature promotion only for committed changed keys",
+  "replay": {"status": "changed", "detail": "Subscribe before replaying the durable own-claim cursor and pending ready keys. Startup drains historical signing and pending pages without waiting for another commit."},
+  "schema": {"status": "changed", "detail": "Add per-origin signature work frontiers, a claim/member-key pending ready queue, transactional capture triggers and an indexed pending retention deadline. Existing pending signatures seed the queue at open."},
+  "rules": {"status": "none", "detail": "Writer-key verification, membership admission and thirty-day pending retention remain unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire changes. Existing claim signing and promotion APIs retain their result semantics."},
+  "downtime": {"status": "none", "detail": "No manual migration or daemon downtime beyond the normal restart."},
+  "manual": {"status": "changed", "detail": "/v1/performance exposes process-lifetime claim_signatures signing_pages, signing_candidates, promotion_pages, promotion_candidates and commit_wakes. Idle and unrelated metadata commits perform no candidate scans; waiting claims are reconsidered by their changed key rather than a wrapping discovery cursor."},
+  "recovery": {"status": "changed", "detail": "Committed ready keys survive interruption, claim arrivals requeue their pending signatures, and member-key activation wakes signing. Only actual indexed retention deadlines wake an otherwise idle signer; failed pages retain their existing error recovery."}
+}
