@@ -10,7 +10,8 @@ import { browserPath, clientRoute, Gateway, type GatewayOptions } from './gatewa
 import { RuntimeIdentity, StaticAssets } from './static.mts'
 import { requestSpanOptions } from './tracing.mts'
 import { handlePairing, pairingRoute, type BrowserPairingOptions } from './pairing.mts'
-import { createUsageHistoryRelay, isUsageHistoryRequest, type UsageHistoryProducer } from './usageHistory.mts'
+import type { LoopbackProducer } from './relayHttp.mts'
+import { createUsageHistoryRelay, isUsageHistoryRequest } from './usageHistory.mts'
 
 export interface AdmissionIdentity {
   readonly kind: 'login' | 'tag'
@@ -40,7 +41,7 @@ export interface MiddlewareOptions {
   /** Explicit cross-origin HTTP collectors; the gateway itself is always same-origin. */
   readonly connectOrigins?: readonly string[]
   /** Interim loopback usage-history producer (see usageHistory.mts); unset registers no route. */
-  readonly usageHistory?: UsageHistoryProducer | undefined
+  readonly usageHistory?: LoopbackProducer | undefined
 }
 export interface ServerOptions extends Omit<MiddlewareOptions, 'server'> {
   readonly dist: string
