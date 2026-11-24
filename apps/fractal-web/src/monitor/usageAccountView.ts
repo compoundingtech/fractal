@@ -90,14 +90,21 @@ export const selectedRow = ({ state, view, selected }: {
 /** Days the history chart spans, the open day included. */
 export const HISTORY_DAYS = 30
 
+/** `zero` is a reported day with nothing recorded; `unreported` is a day the producer has no row or column for. */
+export type HistoryDayState = 'recorded' | 'zero' | 'unrated' | 'unreported'
+
 export interface HistoryBarView {
   readonly day: string
+  readonly state: HistoryDayState
   /** 0–100 of the window's largest day; `undefined` when the day has no value in this unit. */
   readonly fill: number | undefined
   /** The open day: still accumulating, drawn as partial. */
   readonly open: boolean
   readonly words: string
 }
+
+const DAY_MS = 86_400_000
+const daysBefore = (day: string, back: number) => new Date(Date.parse(`${day}T00:00:00Z`) - back * DAY_MS).toISOString().slice(0, 10)
 
 export type HistoryView =
   | { readonly _tag: 'not-configured' }
@@ -118,7 +125,11 @@ export type HistoryView =
 const failureView = ({ kind, reason }: Extract<HistoryState['attempt'], { _tag: 'failed' }>): HistoryView =>
   kind === 'unavailable' ? { _tag: 'not-configured' } : kind === 'incompatible' ? { _tag: 'incompatible', reason } : { _tag: 'unavailable', reason }
 
-/** The selected account's last `HISTORY_DAYS` days, in USD only where the producer's coverage admits it. */
+/**
+ * The `HISTORY_DAYS` calendar days ending on the producer's open day, in USD only where the producer's
+ * coverage admits it. Days before the series are not reported, never zero; a day without a rate is
+ * left out of the USD subtotal and counted, never read as $0.
+ */
 export const historyView = ({ ledgerAccountId, history, preferred }: {
   readonly ledgerAccountId: string | undefined
   readonly history: HistoryState
@@ -128,28 +139,46 @@ export const historyView = ({ ledgerAccountId, history, preferred }: {
   const { last, attempt } = history
   if (last === undefined) return attempt._tag === 'failed' ? failureView(attempt) : { _tag: 'loading' }
   const { unit, belowCoverage } = effectiveUnit({ preferred, series: last.series })
-  const days = last.series.days.slice(-HISTORY_DAYS)
-  const valueOf = (day: HistoryDay) => unit === 'usd' ? day.usd : day.tokens
-  const text = (value: number | undefined) => value === undefined ? 'no rate' : formatUnitValue({ value, unit })
-  const max = Math.max(0, ...days.map(day => valueOf(day) ?? 0))
-  const peak = max === 0 ? undefined : days.find(day => valueOf(day) === max)
-  const open = days.find(day => day.open)
-  const closed = days.filter(day => !day.open)
+  const { openDay } = last.series
+  const byDay = new Map(last.series.days.map(day => [day.day, day]))
+  const valueOf = (day: HistoryDay | undefined) => day === undefined ? undefined : unit === 'usd' ? day.usd : day.tokens
+  const days = Array.from({ length: HISTORY_DAYS }, (_, index) => {
+    const day = daysBefore(openDay, HISTORY_DAYS - 1 - index)
+    const reported = byDay.get(day)
+    const value = valueOf(reported)
+    const state: HistoryDayState = reported === undefined ? 'unreported' : value === undefined ? 'unrated' : value === 0 ? 'zero' : 'recorded'
+    return { day, value, state, open: day === openDay }
+  })
+  const text = ({ value, state }: (typeof days)[number]) =>
+    state === 'unreported' ? 'not reported' : value === undefined ? 'no rate' : formatUnitValue({ value, unit })
+  const max = Math.max(0, ...days.map(day => day.value ?? 0))
+  const peak = max === 0 ? undefined : days.find(day => day.value === max)
+  const open = days.at(-1)!
+  const full = days.filter(day => !day.open && day.state !== 'unreported')
+  const rated = full.filter(day => day.value !== undefined)
+  const unrated = full.length - rated.length
+  const unreported = days.filter(day => day.state === 'unreported').length
+  const total = formatUnitValue({ value: rated.reduce((sum, day) => sum + day.value!, 0), unit })
   return {
     _tag: 'chart',
-    caption: `${unit === 'usd' ? 'Daily spend, USD' : 'Daily tokens'} · last ${days.length} days`,
-    bars: days.map(day => {
-      const value = valueOf(day)
-      return { day: day.day, open: day.open, fill: value === undefined ? undefined : max === 0 ? 0 : value / max * 100, words: `${day.day}${day.open ? ' so far' : ''}: ${text(value)}` }
-    }),
+    caption: `${unit === 'usd' ? 'Daily spend, USD' : 'Daily tokens'} · last ${HISTORY_DAYS} days`,
+    bars: days.map(day => ({
+      day: day.day, state: day.state, open: day.open,
+      fill: day.value === undefined ? undefined : max === 0 ? 0 : day.value / max * 100,
+      words: `${day.day}${day.open ? ' so far' : ''}: ${text(day)}`,
+    })),
     summary: [
-      `${text(closed.reduce((sum, day) => sum + (valueOf(day) ?? 0), 0))} over ${countOf(closed.length, 'full day', 'full days')}`,
-      ...(peak === undefined ? [] : [`peak ${text(max)} on ${peak.day}`]),
-      ...(open === undefined ? [] : [`today so far ${text(valueOf(open))}`]),
+      ...(full.length === 0 ? []
+        : rated.length === 0 ? [`no rate for ${countOf(full.length, 'full day', 'full days')}`]
+        : unrated > 0 ? [`${total} rated subtotal over ${countOf(rated.length, 'full day', 'full days')}`, `${unrated} without a rate`]
+        : [`${total} over ${countOf(rated.length, 'full day', 'full days')}`]),
+      ...(unreported === 0 ? [] : [`${countOf(unreported, 'day', 'days')} not reported`]),
+      ...(peak === undefined ? [] : [`peak ${formatUnitValue({ value: max, unit })} on ${peak.day}`]),
+      `today so far ${text(open)}`,
     ].join(' · '),
     notes: [
       ...(belowCoverage ? ['USD coverage is below the producer’s gate, so this shows tokens'] : []),
-      ...(last.series.omittedDays > 0 ? [`${countOf(last.series.omittedDays, 'older day', 'older days')} not reported`] : []),
+      ...(last.series.omittedDays > 0 ? [`The producer dropped ${countOf(last.series.omittedDays, 'older day', 'older days')}`] : []),
       ...(attempt._tag === 'failed' ? [`Refresh failed: ${attempt.reason}; showing the last good reading`] : []),
     ],
   }

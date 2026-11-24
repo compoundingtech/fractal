@@ -12,7 +12,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { accountOf, accounts, FIXTURE_NOW, fixtureSource, historyEnvelope, quotaEnvelope, type Scripted } from './fixtures.ts'
 import { scenarioUsageSource, usageReads, type UsageRead } from './usageFixtures.ts'
 import { UsagePane } from './UsagePane.tsx'
-import type { QuotaAccount } from './wire.ts'
+import type { QuotaAccount, UsageHistoryEnvelope } from './wire.ts'
 
 const HOUR = 3_600_000
 const atLimit = accountOf({ harness: 'codex', provider: 'openai-codex', name: 'team-north', label: 'Team North', plan: 'Pro',
@@ -21,19 +21,25 @@ const atLimit = accountOf({ harness: 'codex', provider: 'openai-codex', name: 't
 const held = accountOf({ harness: 'codex', provider: 'openai-codex', name: 'held', label: 'Held', plan: 'Plus', retained: { observedAgo: 3 * HOUR, reason: 'provider answered 401' },
   limits: [{ id: 'week', label: 'Weekly', slot: 'governing', fraction: 0.74, resetsIn: 2 * 24 * HOUR }] })
 const quotaOf = (list: readonly QuotaAccount[], generatedAgo?: number) => fixtureSource({ quota: [{ _tag: 'ok', json: quotaEnvelope({ list, ...(generatedAgo === undefined ? {} : { generatedAgo }) }) }] })
+const dayAgo = (days: number) => new Date(FIXTURE_NOW - days * 24 * HOUR).toISOString().slice(0, 10)
+/** The producer reported these days' tokens but no rate-card dollars. */
+const withoutRate = (envelope: UsageHistoryEnvelope, daysAgo: readonly number[]): UsageHistoryEnvelope =>
+  ({ ...envelope, rows: envelope.rows.map(row => daysAgo.some(days => row.bucket_start.startsWith(dayAgo(days))) ? { ...row, usd: null } : row) })
 /** Made-up v3 quota envelopes for the quota accounts at the top of the pane, at the fixture clock. */
 const quotas = {
   'at limit': quotaOf([accounts.claudeAlpha, atLimit, accounts.codexAlpha]),
   stale: quotaOf([held, accounts.claudeBravo], 2 * HOUR),
   empty: quotaOf([]),
   history: fixtureSource({
-    quota: [{ _tag: 'ok', json: quotaEnvelope({ list: [accounts.claudeAlpha, accounts.claudeBravo, accounts.codexAlpha, accounts.codexBravo, atLimit] }) }],
+    quota: [{ _tag: 'ok', json: quotaEnvelope({ list: [accounts.claudeAlpha, accounts.claudeBravo, accounts.codexAlpha, accounts.codexBravo, accounts.copilotMain, accounts.zaiMain, atLimit] }) }],
     history: (ledgerAccountId): readonly Scripted[] => {
       switch (ledgerAccountId) {
         case 'anthropic/alpha': return [{ _tag: 'ok', json: historyEnvelope({ ledgerAccountId, days: 40, coverageOk: false, idle: [2, 3] }) }]
         case 'anthropic/bravo': return [{ _tag: 'fail', failure: { kind: 'unavailable', reason: 'history returned HTTP 404' } }]
         case 'openai-codex/alpha': return [{ _tag: 'ok', json: { lens: 'usage_over_time', rows: 'none' } }]
         case 'openai-codex/bravo': return [{ _tag: 'fail', failure: { kind: 'http', reason: 'history returned HTTP 502' } }]
+        case 'github-copilot/main': return [{ _tag: 'ok', json: historyEnvelope({ ledgerAccountId, days: 3 }) }]
+        case 'zai/main': return [{ _tag: 'ok', json: withoutRate(historyEnvelope({ ledgerAccountId, days: 40, idle: [4] }), [5, 6]) }]
         default: return [{ _tag: 'hang' }]
       }
     },
@@ -222,10 +228,16 @@ export const QuotaHistory: Story = {
       ['codex/alpha', 'History is in a shape this app cannot read'],
       ['codex/bravo', 'Could not read history'],
       ['codex/team-north', 'Reading history…'],
+      ['copilot/main', '27 days not reported'],
+      ['zai/main', '2 without a rate'],
     ] as const) {
       await userEvent.click(accountRow(canvasElement, account))
       await expect(await usage.findByText(text, { exact: false })).toBeVisible()
     }
+    expect(canvasElement.querySelectorAll('[data-state="unrated"]')).toHaveLength(2)
+    expect(canvasElement.querySelectorAll('[data-state="zero"]')).toHaveLength(1)
+    await userEvent.click(accountRow(canvasElement, 'copilot/main'))
+    await waitFor(() => expect(canvasElement.querySelectorAll('[data-state="unreported"]')).toHaveLength(27))
     await userEvent.click(accountRow(canvasElement, 'claude/alpha'))
     await expect(await usage.findByText('USD coverage is below the producer’s gate, so this shows tokens')).toBeVisible()
     canvasElement.dataset.proof = 'passed'
