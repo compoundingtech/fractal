@@ -3,14 +3,19 @@ use super::*;
 pub(in crate::light_node) fn start_draft(selected: &Selection, decision: &str, revision: u64) -> CommandDraft {
     let mut draft = tests::draft(selected, decision);
     draft.binding.authorization_revision = revision.to_string();
-    let member: crate::model::MemberSpec = serde_json::from_value(serde_json::json!({
-        "kind":"exec", "host":selected.host, "runtime_id":draft.binding.runtime,
-        "workspace":"/tmp/light-start", "cwd":"/tmp/light-start", "terminal":false,
-        "launch":{"type":"shell","value":"printf start"}, "environment":{}, "tags":{},
-        "display_name":null, "lifecycle":"service", "restart":"never",
-        "restart_intensity":{"attempts":1,"interval_ms":1000,"delay_ms":0},
-        "shutdown_timeout_ms":1000,"driver":null
-    })).unwrap();
+    use crate::model::{LaunchSpec, MemberKind, MemberLifecycle, MemberSpec, RestartIntensity, RestartType};
+    let member = MemberSpec {
+        kind: MemberKind::Exec, host: selected.host.clone(), runtime_id: draft.binding.runtime.clone(),
+        workspace: "/tmp/light-start".into(), workspace_create: false,
+        cwd: "/tmp/light-start".into(), terminal: false,
+        launch: LaunchSpec::Shell("printf start".into()),
+        environment: Default::default(), tags: Default::default(), display_name: None,
+        lifecycle: MemberLifecycle::Service, terminal_binding: None, one_shot: false,
+        restart: RestartType::Never,
+        restart_intensity: RestartIntensity { attempts: 1, interval_ms: 1000, delay_ms: 0, ..RestartIntensity::default() },
+        shutdown_timeout_ms: 1000, driver: None, terminal_size: None, capacity: None,
+        declared_priority: None, declared_lane: None, declared_budgets: None,
+    };
     let mut authorization = StartAuthorization {
         revision, content_sha256:String::new(), desired_token:"desired/one".into(),
         selected_desired_token:"selected/one".into(), declaration_sha256:"1".repeat(64),
