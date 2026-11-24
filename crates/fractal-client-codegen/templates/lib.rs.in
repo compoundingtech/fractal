@@ -968,6 +968,9 @@ impl CollectionEvent {
     }
 }
 
+// Keep the 312-byte Unix socket inline for allocation-free local terminals.
+// Boxing only the 1376-byte remote TLS socket intentionally leaves unequal variants.
+#[allow(clippy::large_enum_variant)]
 enum TerminalSocket {
     Unix(WebSocketStream<tokio::net::UnixStream>),
     Remote(Box<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>),
