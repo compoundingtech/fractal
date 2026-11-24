@@ -257,7 +257,7 @@ kill or unprovable identity remains visible as `supersession-effect-fence`; it c
 converted into success by a cleanup deadline. Owned runtimes of all predecessor generations
 and descendants must likewise be confirmed quiescent. Acknowledgements and runtime observations
 wake reconciliation; no polling or replacement execution timeout is introduced. New program
-credentials are minted inside the run writer fence only for the current live attempt and
+credentials on unconfigured full nodes are minted inside the run writer fence for the current live attempt
 after checking that it does not await automatic publication cutover.
 
 The host does not acknowledge a merely requested `Worker.terminate()`: it awaits that
@@ -338,18 +338,31 @@ authority in free mode, and the rules that restrict it (`rule.set` in enforce mo
 the run's writes as well. With exact-or-namespace patterns the intersection is exact: for each
 pair with one verb, the narrower pattern if one covers the other, nothing otherwise.
 
-**Credential.** For each start or resume of an attempt the engine mints a store capability of kind
-`program-run` whose subject is the step run and whose incarnation is the attempt (the secret is
-hashed at rest and never journaled), and passes it as `ST_RUN_CREDENTIAL` in the `start`
-message's `env`. The host spreads the run env last, so an effect cannot replace it.
+**Credential.** On an unconfigured full node, each start or resume mints a `program-run` store
+capability whose subject is the step run and whose incarnation is the attempt. The opt-in
+light-node issuer instead uses the session journal's exact execution binding: engine instance,
+actual host generation, runtime, run, step, attempt and admitted authorization revision. It waits
+for the home admission ACK before minting and for predecessor revocation ACK before replacing;
+an ACK targets waiting run evaluations, not a timer poll. Already acknowledged live authority can
+mint offline. Both paths hash secrets at rest, never journal them as graph claims, and pass only
+the local secret as `ST_RUN_CREDENTIAL` in the start message's `env`. The host spreads run env last,
+so an effect cannot replace it. See [light-node authorization](light-node.md#authorization-withdrawal-and-host-admission).
 
 **Binding.** The ancestry walk reads `ST_RUN_CREDENTIAL` from each ancestor's exec-time environment
 beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon
-binds a request to `mission-run/RUN` only while the credential's attempt is its step run's current,
-live attempt, so the credential dies with its attempt and needs no revocation; one that no longer
-binds leaves the caller unverifiable. A run-bound request follows the bound-agent rules: no internal
-routes, no person headers other than its own run, and `actor`/`requester` must be the run. Handlers
-that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
+binds a request to `mission-run/RUN` only while its authority is live. Full nodes retain the
+current graph-attempt check and recheck authenticated run scope in the actual claim transaction.
+That scope travels with the queued SQLite writer action, not just the submitting blocking thread.
+Both the batched writer and the direct writer after projection drain recheck it before the effect;
+the shared writer's previous identity is restored on success, refusal or unwinding.
+Light nodes resolve durable local admission without a graph lookup and explicitly revoke it before
+forgetting an ended or replaced engine attempt. One that no longer binds leaves the caller
+unverifiable. A run-bound request follows bound-agent attribution: no general internal routes,
+no person headers other than its own run, and `actor`/`requester` must be the run. The narrow native
+run-claim bridge signs and durably forwards graph effects to their home, where signature, current
+graph authority, revocation and the effect receipt share one writer transaction. It does not
+enable cross-shard messages or local-observation effects.
+Handlers that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
 alike, so a run writes no seat's `doc/agents/…` document and is the writer its document writes
 name. The CLI defaults its actor to the run when the credential is present and names it on the
 trusted Unix client, which the daemon accepts only from a request its credential binds to that
