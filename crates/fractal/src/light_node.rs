@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use axum::{Json, Router, extract::{Path as AxumPath, Query, State}, http::StatusCode, routing::{get, post}};
 use fractal_daemon::api::run_requests::LocalRunAuthority;
+use fractal_daemon::api::ApiError;
 use fractal_daemon::config::{Config, LightNodeSessionConfig};
 use fractal_daemon::fleet::MemberKey;
 use fractal_daemon::light_node::journal::{CommandDraft, EpochInstall, Journal, Limits, Operation, RunRequest, RunResult, Selection};
@@ -86,14 +87,21 @@ impl LocalRunAuthority for NativeRunAuthority {
         )?)).map_err(authority_error)
     }
     fn execute_claim<'a>(&'a self, secret: &'a str, request_id: &'a str, claim: ClaimInput)
-        -> Pin<Box<dyn Future<Output = Result<Value, FractalError>> + Send + 'a>>
+        -> Pin<Box<dyn Future<Output = Result<Value, ApiError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let payload = serde_json::to_vec(&claim).map_err(|error| FractalError::new("invalid-run-request", error.to_string()))?;
+            let payload = serde_json::to_vec(&claim).map_err(|error|
+                ApiError::bad(FractalError::new("invalid-run-request", error.to_string())))?;
             let identity = RequestIdentity::new(request_id.into(), "POST".into(), "/v1/claims".into(), &payload);
-            let assertion = self.sign(secret, identity, 30_000)?;
-            let result = self.requester.submit(RunRequest { assertion, claim }).await.map_err(authority_error)?;
-            result.result.map_err(|error| FractalError::new(&error.code, error.message))
+            let assertion = self.sign(secret, identity, 30_000).map_err(ApiError::bad)?;
+            let result = self.requester.submit(RunRequest { assertion, claim }).await
+                .map_err(|error| ApiError::bad(authority_error(error)))?;
+            // Wire refusal codes are owned data, not the static codes of a local
+            // FractalError. Preserve the exact home outcome without leaking strings.
+            result.result.map_err(|error| ApiError {
+                status: StatusCode::BAD_REQUEST, code: error.code,
+                message: error.message, details: Box::default(),
+            })
         })
     }
     fn acknowledge_claim(

@@ -17,7 +17,7 @@ pub trait LocalRunAuthority: Send + Sync {
     fn sign(&self, secret: &str, request: RequestIdentity, lifetime_ms: u64) -> Result<RequestAssertion, FractalError>;
     fn execute_claim<'a>(
         &'a self, secret: &'a str, request_id: &'a str, claim: ClaimInput,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, FractalError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ApiError>> + Send + 'a>>;
     fn acknowledge_claim(
         &self, secret: &str, request_id: &str, claim: ClaimInput, accepted: RunResult,
     ) -> Result<(), FractalError>;
@@ -50,7 +50,7 @@ pub(super) async fn claim(
         || request.claim.actor.as_deref().is_some_and(|actor| actor != bound.0.run)
     { return Err(refused()); }
     service.execute_claim(credential.secret(), &request.request_id, request.claim)
-        .await.map(Json).map_err(ApiError::bad)
+        .await.map(Json)
 }
 
 #[derive(Deserialize)]

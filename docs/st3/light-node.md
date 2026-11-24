@@ -50,6 +50,8 @@ After durably accepting a forwarded result, the same bound program explicitly
 posts to `/v1/internal/native/run-request/acknowledge` with
 `{request: {request_id, claim}, accepted: {request_id, result: {Ok: value}}}`.
 For a durable refused result, `result` is `{Err: {code, message}}` instead.
+The Unix response preserves the home's owned refusal code and message exactly;
+it does not intern wire strings as static local error codes or erase their identity.
 The original typed claim and current credential reproduce its immutable
 execution/request digest; another run or changed request cannot retire that
 result. The first acknowledgement must match the retained result exactly.
