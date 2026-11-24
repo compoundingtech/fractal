@@ -3597,14 +3597,14 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// This is read-only apart from transforming this snapshot's retired members
     /// into stops; scoped render validation must not resurrect their ownership.
     fn prepare_member_roster(&self, desired: &mut [DesiredSubject]) -> Result<MemberRoster> {
-        let mut pending_subjects = BTreeSet::new();
-        for declaration in desired.iter() {
-            if let Some(run) = &declaration.owner_run
-                && self.store.run_projection_pending(run)?
-            {
-                pending_subjects.insert(declaration.subject.clone());
-            }
-        }
+        let pending_runs = self.store.pending_projection_runs(
+            desired.iter().filter_map(|declaration| declaration.owner_run.as_deref()),
+        )?;
+        let pending_subjects = desired.iter()
+            .filter(|declaration| declaration.owner_run.as_ref()
+                .is_some_and(|run| pending_runs.contains(run)))
+            .map(|declaration| declaration.subject.clone())
+            .collect::<BTreeSet<_>>();
         let terminal_owned = self.store.terminal_owned_runtime_subjects()?;
         for subject in desired.iter_mut() {
             if terminal_owned.contains(&subject.subject)
@@ -3704,6 +3704,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let gate_runners = self.gate_runners()?;
         _runners_span.items(gate_runners.len());
         for runner in &gate_runners {
+            // Other hosts' runners cannot produce an effect here and need no
+            // projection read. Local effects retain their fresh per-runner fence.
+            if runner.host != self.host {
+                continue;
+            }
             if self.store.run_projection_pending(&runner.owner_run)? {
                 continue;
             }
