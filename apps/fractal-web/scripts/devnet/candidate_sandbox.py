@@ -107,11 +107,29 @@ def directory(name):
     return path.resolve()
 
 
-def bootstrap_env(home):
+def bootstrap_cache_path():
+    return (directory('FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT') / 'nix-bootstrap-cache').resolve()
+
+
+def candidate_worktree(worktree, *, strict=True):
+    worktree = Path(worktree).resolve(strict=strict)
+    cache = bootstrap_cache_path()
+    if cache.is_relative_to(worktree) or worktree.is_relative_to(cache):
+        raise RuntimeError('Nix bootstrap cache must be disjoint from the candidate worktree')
+    return worktree
+
+
+def bootstrap_env(home, state=None):
     # Nix evaluates outside bwrap; never give it agent credentials or configuration.
-    return {'PATH': str(Path(shutil.which('nix') or '/missing-nix').resolve().parent),
-            'HOME': str(home), 'USER': 'builder', 'LANG': 'C.UTF-8',
-            'NIX_CONFIG': 'experimental-features = nix-command flakes\n'}
+    environment = {'PATH': str(Path(shutil.which('nix') or '/missing-nix').resolve().parent),
+                   'HOME': str(home), 'USER': 'builder', 'LANG': 'C.UTF-8',
+                   'NIX_CONFIG': 'experimental-features = nix-command flakes\n'}
+    if state is not None:
+        # Reuse fetcher metadata across temporary HOMEs, outside candidate mounts.
+        cache = Path(state) / 'nix-bootstrap-cache'
+        cache.mkdir(mode=0o700, exist_ok=True)
+        environment['XDG_CACHE_HOME'] = str(cache)
+    return environment
 
 
 def capacity_precheck():
@@ -132,6 +150,9 @@ def tools():
         raise RuntimeError('FRACTAL_INTEGRATOR_SANDBOX must be bwrap (no unsandboxed fallback)')
     state = directory('FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT')
     store = directory('FRACTAL_INTEGRATOR_PNPM_STORE')
+    cache = bootstrap_cache_path()
+    if cache.is_relative_to(store) or store.is_relative_to(cache):
+        raise RuntimeError('Nix bootstrap cache must be disjoint from the pnpm store')
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     store.mkdir(parents=True, exist_ok=True)
     # This file belongs to the trusted launcher checkout, never the candidate.
@@ -147,7 +168,7 @@ def tools():
         result = subprocess.run([nix, 'build', *NIX_OPTIONS, '--no-link', '--print-out-paths',
                                  base + '#bubblewrap', base + '#bash', base + '#coreutils',
                                  base + '#gitMinimal', base + '#python3'],
-                                env=bootstrap_env(home), check=True, capture_output=True, text=True)
+                                env=bootstrap_env(home, state), check=True, capture_output=True, text=True)
     paths = result.stdout.splitlines()
     binaries = {}
     for name in ('bwrap', 'bash', 'env', 'git', 'python3'):
@@ -158,7 +179,11 @@ def tools():
     return binaries, state, store
 
 
-def validate_configuration():
+def validate_configuration(*candidate_worktrees):
+    # A configured clone may not exist yet; resolve existing symlinks before
+    # bootstrapping, without requiring clone creation first.
+    for worktree in candidate_worktrees:
+        candidate_worktree(worktree, strict=False)
     tools()
 
 
@@ -172,7 +197,7 @@ def realize_megarepo():
     with tempfile.TemporaryDirectory(prefix='package-', dir=state) as home:
         result = subprocess.run([shutil.which('nix'), 'build', *NIX_OPTIONS, '--no-link',
                                  '--print-out-paths', '--no-write-lock-file', installable],
-                                env=bootstrap_env(home), check=True, capture_output=True, text=True)
+                                env=bootstrap_env(home, state), check=True, capture_output=True, text=True)
     paths = result.stdout.splitlines()
     if len(paths) != 1 or not paths[0].startswith('/nix/store/'):
         raise RuntimeError('candidate package realization did not return one store path')
@@ -182,6 +207,7 @@ def realize_megarepo():
 def run_package(binary, args, *, worktree, **kwargs):
     if binary != 'mr':
         raise ValueError('unknown trusted candidate package')
+    worktree = candidate_worktree(worktree)
     executable = realize_megarepo() / 'bin' / binary
     return run([str(executable), *args], worktree=worktree, **kwargs)
 
@@ -190,8 +216,8 @@ def run(args, *, worktree, shell=None, network=False, output=None,
         readonly_dependencies=False, working_directory=None, **kwargs):
     if 'env' in kwargs or 'cwd' in kwargs:
         raise ValueError('sandbox environment and cwd are runner-owned')
+    worktree = candidate_worktree(worktree)
     binaries, state, store = tools()
-    worktree = Path(worktree).resolve(strict=True)
     host_home = Path.home().resolve()
     if host_home == Path('/') or any(host_home.is_relative_to(path) for path in (worktree, store)):
         raise RuntimeError('candidate mounts must not contain the operator home')
@@ -352,7 +378,7 @@ def main():
                 parser.error('--prepare-removal requires --snapshot-root')
             prepare_removal(options.prepare_removal, options.snapshot_root)
             return 0
-        validate_configuration()
+        validate_configuration(*([options.worktree] if options.worktree else []))
         if options.check_config:
             return 0
         command = options.command[1:] if options.command[:1] == ['--'] else options.command

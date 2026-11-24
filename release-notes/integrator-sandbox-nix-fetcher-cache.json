@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reuse trusted integrator Nix fetcher metadata across isolated candidate bootstrap HOMEs instead of downloading locked GitHub inputs for every build",
+  "replay": {"status": "none", "detail": "No replay or tree-cache semantics change."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "Candidate confinement and Nix evaluation policy are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Pinned sandbox tools and megarepo bootstrap builds use XDG_CACHE_HOME at nix-bootstrap-cache under FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT, created with mode 0700. Bootstrap HOME remains temporary and credential-free; the cache is not mounted into candidate sandboxes."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "The integrator creates the cache automatically; an initially cold cache still needs GitHub access."},
+  "recovery": {"status": "none", "detail": "Reverting leaves disposable fetcher metadata under the sandbox state root."}
+}
