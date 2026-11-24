@@ -3,6 +3,8 @@
     mod restart_preparation;
     #[cfg(test)]
     mod file_watch_scope;
+    #[cfg(test)]
+    mod host_observations;
     mod environment_capture;
     mod capture_restart;
 
@@ -1117,37 +1119,6 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_running_pty_with_a_dead_pid_is_observed_as_vanished() {
-        let observation = fractal_runtime::PtyObservation {
-            name: "stale-worker".into(),
-            status: "running".into(),
-            exit_code: None,
-            pid: Some(i32::MAX as u32),
-            created_at: Some("2026-09-22T12:00:00.000Z".into()),
-            display_name: None,
-            tags: BTreeMap::new(),
-        };
-
-        assert_eq!(observed_pty_status(&observation), "vanished");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_running_pty_with_a_live_pid_remains_running() {
-        let observation = fractal_runtime::PtyObservation {
-            name: "live-worker".into(),
-            status: "running".into(),
-            exit_code: None,
-            pid: Some(std::process::id()),
-            created_at: Some("2026-09-22T12:00:00.000Z".into()),
-            display_name: None,
-            tags: BTreeMap::new(),
-        };
-
-        assert_eq!(observed_pty_status(&observation), "running");
-    }
 
     /// The exec a hook waits for, and what happens right after that exec is next observed.
     type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
@@ -1157,6 +1128,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
+        observation_paths: Option<Vec<PathBuf>>,
+        physical_exec_observations: AtomicUsize,
         capture_timeouts: Mutex<(u32, u32)>,
         capture_error: Mutex<Option<String>>,
         start_closure_unavailable: AtomicBool,
@@ -1425,7 +1398,7 @@ mission "exit-evidence" state="ready" {
         };
         reconciler.reconcile_stop(
             &stopped,
-            Some(&HashMap::from([(member.runtime_id.clone(), replacement)])),
+            Some(&HashMap::from([(member.runtime_id.as_str(), &replacement)])),
         ).unwrap();
         let replacement = store.latest_actual_value(&subject.subject).unwrap().unwrap();
         assert!(actual_field(&replacement, "exit_evidence").is_none_or(Value::is_null));
@@ -2060,6 +2033,9 @@ mission "cancel-driver" state="ready" {
     }
 
     impl RuntimeControl for FakeRuntime {
+        fn observation_paths(&self) -> Option<&[PathBuf]> {
+            self.observation_paths.as_deref()
+        }
         fn launch_contract(&self, store: &Store, desired: &DesiredSubject, launch: &MemberSpec) -> Result<crate::launch_contract::Contract> {
             let mut capture = self.capture_timeouts.lock().unwrap();
             capture.1 += 1;
@@ -2246,6 +2222,7 @@ mission "cancel-driver" state="ready" {
             Ok(self.exec_payloads.lock().unwrap().get(&(runtime_id.into(), incarnation.into())).copied())
         }
         fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
+            self.physical_exec_observations.fetch_add(1, Ordering::Relaxed);
             if let Some(before) = self.before_observe_exec.lock().unwrap().take() {
                 before();
             }
