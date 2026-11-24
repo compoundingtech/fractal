@@ -28,6 +28,19 @@ liveness alone cannot show whether its harness still runs.
 
 No database migration or full replay is required. Existing declarations serialize identically. New bindings persist a `terminal-bound` member lifecycle. Older binaries cannot interpret that lifecycle; upgrade the terminal-owning daemon before creating bindings. Rollback is supported before bindings exist. Once bindings exist, roll forward: an older reconciler's stop fallback is not aware that the runtime belongs to a surviving shell.
 
+Executor-local custody now retains the binding's logical invocation separately
+from its exact native PTY incarnation. Local read and attach resolve that durable
+binding and freshly check native evidence without requiring graph-running state.
+A local emergency stop of a borrowed invocation persists a detach, never sends a
+signal to the PTY, and remains detached after daemon restart. Reconciliation emits
+one idempotent `runtime.action.succeeded` detach receipt and a stopped graph observation without
+inventing an exit code or process-exit evidence. The invocation fence remains
+retained until custody and receipt settlement permit normal checkpoint removal.
+The real PTY fixture in `fractal-reconcile` exercises restart, unavailable graph
+tables, native attachment, stale invocation denial and detach without shell
+termination; its integration-lane execution is required evidence.
+
+
 ## Native OMP attach admission
 
 The typed `fractal_runtime::native_attach` proof APIs and

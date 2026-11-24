@@ -765,6 +765,56 @@ pub trait RuntimeControl: Send + Sync + 'static {
 
 type ShellRetirements = Arc<Mutex<BTreeMap<(String, Option<String>), Option<Result<bool>>>>>;
 
+#[derive(Debug)]
+pub enum LocalSessionUnavailable { Missing, Stale, Ambiguous }
+
+impl std::fmt::Display for LocalSessionUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "local session absent or detached",
+            Self::Stale => "local native incarnation or launch provenance is stale",
+            Self::Ambiguous => "local native session identity is ambiguous",
+        })
+    }
+}
+impl std::error::Error for LocalSessionUnavailable {}
+
+/// Resolve executor custody without consulting desired state, graph status, or a home session.
+pub fn local_session<R: RuntimeControl>(
+    store: &Store, runtime: &R, subject: &str, expected: Option<&str>,
+) -> Result<crate::store::local_sessions::LocalSession> {
+    let binding = store.local_session(subject)?.ok_or(LocalSessionUnavailable::Missing)?;
+    anyhow::ensure!(expected.is_none_or(|id| id == binding.incarnation), LocalSessionUnavailable::Stale);
+    let observed = if binding.terminal {
+        let mut matches = runtime.snapshot_ptys()?.into_iter().filter(|o| o.runtime_id == binding.runtime_id);
+        let found = matches.next();
+        anyhow::ensure!(matches.next().is_none(), LocalSessionUnavailable::Ambiguous);
+        found
+    } else { runtime.observe_exec(&binding.runtime_id)? };
+    anyhow::ensure!(observed.is_some_and(|o| o.status == "running"
+        && o.incarnation_id.as_deref() == Some(binding.native_incarnation.as_str())),
+        LocalSessionUnavailable::Stale);
+    if let Some(operation) = &binding.start_operation {
+        anyhow::ensure!(runtime.start_operation(&binding.runtime_id, binding.terminal, &binding.native_incarnation)?
+            .as_ref() == Some(operation), LocalSessionUnavailable::Stale);
+    }
+    Ok(binding)
+}
+
+/// Emergency local control uses the same native exact-generation fences as managed stop.
+/// A borrowed invocation only detaches; the durable receipt is replayed by the graph owner.
+pub fn stop_local_session<R: RuntimeControl>(
+    store: &Store, runtime: &R, subject: &str, incarnation: &str, operation: &str,
+) -> Result<()> {
+    if store.local_session_detached(subject, incarnation)? { return Ok(()); }
+    let binding = local_session(store, runtime, subject, Some(incarnation))?;
+    if binding.custody == crate::store::local_sessions::SessionCustody::Borrowed {
+        store.detach_local_session(subject, incarnation, operation)
+    } else {
+        runtime.stop(&binding.runtime_id, binding.terminal, Some(&binding.native_incarnation))
+    }
+}
+
 pub struct NativeRuntime {
     pty: fractal_runtime::PtyRuntime,
     exec: fractal_runtime::ExecRuntime,
@@ -1712,6 +1762,8 @@ pub struct Reconciler<R = NativeRuntime> {
     launch_input_wake: std::sync::OnceLock<Arc<fractal_drivers::harness_admission::IdentityWake>>,
     /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
     program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
+    program_run_authority: std::sync::OnceLock<Arc<dyn program::RunAuthority>>,
+    program_setup: Mutex<()>,
     resource_authority: std::sync::OnceLock<std::result::Result<(), String>>,
     resource_admission_maintenance: Mutex<Option<u128>>,
     resource_provider: Arc<dyn ResourceProvider>,
@@ -2044,6 +2096,8 @@ impl Reconciler<NativeRuntime> {
             file_changes: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
+            program_run_authority: Default::default(),
+            program_setup: Mutex::default(),
             resource_authority: Default::default(),
             resource_admission_maintenance: Mutex::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
@@ -2285,6 +2339,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_changes: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
+            program_run_authority: Default::default(),
+            program_setup: Mutex::default(),
             resource_authority: Default::default(),
             resource_admission_maintenance: Mutex::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
@@ -3484,7 +3540,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_once_with_cause(&self, cause: crate::reconcile_telemetry::WakeCause) -> Result<()> {
         let telemetry = crate::reconcile_telemetry::Operation::new(false, cause);
         let _entered = telemetry.span.enter();
-        let result = self.recording_writes(|| self.reconcile_pass());
+        let result = self.recording_writes(|| {
+            self.replay_local_session_detaches()?;
+            let result = self.reconcile_pass();
+            self.replay_local_session_detaches()?;
+            result
+        });
         if result.is_err() { telemetry.error(); }
         // Mail the pass queued from inside its transactions leaves now, as the daemon's drain would
         // after the commit: no wait for that task, and a pass alone delivers what it caused.
@@ -7845,6 +7906,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .as_ref()
                 .context("bound seat has no binding")?
                 .agent_incarnation();
+            if self.store.local_session(&subject.subject)?.is_some() {
+                self.store.detach_local_session(&subject.subject, &incarnation,
+                    &format!("bound-stop:{incarnation}"))?;
+            }
             return self.record_once(
                 &subject.subject,
                 "runtime.observed",
@@ -11455,6 +11520,25 @@ impl<R: RuntimeControl> Reconciler<R> {
         }));
     }
 
+    /// Acknowledge only after idempotent graph receipt acceptance; never infer a process exit.
+    fn replay_local_session_detaches(&self) -> Result<()> {
+        for (detached, operation) in self.store.pending_local_session_detaches()? {
+            self.store.append_claim(&ClaimInput {
+                subject: detached.subject.clone(), kind: "runtime.action.succeeded".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), Value::from("detach")),
+                    ("incarnation_id".into(), Value::from(detached.incarnation.clone())),
+                    ("runtime_id".into(), Value::from(detached.runtime_id)),
+                    ("operation".into(), Value::from(operation.clone())),
+                ]),
+                evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some(format!("local-session-detach:{}:{operation}", detached.subject)),
+            })?;
+            self.store.ack_local_session_detach(&detached.subject, &detached.incarnation, &operation)?;
+        }
+        Ok(())
+    }
+
     /// Observe only the invocation, never the borrowed shell's lifecycle as an agent exit.
     fn reconcile_terminal_binding(
         &self,
@@ -11467,6 +11551,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .as_ref()
             .context("bound seat has no binding")?;
         let incarnation = binding.agent_incarnation();
+        if self.store.local_session_detached(&subject.subject, &incarnation)? {
+            self.record_once(&subject.subject, "runtime.observed",
+                member_fields(member, "stopped", Some(&incarnation), true))?;
+            return Ok(None);
+        }
         let prior = self.store.latest_actual_value(&subject.subject)?;
         if let Some(prior) = prior.as_ref().filter(|actual| {
             actual_field(actual, "incarnation_id").and_then(Value::as_str)
@@ -11493,6 +11582,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             o.status == "running"
                 && o.incarnation_id.as_deref() == Some(binding.incarnation.as_str())
         });
+        if running {
+            self.store.bind_local_session(&crate::store::local_sessions::LocalSession {
+                subject: subject.subject.clone(), runtime_id: member.runtime_id.clone(),
+                incarnation: incarnation.clone(), native_incarnation: binding.incarnation.clone(),
+                terminal: true, driver: member.driver.clone(), lifecycle: MemberLifecycle::TerminalBound,
+                custody: crate::store::local_sessions::SessionCustody::Borrowed,
+                start_operation: None, invocation: Some(incarnation.clone()),
+            })?;
+        }
         let status = if running { "running" } else { "vanished" };
         self.record_once(
             &subject.subject,
@@ -11598,6 +11696,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         self.record_native_exec_observation(subject, member, observation)?;
+        if observation.status == "running"
+            && let Some(incarnation) = observation.incarnation_id.as_deref()
+            && member.lifecycle != MemberLifecycle::TerminalBound
+        {
+            self.store.bind_local_session(&crate::store::local_sessions::LocalSession {
+                subject: subject.subject.clone(), runtime_id: member.runtime_id.clone(),
+                incarnation: incarnation.into(), native_incarnation: incarnation.into(),
+                terminal: member.terminal, driver: member.driver.clone(),
+                lifecycle: member.lifecycle.clone(),
+                custody: crate::store::local_sessions::SessionCustody::Owned,
+                start_operation: self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?,
+                invocation: None,
+            })?;
+        }
         let mut fields = member_fields(
             member,
             &observation.status,
@@ -11724,7 +11836,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .collect();
             }
         }
-        self.record_once_with_previous(&subject.subject, "runtime.observed", fields, evidence, previous.as_ref())
+        self.record_once_with_previous(&subject.subject, "runtime.observed", fields, evidence, previous.as_ref())?;
+        if observation.status == "exited"
+            && let Some(incarnation) = observation.incarnation_id.as_deref()
+        {
+            self.store.settle_local_session_custody(&subject.subject, incarnation)?;
+        }
+        Ok(())
     }
 
     /// An unchanged diagnostic is one durable operation per affected subject and code, even
@@ -16353,13 +16471,28 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(true)
     }
 
+    /// Install the selected journal authority before supervision starts any program host.
+    pub fn install_program_run_authority(&self, authority: Arc<dyn program::RunAuthority>) -> Result<()> {
+        let _setup = self.program_setup.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        anyhow::ensure!(self.program_engine.get().is_none(), "program engine already started");
+        self.program_run_authority.set(authority)
+            .map_err(|_| anyhow::anyhow!("program run authority is already installed"))
+    }
+
+    /// A home ACK invalidates only program attempts actually waiting for authority.
+    pub fn program_run_authority_changed(&self) {
+        if let Some(engine) = self.program_engine.get() { engine.authority_changed(); }
+    }
+
     /// The program engine, started with the first program step this daemon runs.
     fn program_engine(&self) -> &Arc<program::ProgramEngine> {
+        if let Some(engine) = self.program_engine.get() { return engine; }
+        let _setup = self.program_setup.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.program_engine.get_or_init(|| {
             let incremental = self.incremental.clone();
             let notify = self.notify.clone();
             let event_notify = self.event_notify.clone();
-            program::ProgramEngine::new(
+            let engine = program::ProgramEngine::new(
                 self.store.clone(),
                 Arc::new(move |step: &str| {
                     incremental.touch(step);
@@ -16367,7 +16500,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }),
                 self.driver_state_dir.join("programs"),
                 program::Liveness::default(),
-            )
+            );
+            if let Some(authority) = self.program_run_authority.get() {
+                engine.install_run_authority(authority.clone())
+                    .expect("fresh program engine accepts its startup authority");
+            }
+            engine
         })
     }
 
@@ -16416,7 +16554,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         Ok(changed | match self.program_engine().dispatch(dispatch)? {
             // A step that left this attempt already says why in its state.
-            program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => false,
+            program::Dispatched::Running | program::Dispatched::Started
+                | program::Dispatched::Left(_) | program::Dispatched::AwaitingAuthority => false,
             // The step keeps its state; `reconcile_program_faults` raises `program/host` from
             // `ProgramEngine::host_fault` and dispatches it again at a deadline.
             program::Dispatched::HostDown(_) => false,
@@ -23810,3 +23949,6 @@ pub fn now_ms() -> u128 {
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests;
+
+#[cfg(test)]
+mod local_session_tests;

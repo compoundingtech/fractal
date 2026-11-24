@@ -177,6 +177,22 @@ impl StartCommand {
         result["terminal"] = Value::from(prepared.member.terminal);
         result["start_request"] = Value::from(prepared.start_request);
         result["control_request"] = serde_json::json!(prepared.control_request);
+        if result["verification"] == "operation-incarnation"
+            && let Some(incarnation) = result["incarnation"].as_str()
+        {
+            store.bind_local_session(&crate::store::local_sessions::LocalSession {
+                subject: subject.clone(),
+                runtime_id: result["runtime_id"].as_str().context("start runtime ID missing")?.into(),
+                incarnation: incarnation.into(),
+                native_incarnation: incarnation.into(),
+                terminal: prepared.member.terminal,
+                driver: prepared.member.driver.clone(),
+                lifecycle: prepared.member.lifecycle.clone(),
+                custody: crate::store::local_sessions::SessionCustody::Owned,
+                start_operation: Some(id.clone()),
+                invocation: None,
+            })?;
+        }
         store.finish_runtime_start(&id, &result)?;
         Ok(StartReceipt::Persisted)
     }
