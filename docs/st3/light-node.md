@@ -46,6 +46,21 @@ For fleet requests, the local adapter validates `ST_RUN_CREDENTIAL` against that
 
 The Unix-only `POST /v1/internal/native/run-request/claim` route accepts `{request_id, claim}` only from a bound program credential. The configured journal/host-key/session service signs and durably forwards the typed claim; clients do not export their credential or construct an authenticated transport. The signed request identity is `POST /v1/claims` with canonical `serde_json` serialization of the original `ClaimInput`, before run attribution. The home invokes `Store::execute_asserted_claim`, reusing the ordinary claim pipeline and all its schema, rules, authority, evidence, CAS and projector gates. This operation covers graph claims only: cross-shard `message.sent` and local-observation kinds require their dedicated effect adapters and are explicitly refused, not silently routed around their gates.
 
+After durably accepting a forwarded result, the same bound program explicitly
+posts to `/v1/internal/native/run-request/acknowledge` with
+`{request: {request_id, claim}, accepted: {request_id, result: {Ok: value}}}`.
+For a durable refused result, `result` is `{Err: {code, message}}` instead.
+The original typed claim and current credential reproduce its immutable
+execution/request digest; another run or changed request cannot retire that
+result. The first acknowledgement must match the retained result exactly.
+Acknowledgement atomically releases its payload/result capacity while retaining
+the scoped request tombstone. A lost acknowledgement response is retryable for
+that same logical request after restart; submitting it again returns
+`result-expired`, never a second effect. Neither an HTTP response nor a session
+send implies consumer acceptance. The Bun fixture first completes a real
+`ctx.record`, proves the result remains retained, then explicitly acknowledges
+it and admits the next request through a one-slot journal.
+
 The home retains the admitted host key, exact execution binding and graph authorization revision. A delayed report of an ended execution is an inactive tombstone that can be acknowledged, not a renewed start grant. Installing an authenticated newer epoch atomically fences all older execution authority; lower epochs are refused. Signature, scope, current live step/attempt/generation/revision and replay checks run in the same graph writer transaction as the actual effect and durable response receipt. Revocation uses that same writer order. An already-forwarded assertion therefore cannot create a new effect after revocation, even before expiry. An identical signed retry can recover its already committed response after revocation or assertion expiry without creating another effect; conflicting request-ID reuse, including across epochs, fails closed. Retained response receipts and home authority fences are bounded and are not age-deleted. Full-node bound run writes also carry authenticated scope through blocking admission and recheck the attempt in the actual claim transaction, closing the local authentication-to-commit race.
 
 Closing a home epoch freezes new effects immediately while its old authenticated transport drains authority changes and receipts. The home persists a closed epoch fence and revokes all older or equal execution authority in one writer transaction. Reinstalling that same closed epoch cannot reopen it, including after restart; only an explicitly authenticated higher selection can open new authority. Delayed execution reports can settle as inactive tombstones during the drain, but cannot issue a new graph effect.
@@ -80,9 +95,9 @@ the integration lane before treating this gate as verified. This is neither a
 Phase 2 session implementation nor a CPU/offload measurement.
 
 
-## Agent/home session sketch
+## Agent/home session
 
-The following is a protocol contract to implement, not a claim about existing wire support:
+The full target contract follows. The first opt-in Phase 2 slice implements durable **Observe and Stop only**, as detailed below; it does not enable remote Start, terminal-stream transport, mail forwarding or graph/deployment cutover.
 
 1. Authenticate both ends and negotiate a versioned capability and scoped grant. Bind the session to the explicitly selected home and durable control epoch. Reject commands from any other home or an older epoch, including a returning old session.
 2. Before first transmission, the home transactionally records epoch, sequence, stable command/execution ID, immutable payload and its association with the planning decision in a durable outbox. Recovery replays that same record, even after a lost ACK; replanning cannot mint another execution ID for the same decision. The executor persists admission and its receipt atomically **before ACK**; an ACK means durable custody, not successful execution. Reject new admission explicitly when bounded capacity is exhausted; never discard accepted work.
@@ -91,7 +106,102 @@ The following is a protocol contract to implement, not a claim about existing wi
 5. On reconnect, reconcile durable command/receipt high-water marks and drain retained evidence before releasing new fleet-dependent work. Keep connection health, command backlog, local runtime health and last acknowledged sequence separate. Missing evidence makes fleet freshness, roll and mail coverage unknown, never spuriously healthy.
 6. Epoch installation is a durable execution barrier, not just an incoming-message filter. Under the dispatch barrier, fence the old epoch and terminalize all its accepted-but-undispatched work. Reconcile retained receipts and settle backend-entered custody, or durably transfer its exact incarnation/custody to the new home. Conflicting seat effects remain blocked until that resolution; only then grant replacement control. Reject an old home's commands even if its connection returns. Local emergency stops are recorded and reconciled, not bypassed by replay.
 
-Terminal streams are separately flow-controlled, ephemeral data over the session; they cannot substitute for durable command receipts. Local process/PTY observations remain available without that session. Remote access and mail custody need explicit authorization and backpressure, not whole-store replication.
+Terminal streams need separate ephemeral flow control and cannot substitute for durable command receipts. This slice leaves existing terminal-stream and mail routes unchanged. Local process/PTY observations and emergency control remain available without a home connection.
+
+### First Phase 2 slice: existing native custody
+
+`fractal-peer::light_node` implements a versioned SQLite command/receipt journal and
+an authenticated bidirectional websocket opened **outbound by the seat agent**.
+`light_node_session` is explicit opt-in configuration: the home role names its
+`listen` address and bounded `grants`; the agent role names `home_endpoint` and one
+`grant`. Both ends pin the same home/host identities, Ed25519 public keys, positive
+control epoch, exact subjects and explicit `observe`/`stop` operations. It requires
+the existing admitted fleet identity and fleet authentication configuration.
+Unencrypted `ws` is restricted to literal loopback or tailnet addresses; other
+routes require `wss`. Version, key, grant and epoch mismatches fail closed.
+
+Both upgrade verifiers require a valid asymmetric member signature as well as
+the exact advertised pin; the shared fleet HMAC alone is not identity proof.
+The request signs its actual WebSocket challenge and the response signs a fresh
+home nonce bound to that exact request. Every application frame is pinned-member
+signed over this channel transcript, its direction and its strictly increasing
+sequence before any journal/native effect. Replayed upgrade headers cannot
+reserve the seat lease without a fresh signed Hello, whose wait has a deadline.
+
+Start grants, either configuration role containing Start, command enqueue and
+seat admission explicitly refuse with `light-node-start-not-supported`, including
+attempts to reuse retired execution identities. There is no remote launch adapter
+or transported prepared-start payload. Native Observe/Stop resolves exact current
+local custody and generation without a seat graph read; a borrowed terminal Stop
+detaches the invocation and never signals its shell or harness. These commands
+control native local sessions, not the separate program engine's VM lifecycle.
+
+Authoritative session state is under `$STATE/light-node-session/v1/`, with private
+directory/database permissions. Decisions, accepted commands, entered native
+custody, receipt sequences, closed epochs and retained identity/floor records are
+durable before their protocol acknowledgement. A replay returns retained receipt
+custody, never repeats an effect. Joint checkpoint reclamation can return explicit
+`result-expired`; it is not evidence that a command never ran and must not cause a
+replacement execution ID to be invented. Bounded queues and identity/authority
+tables apply explicit backpressure rather than deleting accepted or unresolved work.
+
+Native signal acceptance is not whole-scope retirement. A durable native
+finalization phase retains the exact retirement snapshot and blocks terminal
+receipt transmission, ACK, checkpoint reclamation and epoch drain until local
+custody finalization succeeds. Both a returned Store error on a live connection
+and a daemon crash retain that witness for retry; bootstrap repairs it before
+transmission. Logical session identity and physical native incarnation are
+distinct, and finalization uses the latter. If entry committed before its proof,
+a positively identified still-running generation can reconcile the retained
+Stop under the current serialized authority/cancellation barrier. A replaced or
+ambiguous generation cannot be signaled; missing evidence never proves closure.
+
+Epoch replacement first closes old authority. The old home connection remains
+available to drain real terminal receipts and authority changes/ACKs; queued home
+commands are not declared settled merely because control is changing. Both peers
+durably confirm their drained epoch. A signed, pinned retained-epoch response is
+barrier-only and recovers a lost final acknowledgement; it cannot execute old work.
+The seat retains the exact prior endpoint across restart. Unknown entered native
+custody blocks replacement until positive exact-generation closure, not absence.
+The home closes its actual graph-writer epoch before accepting further effects.
+Keep the old home and its signing identity available until this drain completes;
+this does not implement unattended home discovery, key rotation or failover.
+
+Home command administration is owner-local Unix only:
+`POST /v1/internal/light-node/commands`,
+`GET /v1/internal/light-node/commands/{execution}?host=...`,
+`GET /v1/internal/light-node/executions`, and
+`POST /v1/internal/light-node/commands/{execution}/cancel`.
+The existing serving boundary rejects bound harness/program callers; these routes
+are not mounted on the TCP client gateway or home session listener. Reported
+execution bindings describe admitted identity, not current runtime health.
+
+The concrete program issuer uses the selected local journal and host key, waits
+for its own admission and predecessor revocation ACKs, and revokes before the
+engine forgets an attempt. Newly admitted full-node attempts keep their existing
+canonical graph admission gate; resolving/signing an admitted credential is local.
+The guarded native Unix route
+`POST /v1/internal/native/run-request/claim` forwards request-bound host assertions
+through that same outbound session. The home reuses the real ordinary claim
+pipeline, current authority checks and atomic effect/retry-receipt writer fence.
+The bearer credential never goes on the wire. Stable Unix HTTP retries recover
+their durable result even when signed envelopes have fresh timestamps; returning
+an HTTP result does not invent a consumer acknowledgement. This is ordinary claim
+forwarding only, not message/resource action parity or whole-node cutover.
+
+The real native two-node fixtures exercise retained receipt replay, duplicate
+identity fencing, reused native generations, offline observe/stop and paired epoch
+replacement without a seat graph. The real Bun fixture uses the production issuer,
+guarded Unix listener, host signatures, outbound session and home graph effect
+pipeline, including own-ACK waiting, exact-once retry and revocation on completion.
+Run the Linux integration lanes and obtain an exact-head independent review before
+treating these exit gates as verified; no CPU/offload or deployment result is claimed.
+
+**Next reviewed slice:** implement graph-free remote Start with locally admitted,
+withdrawable authorization replacing the remaining full-node graph preflight
+reads, while preserving workspace leases, launch-freeze, kernel/capacity and native
+producer/cleanup custody. This Observe/Stop slice does not weaken those start gates.
+
 
 ## Phases and exit gates
 
