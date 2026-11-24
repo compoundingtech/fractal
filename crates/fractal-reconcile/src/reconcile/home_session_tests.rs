@@ -65,7 +65,7 @@ impl NativePair {
         let seat_auth = FleetAuth::test("native-session-tests", &[7; 32]).with_member_key(Some(seat_key));
         let home_service = Home::new(vec![home.clone()], home_auth, selection.home.clone(), Arc::new(StoreRunEffects::new(graph.clone()))).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("ws://{}{fractal_peer::config::LIGHT_NODE_SESSION_PATH}", listener.local_addr().unwrap());
+        let endpoint = format!("ws://{}{}", listener.local_addr().unwrap(), fractal_peer::config::LIGHT_NODE_SESSION_PATH);
         let app = home_service.router();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let mut pair = Self { root, selection, home, seat, store, graph, runtime, executor, driver, binding, seat_auth, endpoint,

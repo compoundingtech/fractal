@@ -1210,7 +1210,7 @@ fn a_failed_terminal_write_resumes_with_new_authority_on_the_same_host_and_attem
     use crate::store::run_credentials::local;
     let mut fixture = AuthorityFixture::new();
     let gate = fixture._dir.path().join("finish-gate");
-    fixture.dispatch.payload.insert("finishGate".into(), json!(gate));
+    fixture.dispatch.payload.insert("finishGate".into(), gate.to_string_lossy().into_owned());
     assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
     let first = fixture.waiting();
     fixture.authority.acknowledge();

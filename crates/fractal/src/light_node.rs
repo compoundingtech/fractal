@@ -93,7 +93,7 @@ impl LocalRunAuthority for NativeRunAuthority {
             let identity = RequestIdentity::new(request_id.into(), "POST".into(), "/v1/claims".into(), &payload);
             let assertion = self.sign(secret, identity, 30_000)?;
             let result = self.requester.submit(RunRequest { assertion, claim }).await.map_err(authority_error)?;
-            result.result.map_err(|error| FractalError::new(error.code, error.message))
+            result.result.map_err(|error| FractalError::new(&error.code, error.message))
         })
     }
     fn acknowledge_claim(
@@ -129,7 +129,7 @@ struct SelectedHost { host: String }
 type ControlError = (StatusCode, Json<Value>);
 fn control_error(error: anyhow::Error) -> ControlError {
     let error = error.downcast::<FractalError>().unwrap_or_else(|error| FractalError::new("light-node-command-refused", error.to_string()));
-    (StatusCode::CONFLICT, Json(json!({"error":error})))
+    (StatusCode::CONFLICT, Json(json!({"error":{"code":error.code,"message":error.message,"details":error.details}})))
 }
 async fn enqueue(State(controls): State<Controls>, Json(request): Json<Enqueue>) -> Result<Json<Value>, ControlError> {
     let journal = controls.journals.get(&request.host).ok_or_else(|| control_error(anyhow::anyhow!("host has no explicit session grant")))?;
