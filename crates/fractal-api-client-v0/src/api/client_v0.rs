@@ -6343,7 +6343,7 @@ fn remote_terminal_live_session(
     expected_incarnation: &str,
 ) -> Result<LiveSession, ApiError> {
     let _span = crate::profile::span("terminal/live-fence");
-    if state.store.local_session_known(subject).map_err(ApiError::internal)? {
+    if state.store.has_current_local_session(subject).map_err(ApiError::internal)? {
         return terminal_live_session(state, subject, Some(expected_incarnation));
     }
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
@@ -6389,6 +6389,7 @@ fn remote_terminal_live_session(
         runtime_id: runtime_id.into(),
         incarnation_id: incarnation.into(),
         native_incarnation_id: incarnation.into(),
+        custody: crate::store::local_sessions::SessionCustody::Owned,
         owner_host_id,
         terminal: fields
             .get("terminal")
@@ -25157,6 +25158,64 @@ mission "example/zero-run" state="ready" {
             .unwrap_or_else(|error| panic!("{}: {}", error.code, error.message));
         assert_eq!(live.owner_host_id, "host/owner-node");
         assert_eq!(live.incarnation_id, "same-runtime-id:i1");
+    }
+
+    #[test]
+    fn retained_local_session_history_does_not_override_the_current_remote_owner() {
+        use crate::store::local_sessions::{LocalSession, SessionCustody};
+        for retained in ["exited", "inactive", "detached"] {
+            let owner_root = tempfile::tempdir().unwrap();
+            let follower_root = tempfile::tempdir().unwrap();
+            let owner = test_state_named(owner_root.path(), "owner-node");
+            let mut follower = test_state_named(follower_root.path(), "follower-node");
+            let secret = follower_root.path().join("fleet-secret");
+            std::fs::write(&secret, [7_u8; 32]).unwrap();
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+            follower.client_relay = crate::peer::ClientRelay::from_config(&crate::config::Config {
+                node: "follower-node".into(), fleet_id: Some("fleet-test".into()),
+                shared_secret_file: Some(secret),
+                peers: vec![crate::config::PeerConfig {
+                    name: "owner-node".into(), url: "http://127.0.0.1:9".into(),
+                }], ..Default::default()
+            }).unwrap();
+            let subject = "agent/fleet-terminal";
+            let mut old = LocalSession {
+                subject: subject.into(), runtime_id: "former-local-runtime".into(),
+                incarnation: "42:former".into(), native_incarnation: "42:former".into(),
+                terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
+                custody: SessionCustody::Owned, start_operation: None, invocation: None,
+            };
+            if retained == "detached" {
+                old.incarnation = "42:former:bound:019a0000-0000-7000-8000-000000000001".into();
+                old.invocation = Some(old.incarnation.clone());
+                old.lifecycle = crate::model::MemberLifecycle::TerminalBound;
+                old.custody = SessionCustody::Borrowed;
+            }
+            follower.store.bind_local_session(&old).unwrap();
+            match retained {
+                "exited" => follower.store.settle_local_session_custody(subject, &old.native_incarnation).unwrap(),
+                "inactive" => {
+                    follower.store.connection.write().execute(
+                        "UPDATE local_session_custody SET active=0 WHERE subject=?1", [subject]).unwrap();
+                }
+                "detached" => follower.store.detach_local_session(subject, &old.incarnation, "migration-detach").unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(follower.store.local_session_at(subject, &old.incarnation).unwrap().is_some());
+            assert!(!follower.store.has_current_local_session(subject).unwrap(), "{retained}");
+            owner.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({"runtime_id":"remote-runtime",
+                    "incarnation_id":"remote-current", "status":"running", "terminal":true})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: Some("remote-current".into()),
+            }).unwrap();
+            follower.store.import_replication("owner-node", &owner.store.export_replication(0).unwrap()).unwrap();
+            let live = remote_terminal_live_session(&follower, subject, "remote-current")
+                .unwrap_or_else(|error| panic!("{retained}: {}: {}", error.code, error.message));
+            assert_eq!(live.owner_host_id, "host/owner-node", "{retained}");
+            assert_eq!(live.runtime_id, "remote-runtime", "{retained}");
+            assert_eq!(live.incarnation_id, "remote-current", "{retained}");
+        }
     }
 
     #[test]

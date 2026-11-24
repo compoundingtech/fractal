@@ -86,14 +86,16 @@ impl Store {
         Ok(())
     }
 
-    pub fn local_session_known(&self, subject: &str) -> Result<bool> {
-        Ok(self.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM local_session_custody WHERE subject=?1)",
+    /// Historical, detached and positively closed rows are retention, not local routing authority.
+    pub fn has_current_local_session(&self, subject: &str) -> Result<bool> {
+        Ok(self.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM local_session_custody
+            WHERE subject=?1 AND active=1 AND custody_settled=0 AND detached_by IS NULL)",
             [subject], |row| row.get(0))?)
     }
 
     pub fn local_session(&self, subject: &str) -> Result<Option<LocalSession>> {
         let body: Option<String> = self.readers.get().query_row(
-            "SELECT body FROM local_session_custody WHERE subject=?1 AND active=1 AND detached_by IS NULL",
+            "SELECT body FROM local_session_custody WHERE subject=?1 AND active=1 AND custody_settled=0 AND detached_by IS NULL",
             [subject], |row| row.get(0)).optional()?;
         body.map(|body| serde_json::from_str(&body).map_err(Into::into)).transpose()
     }
