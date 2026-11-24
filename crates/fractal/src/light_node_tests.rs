@@ -91,6 +91,12 @@ struct Tasks(Vec<tokio::task::JoinHandle<()>>);
 impl Drop for Tasks { fn drop(&mut self) { for task in &self.0 { task.abort(); } } }
 
 async fn until(reconciler: &Reconciler, notify: &Notify, journal: &Journal, step: &str, phase: &str, done: impl Fn() -> bool) {
+    // Ordinary journal entries intentionally do not wake program reconciliation.
+    // Observe their actual committed claims, as the daemon's Store feed would,
+    // rather than waiting only for control/completion notifications.
+    let committed = Arc::new(Notify::new());
+    let commit_wake = committed.clone();
+    let _commits = reconciler.store.connection.observe_tables(&["claims"], move |_| commit_wake.notify_one());
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let changed = notify.notified();
@@ -106,7 +112,10 @@ async fn until(reconciler: &Reconciler, notify: &Notify, journal: &Journal, step
                 tokio::task::yield_now().await;
                 continue;
             }
-            changed.await;
+            tokio::select! {
+                _ = changed => {}
+                _ = committed.notified() => {}
+            }
         }
     }).await.unwrap_or_else(|error| {
         let entries = reconciler.store.claims_for(step, Some(JOURNAL_KIND)).unwrap().into_iter()
