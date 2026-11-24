@@ -735,7 +735,7 @@ impl CollectionStream {
     pub async fn close(mut self) {
         let _ = match &mut self.socket {
             TerminalSocket::Unix(socket) => socket.close(None).await,
-            TerminalSocket::Remote(socket) => socket.close(None).await,
+            TerminalSocket::Remote(socket) => socket.as_mut().close(None).await,
         };
     }
 }
@@ -753,7 +753,7 @@ impl ConversationStream {
     pub async fn close(mut self) {
         let _ = match &mut self.socket {
             TerminalSocket::Unix(socket) => socket.close(None).await,
-            TerminalSocket::Remote(socket) => socket.close(None).await,
+            TerminalSocket::Remote(socket) => socket.as_mut().close(None).await,
         };
     }
 }
@@ -1080,7 +1080,7 @@ impl TerminalStream {
     pub async fn close(mut self) {
         let _ = match &mut self.socket {
             TerminalSocket::Unix(websocket) => websocket.close(None).await,
-            TerminalSocket::Remote(websocket) => websocket.close(None).await,
+            TerminalSocket::Remote(websocket) => websocket.as_mut().close(None).await,
         };
     }
 }
