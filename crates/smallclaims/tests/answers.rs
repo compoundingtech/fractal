@@ -353,6 +353,40 @@ fn settled(cache: &Arc<AnswersCache>, store: &Arc<Store>, request: &AnswersReque
     panic!("the cache never answered {request:?}");
 }
 
+/// A cache that runs one fold reader, as every daemon's does: a member sends the verdict reader
+/// only beside fold readers.
+fn cache_with_a_fold_reader() -> Arc<AnswersCache> {
+    let cache = Arc::new(AnswersCache::default());
+    cache.set_readers(Arc::new(|_: &Connection, _: u128| {
+        Ok(BTreeMap::from([(
+            "status_history".to_owned(),
+            vec![AnswerKey { subject: "agent/alder.worker".into(), origin: String::new(), claim: "answer".into(), moving: false }],
+        )]))
+    }));
+    cache
+}
+
+/// The kinds the previous release's `differing_kinds` finds different, by its rules: every reader
+/// kind is compared once both summaries carry any, except a `reader/slots/` kind one lacks.
+fn previous_release_differs(ours: &AnswersSummary, theirs: &AnswersSummary) -> Vec<String> {
+    let runs_readers = |summary: &AnswersSummary| summary.kinds.keys().any(|kind| kind.starts_with(READER_PREFIX));
+    let readers = runs_readers(ours) && runs_readers(theirs);
+    let kinds = ours.kinds.keys().chain(theirs.kinds.keys()).collect::<BTreeSet<_>>();
+    kinds
+        .into_iter()
+        .filter(|kind| readers || !kind.starts_with(READER_PREFIX))
+        .filter(|kind| !kind.starts_with("reader/slots/") || (ours.kinds.contains_key(*kind) && theirs.kinds.contains_key(*kind)))
+        .filter(|kind| {
+            let answers = |side: Option<&KindAnswers>| {
+                let side = side.cloned().unwrap_or_default();
+                (side.keys, if side.keys == 0 { String::new() } else { side.digest })
+            };
+            answers(ours.kinds.get(*kind)) != answers(theirs.kinds.get(*kind))
+        })
+        .cloned()
+        .collect()
+}
+
 #[test]
 fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
     let store = Arc::new(node("alder"));
@@ -519,4 +553,210 @@ fn claims_compare_only_between_members_that_finished_the_same_trim() {
     let alder_summary = trim(&alder, 2 * day, "trimmed");
     assert!(claims_compare(&alder_summary, &birch_summary));
     assert!(differing_kinds(&alder_summary, &birch_summary, true).is_empty());
+}
+#[test]
+fn a_verdict_that_differs_between_members_is_named_and_one_still_to_judge_is_not() {
+    let alder = node("alder");
+    let birch = node("birch");
+    let claim = state(&alder, "item/a", "one");
+    state(&alder, "item/b", "two");
+    push(&alder, &birch);
+    let cut = cut();
+    let kind = verdicts_kind();
+    let differing = |ours: &Store, theirs: &Store| {
+        differing_kinds(&ours.answers_summary(cut).unwrap(), &theirs.answers_summary(cut).unwrap(), false)
+            .into_iter()
+            .map(|difference| difference.kind)
+            .collect::<Vec<_>>()
+    };
+    assert!(alder.answers_summary(cut).unwrap().kinds.contains_key(&kind), "every member runs the verdict reader");
+    assert!(differing(&alder, &birch).is_empty(), "members that serve the same verdicts agree");
+
+    // birch serves the claim as invalid where alder serves it as unsigned.
+    birch
+        .connection
+        .write()
+        .execute(
+            "INSERT INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+            [&claim],
+        )
+        .unwrap();
+    assert_eq!(differing(&alder, &birch), vec![kind.clone()]);
+    let every: BTreeSet<usize> = (0..BUCKETS).collect();
+    let ours = alder.answer_buckets(&kind, cut, &every).unwrap();
+    let theirs = birch.answer_buckets(&kind, cut, &every).unwrap();
+    let wanted = differing_buckets(&ours.buckets, &theirs.buckets);
+    assert_eq!(wanted.len(), 1);
+    let keys = differing_keys(&ours.keys, &theirs.keys);
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert_eq!((keys[0].subject.as_str(), keys[0].origin.as_str()), ("item/a", r#"["example.state","alder"]"#));
+    assert_eq!(keys[0].ours, None);
+    assert_eq!(keys[0].theirs, Some(format!("{claim} invalid: batch-disorder")));
+
+    // A member that has not judged the claim again yet answers nothing for it.
+    alder.connection.write().execute("INSERT INTO claim_verdict_queue(claim_id) VALUES (?1)", [&claim]).unwrap();
+    alder
+        .connection
+        .write()
+        .execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','host/sample')", [&claim])
+        .unwrap();
+    // The digests differ, and the narrowing finds only a moving key, which the check drops.
+    let ours = alder.answer_buckets(&kind, cut, &every).unwrap();
+    assert!(ours.keys.iter().any(|key| key.moving && key.subject == "item/a"));
+    assert!(differing_keys(&ours.keys, &theirs.keys).is_empty(), "a queued verdict moves");
+    alder.connection.write().execute("DELETE FROM claim_verdict_queue WHERE claim_id=?1", [&claim]).unwrap();
+    assert_eq!(differing(&alder, &birch), vec![kind.clone()], "a settled verified verdict differs from invalid");
+
+    // While a requeue pages, any linked claim may wait on it: the member leaves the reader out.
+    alder.connection.write().execute("INSERT INTO meta(key,value) VALUES ('claim_candidate_requeue:root','')", []).unwrap();
+    assert!(!alder.answers_summary(cut).unwrap().kinds.contains_key(&kind), "no verdicts while a requeue pages");
+    assert!(differing(&alder, &birch).is_empty());
+    alder.connection.write().execute("DELETE FROM meta WHERE key='claim_candidate_requeue:root'", []).unwrap();
+    assert_eq!(differing(&alder, &birch), vec![kind.clone()]);
+
+    // A member on a build without the reader is no disagreement, and the reader alone does not
+    // make a member compare fold readers it does not run.
+    let mut old = birch.answers_summary(cut).unwrap();
+    old.kinds.remove(&kind);
+    assert!(differing_kinds(&alder.answers_summary(cut).unwrap(), &old, false).is_empty());
+    let mut folding = alder.answers_summary(cut).unwrap();
+    let (name, answers, _) = reader_answers("seat", cut, vec![AnswerKey {
+        subject: "agent/a".into(),
+        origin: String::new(),
+        claim: "one".into(),
+        moving: false,
+    }]);
+    folding.kinds.insert(name, answers);
+    folding.kinds.remove(&kind);
+    let plain = alder.answers_summary(cut).unwrap();
+    assert!(differing_kinds(&folding, &plain, false).is_empty(), "a member that runs only the verdict reader runs no fold reader");
+}
+
+#[test]
+fn a_verdict_judged_again_after_the_summary_moves_rather_than_differs() {
+    let alder = Arc::new(node("alder"));
+    let birch = node("birch");
+    let claim = state(&alder, "item/a", "one");
+    let other = state(&alder, "item/b", "two");
+    push(&alder, &birch);
+    let cut = cut();
+    let kind = verdicts_kind();
+    let every: BTreeSet<usize> = (0..BUCKETS).collect();
+    let cache = cache_with_a_fold_reader();
+    let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
+    let ask = AnswersRequest { cut_unix_ms: cut, kind: Some(kind.clone()), buckets: every.clone() };
+    let invalid = |store: &Store, claim: &str| {
+        store
+            .connection
+            .write()
+            .execute(
+                "INSERT OR REPLACE INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+                [claim],
+            )
+            .unwrap();
+    };
+    // alder keeps a summary in which item/b is invalid and item/a has no key (unsigned).
+    invalid(&alder, &other);
+    invalid(&birch, &other);
+    let kept = settled(&cache, &alder, &summary).summary.unwrap();
+    assert_eq!(kept.kinds[&kind].keys, 1);
+
+    // Then both judge item/a invalid. Nothing of its subject arrives, so only its verdict moved:
+    // the kept summary moves its key, and birch, computing now, lists it, which is no difference.
+    invalid(&alder, &claim);
+    invalid(&birch, &claim);
+    let served = settled(&cache, &alder, &summary).summary.unwrap();
+    assert_eq!(served.kinds[&kind].keys, 1, "the re-judged key moves and item/b still counts");
+    let ours = settled(&cache, &alder, &ask).buckets.unwrap();
+    assert!(ours.keys.iter().any(|key| key.subject == "item/a" && key.moving), "{:?}", ours.keys);
+    let theirs = birch.answer_buckets(&kind, cut, &every).unwrap();
+    assert_eq!(theirs.keys.iter().filter(|key| !key.moving).count(), 2);
+    assert!(differing_keys(&ours.keys, &theirs.keys).is_empty());
+
+    // Verdicts rebuilt from nothing say nothing the kept ones do: every key moves.
+    alder.connection.write().execute("DELETE FROM claim_verdicts", []).unwrap();
+    let rebuilt = settled(&cache, &alder, &summary).summary.unwrap();
+    assert_eq!(rebuilt.kinds[&kind].keys, 0);
+}
+
+#[test]
+fn a_kept_verdict_that_waits_again_moves_and_a_requeue_leaves_the_reader_out() {
+    let alder = Arc::new(node("alder"));
+    let birch = node("birch");
+    let claim = state(&alder, "item/a", "one");
+    push(&alder, &birch);
+    let cut = cut();
+    let kind = verdicts_kind();
+    let every: BTreeSet<usize> = (0..BUCKETS).collect();
+    let cache = cache_with_a_fold_reader();
+    let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
+    let ask = AnswersRequest { cut_unix_ms: cut, kind: Some(kind.clone()), buckets: every.clone() };
+    alder
+        .connection
+        .write()
+        .execute(
+            "INSERT OR REPLACE INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+            [&claim],
+        )
+        .unwrap();
+    assert_eq!(settled(&cache, &alder, &summary).summary.unwrap().kinds[&kind].keys, 1);
+
+    // A delegation requeues item/a: no verdict row is written until it is judged, but alder no
+    // longer serves it as settled, so its kept key moves rather than differs from birch's verdict.
+    alder.connection.write().execute("INSERT INTO claim_verdict_queue(claim_id) VALUES (?1)", [&claim]).unwrap();
+    assert_eq!(settled(&cache, &alder, &summary).summary.unwrap().kinds[&kind].keys, 0);
+    let ours = settled(&cache, &alder, &ask).buckets.unwrap();
+    assert!(ours.keys.iter().all(|key| key.moving), "{:?}", ours.keys);
+    let theirs = birch.answer_buckets(&kind, cut, &every).unwrap();
+    assert!(differing_keys(&ours.keys, &theirs.keys).is_empty());
+
+    // A requeue that starts after the summary was kept leaves the reader out, as computing now would.
+    alder.connection.write().execute("INSERT INTO meta(key,value) VALUES ('claim_candidate_requeue:root','')", []).unwrap();
+    let served = settled(&cache, &alder, &summary).summary.unwrap();
+    assert!(!served.kinds.contains_key(&kind), "no verdicts while a requeue pages");
+    assert!(differing_kinds(&served, &birch.answers_summary(cut).unwrap(), false).is_empty());
+}
+
+#[test]
+fn a_member_on_the_previous_release_finds_no_difference_in_the_verdict_reader() {
+    let alder = Arc::new(node("alder"));
+    let claim = state(&alder, "item/a", "one");
+    let cut = cut();
+    let kind = verdicts_kind();
+    alder
+        .connection
+        .write()
+        .execute(
+            "INSERT OR REPLACE INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+            [&claim],
+        )
+        .unwrap();
+    let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
+    let new = settled(&cache_with_a_fold_reader(), &alder, &summary).summary.unwrap();
+    assert_eq!(new.kinds[&kind].keys, 1);
+    // The same member on the previous release: the same fold reader, no verdict reader.
+    let mut previous = new.clone();
+    previous.kinds.remove(&kind);
+    assert!(previous_release_differs(&previous, &new).is_empty(), "{:?}", previous_release_differs(&previous, &new));
+    assert!(previous_release_differs(&new, &previous).is_empty());
+    assert!(differing_kinds(&new, &previous, false).is_empty());
+
+    // A member that runs no fold reader sends no verdict reader, so the previous release never
+    // takes it as running fold readers it lacks.
+    let alone = alder.answer(&summary).unwrap().summary.unwrap();
+    assert!(!alone.kinds.keys().any(|kind| kind.starts_with(READER_PREFIX)), "{:?}", alone.kinds.keys());
+    let birch = Arc::new(node("birch"));
+    push(&alder, &birch);
+    birch
+        .connection
+        .write()
+        .execute(
+            "INSERT OR REPLACE INTO claim_verdicts(claim_id,verdict,reason,signer) VALUES (?1,'invalid','batch-disorder','host/sample')",
+            [&claim],
+        )
+        .unwrap();
+    assert!(birch.answers_summary(cut).unwrap().kinds[&kind].keys == 1, "birch judges it invalid too");
+    let uncached = settled(&Arc::new(AnswersCache::default()), &birch, &summary).summary.unwrap();
+    assert!(!uncached.kinds.contains_key(&kind), "{:?}", uncached.kinds.keys());
+    assert!(previous_release_differs(&previous, &alone).is_empty());
 }

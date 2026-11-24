@@ -1658,6 +1658,27 @@ a store of 52 GB), marks them moving and counts the readers again without them. 
 computed hours apart, such as either side of a restart onto a new build, then leave out the same
 seats: a seat whose held usage readings were flushed late moves on both.
 
+Each member judges every signed claim itself (see [device signing](device-signing.md)), so two
+members can serve different verdicts for one claim, for example when the batch order a verdict
+depends on arrived differently. The summary therefore also carries `reader/slots/verdicts`. It holds
+one key per answer whose claim this member judges `invalid`, keyed by the answer's subject and
+`[kind, origin]` and answering `CLAIM invalid: REASON`. A `verified` or `unsigned` answer is no
+key, so a member serving `verified` where its peer serves `invalid` differs in that key. An answer
+still to be judged (fresh, queued, or held while judgment is incomplete or a delegation is
+missing) moves, as a key with a claim at or after the cut does. `unsigned` answers are not listed:
+a signature can arrive apart from its claim, and listing them would hold a key for each of them.
+Two members compare the reader only when both carry it, and a member carries it only while its
+verdicts come from the current signature tables (not during the signature migration or from a
+legacy cache) and no requeue is paging, when any claim linked to it may still wait on it. It
+reads the claims still to be judged and the verdicts other than `verified` and `unsigned` once a
+pass, so it adds a few index reads to the pass rather than reads for each answer. It does not
+make a member count as running the fold readers. It is named as a slot reader, and a member sends
+it only beside fold readers, so that earlier builds, which compare a `reader/slots/` kind only
+when both members carry it and take any other reader kind to mean the peer runs the fold
+readers, compare nothing for it. A kept summary reads the verdicts again each time it is served:
+a key whose claim is no longer judged `invalid` for the same reason, or that was judged `invalid`
+since, moves, and the reader is left out while the member could not compute it now.
+
 ### First sync
 
 A machine that joins with `fractal fleet join` records a first sync. It ends, `verified`, at the first
