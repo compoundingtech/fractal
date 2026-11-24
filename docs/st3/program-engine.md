@@ -599,6 +599,12 @@ handling rather than resuming the step as ready.
 
 An ask that ends with its run is never resolved: the program ended with it.
 
+The host publishes an external invalidation of the owning program step before exposing a
+new request to run evaluation. Resource requests need this wake even before they have a
+journal claim. Mission evaluation acknowledges only invalidations present when it started;
+one arriving while it evaluates remains pending for the next pass. The incremental
+correction checker recognizes these external wakes as well as durable feed changes.
+
 **Pull requests.** `Fractal.awaitPr({ id, repo, pr, head })` waits for the outcome of one
 pull request at an exact head. `repo` is `owner/name`, `pr` is its number, and `head` is the
 commit the caller verified and enqueued. The caller chooses the journal key with `id`; use
