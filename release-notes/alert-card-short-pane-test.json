@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: the TUI test for an alert form too tall for the band also draws short frames with a title long enough to wrap, in the conversation and over the seat's attached terminal, and requires the click that opens the form in Inbox to be on screen whenever the band is (#4613).",
+  "replay": {"status": "none", "detail": "No stored data is read or written differently."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination version change."},
+  "compatibility": {"status": "none", "detail": "A test only; the TUI is unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "Nothing to do."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}
