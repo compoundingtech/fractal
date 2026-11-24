@@ -591,6 +591,38 @@ mod tests {
     }
 
     #[test]
+    fn performance_charges_batched_page_reads_to_the_submitting_route() {
+        let (_directory, connection) = page_read_fixture(4096);
+        let writer = crate::sqlite::WriterConnection::new(
+            connection, std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))
+        );
+        let route = "test/batched-page-reads";
+        with_cpu(Some(route), Some(route), || {
+            writer.batched(|transaction| -> rusqlite::Result<()> {
+                assert_eq!(current().unwrap().kind(), route);
+                let bytes: u64 = transaction.query_row(
+                    "SELECT SUM(length(payload)) FROM claims", [], |row| row.get(0)
+                )?;
+                assert_eq!(bytes, 128 * 2048);
+                transaction.execute("INSERT INTO claims(payload) VALUES (zeroblob(2048))", [])?;
+                Ok(())
+            }).unwrap().unwrap();
+        });
+        let meter = METER.get().unwrap().lock().unwrap();
+        let reads = |table| meter.totals(table).into_iter()
+            .find(|(label, _)| *label == route).unwrap().1.sqlite_cache_miss_bytes;
+        assert!(reads(Table::Requests) > 0, "writer-thread reads must reach the caller's route");
+        assert_eq!(reads(Table::Requests), reads(Table::Clients));
+        assert!(meter.totals(Table::Requests).iter().any(|(label, _)| *label == "writer.batch.commit"));
+        drop(meter);
+        writer.batched(|_| -> rusqlite::Result<()> {
+            assert_eq!(current().unwrap().kind(), "writer.batch.job",
+                "the previous caller's charge must not leak into the next job");
+            Ok(())
+        }).unwrap().unwrap();
+    }
+
+    #[test]
     fn performance_counts_sqlite_page_reads_and_serializes_them() {
         for (page_size, label) in [(1024, "test/page-reads-1k"), (8192, "test/page-reads-8k")] {
             let (_directory, connection) = page_read_fixture(page_size);
