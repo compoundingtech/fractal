@@ -216,6 +216,7 @@ impl Meter {
             "clients":by_count(Table::Clients),"client_requests":by_count(Table::ClientRequests),
             "reconciler_wakes":wakes,"incremental_corrections":corrections,"incremental_evaluations":evaluations,
             "wal_escalations":crate::windows::wal::escalations(),
+            "claim_signatures":crate::store::member_signatures::work_counts(),
             "query_time_note":"Statement wall time includes row processing; concurrent times overlap."})
     }
 }

@@ -22825,27 +22825,37 @@ async fn release_old_envelopes(store: Arc<Store>) {
     }
 }
 
-/// Sign this member's own claims with its member key (`member_signatures`): the claims it held
-/// before this build a page at a time, then each new one within seconds of its append. Signing
-/// happens outside the writer; each page stores in one short write.
+/// Replay durable signing/ready cursors after subscribing, then wait for changed keys.
+/// The only idle deadline is an actual pending signature's retention expiry.
 async fn sign_own_claims(store: Arc<Store>) {
+    let (_observer, mut changes) = store.subscribe_claim_signatures();
     loop {
+        changes.borrow_and_update();
         let page_store = store.clone();
-        // Signatures that wait for their claims are settled first: a page of them, then a page
-        // of this member's own claims to sign.
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || {
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || -> anyhow::Result<_> {
             page_store.promote_claim_member_signatures()?;
-            page_store.sign_own_claims()
+            page_store.expire_claim_signatures()?;
+            let report = page_store.sign_own_claims()?;
+            Ok((report.done && !page_store.claim_signatures_ready()?, page_store.claim_signature_expiry()?))
         })).await;
-        let pause = match result {
-            Ok(Ok(report)) if report.done => Duration::from_secs(5),
-            Ok(Ok(_)) => Duration::from_millis(50),
+        match result {
+            Ok(Ok((false, _))) => tokio::task::yield_now().await,
+            Ok(Ok((true, expiry))) => {
+                if let Some(expiry) = expiry {
+                    let wait = Duration::from_millis(u64::try_from(expiry.saturating_sub(now_ms())).unwrap_or(u64::MAX));
+                    tokio::select! {
+                        result = changes.changed() => if result.is_err() { return; },
+                        _ = tokio::time::sleep(wait) => {},
+                    }
+                } else if changes.changed().await.is_err() {
+                    return;
+                }
+            }
             error => {
                 stderr_message("fractal", format_args!("signing own claims failed: {error:?}"));
-                Duration::from_secs(60)
+                tokio::time::sleep(Duration::from_secs(60)).await;
             }
-        };
-        tokio::time::sleep(pause).await;
+        }
     }
 }
 
