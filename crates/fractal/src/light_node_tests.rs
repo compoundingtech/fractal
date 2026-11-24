@@ -38,6 +38,7 @@ export default {
       console.log(JSON.stringify(first.body));
     `
     const result = await ctx.spawn(['bun', '-e', script], {env:{TEST_SOCKET:ctx.payload.socket}})
+    if (result.code !== 0) throw new Error(`forwarding subprocess failed: ${result.stderr}`)
     // Acceptance is durable before any ACK is possible. The fixture verifies retained
     // custody here, then releases the real FIFO to permit the explicit acknowledgement.
     await ctx.record({ key: 'forwarded', status: 'completed', value: result.stdout, ms: 0 })
@@ -69,6 +70,7 @@ export default {
     `
     const acknowledged = await ctx.spawn(['bun','-e',acknowledge],
       {env:{TEST_SOCKET:ctx.payload.socket,TEST_ACCEPTED:result.stdout}})
+    if (acknowledged.code !== 0) throw new Error(`acknowledgement subprocess failed: ${acknowledged.stderr}`)
     await ctx.record({ key: 'acknowledged', status: 'completed', value: acknowledged.stdout, ms: 0 })
     const finish = `
       const claim = {subject:'custom/example/capacity-effect',kind:'custom.example.recorded',actor:null,
@@ -139,6 +141,7 @@ async fn program_waits_for_home_ack_forwards_one_real_effect_and_revokes_on_end(
     let source = format!(r#"version 2
 mission "program-session" state="ready" {{
   goal "Forward exactly one authorized program effect."
+  authority {{ write "custom/example/session-effect"; write "custom/example/capacity-effect" }}
   input "socket" kind="text"
   input "gate" kind="text"
   step "program" {{ program "{}" sha256="{hash}" }}
@@ -227,6 +230,8 @@ mission "program-session" state="ready" {{
     }));
     until(&reconciler, &notify, &journal, &step, "forwarded effect durable acceptance", || store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().iter()
         .any(|claim| claim.body["fields"]["key"] == "forwarded" && claim.body["fields"]["status"] == "completed")).await;
+    let retained = journal.run_result("program-session-effect").unwrap().expect("accepted result must retain custody");
+    assert!(retained.result.is_ok(), "real effect must be authorized, not a retained refusal");
     assert!(journal.run_result("program-session-effect").unwrap().is_some(),
         "sending the HTTP response and durably accepting it must not implicitly acknowledge custody");
     writeln!(gate_writer, "acknowledge").unwrap();
