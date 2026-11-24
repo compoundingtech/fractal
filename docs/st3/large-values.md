@@ -220,12 +220,25 @@ unbounded shell-body representation and table-copy transaction remain debt.
 ### GitHub capture rebuildable projection
 
 The `fractal_reconcile::reconcile::github_capture` maintainer owns the
-`capture_v1_*` cache schema (`lv-h6b101dd45bbc`), including serialized claim,
+`capture_v1_*` cache schema (`lv-h99cc4a195ebd`), including serialized claim,
 fact, coverage and checkpoint records and the source, repository, entity,
 authority and claim identifiers used in columns and index expressions.
 These remain inline in a rebuildable plugin projection; authoritative claims
 are unchanged. The schema TODO requires bounded physical units or references
 for variable columns **and index keys**, preserving replay and lookup semantics.
+
+[#7070](https://github.com/compoundingtech/fractal/pull/7070) replaces the
+schema fingerprint after adding the derived `capture_v1_pull_created` index.
+Its keys reuse the existing source, repository and entity identifiers plus
+the extracted creation timestamp; the `pull_request` predicate excludes other
+families. These identifiers remain variable-sized inline keys, and the numeric
+timestamp is not a complete encoded-size proof. The existing producer maintainer
+and `chunk-or-reference-variable-columns` TODO continue to own their bounded
+physical representation. The index keeps deadline candidate lookup proportional
+to the horizon population rather than historical PR volume; it adds no payload
+copy, authoritative state or new unresolved SQL sink. The SQLite-work regression
+bounds statements and VM steps for its fixture, not arbitrary value bytes or
+first-open index-build duration.
 
 The same maintainer owns ingestion (`lv-h8b8be878a0a1`), conflict insertion and
 reclamation (`lv-hd1bc48ebaa1b`, `lv-h0fde81c700c9`), cursor publication

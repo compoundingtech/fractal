@@ -275,7 +275,7 @@ fn github_measurement_parses_without_an_invented_target() {
 }
 
 #[test]
-fn github_target_policy_is_explicit_and_count_only() {
+fn github_target_policy_is_explicit() {
     let targeted = GITHUB_MEASURED.replace("measurement \"only\"", "measurement \"targeted\"");
     assert!(one(&targeted).is_err());
     let count = targeted.replace("github-ready-to-merged", "github-merged-count");
@@ -302,8 +302,32 @@ fn github_measurements_do_not_accept_claim_budgets() {
         .replace("measurement \"only\"", "measurement \"targeted\"")
         .replacen("\n}", "\n  target \"per-hour\" min=7\n}", 1);
     for declaration in [measured.clone(), measured.replace("github-ready-to-merged", "github-merged-count"), targeted] {
-        assert!(one(&declaration).unwrap_err().message.contains("take no `budget`"));
+        assert!(one(&declaration).unwrap_err().message.contains("only targeted GitHub latency takes a `budget`"));
     }
+}
+
+#[test]
+fn github_authored_window_and_latency_budget_are_native_policy() {
+    let count = GITHUB_MEASURED.replace("github-ready-to-merged", "github-merged-count")
+        .replace("measurement \"only\"", "measurement \"targeted\"")
+        .replacen("\n}", "\n  window \"24h\"\n  target \"per-hour\" min=5\n}", 1);
+    assert_eq!(one(&count).unwrap().window.unwrap().ms, 86_400_000);
+    assert!(one(&count.replace("24h", "31d")).is_err());
+    assert!(one(&count.replace("window \"24h\"", "window \"24h\" min-samples=2")).is_err());
+    let latency = GITHUB_MEASURED.replace("measurement \"only\"", "measurement \"targeted\"")
+        .replacen("\n}", r#"
+  target "p95" within="48h"
+  budget allowance=0.05 horizon="30d" min-coverage=1 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+}"#, 1);
+    let parsed = one(&latency).unwrap();
+    assert_eq!(parsed.target("p95", false).unwrap().within_ms(), Some(172_800_000));
+    assert_eq!(parsed.budget.unwrap().horizon_ms, 30 * 86_400_000);
+    assert!(one(&latency.replace("allowance=0.05", "allowance=0.1")).is_err());
+    assert!(one(&latency.replace("p95", "p99")).is_err());
+    assert!(one(&latency.replacen("\n}", "\n window \"1h\"\n}", 1)).is_err());
 }
 
 const RATIO: &str = r#"objective "acme/request-budget" {
