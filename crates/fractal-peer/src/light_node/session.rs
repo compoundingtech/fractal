@@ -154,7 +154,7 @@ enum Frame {
     ResultExpired { execution_id: String },
     Checkpoint { epoch: u64, through: u64 },
     CheckpointAck { epoch: u64, through: u64 },
-    RunRequest { request: RunRequest },
+    RunRequest { request: Box<RunRequest> },
     RunResult { result: RunResult },
 }
 fn capabilities() -> Vec<String> { CAPABILITIES.iter().map(|s| (*s).into()).collect() }
@@ -572,7 +572,7 @@ impl SeatClient {
             }
             for request in self.journal.pending_run_requests()? {
                 if sent_requests.insert(request.assertion.request.request_id.clone()) {
-                    client_send(socket, Frame::RunRequest { request }).await?;
+                    client_send(socket, Frame::RunRequest { request: Box::new(request) }).await?;
                 }
             }
             if work.is_none() {

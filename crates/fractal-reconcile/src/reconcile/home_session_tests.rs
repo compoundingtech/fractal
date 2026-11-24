@@ -27,6 +27,10 @@ struct NativePair {
 }
 impl NativePair {
     async fn new() -> Self {
+        Self::with_custody(SessionCustody::Owned).await
+    }
+
+    async fn with_custody(custody: SessionCustody) -> Self {
         let root = tempfile::tempdir().unwrap();
         let home_key = Arc::new(MemberKey::generate().unwrap().0);
         let seat_key = Arc::new(MemberKey::generate().unwrap().0);
@@ -47,11 +51,19 @@ impl NativePair {
         runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
             root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
         let generation = runtime.snapshot_ptys().unwrap().into_iter().find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
+        // Owned sessions use the exact native generation. Only adoption creates a
+        // distinct logical invocation identity; exercise that contract separately.
+        let borrowed = custody == SessionCustody::Borrowed;
+        let incarnation = if borrowed {
+            format!("{generation}:bound:019a0000-0000-7000-8000-000000000001")
+        } else { generation.clone() };
         let local = LocalSession {
             subject: selection.grant.subjects[0].clone(), runtime_id: "native-worker".into(),
-            incarnation: format!("owned:{generation}"), native_incarnation: generation,
-            terminal: true, driver: None, lifecycle: MemberLifecycle::Service, custody: SessionCustody::Owned,
-            start_operation: None, invocation: None,
+            invocation: borrowed.then(|| incarnation.clone()),
+            incarnation, native_incarnation: generation,
+            terminal: true, driver: None,
+            lifecycle: if borrowed { MemberLifecycle::TerminalBound } else { MemberLifecycle::Service },
+            custody, start_operation: None,
         };
         store.bind_local_session(&local).unwrap();
         let executor = Arc::new(Reconciler::new(store.clone(), runtime.clone(), selection.host.clone(), Arc::new(Notify::new())));
@@ -195,6 +207,43 @@ async fn native_receipt_replay_reconnect_and_offline_stop_need_no_seat_graph() {
     pair.store.bind_local_session(&binding).unwrap();
     stop_local_session(&pair.store, pair.runtime.as_ref(), &binding.subject, &binding.incarnation, "fresh-offline-stop").unwrap();
     assert!(local_session(&pair.store, pair.runtime.as_ref(), &binding.subject, None).is_err());
+}
+
+#[tokio::test]
+async fn borrowed_invocation_keeps_distinct_logical_identity_and_detaches_without_native_exit() {
+    let mut pair = NativePair::with_custody(SessionCustody::Borrowed).await;
+    let local = pair.store.local_session(&pair.binding.subject).unwrap().unwrap();
+    assert_eq!(pair.binding.incarnation, local.incarnation);
+    assert_ne!(local.incarnation, local.native_incarnation,
+        "adopted invocation identity must not collapse into the person's native PTY identity");
+    assert_eq!(local.invocation.as_deref(), Some(local.incarnation.as_str()));
+    let observe = pair.home.enqueue(pair.draft("borrowed-observe", Operation::Observe)).unwrap();
+    assert!(matches!(pair.seat.admit(&observe).unwrap(), Admission::Accepted(_)));
+    let recovery = pair.seat.enter(&observe.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
+    let outcome = pair.driver.recover(recovery).await.unwrap();
+    assert!(matches!(&outcome, Outcome::Observed { incarnation, .. } if incarnation == &local.incarnation));
+    pair.seat.complete(&observe.execution_id, outcome).unwrap();
+    pair.connect();
+    pair.settled(&observe).await;
+    pair.disconnect().await;
+    let stop = pair.home.enqueue(pair.draft("borrowed-detach", Operation::Stop)).unwrap();
+    assert!(matches!(pair.seat.admit(&stop).unwrap(), Admission::Accepted(_)));
+    let recovery = pair.seat.enter(&stop.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
+    let outcome = pair.driver.recover(recovery).await.unwrap();
+    assert!(matches!(&outcome, Outcome::Detached { incarnation } if incarnation == &local.incarnation));
+    pair.seat.complete(&stop.execution_id, outcome).unwrap();
+    pair.connect();
+    pair.settled(&stop).await;
+    pair.disconnect().await;
+    assert!(pair.store.local_session_detached(&local.subject, &local.incarnation).unwrap());
+    assert!(local_session(&pair.store, pair.runtime.as_ref(), &local.subject, Some(&local.incarnation)).is_err());
+    assert_eq!(pair.store.pending_local_session_detaches().unwrap(), vec![(local.clone(), stop.execution_id.clone())]);
+    assert!(matches!(pair.seat.admit(&stop).unwrap(), Admission::Duplicate(_) | Admission::ResultExpired));
+    let running = pair.runtime.snapshot_ptys().unwrap().into_iter()
+        .find(|entry| entry.runtime_id == local.runtime_id).unwrap();
+    assert_eq!(running.status, "running", "borrowed detach must not stop the person's shell");
+    assert_eq!(running.incarnation_id.as_deref(), Some(local.native_incarnation.as_str()));
+    assert_ne!(running.incarnation_id.as_deref(), Some(local.incarnation.as_str()));
 }
 
 #[tokio::test]

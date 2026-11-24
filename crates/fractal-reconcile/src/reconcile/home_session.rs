@@ -6,7 +6,7 @@ use fractal_peer::light_node::session::Executor;
 use crate::store::local_sessions::{LocalSession, SessionCustody};
 use crate::store::run_credentials::{ExecutionBinding, local};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 use std::pin::Pin;
 
 #[derive(Serialize, Deserialize)]
@@ -165,24 +165,22 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub(super) fn record_local_session(&self, binding: &LocalSession) -> Result<()> {
-        if let Some(journal) = self.home_session_journal.get() {
-            if !journal.closing()? {
+        if let Some(journal) = self.home_session_journal.get()
+            && !journal.closing()? {
                 let selection = journal.selection()?;
                 if selection.grant.subjects.contains(&binding.subject) {
-                    if let Some(prior) = self.store.local_session(&binding.subject)? {
-                        if prior != *binding {
+                    if let Some(prior) = self.store.local_session(&binding.subject)?
+                        && prior != *binding {
                             // Withdraw the old remote permission under its dispatch barrier
                             // BEFORE publishing a different local custody owner.
                             journal.revoke_execution(&execution_binding(&selection, &prior)?)?;
                         }
-                    }
                     self.store.bind_local_session(binding)?;
                     if self.store.local_session(&binding.subject)?.as_ref() == Some(binding) {
                         let _ = journal.offer_execution(&execution_binding(&selection, binding)?)?;
                     }
                     return Ok(());
                 }
-            }
         }
         self.store.bind_local_session(binding)
     }

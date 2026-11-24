@@ -93,8 +93,16 @@ async fn until(reconciler: &Reconciler, notify: &Notify, done: impl Fn() -> bool
             let changed = notify.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
+            let before = reconciler.store.connection.write().total_changes();
             reconciler.reconcile_once().unwrap();
             if done() { return; }
+            // The daemon immediately continues a pass that committed progress.
+            // This fixture has no daemon loop; preserve that causal continuation
+            // before waiting for an external host/session notification.
+            if reconciler.store.connection.write().total_changes() != before {
+                tokio::task::yield_now().await;
+                continue;
+            }
             changed.await;
         }
     }).await.expect("actual program/session event must wake the reconciler");
@@ -151,7 +159,11 @@ mission "program-session" state="ready" {{
     let client = SeatClient::new(journal.clone(), seat_auth, selection.host.clone(), endpoint, Arc::new(NativeSessionExecutor::new(reconciler.clone()))).unwrap();
     let authority = Arc::new(NativeRunAuthority { journal: journal.clone(), selection: selection.clone(), key: seat_key, requester: client.requester() });
     reconciler.install_program_run_authority(authority.clone()).unwrap();
-    reconciler.reconcile_once().unwrap();
+    // Run creation and ready-step dispatch are distinct reconciler transitions.
+    // Drive the real notifications to durable enrollment while the home is still
+    // offline, rather than assuming one pass already dispatched the program.
+    until(&reconciler, &notify, || journal.reported_executions().unwrap().iter()
+        .any(|binding| binding.run.as_ref().is_some_and(|bound| bound.step_run == step))).await;
     assert!(store.claims_for(&step, Some(JOURNAL_KIND)).unwrap().is_empty(), "no program effect or trace may run before its own admission ACK");
     assert!(journal.reported_executions().unwrap().iter().any(|binding| binding.run.as_ref().is_some_and(|bound| bound.step_run == step)));
     // A real full-node graph snapshot provides the exact canonical run/attempt revisions;

@@ -27,7 +27,7 @@ use tokio::sync::watch;
 
 fn now_ms() -> Result<u64> {
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).context("session clock predates Unix epoch")?;
-    Ok(u64::try_from(elapsed.as_millis()).context("session clock overflow")?)
+    u64::try_from(elapsed.as_millis()).context("session clock overflow")
 }
 fn authority_error(error: anyhow::Error) -> FractalError {
     match error.downcast::<FractalError>() {
@@ -166,7 +166,16 @@ async fn cancel(State(controls): State<Controls>, AxumPath(execution): AxumPath<
 
 enum Role {
     Home { listener: tokio::net::TcpListener, home: Home, pending: Vec<(Journal, Selection)>, effects: Arc<StoreRunEffects> },
-    Agent { client: SeatClient, journal: Journal, reconciler: Arc<Reconciler>, auth: FleetAuth, node: String, target: Selection, endpoint: String },
+    Agent(Box<AgentSession>),
+}
+struct AgentSession {
+    client: SeatClient,
+    journal: Journal,
+    reconciler: Arc<Reconciler>,
+    auth: FleetAuth,
+    node: String,
+    target: Selection,
+    endpoint: String,
 }
 pub struct Service {
     role: Role,
@@ -216,8 +225,8 @@ impl Service {
                     journal: journal.clone(), selection: grant.clone(), key, requester: client.requester(),
                 });
                 reconciler.install_program_run_authority(authority.clone())?;
-                Ok(Some(Self { role: Role::Agent { client, journal, reconciler, auth, node: config.node.clone(),
-                    target: grant.clone(), endpoint: home_endpoint.clone() }, authority: Some(authority), controls: None }))
+                Ok(Some(Self { role: Role::Agent(Box::new(AgentSession { client, journal, reconciler, auth, node: config.node.clone(),
+                    target: grant.clone(), endpoint: home_endpoint.clone() })), authority: Some(authority), controls: None }))
             }
         }
     }
@@ -254,9 +263,11 @@ impl Service {
                 tokio::try_join!(serving, advance_home(pending, effects, transition_shutdown))?;
                 Ok(())
             }
-            Role::Agent { client, journal, reconciler, auth, node, target, endpoint } => {
+            Role::Agent(agent) => {
+                let journal = agent.journal.clone();
+                let reconciler = agent.reconciler.clone();
                 let mut authority_shutdown = shutdown.clone();
-                tokio::try_join!(run_agent(client, journal.clone(), reconciler.clone(), auth, node, target, endpoint, shutdown), async move {
+                tokio::try_join!(run_agent(*agent, shutdown), async move {
                     loop {
                         if *authority_shutdown.borrow() { return Ok::<(), anyhow::Error>(()); }
                         let changed = journal.authority_changed.notified();
@@ -306,8 +317,8 @@ async fn advance_home(pending: Vec<(Journal, Selection)>, effects: Arc<StoreRunE
     Ok(())
 }
 
-async fn run_agent(first: SeatClient, journal: Journal, reconciler: Arc<Reconciler>, auth: FleetAuth, node: String,
-    target: Selection, endpoint: String, shutdown: watch::Receiver<bool>) -> Result<()> {
+async fn run_agent(agent: AgentSession, shutdown: watch::Receiver<bool>) -> Result<()> {
+    let AgentSession { client: first, journal, reconciler, auth, node, target, endpoint } = agent;
     let mut first = Some(first);
     loop {
         if *shutdown.borrow() { return Ok(()); }

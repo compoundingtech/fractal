@@ -191,6 +191,9 @@ their durable result even when signed envelopes have fresh timestamps; returning
 an HTTP result does not invent a consumer acknowledgement. This is ordinary claim
 forwarding only, not message/resource action parity or whole-node cutover.
 
+Owned custody uses the actual native generation unchanged; the borrowed-invocation
+fixture separately proves a distinct logical identity and a detach that leaves the
+real native PTY alive across authenticated receipt replay.
 The real native two-node fixtures exercise retained receipt replay, duplicate
 identity fencing, reused native generations, offline observe/stop and paired epoch
 replacement without a seat graph. The real Bun fixture uses the production issuer,
