@@ -2339,7 +2339,9 @@ pub mod work {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, PoisonError};
 
-    use rusqlite::{Connection, ffi};
+    #[cfg(test)]
+    use rusqlite::Connection;
+    use rusqlite::ffi;
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct SqliteWork {
