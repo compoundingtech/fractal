@@ -3,11 +3,12 @@
 //! A consumer's delivery, read and close of a message stay on the consumer's host, never
 //! replicated (`local_message_marks`, and a stream item's `stream_lifecycle`). Another member that
 //! needs how far a message got asks that host, which answers for the seats its declarations place
-//! on it. Nothing is pushed or kept: a host that does not answer in time reads as unknown.
+//! on it. A host that does not answer in time reads as unknown. Separately negotiated event
+//! cursors report changed keys without rebuilding those answers during an idle keepalive.
 //!
-//! Each request is one tagged operation, so a later operation joins without a new route. A member
-//! asks only a host whose own newest `daemon.started` advertises [`SEAT_FRESHNESS_READS_FEATURE`]
-//! at the operation's version.
+//! Each request is one tagged operation, so a later operation joins without a new route. Marks
+//! reads require [`SEAT_FRESHNESS_READS_FEATURE`]; event reads require [`MESSAGE_MARK_EVENTS_FEATURE`]
+//! in the host's own newest `daemon.started`.
 
 use super::*;
 
@@ -18,6 +19,8 @@ pub const SEAT_FRESHNESS_READS_INTERNAL_PATH: &str = "/v1/internal/seat-freshnes
 /// The `daemon.started` feature of a member that answers [`SEAT_FRESHNESS_READS_PATH`], and the
 /// version of the operations it answers.
 pub const SEAT_FRESHNESS_READS_FEATURE: &str = "seat_freshness_reads";
+/// Separately negotiated change-feed support; legacy hosts answer marks reads only.
+pub const MESSAGE_MARK_EVENTS_FEATURE: &str = "message_mark_events";
 /// The most messages one read may name.
 pub const MAX_READ_MESSAGES: usize = 512;
 const MAX_READ_SUBJECT_BYTES: usize = 256;
@@ -32,6 +35,8 @@ pub const MAX_READ_ANSWER_BYTES: usize = 4_194_304;
 pub enum SeatFreshnessRead {
     /// How far the host's seats got with each of these messages.
     MessageMarks { messages: Vec<String> },
+    /// Wait for host-local mark changes. A reset requires rediscovering local candidates.
+    MessageMarkEvents { cursor: Option<String>, max: usize },
 }
 
 impl SeatFreshnessRead {
@@ -48,6 +53,10 @@ impl SeatFreshnessRead {
                         "a message marks read names messages only"
                     );
                 }
+            }
+            Self::MessageMarkEvents { cursor, max } => {
+                anyhow::ensure!((1..=MAX_READ_MESSAGES).contains(max), "invalid mark event page size");
+                anyhow::ensure!(cursor.as_ref().is_none_or(|cursor| cursor.len() <= 2048), "mark event cursor exceeds its bound");
             }
         }
         Ok(())
@@ -83,6 +92,18 @@ pub struct MessageMarksAnswer {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageMarksAnswers {
     pub messages: Vec<MessageMarksAnswer>,
+}
+
+/// A bounded change page. `reset` invalidates all previously read host answers; the caller
+/// requeues every candidate it associates with this host before consuming further pages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageMarkEvents {
+    pub epoch: String,
+    pub cursor: String,
+    pub consumers: Vec<String>,
+    pub messages: Vec<String>,
+    pub reset: bool,
+    pub has_more: bool,
 }
 
 pub(super) async fn receive_seat_freshness_read(
@@ -143,6 +164,38 @@ pub(super) async fn receive_seat_freshness_read(
 }
 
 impl ClientRelay {
+    /// Long poll a member advertising [`MESSAGE_MARK_EVENTS_FEATURE`] version 1.
+    /// No fallback to repeated message-answer reads is performed.
+    pub async fn read_message_mark_events(
+        &self,
+        name: &str,
+        cursor: Option<&str>,
+        max: usize,
+        timeout: Duration,
+    ) -> Result<Option<MessageMarkEvents>> {
+        let read = SeatFreshnessRead::MessageMarkEvents { cursor: cursor.map(str::to_owned), max };
+        read.validate()?;
+        let body = serde_json::to_vec(&read)?;
+        let digest = FleetAuth::body_digest(&body);
+        let mut last_error = None;
+        for peer in self.next_hops(name, &[]).into_iter().filter(|peer| peer.name == name) {
+            match tokio::time::timeout(timeout, self.read_seat_freshness_from(&peer, &body, &digest)).await {
+                Ok(Ok(Some(answer))) => {
+                    let page: MessageMarkEvents = serde_json::from_value(answer)?;
+                    anyhow::ensure!(page.messages.len() + page.consumers.len() <= max
+                        && page.messages.iter().all(|message| message.starts_with("message/") && message.len() <= MAX_READ_SUBJECT_BYTES)
+                        && page.consumers.iter().all(|consumer| consumer.len() <= MAX_READ_SUBJECT_BYTES)
+                        && page.cursor.len() <= 2048, "invalid message mark event page");
+                    return Ok(Some(page));
+                }
+                Ok(Ok(None)) => return Ok(None),
+                Ok(Err(error)) => last_error = Some(error),
+                Err(_) => last_error = Some(anyhow::anyhow!("{name} did not answer in {timeout:?}")),
+            }
+        }
+        match last_error { Some(error) => Err(error), None => Ok(None) }
+    }
+
     /// Ask member `name` itself how far its seats got with `messages`, over a route this node can
     /// dial, within `timeout`. `None` when no route reaches it directly, or when it does not
     /// answer the route (an unsigned 404 or 405): its advertisement was ahead of its build.

@@ -141,7 +141,7 @@ fn mail_inputs_cover_desired_identity_conflicts_health_and_canonical_evidence() 
     store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h5086674ad23b owner=fractal_store::store::observer_mail_inputs_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=99 WHERE id=(SELECT batch_id FROM claims WHERE id=?1)", [&runtime]).unwrap();
     generation = changed(&mut receiver, generation);
     store.fractal.forget_views();
-    changed(&mut receiver, generation);
+    assert_eq!(*receiver.borrow(), generation, "presentation resets are not source changes");
 }
 
 #[test]
@@ -217,4 +217,183 @@ fn mail_inputs_fence_shard_position_before_mirroring_and_propagate_shard_failure
     shard.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-he9cd28d1fdec owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE stream_lifecycle").unwrap();
     changed(&mut receiver, generation);
     assert!(store.mail_objective_input_coverage_failed());
+}
+
+#[test]
+fn mail_subject_deltas_are_retained_coalesced_and_non_destructive() {
+    let store = Store::open_memory("local").unwrap();
+    let receiver = store.subscribe_mail_objective_inputs();
+    let initial = *receiver.borrow();
+    for message in ["message/first", "message/second"] {
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h629a7a0b19ba owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_delivery_source_v1(message,recipient,sent_ms,fields) VALUES(?1,'agent/test',1,'{\"sent_clock_valid\":1}')",
+            [message]).unwrap();
+    }
+    let (cut, delta) = store.mail_objective_changes_since(initial);
+    assert!(cut > initial);
+    let expected = BTreeSet::from(["message/first".to_owned(), "message/second".to_owned()]);
+    let (messages, recipients) = delta.unwrap();
+    assert_eq!(messages, expected);
+    assert!(recipients.is_empty());
+    assert_eq!(store.mail_objective_changes_since(initial), (cut, Some((expected, BTreeSet::new()))),
+        "one consumer cannot consume another consumer's changes");
+    assert_eq!(store.mail_objective_changes_since(cut), (cut, Some((BTreeSet::new(), BTreeSet::new()))));
+
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hacac0eab3efb owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_acceptance_frontier_v1 VALUES('agent/test','incarnation/test',2,2)", []).unwrap();
+    let (next, delta) = store.mail_objective_changes_since(cut);
+    assert_eq!(delta, Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hb05bdfc424a1 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mail_acceptance_frontier_v1 SET observed_through_unix_ms=3 WHERE recipient='agent/test'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(next).1,
+        Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
+}
+
+#[test]
+fn mail_subject_key_updates_invalidate_both_old_and_new_messages() {
+    let store = Store::open_memory("local").unwrap();
+    let receiver = store.subscribe_mail_objective_inputs();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h3f11a802a5cd owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_delivery_source_v1 VALUES('message/old','agent/test',1,'{\"sent_clock_valid\":1}')", []).unwrap();
+    let generation = *receiver.borrow();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h1eaca37fa635 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mail_delivery_source_v1 SET message='message/new' WHERE message='message/old'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::from(["message/old".to_owned(), "message/new".to_owned()]), BTreeSet::new())));
+    let generation = *receiver.borrow();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h063d26028ca7 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mail_delivery_source_v1 WHERE message='message/new'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::from(["message/new".to_owned()]), BTreeSet::new())));
+}
+
+#[test]
+fn mail_subject_journal_rollover_requires_a_full_rebuild_but_presentation_reset_does_not() {
+    let store = Store::open_memory("local").unwrap();
+    let receiver = store.subscribe_mail_objective_inputs();
+    let initial = *receiver.borrow();
+    {
+        let mut state = store.fractal.mail_objective_inputs.0.lock().unwrap();
+        for index in 0..PENDING_LIMIT {
+            state.messages.insert(format!("message/retained-{index}"), initial);
+        }
+    }
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h28cf46bbeff5 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_delivery_source_v1 VALUES('message/overflow','agent/test',1,'{\"sent_clock_valid\":1}')", []).unwrap();
+    assert!(store.mail_objective_changes_since(initial).1.is_none());
+    let generation = *receiver.borrow();
+    store.fractal.forget_views();
+    assert_eq!(store.mail_objective_changes_since(generation),
+        (generation, Some((BTreeSet::new(), BTreeSet::new()))));
+}
+
+#[test]
+fn unrelated_desired_updates_and_deletes_do_not_advance_mail_inputs() {
+    let store = Store::open_memory("local").unwrap();
+    append(&store, "resource/unrelated", "resource.observed");
+    let receiver = store.subscribe_mail_objective_inputs();
+    let initial = *receiver.borrow();
+    for sql in [
+        /* sqlite-large-value: allow-for-now lv-h2c4ec6a16f2e owner=fractal_store::store::observer_mail_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('resource/unrelated','resource','revision/test',(SELECT id FROM claims LIMIT 1),'{}')",
+        /* sqlite-large-value: allow-for-now lv-hb2137ade0af5 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET body='{\"changed\":true}' WHERE subject='resource/unrelated'",
+        /* sqlite-large-value: allow-for-now lv-h94fbb19ea262 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/unrelated'",
+    ] {
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h623bc4b03841 owner=fractal_store::store::observer_mail_inputs_tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
+        assert_eq!(*receiver.borrow(), initial, "{sql}");
+    }
+}
+
+#[test]
+fn desired_old_and_new_recipient_keys_survive_updates_and_removal() {
+    let store = Store::open_memory("local").unwrap();
+    append(&store, "agent/old", "runtime.observed");
+    let receiver = store.subscribe_mail_objective_inputs();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h01bb0e65c2cc owner=fractal_store::store::observer_mail_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('agent/old','agent','revision/test',(SELECT id FROM claims LIMIT 1),'{}')", [],
+    ).unwrap();
+    let before_replacement = *receiver.borrow();
+    store.fractal.mail_objective_inputs.shard_replaced();
+    assert!(store.mail_objective_changes_since(before_replacement).1.is_none());
+    let generation = *receiver.borrow();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hbdc2626eee19 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET subject='agent/new' WHERE subject='agent/old'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::new(), BTreeSet::from(["agent/old".to_owned(), "agent/new".to_owned()]))));
+    let generation = *receiver.borrow();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h7f1408b5fbc7 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET kind='stop' WHERE subject='agent/new'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::new(), BTreeSet::from(["agent/new".to_owned()]))));
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hc4c979fca1a7 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET kind='agent' WHERE subject='agent/new'", []).unwrap();
+    store.fractal.mail_objective_inputs.shard_replaced();
+    let generation = *receiver.borrow();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hd6c3743ff341 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='agent/new'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::new(), BTreeSet::from(["agent/new".to_owned()]))),
+        "shard replacement preserves the old desired key for raw deletions");
+}
+
+#[test]
+fn runtime_record_authority_routes_to_its_recipient_instead_of_the_mail_population() {
+    let store = Store::open_memory("local").unwrap();
+    let runtime = append(&store, "agent/test", "runtime.observed");
+    let receiver = store.subscribe_mail_objective_inputs();
+    let generation = *receiver.borrow();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h9b6541dfb2fd owner=fractal_store::store::observer_mail_inputs_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+         VALUES('record/runtime','local',1,'digest/runtime',0,X'','valid',?1,'0')", [&runtime],
+    ).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
+    let generation = *receiver.borrow();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h80bda2fca424 owner=fractal_store::store::observer_mail_inputs_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref='record/runtime'", []).unwrap();
+    assert_eq!(store.mail_objective_changes_since(generation).1,
+        Some((BTreeSet::new(), BTreeSet::from(["agent/test".to_owned()]))));
+}
+
+#[test]
+fn mail_deletion_without_a_retained_old_key_still_requires_a_full_rebuild() {
+    let store = Store::open_memory("local").unwrap();
+    let receiver = store.subscribe_mail_objective_inputs();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hecc57f564f0f owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mail_delivery_source_v1 VALUES('message/missing-key','agent/test',1,'{\"sent_clock_valid\":1}')", [],
+    ).unwrap();
+    let generation = *receiver.borrow();
+    store.fractal.mail_objective_inputs.0.lock().unwrap().routing.clear();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h3f913de5c038 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mail_delivery_source_v1 WHERE message='message/missing-key'", [],
+    ).unwrap();
+    assert!(store.mail_objective_changes_since(generation).1.is_none());
+}
+
+#[test]
+fn unrelated_claim_routing_does_not_scan_later_batch_ballast() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h13d1dca582cf owner=fractal_store::store::observer_mail_inputs_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(id TEXT PRIMARY KEY,batch_id TEXT,kind TEXT,store_index INTEGER);
+         CREATE INDEX claims_batch_index ON claims(batch_id,store_index);
+         CREATE INDEX claims_kind_index ON claims(kind,store_index);
+         CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY);
+         WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<10000)
+         INSERT INTO claims SELECT 'ballast-'||n,'batch','harness.observed',n FROM seq;"
+    ).unwrap();
+    let inputs = Inputs::default();
+    let mut state = inputs.0.lock().unwrap();
+    let steps = Arc::new(AtomicUsize::new(0));
+    let counted = steps.clone();
+    connection.progress_handler(1, Some(move || {
+        counted.fetch_add(1, Ordering::Relaxed);
+        false
+    }));
+    assert!(!relevant(&connection, &mut state, "claims", 1).unwrap());
+    connection.progress_handler(0, None::<fn() -> bool>);
+    assert!(steps.load(Ordering::Relaxed) < 200,
+        "routing one unrelated claim must not visit its 9,999 later unrelated siblings");
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h65fd8fd826b9 owner=fractal_store::store::observer_mail_inputs_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES('runtime','batch','runtime.observed',10001)", [],
+    ).unwrap();
+    assert!(relevant(&connection, &mut state, "claims", 1).unwrap(),
+        "a later legacy runtime still depends on the earlier sibling's rank");
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h5343abc9850d owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_positions VALUES('runtime')", []).unwrap();
+    assert!(!relevant(&connection, &mut state, "claims", 1).unwrap(),
+        "an immutable runtime position does not depend on legacy sibling ranks");
 }

@@ -44,6 +44,7 @@ pub struct FractalRuntime {
     pub(super) card_actuals: Mutex<HashMap<(String, bool), Arc<card_actual::Reduction>>>,
     pub observer_actuals: Arc<observer_actuals::Actuals>,
     pub(super) mail_objective_inputs: Arc<observer_mail_inputs::Inputs>,
+    pub(super) reconcile_inputs: Arc<observer_reconcile_inputs::Inputs>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
     pub placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
     /// Per-subject status reductions and current-view answers, until their claims change.
@@ -116,12 +117,15 @@ pub struct FractalRuntime {
     pub published_work: published_list::PublishedList<work_list::WorkRows>,
     /// Current runtime resources, built only by the background collection refresher.
     pub published_runtimes: published_list::PublishedList<runtime_list::RuntimeRows>,
-    #[cfg(any(test, feature = "test-support"))]
     pub agent_resources_builds: std::sync::atomic::AtomicUsize,
-    #[cfg(any(test, feature = "test-support"))]
     pub agent_resources_refolded_cards: std::sync::atomic::AtomicUsize,
-    #[cfg(any(test, feature = "test-support"))]
     pub agent_resources_largest_fold: std::sync::atomic::AtomicUsize,
+    /// Agent cards whose presentation, fault evidence and references were enriched.
+    pub agent_roster_presentations: std::sync::atomic::AtomicUsize,
+    pub agent_roster_fault_enrichments: std::sync::atomic::AtomicUsize,
+    pub agent_roster_ref_enrichments: std::sync::atomic::AtomicUsize,
+    /// Completed presented-roster publications observed without creating roster demand.
+    pub agents_publication_changes: tokio::sync::watch::Sender<u64>,
     /// Direct current-work reads, which an enabled work list never makes.
     #[cfg(any(test, feature = "test-support"))]
     pub direct_work_reads: std::sync::atomic::AtomicUsize,
@@ -187,7 +191,7 @@ impl Store {
 impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
-        native_attach::create_schema(connection)?;
+        local_sessions::create_schema(connection)?;
         resource_references::create_schema(connection)?;
         effects::create_schema(connection)?;
         // Legacy run stamps are projection metadata, not ownership of a shared URI.
@@ -233,6 +237,7 @@ impl FractalRuntime {
         message_marks::create_triggers(connection)?;
         relayed_closes::create_triggers(connection)?;
         stream_mirror::create_triggers(connection)?;
+        relayed_close_work::create_schema(connection)?;
         mail_delivery_source::install(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
@@ -279,9 +284,12 @@ impl FractalRuntime {
 
 impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
-        Some(Arc::new(observer_mail_inputs::Observer {
-            actuals: self.observer_actuals.clone(),
-            mail: self.mail_objective_inputs.clone(),
+        Some(Arc::new(observer_reconcile_inputs::Observer {
+            inner: Arc::new(observer_mail_inputs::Observer {
+                actuals: self.observer_actuals.clone(),
+                mail: self.mail_objective_inputs.clone(),
+            }),
+            inputs: self.reconcile_inputs.clone(),
         }))
     }
     fn admit_writer_tx(
@@ -705,7 +713,7 @@ impl Runtime for FractalRuntime {
             self.presented_agents.forget();
         }
         self.forget_reductions(false);
-        self.mail_objective_inputs.invalidate();
+        // Mail owns native source/schema cuts; presentation resets are not mail facts.
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
         self.glass_list.forget();
@@ -1389,10 +1397,10 @@ mod schema_install_tests {
         graph_schema(&connection);
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let committed = events.clone();
-        connection.commit_hook(Some(move || {
+        smallclaims::sqlite::observe_transaction_resolution(&connection, move || {
             committed.lock().unwrap().push("commit".into());
             false
-        }));
+        }, || {}).unwrap();
         let observed = events.clone();
         connection.authorizer(Some(move |context: AuthContext<'_>| {
             let event = match context.action {
@@ -1420,7 +1428,6 @@ mod schema_install_tests {
         // authorizer must still see it, or the late-chunk guard could give false assurance.
         connection.execute_batch("BEGIN; PRAGMA foreign_keys=ON; ROLLBACK;").unwrap();
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-        connection.commit_hook(None::<fn() -> bool>);
         let events = events.lock().unwrap();
         let first = events
             .iter()
@@ -1609,10 +1616,10 @@ mod schema_install_tests {
         let counted = commits.clone();
         drop(
             crate::store::GraphStore::open_for_initialization_test(&whole, "node", Arc::new(FractalRuntime::default()), true, move |connection| {
-                connection.commit_hook(Some(move || {
+                smallclaims::sqlite::observe_transaction_resolution(connection, move || {
                     counted.fetch_add(1, Ordering::Relaxed);
                     false
-                }));
+                }, || {}).unwrap();
             })
             .unwrap(),
         );
@@ -1626,7 +1633,7 @@ mod schema_install_tests {
             let seen = Arc::new(AtomicUsize::new(0));
             // Every commit after the first `kept` rolls back, as if the process stopped there.
             let opened = crate::store::GraphStore::open_for_initialization_test(&path, "node", Arc::new(FractalRuntime::default()), true, move |connection| {
-                connection.commit_hook(Some(move || seen.fetch_add(1, Ordering::Relaxed) >= kept));
+                smallclaims::sqlite::observe_transaction_resolution(connection, move || seen.fetch_add(1, Ordering::Relaxed) >= kept, || {}).unwrap();
             });
             assert!(opened.is_err(), "the open cut after {kept} of {commits} commits still succeeded");
             drop(opened);

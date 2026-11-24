@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve committed mission input changes when scoped launch work runs on the mission follower's first iteration",
+  "replay": {"status": "none", "detail": "No claim or projection replay; the mission follower pins its independent feed cursor before scoped launch work can advance the pass watermark."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness change."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Reverting restores the startup feed-cursor race; no persisted state changes."}
+}

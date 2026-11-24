@@ -135,7 +135,10 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new(),
+    let execution = engine.execution(crate::store::run_credentials::RunBinding {
+        run: dispatch.run.clone(), step_run: dispatch.step.clone(), attempt: dispatch.attempt,
+    }, 1);
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, execution, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
@@ -177,7 +180,10 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new(),
+    let execution = engine.execution(crate::store::run_credentials::RunBinding {
+        run: step.run.clone(), step_run: step.subject.clone(), attempt: 1,
+    }, 1);
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, execution, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
@@ -298,6 +304,9 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
             program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
+        execution: engine.execution(crate::store::run_credentials::RunBinding {
+            run: run.subject.clone(), step_run: step.clone(), attempt,
+        }, generation),
         generation, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]),
     });
@@ -326,7 +335,7 @@ fn host_ending_survives_outcome_and_requires_each_exact_termination_acknowledgem
     for (attempt, generation) in [(2, 1), (2, 2)] {
         running_attempt(&engine, &run, attempt, generation);
         engine.handle(&message("ending", attempt), generation).unwrap();
-        assert!(engine.end(step, attempt, generation, None, false).is_some());
+        assert!(engine.end(step, attempt, generation, None, false).unwrap().is_some());
     }
     engine.handle(&message("cancelled", 1), 2).unwrap();
     assert_eq!(engine.lock().terminating.len(), 3);
@@ -423,7 +432,7 @@ fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
     let step = &unrelated.steps[0].subject;
     running_attempt(&engine, &unrelated, 1, 1);
     engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
-    assert!(engine.end(step, 1, 1, None, false).is_some());
+    assert!(engine.end(step, 1, 1, None, false).unwrap().is_some());
     assert!(engine.fence_left_effects(&replacement).unwrap());
     assert!(!engine.fence_left_effects(&unrelated).unwrap());
     engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();
@@ -875,7 +884,7 @@ fn native_await_pr_resolves_observed_merge_and_journals_the_caller_key() {
     let request = engine.requests(&run.subject).pop().unwrap();
     let (pending, reads) = smallclaims::touched::record(|| await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head"));
     assert!(!pending.unwrap());
-    assert!(reads.contains("resource/github/acme/garden/pull-request/12"));
+    assert!(reads.contains("actual:resource/github/acme/garden/pull-request/12"));
     assert_eq!(engine.store.program_pr_watches().unwrap().len(), 1);
     observe_program_pr(&engine, json!([{
         "number":12,"state":"closed","head_sha":"head","head":"head","merged":true,"merge_commit_sha":"merge",
@@ -908,7 +917,7 @@ fn native_await_pr_returns_typed_unknown_repository_and_pull_request_errors() {
         let request = engine.requests(&run.subject).pop().unwrap();
         let (pending, reads) = smallclaims::touched::record(|| await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head"));
         assert!(!pending.unwrap(), "pre-registration failures and incremental absence cannot settle a new wait");
-        assert!(reads.contains("resource/github/acme/garden"));
+        assert!(reads.contains("actual:resource/github/acme/garden"));
         assert!(reads.contains("observer/github/acme/garden"));
         let registrations = engine.store.program_pr_watches().unwrap();
         let token = registrations[0]["registration"].as_str().unwrap();

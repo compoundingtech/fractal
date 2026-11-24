@@ -107,7 +107,7 @@ mission "gated" state="ready" report-to="agent/node.reporter" stalled-after="10m
   }
   step "observe" {
     agentless
-    gate "signal" { field "status" "resource/loop-result" is "ready" }
+    gate "signal" { field "state" "mission/gated" is "retired" }
   }
 }
 mission "queued-exec" state="ready" report-to="agent/node.reporter" {
@@ -708,7 +708,7 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
     fixture.passes(3);
     let subject = format!("exec/{}/check", run.id);
     let (desired, _) = fixture.store.desired_subject_with_writer(&subject).unwrap().unwrap();
-    let member = desired.member.unwrap();
+    let member = desired.member.as_ref().unwrap();
     let receipt = fixture.store.latest_observation(&subject, "runtime.action.succeeded").unwrap().unwrap();
     let incarnation = receipt.body["fields"]["incarnation_id"].as_str().unwrap().to_owned();
     fixture.reconciler.runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), RuntimeObservation {
@@ -716,10 +716,15 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
         terminal: false,
         status: "running".into(),
         exit_code: None,
-        incarnation_id: Some(incarnation),
+        incarnation_id: Some(incarnation.clone()),
     });
     let run = fixture.store.mission_run(&run.id).unwrap().unwrap();
     let since = crate::reconcile::run_report::run_activity(&run);
+    // FakeRuntime has no physical executor registry. Supply the executor's native
+    // phase evidence explicitly; running observations alone do not prove an overrun.
+    fixture.reconciler.record_step_exec_phase(
+        &run.steps[0], &desired, "exec-started", since, Some(&incarnation), None,
+    ).unwrap();
     let now = since + 31 * MINUTE;
     let _later = Clock::at(&fixture.store, now);
     let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
@@ -728,6 +733,10 @@ fn a_live_owned_exec_counts_as_progress_without_extending_its_timeout() {
 
     // A live process must not suppress its independent execution deadline.
     let _expired = Clock::at(&fixture.store, since + 121 * MINUTE);
+    fixture.reconciler.record_step_exec_phase(
+        &run.steps[0], &desired, "execution-timeout", since + 121 * MINUTE,
+        Some(&incarnation), None,
+    ).unwrap();
     // Deliver the step timer's wake explicitly: this synchronous fixture has no Tokio timers.
     fixture.reconciler.incremental.touch(&run.steps[0].subject);
     fixture.passes(4);
@@ -897,15 +906,13 @@ fn a_held_step_that_only_renews_its_lease_stalls() {
     assert_eq!(stalled(), 2, "silence after progress is a new stall");
 }
 
-/// The runtime holds an agentless gate step without a claimant or a lease, so it is not a held
-/// step and nothing renews it: its last change is its sign of life, as before lease renewals
-/// stopped counting. A run that only waits on open gates therefore stalls at its limit, once;
-/// `report-stalls=#false` is how a run that intends such a wait says so.
+/// Agentless human/predicate waits are deliberate, not a worker's unexplained silence.
 #[test]
-fn a_gate_step_the_runtime_holds_is_not_a_held_step() {
+fn named_reporter_does_not_stall_an_agentless_keepalive_and_human_gate() {
     let (_clock, fixture) = fixture();
     let run = fixture.start("gated", "gated-run");
     fixture.passes(4);
+    fixture.store.latest_actual_value("mission/gated").unwrap();
     let view = fixture.store.mission_run(&run.id).unwrap().unwrap();
     assert_eq!(view.steps.len(), 2);
     for step in &view.steps {
@@ -924,10 +931,8 @@ fn a_gate_step_the_runtime_holds_is_not_a_held_step() {
         .max()
         .unwrap();
     assert_eq!(quiet_since, last_change);
-    assert_eq!(
-        fixture.reconciler.incremental.next_due(&run.subject),
-        Some(quiet_since + 10 * MINUTE)
-    );
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    assert_eq!(fixture.reconciler.report_run(&view, &report, quiet_since + 11 * MINUTE).unwrap(), None);
     let stalled = || {
         fixture
             .reports(REPORTER)
@@ -942,7 +947,166 @@ fn a_gate_step_the_runtime_holds_is_not_a_held_step() {
     }
     let _later = Clock::at(&fixture.store, quiet_since + 3 * 24 * 60 * MINUTE);
     fixture.passes(3);
-    assert_eq!(stalled(), 1, "one report, however long the gates stay open");
+    assert_eq!(stalled(), 0, "intentional waits do not become stalled with age");
+}
+
+#[test]
+fn native_person_asks_wait_but_mixed_stalled_work_still_reports() {
+    for status in ["waiting-person", "ready"] {
+        let (_clock, fixture) = fixture();
+        let run = fixture.start("watched", "person-wait");
+        let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+        // Exercise the native projections without making a human answer or changing ask cadence.
+        view.steps.retain(|step| step.step == "build");
+        view.steps[0].status = status.into();
+        view.steps[0].assigned_to = (status == "ready").then(|| "person/example".into());
+        let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+        let late = crate::reconcile::run_report::run_activity(&view) + 11 * MINUTE;
+        fixture.reconciler.report_run(&view, &report, late).unwrap();
+        assert!(fixture.reports(REPORTER).is_empty(), "{status}");
+
+        let mut stalled = view.steps[0].clone();
+        stalled.subject.push_str("-other");
+        stalled.step = "other".into();
+        stalled.status = "working".into();
+        stalled.assigned_to = Some("agent/node.builder".into());
+        view.steps.push(stalled);
+        fixture.reconciler.report_run(&view, &report, late).unwrap();
+        fixture.reconciler.report_run(&view, &report, late + MINUTE).unwrap();
+        assert_eq!(fixture.reports(REPORTER).len(), 1, "mixed work still reports once");
+    }
+}
+
+#[test]
+fn an_answered_wait_reports_once_after_genuine_resumed_silence() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("watched", "resumed-wait");
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    view.steps.retain(|step| step.step == "build");
+    view.steps[0].status = "waiting-person".into();
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    let late = crate::reconcile::run_report::run_activity(&view) + 11 * MINUTE;
+    fixture.reconciler.report_run(&view, &report, late).unwrap();
+    assert!(fixture.reports(REPORTER).is_empty());
+    view.steps[0].status = "working".into();
+    view.steps[0].updated_at_unix_ms = late;
+    assert_eq!(fixture.reconciler.report_run(&view, &report, late).unwrap(), Some(late + 10 * MINUTE));
+    fixture.reconciler.report_run(&view, &report, late + 11 * MINUTE).unwrap();
+    fixture.reconciler.report_run(&view, &report, late + 12 * MINUTE).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+}
+
+#[test]
+fn unknown_predicate_evidence_preserves_stall_reporting() {
+    let (_clock, fixture) = fixture();
+    apply_source(
+        &fixture.store,
+        &SOURCE.replace(r#"field "state" "mission/gated""#, r#"field "state" "mission/absent""#),
+        "unknown-gate-evidence",
+    );
+    let run = fixture.start("gated", "unknown-gate-run");
+    fixture.passes(4);
+    let view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    let late = crate::reconcile::run_report::run_activity(&view) + 11 * MINUTE;
+    fixture.reconciler.report_run(&view, &report, late).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1, "unknown is not proof of an intentional wait");
+}
+
+#[test]
+fn an_empty_actual_cache_does_not_suppress_a_known_predicate_run() {
+    let (_clock, fixture) = fixture();
+    apply_source(&fixture.store, r#"version 2
+mission "cold-keepalive" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
+  goal "Keep a schedule alive until retirement."
+  step "retire" {
+    agentless
+    gate "retired" { field "state" "mission/cold-keepalive" is "retired" }
+  }
+}"#, "cold-keepalive");
+    // Create without reconciling: gate evaluation must not incidentally warm the observation.
+    let view = fixture.store.create_mission_run(&crate::model::MissionRunRequest {
+        mission: "cold-keepalive".into(),
+        revision: None,
+        workspace: "/tmp".into(),
+        requester: Some("person/requester".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "cold-keepalive-run".into(),
+    }).unwrap();
+    assert_eq!(fixture.store.inspect_cached_actual("mission/cold-keepalive", |_| ()).unwrap(), None);
+    let report = fixture.reconciler.run_report(&view.subject).unwrap().unwrap();
+    let since = crate::reconcile::run_report::run_activity(&view);
+    assert_eq!(fixture.reconciler.report_run(&view, &report, since).unwrap(), Some(since + 10 * MINUTE));
+    fixture.reconciler.report_run(&view, &report, since + 11 * MINUTE).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+    fixture.store.latest_actual_value("mission/cold-keepalive").unwrap();
+    assert_eq!(fixture.reconciler.report_run(&view, &report, since).unwrap(), None,
+        "warming the same false predicate enables intentional-wait classification");
+}
+
+#[test]
+fn an_unclassified_pending_step_prevents_suppression() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("watched", "pending-and-ask");
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    let build = view.steps.iter_mut().find(|step| step.step == "build").unwrap();
+    build.status = "waiting-person".into();
+    assert!(view.steps.iter().any(|step| step.step == "ship" && step.status == "pending"));
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    let late = crate::reconcile::run_report::run_activity(&view) + 11 * MINUTE;
+    fixture.reconciler.report_run(&view, &report, late).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+}
+
+#[test]
+fn default_reporter_suppresses_backoff_but_reports_after_it_expires() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("supervised", "default-backoff");
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    let since = crate::reconcile::run_report::run_activity(&view);
+    for step in &mut view.steps {
+        step.status = "working".into();
+        step.not_before_unix_ms = Some(since + 60 * MINUTE);
+    }
+    assert_eq!(fixture.reconciler.report_stall_by_default(&view, since + 40 * MINUTE).unwrap(), None);
+    assert!(fixture.reports(REPORTER).is_empty());
+    fixture.reconciler.report_stall_by_default(&view, since + 70 * MINUTE).unwrap();
+    fixture.reconciler.report_stall_by_default(&view, since + 80 * MINUTE).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+}
+
+#[test]
+fn an_expired_declared_wait_is_not_intentional() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("watched", "expired-declared-wait");
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    view.steps.retain(|step| step.step == "build");
+    let since = crate::reconcile::run_report::run_activity(&view);
+    view.steps[0].status = "working".into();
+    view.steps[0].execution_paused_until_unix_ms = Some(since + MINUTE);
+    let late = since + 11 * MINUTE;
+    assert_eq!(crate::intentional_wait::classify(&view.steps[0], late, false, false), None);
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    fixture.reconciler.report_run(&view, &report, late).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+}
+
+#[test]
+fn an_intentional_hold_with_linked_child_work_does_not_hide_child_silence() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("loop-parent", "child-linked-hold");
+    fixture.passes(8);
+    let mut view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    assert!(view.steps.iter().any(|step|
+        fixture.store.mission_run_for_parent_step(&step.subject).unwrap().is_some()));
+    for step in &mut view.steps {
+        step.status = "blocked".into();
+    }
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    let late = fixture.reconciler.run_report_activity(&view).unwrap() + 11 * MINUTE;
+    fixture.reconciler.report_run(&view, &report, late).unwrap();
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
 }
 
 #[test]

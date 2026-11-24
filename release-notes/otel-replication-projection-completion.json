@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Synchronize the replication telemetry regression on completed projection, not receipt admission: background maintenance may own projection, while any receive-owned attempt must remain a linked root and settled duplicate/heartbeat exchanges must emit none",
+  "replay": {"status": "none", "detail": "Test-only change; no replay."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule or retention change."},
+  "compatibility": {"status": "none", "detail": "No runtime or wire change. The renamed test retains its existing Nix sandbox exclusion and still runs in central CI."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

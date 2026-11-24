@@ -172,8 +172,15 @@ def test_ranges(ts: list[Token]) -> list[tuple[int, int]]:
             i += 1
             continue
         j = i + 7
-        # Walk attributes/signature to the item's top-level body/semicolon. This is a
-        # lexical item boundary, not evaluation of arbitrary cfg expressions/macros.
+        field = j
+        if ts[field].text == "pub":
+            field += 1
+            if ts[field].text == "(":
+                field = paired(ts, field) + 1
+        is_field = field + 1 < len(ts) and ts[field + 1].text == ":"
+        # Walk attributes/signature to the item's body/semicolon, or a struct field's
+        # comma/closing brace. A test-only field must not swallow the next live item.
+        # This is lexical delimiting, not evaluation of arbitrary cfg expressions.
         while j < len(ts):
             if ts[j].text in ("(", "["):
                 j = paired(ts, j) + 1
@@ -182,8 +189,9 @@ def test_ranges(ts: list[Token]) -> list[tuple[int, int]]:
                 ranges.append((ts[i].start, ts[end].end))
                 i = end + 1
                 break
-            elif ts[j].text == ";":
-                ranges.append((ts[i].start, ts[j].end))
+            elif ts[j].text == ";" or (is_field and ts[j].text in (",", "}")):
+                end = ts[j].start if ts[j].text == "}" else ts[j].end
+                ranges.append((ts[i].start, end))
                 i = j + 1
                 break
             else:

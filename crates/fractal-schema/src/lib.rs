@@ -469,7 +469,7 @@ impl std::error::Error for ValidationError {}
 
 /// Local SQLite projection notes. They are documentation only: the projection is
 /// not part of the serialized registry, so it cannot change the registry digest.
-const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-hbfa81626a10c owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
+const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-h631c4f058759 owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
 ## Local message selectors
 
 The client message list pages through `local_client_message_selectors_v1`, a SQLite projection kept only on the local node. It is derived from message claims and from the `desired` projection, so it is not part of this registry. It adds no subject family, resource kind, claim kind or claim field. The registry digest and the replication compatibility digest therefore stay unchanged. Nodes with and without this table exchange claims as before. The `_v1` suffix is the projection version: a layout change uses a new table name, never an edit to this one in place.
@@ -528,7 +528,11 @@ The fourteen page indexes are partial on `born_index >= 0` and order by `sent_ke
 
 Triggers on `claims` (insert, update, delete) for `message/` subjects and on `desired` (insert, update, delete) add a pending row with the reason. Insert triggers mark only claims that can change a selector field: `message.sent`, `message.closed`, `intent.desired`, or a claim that sets `from`, `to`, `tags` or `status`. A body-only edit adds no new header version. Deleting a `desired` row immediately clears the fields it supplied (`desired_mask`) and recomputes eligibility only for that subject and the old/new global and affected-recipient reminder winners. Each candidate or previous-winner lookup is an indexed seek with `LIMIT 1`, in canonical `version DESC, subject DESC` order for candidates; it never enumerates or updates the superseded open members of a reminder group. At most seven live headers and one subject-keyed pending row are touched per desired deletion, independent of group size. The pending row retains the old reminder and recipient for bounded durable reconciliation. A fresh page therefore never shows a removed declaration, even before the transaction's flush.
 
-A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). A read that hears a host's close queues it without waiting for the writer; a background writer records at most 64 per transaction, and its insert trigger adds a pending row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
+A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). Daemon-owned maintenance discovers remote closes independently of GETs. Relevant selector, recipient ownership and daemon-feature changes enqueue durable host/recipient/message keys in `local_relayed_close_work`; bounded indexed seeks update only the affected candidates. An unchanged open answer consumes its key and is not periodically rediscovered. Settlement reads host-owned seats through the declared-member host index, not the full desired population. A background writer records at most 64 closes per transaction; discovery waits for each bounded page to settle before admitting more, and its insert trigger adds a pending selector row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
+
+Hosts advertising `message_mark_events: 1` expose authenticated long-poll event pages through the seat-freshness relay. Indexed graph-mark, held-message, recipient-ownership and shard-lifecycle changes return message or consumer keys. Empty transport keepalives do not rebuild message answers or rerun discovery. An initial cursor, daemon restart or retained-event gap resets only that host's local candidate set. Disconnected subscriptions reconnect with network backoff, not a discovery interval. During mixed-version operation, only hosts lacking this capability retain a 30-second compatibility schedule: it seeks their already indexed pending message candidates, never rebuilds the relay-host mapping or scans other hosts. Upgrading a host replaces this compatibility arm with its event subscription. Remove the arm once every active relay host advertises the feature and `legacy_peer_discovery_passes` stays zero. `/v1/performance` exports `relayed_close_work.discovery_passes`, `candidate_messages`, `remote_event_pages`, `remote_changed_messages` and `legacy_peer_discovery_passes`; unchanged inputs with capable peers must add zero discovery passes and candidate messages.
+
+Discovery retains a durable read job until a successful marks answer. A failed remote read schedules an explicit exponential network retry deadline (one to sixty seconds), independent of the event subscription. Successful terminal answers commit to `local_relayed_message_closes_pending` before their read jobs are acknowledged; final recording and pending-evidence deletion share a transaction. A local writer failure retains that evidence across restart, surfaces an error, and suspends maintenance until actual committed writer recovery; it never starts a local-failure retry timer. Event cursors advance only after their local changed-key admission succeeds.
 
 The seventh source-change trigger, `client_selector_repair`, watches `replica_records` updates of `state` and `replacement_claim_id`. A message claim newly marked `repaired`, or already repaired with a changed replacement claim, queues a full selector fold and a destructive quarantine marker. The paired epoch trigger invalidates previously issued cuts for both initial repair and replacement reselection.
 
@@ -844,6 +848,17 @@ impl Registry {
         effects::validate(kind, subject, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
+        }
+        if kind == "harness.model-fallback.observed" {
+            let bounded = |name: &str| fields.get(name).and_then(Value::as_str).is_some_and(|text|
+                !text.is_empty() && text.len() <= 256 && text.bytes().all(|byte|
+                    byte.is_ascii_alphanumeric() || b"-_./:@+".contains(&byte)));
+            if !["incarnation_id", "native_session", "source_event", "episode_id", "to"].into_iter().all(bounded)
+                || (fields.get("observation").and_then(Value::as_str) == Some("applied")
+                    && (!bounded("from") || !fields.contains_key("cause")))
+            {
+                return Err(error("invalid-model-fallback", "model fallback requires bounded native provenance and sanitized cause"));
+            }
         }
         usage_limits::validate(subject, kind, fields)?;
         if kind == "terminal.launch-geometry" {
@@ -1797,6 +1812,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "harness.model-fallback.observed",
+            &["agent"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
             "harness.inventory.observed",
             &["agent"],
             WritePolicy::SameSubjectActor,
@@ -2112,6 +2136,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["revision"],
         ),
         (
+            "step.execution-phase",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &["step"],
+        ),
+        (
             "step-run.state",
             &["step-run"],
             WritePolicy::SystemOnly,
@@ -2281,6 +2314,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::AuthorizedParticipant,
             Cardinality::Append,
             Some("work"),
+            true,
+            &[],
+        ),
+        (
+            "work.rebound",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("step-runs"),
             true,
             &[],
         ),
@@ -3937,6 +3979,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("successor", reference()),
         ],
+        "step.execution-phase" => &[
+            ("attempt", required_integer()),
+            ("phase", required_enum(&[
+                "dispatched", "received", "admitted", "exec-started", "exec-exited",
+                "result-replicated", "dispatch-stalled", "execution-timeout",
+            ])),
+            ("exec", required_string()),
+            ("at_unix_ms", required_integer()),
+            ("host", required_string()),
+            ("reason", string()),
+            ("incarnation_id", string()),
+            ("start_operation", string()),
+            ("timeout_extension_ms", integer()),
+        ],
         "step-run.state" => &[
             ("status", string()),
             ("reason", string()),
@@ -4056,6 +4112,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("handoff_to", reference()),
             ("handoff_message", reference()),
             ("handoff_acknowledged", reference()),
+        ],
+        "work.rebound" => &[
+            ("attempt", integer()),
+            ("claimant", reference()),
+            ("from_incarnation", string()),
+            ("to_incarnation", string()),
+            ("session_id", string()),
+            ("harness", string()),
         ],
         "work.nudged" => &[
             ("attempt", integer()),
@@ -4496,6 +4560,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source_host", string()),
             ("rollout", object()),
             ("operation", string()),
+            ("model_return_attempt", integer()),
             ("runtime_id", string()),
             ("terminal", boolean()),
             ("incarnation_id", string()),
@@ -4544,7 +4609,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_code", integer()),
             ("exit_signal", integer()),
             ("exit_evidence", object()),
+            ("exec_exited_at_unix_ms", integer()),
             ("incarnation_id", string()),
+            ("start_operation", string()),
             ("workspace", FieldSpec { nullable: true, ..string() }),
             ("restarting_from", string()),
             ("adopted", boolean()),
@@ -4865,6 +4932,18 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("result_digest", string()),
             ("error", string()),
             ("evidence", array()),
+        ],
+        "harness.model-fallback.observed" => &[
+            ("observation", required_enum(&["applied", "selected"])),
+            ("cause", enumeration(&["transient", "quota", "auth", "unknown"])),
+            ("from", string()),
+            ("to", required_string()),
+            ("native_session", required_string()),
+            ("source_event", required_string()),
+            ("episode_id", required_string()),
+            ("incarnation_id", required_string()),
+            ("observed_at_unix_ms", required_integer()),
+            ("reason", required_enum(&["native-retry-fallback", "native-model-selection"])),
         ],
         "harness.timeline" => &[
             (
@@ -5703,6 +5782,7 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        current.claims.remove("work.rebound").unwrap();
         for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
             current.claims.remove(kind).unwrap();
         }
@@ -5739,11 +5819,13 @@ mod tests {
         current.subjects.remove("notice-owner").unwrap();
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("step.execution-phase").unwrap();
         current.claims.remove("program.turn.report").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
         current.claims.remove("harness.invocation-artifact").unwrap();
+        current.claims.remove("harness.model-fallback.observed").unwrap();
         for kind in [effects::KIND_INTENDED, effects::KIND_IN_FLIGHT, effects::KIND_CONFIRMED, effects::KIND_UNRESOLVED] {
             current.claims.remove(kind).unwrap();
         }
@@ -5778,6 +5860,7 @@ mod tests {
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("model_return_attempt").unwrap();
         for field in ["idle_declaration", "idle_after_ms", "idle_enabled_at_unix_ms",
             "idle_eligible_since_unix_ms", "idle_frontier", "suspend_operation_id",
             "idle_wake_lineage", "idle_wake_attempt"] {
@@ -5788,7 +5871,7 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        for field in ["exit_evidence", "workspace"] {
+        for field in ["exit_evidence", "exec_exited_at_unix_ms", "start_operation", "workspace"] {
             current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
         }
         for field in ["host", "dispatch"] {

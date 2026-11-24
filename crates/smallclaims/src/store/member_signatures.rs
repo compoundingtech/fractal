@@ -4,7 +4,7 @@
 //! sequence and the claim id (`fleet::keys::claim_signature_message`). The claim id already
 //! hashes the claim's content and its batch, so the signature binds both.
 //!
-//! A writer signs its own claims in a paced background pass, the new ones and those it held
+//! A writer signs its own claims in a commit-driven background pass, the new ones and those it held
 //! before this build (`sign_own_claims`). Signatures travel beside the claims in an exchange's
 //! `claim_member_signatures`. A member keeps one only after it verifies with a key the membership
 //! window admits for that writer and sequence, and only for a claim whose batch names that writer
@@ -14,7 +14,24 @@
 //! peer ignores the field.
 use super::*;
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h88bdbfc1cdaf owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
+static SIGN_PAGES: AtomicU64 = AtomicU64::new(0);
+static SIGN_CANDIDATES: AtomicU64 = AtomicU64::new(0);
+static PROMOTE_PAGES: AtomicU64 = AtomicU64::new(0);
+static PROMOTE_CANDIDATES: AtomicU64 = AtomicU64::new(0);
+static WAKES: AtomicU64 = AtomicU64::new(0);
+
+/// Process-lifetime work counts, exported without a top-N cutoff.
+pub fn work_counts() -> serde_json::Value {
+    serde_json::json!({
+        "signing_pages": SIGN_PAGES.load(Ordering::Relaxed),
+        "signing_candidates": SIGN_CANDIDATES.load(Ordering::Relaxed),
+        "promotion_pages": PROMOTE_PAGES.load(Ordering::Relaxed),
+        "promotion_candidates": PROMOTE_CANDIDATES.load(Ordering::Relaxed),
+        "commit_wakes": WAKES.load(Ordering::Relaxed),
+    })
+}
+
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2079ddca5029 owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS claim_member_signatures (
     id INTEGER PRIMARY KEY,
     claim_id TEXT NOT NULL,
@@ -33,12 +50,46 @@ CREATE TABLE IF NOT EXISTS claim_member_signature_pending (
     PRIMARY KEY(claim_id, member_key)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS claim_member_signature_pending_peer ON claim_member_signature_pending(peer);
+CREATE INDEX IF NOT EXISTS claim_member_signature_pending_expiry ON claim_member_signature_pending(received_at_unix_ms);
+CREATE TABLE IF NOT EXISTS claim_signature_frontiers (
+    origin TEXT PRIMARY KEY,
+    through INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS claim_signature_ready (
+    claim_id TEXT NOT NULL,
+    member_key TEXT NOT NULL,
+    PRIMARY KEY(claim_id, member_key)
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS claim_signature_claim_insert AFTER INSERT ON claims BEGIN
+    UPDATE claim_signature_frontiers SET through=through+1 WHERE origin=NEW.origin;
+    INSERT INTO claim_signature_frontiers(origin,through)
+    SELECT NEW.origin,NEW.store_index
+    WHERE NOT EXISTS(SELECT 1 FROM claim_signature_frontiers WHERE origin=NEW.origin);
+    INSERT INTO claim_signature_ready
+    SELECT pending.claim_id,pending.member_key FROM claim_member_signature_pending AS pending
+    WHERE pending.claim_id=NEW.id AND NOT EXISTS(
+        SELECT 1 FROM claim_signature_ready AS ready
+        WHERE ready.claim_id=pending.claim_id AND ready.member_key=pending.member_key);
+END;
+CREATE TRIGGER IF NOT EXISTS claim_signature_pending_insert AFTER INSERT ON claim_member_signature_pending BEGIN
+    INSERT INTO claim_signature_ready SELECT NEW.claim_id,NEW.member_key
+    WHERE NOT EXISTS(SELECT 1 FROM claim_signature_ready
+        WHERE claim_id=NEW.claim_id AND member_key=NEW.member_key);
+END;
+CREATE TRIGGER IF NOT EXISTS claim_signature_pending_delete AFTER DELETE ON claim_member_signature_pending BEGIN
+    DELETE FROM claim_signature_ready WHERE claim_id=OLD.claim_id AND member_key=OLD.member_key;
+END;
+CREATE TRIGGER IF NOT EXISTS claim_signature_fleet_insert AFTER INSERT ON meta WHEN NEW.key='fleet_id' BEGIN
+    UPDATE claim_signature_frontiers SET through=through+1;
+END;
+INSERT INTO claim_signature_frontiers SELECT origin,MAX(store_index) FROM claims GROUP BY origin
+ON CONFLICT(origin) DO UPDATE SET through=MAX(through,excluded.through);
+INSERT OR IGNORE INTO claim_signature_ready SELECT claim_id,member_key FROM claim_member_signature_pending;
 ";
 
 const SIGN_CURSOR: &str = "claim_member_signature_cursor";
 const SIGN_PAGE: usize = 512;
 const PROMOTE_PAGE: usize = 512;
-const PENDING_CURSOR: &str = "claim_member_signature_pending_cursor";
 /// The most signatures one peer may have waiting here, and the most in all. A member writes a
 /// few thousand claims a day, so a real backlog stays far below these; past them a signature is
 /// refused and counted (`REFUSED`), never by evicting one that waits.
@@ -83,6 +134,80 @@ pub struct OwnClaimSigning {
 }
 
 impl Store {
+    pub(super) fn wake_claim_signatures(&self) -> Result<()> {
+        self.connection.batched({
+            let origin = self.origin.clone();
+            move |tx| -> Result<()> {
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hde426671a84f owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_signature_frontiers(origin,through) VALUES(?1,1)
+                    ON CONFLICT(origin) DO UPDATE SET through=through+1", [origin])?;
+                Ok(())
+            }
+        }).map_err(anyhow::Error::msg)??;
+        Ok(())
+    }
+
+    /// Register before replaying the durable cursors/ready keys. A commit racing replay
+    /// remains in the watch channel; only this origin's frontier or ready pending keys wake it.
+    pub fn subscribe_claim_signatures(&self) -> (crate::sqlite::CommitObserver, tokio::sync::watch::Receiver<()>) {
+        let (sender, receiver) = tokio::sync::watch::channel(());
+        let origin = self.origin.clone();
+        let initial = self.readers.get().query_row(
+            "SELECT through FROM claim_signature_frontiers WHERE origin=?1", [&origin],
+            |row| row.get::<_, i64>(0),
+        ).optional().ok();
+        let mut_frontier = std::sync::Mutex::new(initial);
+        let observer = self.observe_tables(&["claim_signature_frontiers", "claim_signature_ready"], move |connection| {
+            let frontier = connection.query_row(
+                "SELECT through FROM claim_signature_frontiers WHERE origin=?1", [&origin],
+                |row| row.get::<_, i64>(0),
+            ).optional();
+            let ready = connection.query_row("SELECT EXISTS(SELECT 1 FROM claim_signature_ready)", [], |row| row.get::<_, bool>(0));
+            let mut previous = mut_frontier.lock().unwrap_or_else(PoisonError::into_inner);
+            match (frontier, ready) {
+                (Ok(frontier), Ok(ready)) => {
+                    if *previous != Some(frontier) || ready {
+                        WAKES.fetch_add(1, Ordering::Relaxed);
+                        sender.send_replace(());
+                    }
+                    *previous = Some(frontier);
+                }
+                _ => { sender.send_replace(()); }
+            }
+        });
+        (observer, receiver)
+    }
+    /// Earliest real retention deadline; the index avoids rediscovering waiting signatures.
+    pub fn claim_signature_expiry(&self) -> Result<Option<u128>> {
+        let received: Option<i64> = self.readers.get().query_row(
+            "SELECT MIN(received_at_unix_ms) FROM claim_member_signature_pending", [], |row| row.get(0),
+        )?;
+        Ok(received.map(|received| received.max(0) as u128 + PENDING_KEEP_MS + 1))
+    }
+
+    pub fn expire_claim_signatures(&self) -> Result<()> {
+        if self.claim_signature_expiry()?.is_none_or(|deadline| deadline > now_ms()) {
+            return Ok(());
+        }
+        let cutoff = i64::try_from(now_ms().saturating_sub(PENDING_KEEP_MS))?;
+        self.connection.batched(move |tx| -> Result<()> {
+            // A claim can arrive after a promotion page, or wait behind that page.
+            // Check absence in this same transaction: retention never discards an
+            // authenticatable signature merely because its ready page ran later.
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h7885c75a64e0 owner=smallclaims::store::member_signatures TODO=prepare-body-and-predecessor-values */ "DELETE FROM claim_member_signature_pending WHERE (claim_id,member_key) IN
+                (SELECT claim_id,member_key FROM claim_member_signature_pending
+                 WHERE received_at_unix_ms < ?1 ORDER BY received_at_unix_ms LIMIT ?2)
+                AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.id=claim_member_signature_pending.claim_id)",
+                params![cutoff, PROMOTE_PAGE])?;
+            Ok(())
+        }).map_err(anyhow::Error::msg)??;
+        Ok(())
+    }
+
+    pub fn claim_signatures_ready(&self) -> Result<bool> {
+        Ok(self.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claim_signature_ready)", [], |row| row.get(0))?)
+    }
+
+
     /// Sign one page of this writer's own claims that have no writer signature yet, in claim
     /// order. The page is read and signed outside the writer and stored in one short write; the
     /// cursor commits with it. A store without a member key or fleet signs nothing.
@@ -116,6 +241,8 @@ impl Store {
             (fleet_id, after, page)
         };
         let mut report = OwnClaimSigning { scanned: page.len(), done: page.is_empty(), ..Default::default() };
+        SIGN_PAGES.fetch_add(1, Ordering::Relaxed);
+        SIGN_CANDIDATES.fetch_add(page.len() as u64, Ordering::Relaxed);
         let through = page.last().map_or(after, |row| row.0);
         let signatures: Vec<ClaimMemberSignature> = page
             .into_iter()
@@ -270,11 +397,9 @@ impl Store {
     /// those older than a month whose claim never came. One bounded page; returns how many it
     /// settled.
     pub fn promote_claim_member_signatures(&self) -> Result<usize> {
-        // Nothing waits on an idle member: look before taking the writer.
+        // Durable changed keys are consumed once, even when their claims have not arrived.
         let waiting: bool = self.readers.get().query_row(
-            "SELECT EXISTS(SELECT 1 FROM claim_member_signature_pending)",
-            [],
-            |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM claim_signature_ready)", [], |row| row.get(0),
         )?;
         if !waiting {
             return Ok(0);
@@ -284,34 +409,24 @@ impl Store {
         let membership = fleet_membership_tx(&self.readers.get())?;
         self.connection
             .batched(|tx| -> Result<usize> {
-                // A cursor moves through the waiting rows and wraps, so rows whose claims have not
-                // arrived do not hide the rows behind them.
-                let after: (String, String) = tx
-                    .query_row("SELECT value FROM meta WHERE key=?1", [PENDING_CURSOR], |row| row.get::<_, String>(0))
-                    .optional()?
-                    .and_then(|value| value.split_once('\n').map(|(a, b)| (a.to_owned(), b.to_owned())))
-                    .unwrap_or_default();
-                let page = tx
-                    .prepare_cached(
-                        "SELECT claim_id, writer, sequence, member_key, signature, received_at_unix_ms
-                         FROM claim_member_signature_pending WHERE (claim_id, member_key) > (?2, ?3)
-                         ORDER BY claim_id, member_key LIMIT ?1",
-                    )?
-                    .query_map(params![PROMOTE_PAGE, after.0, after.1], |row| {
-                        Ok((
-                            ClaimMemberSignature {
-                                claim_id: row.get(0)?,
-                                writer: row.get(1)?,
-                                sequence: row.get(2)?,
-                                member_key: row.get(3)?,
-                                signature: row.get(4)?,
-                            },
-                            row.get::<_, i64>(5)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let page = tx.prepare_cached(
+                    "SELECT pending.claim_id, pending.writer, pending.sequence, pending.member_key,
+                            pending.signature, pending.received_at_unix_ms
+                     FROM claim_signature_ready AS ready
+                     JOIN claim_member_signature_pending AS pending USING(claim_id,member_key)
+                     ORDER BY ready.claim_id,ready.member_key LIMIT ?1",
+                )?.query_map([PROMOTE_PAGE], |row| {
+                    Ok((ClaimMemberSignature {
+                        claim_id: row.get(0)?, writer: row.get(1)?, sequence: row.get(2)?,
+                        member_key: row.get(3)?, signature: row.get(4)?,
+                    }, row.get::<_, i64>(5)?))
+                })?.collect::<rusqlite::Result<Vec<_>>>()?;
+                PROMOTE_PAGES.fetch_add(1, Ordering::Relaxed);
+                PROMOTE_CANDIDATES.fetch_add(page.len() as u64, Ordering::Relaxed);
                 let mut settled = 0;
                 for (signature, received) in &page {
+                    tx.execute(/* sqlite-large-value: allow-for-now lv-h138e91033c5a owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_ready WHERE claim_id=?1 AND member_key=?2",
+                        params![signature.claim_id, signature.member_key])?;
                     let decided = match claim_writer_tx(tx, &signature.claim_id)? {
                         // The claim has arrived, and with it its writer's admission if there is
                         // one: keep the signature only if that writer's key is the one admitted.
@@ -335,11 +450,7 @@ impl Store {
                         settled += 1;
                     }
                 }
-                let next = page.last().map_or_else(String::new, |(last, _)| format!("{}\n{}", last.claim_id, last.member_key));
-                tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-hc4a49862daba owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![PENDING_CURSOR, next],
-                )?;
+                // Undecidable keys leave the ready queue until their claim arrives.
                 Ok(settled)
             })
             .map_err(anyhow::Error::msg)?

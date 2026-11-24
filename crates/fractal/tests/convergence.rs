@@ -67,7 +67,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v42.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v45.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -85,7 +85,7 @@ fn keyed_only(kind: &str) -> bool {
 #[test]
 fn the_current_corpus_matches_the_registry() {
     assert_eq!(
-        include_str!("../../../fixtures/convergence/claims-v42.json"),
+        include_str!("../../../fixtures/convergence/claims-v45.json"),
         serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
         "regenerate the active corpus with the owning fractal-schema claim_corpus example"
     );
@@ -116,6 +116,26 @@ fn the_corpus_generates_valid_native_continuity_inputs() {
             if field.required {
                 assert!(input.fields.contains_key(name), "{kind} requires {name}");
             }
+        }
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_step_execution_phase_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["step.execution-phase", "runtime.observed"] {
+        assert_eq!(
+            serde_json::to_value(&corpus()[kind]).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current execution evidence fields"
+        );
+    }
+    let spec = &corpus()["step.execution-phase"];
+    let input = world.claim_of(spec, 0).expect("generate step execution phase input");
+    fractal_schema::registry().validate_claim(&input.subject, &input.kind, &input.fields).unwrap();
+    for (name, field) in &spec.fields {
+        if field.required {
+            assert!(input.fields.contains_key(name), "step.execution-phase requires {name}");
         }
     }
 }
@@ -179,6 +199,18 @@ fn the_corpus_generates_valid_deployment_inputs() {
         fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         world.nodes[0].store.append_claim(&input).unwrap();
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_native_model_fallback_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(&corpus()["harness.model-fallback.observed"], 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
 }
 
 #[test]
@@ -294,6 +326,26 @@ fn the_corpus_generates_valid_native_admission_inputs() {
     for id in written {
         assert!(replicated.contains_key(&id), "native admission evidence {id} must replicate");
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_work_rebound_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let kind = "work.rebound";
+    let spec = &corpus()[kind];
+    assert_eq!(serde_json::to_value(spec).unwrap(),
+        serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+    let input = world.claim_of(spec, 0).expect("generate work rebound evidence");
+    fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+    assert_eq!(input.fields["attempt"], 1);
+    assert!(input.fields["claimant"].as_str().unwrap().starts_with("agent/"));
+    assert_ne!(input.fields["from_incarnation"], input.fields["to_incarnation"]);
+    assert!(!input.fields["session_id"].as_str().unwrap().is_empty());
+    assert_eq!(input.fields["harness"], "codex");
+    let claim = world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    assert!(claims(&world.oracle).contains_key(&claim.id), "work rebound evidence must replicate");
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -1069,6 +1121,42 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == "harness.model-fallback.observed" {
+            let subject = self.subject_of("agent", index)?;
+            let event = self.fresh("model-fallback");
+            return Some(ClaimInput {
+                actor: Some(subject.clone()), subject, kind: spec.kind.clone(),
+                fields: BTreeMap::from([
+                    ("observation".into(), json!("applied")),
+                    ("cause".into(), json!("transient")),
+                    ("from".into(), json!("openai/gpt-5")),
+                    ("to".into(), json!("anthropic/claude-sonnet-4-5")),
+                    ("native_session".into(), json!("convergence-session")),
+                    ("source_event".into(), json!(event)),
+                    ("episode_id".into(), json!(event)),
+                    ("incarnation_id".into(), json!("convergence-incarnation")),
+                    ("observed_at_unix_ms".into(), json!(self.clock(index))),
+                    ("reason".into(), json!("native-retry-fallback")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(event),
+            });
+        }
+        if spec.kind == "work.rebound" {
+            let id = self.fresh("rebound");
+            return Some(ClaimInput {
+                subject: self.subject_of("step-run", index)?,
+                kind: spec.kind.clone(), actor: None,
+                fields: BTreeMap::from([
+                    ("attempt".into(), json!(1)),
+                    ("claimant".into(), json!(self.subject_of("agent", index)?)),
+                    ("from_incarnation".into(), json!(format!("{id}-before"))),
+                    ("to_incarnation".into(), json!(format!("{id}-after"))),
+                    ("session_id".into(), json!(format!("{id}-native-session"))),
+                    ("harness".into(), json!("codex")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(id),
+            });
+        }
         if spec.kind == "custom.client.observation-minute" {
             let source = "person/operator/device/phone";
             let start_ms = (self.clock(index).max(60_000) as u64 / 60_000 - 1) * 60_000;
@@ -2225,7 +2313,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 /// are historical and recorded in fixtures/convergence/README.md.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v42 seed {seed}: retired={}", outcome.trimmed);
+    eprintln!("convergence corpus v44 seed {seed}: retired={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2433,7 +2521,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v42.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v45.json"
         }))
         .unwrap(),
     )

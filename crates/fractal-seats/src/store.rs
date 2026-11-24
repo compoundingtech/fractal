@@ -200,22 +200,43 @@ const RETIRED_OWNED_INTAKE_SUBJECTS: &str = "SELECT desired.subject
        )
      ORDER BY desired.subject";
 
-/// The local rows a roster card can read: timeline entries an agent subject made, which date its
-/// activity and its managed session. Heartbeat and telemetry observations never change a card —
-/// the harness fold, working episodes, usage summaries and todos all read replicated claims —
-/// and neither do `Latest` observations, which reach cards only through the claims written when
-/// their state changes. So the frontier is the newest agent timeline row at or before the cut,
-/// an exact `MAX(id)`: it never assumes observation ids and graph cuts rise together, which
-/// repair and trim can break.
-const ROSTER_LOCAL_FRONTIER: &str = "SELECT COALESCE((SELECT id FROM local_observations
- WHERE kind='harness.timeline' AND subject LIKE 'agent/%' AND after_store_index<=?1
- ORDER BY id DESC LIMIT 1), 0)";
+/// Every appended observation advances this snapshot token, including a usage repeat that
+/// clears a pending slot. MAX(id) uses the existing INTEGER PRIMARY KEY endpoint, not a
+/// filtered backwards walk. The delta query below decides which cards actually need refolding.
+const ROSTER_LOCAL_FRONTIER: &str =
+    "SELECT COALESCE(MAX(id), 0) FROM local_observations WHERE ?1>=0";
 
-/// One frontier read, inside the caller's SQLite snapshot when it holds one: the reader pool
-/// lends pinned reads the same connection. The partial frontier index keeps an old cut from
-/// walking newer heartbeat rows.
+/// Read inside the caller's SQLite snapshot. The graph cut remains a delta predicate, not a
+/// frontier predicate: even an observation beyond that cut conservatively changes the token.
 pub fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64> {
     Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h6ec3fa9174f4 owner=fractal_seats::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [index], |row| row.get::<_, u64>(0))?)
+}
+
+/// Seek only observations appended since the cached token. Reading the append interval, rather
+/// than current pending slots, retains clear/replace/repeat transitions after a slot disappears.
+/// Heartbeats and response/subagent spend change the token but refold no cards.
+const ROSTER_LOCAL_CHANGED_SUBJECTS: &str =
+    "SELECT subject FROM local_observations NOT INDEXED
+     WHERE id>?1 AND id<=?2 AND after_store_index<=?3 AND subject LIKE 'agent/%'
+       AND (kind='harness.timeline' OR (kind='harness.usage'
+         AND json_extract(body, '$.fields.semantics') IN ('context_occupancy','session_cumulative')))";
+
+/// Read-only pins may reuse rows across an irrelevant append interval. Bound the work under
+/// the pin; larger intervals use the normal incremental builder instead.
+fn roster_local_unchanged(
+    connection: &Connection,
+    before: u64,
+    after: u64,
+    index: u64,
+) -> Result<bool> {
+    if before == after {
+        return Ok(true);
+    }
+    if before > after || after - before > 256 {
+        return Ok(false);
+    }
+    Ok(!connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbf7fc60867bd owner=fractal_seats::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS)?
+        .exists(params![before, after, index])?)
 }
 
 /// The subjects whose claims an agent card reads: its agent, the runs, generations and steps that
@@ -299,8 +320,6 @@ pub trait SeatsStoreCore {
             run: &str,
             generation: &str,
         ) -> Result<BTreeSet<String>>;
-    /// The desired subjects named in `subjects`, by their primary keys.
-    fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>>;
     /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
     /// only typed edges; this resolves them through the ordinary desired resource subjects.
     fn declared_resource_uris<'a>(
@@ -439,21 +458,6 @@ impl SeatsStoreCore for Store {
             .collect())
     }
 
-    fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>> {
-        for subject in subjects {
-            smallclaims::touched::note_read(|| subject.clone());
-        }
-        if subjects.is_empty() {
-            return Ok(Vec::new());
-        }
-        let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
-            "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
-             FROM desired WHERE subject IN (SELECT value FROM json_each(?1)) ORDER BY subject",
-        )?;
-        let rows = statement.query_map([serde_json::to_string(subjects)?], desired_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
 }
 
 

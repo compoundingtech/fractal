@@ -16,6 +16,90 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn simulated_mail_retirement_advances_the_signed_claim_forget_clock() {
+    use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    store.bind_fleet("7b6c5d4e-3f20-4b1c-8d9e-0f1a2b3c4d5e").unwrap();
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    // Always exercise the signed-claim guard, even before its calendar activation.
+    let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
+    store.set_write_clock_at(written).unwrap();
+    let mut ids = Vec::new();
+    for kind in ["message.sent", "message.delivered", "message.read", "message.closed"] {
+        ids.push(store.append_claim(&crate::model::ClaimInput {
+            subject: "message/retirement-clock".into(),
+            kind: kind.into(),
+            actor: Some(if kind == "message.sent" { "agent/retirement-sender" } else { "agent/retirement-reader" }.into()),
+            fields: serde_json::from_value(if kind == "message.sent" {
+                json!({
+                    "from": "agent/retirement-sender", "to": "agent/retirement-reader",
+                    "content": "signed retirement clock", "status": "sent",
+                })
+            } else {
+                json!({"status": kind.trim_start_matches("message.")})
+            }).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap().id);
+    }
+    store.seal_local_batches().unwrap();
+    assert!(ids.iter().all(|id| store.claim_signature(id).unwrap().is_some()));
+    let later = u64::try_from(written).unwrap() + FORGET_SIGNED_AFTER_MS + 1;
+    let step = store.retire_closed_mail_step(later).unwrap();
+    assert_eq!(step.threads, 0, "the write-clock backstop must still protect fresh signatures");
+    assert!(ids.iter().all(|id| store.claim_by_id(id).unwrap().is_some()));
+    store.set_write_clock_offset(0).unwrap();
+
+    let Json(retired) = test_retire_closed_mail(
+        State(state.clone()), Json(TestMailRetirement { now_ms: later }),
+    ).await.unwrap();
+    assert_eq!(retired, json!({"threads": 1, "claims": 4}));
+    assert!(ids.iter().all(|id| store.claim_by_id(id).unwrap().is_none()));
+    // The simulated deletion must not move the daemon's shared writer clock.
+    let clock: (i64, Option<i64>) = store.connection.write().query_row(
+        "SELECT offset_ms, at_ms FROM temp.write_clock", [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(clock, (0, None));
+}
+
+#[tokio::test]
+async fn performance_exports_native_writer_work_counts() {
+    let root = tempfile::tempdir().unwrap();
+    let (status, report) = get_request(router(state(root.path())), "/v1/performance").await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["mailbox_streams"]["open_streams"], 0);
+    assert_eq!(report["mailbox_streams"]["streams"], json!([]));
+    for counter in [
+        "boundaries", "noops", "rollbacks", "index_refreshes",
+        "global_evaluations", "scoped_evaluations",
+    ] {
+        assert!(report["writer_observers"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+    for counter in ["builds", "card_rebuilds", "largest_fold", "presentations", "fault_enrichments", "ref_enrichments"] {
+        assert!(report["agent_roster_work"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+    assert!(report["agent_roster_presentation_work"]["card_rebuilds"].as_u64().is_some(), "{report}");
+    for counter in ["cards_presented", "cards_enriched", "subjects_rebuilt", "groups_rebuilt", "prompt_reads", "fleet_agent_inputs"] {
+        assert!(report["attention_work"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+    for counter in ["mission_subject_rebuilds", "agent_subject_rebuilds", "machine_subject_rebuilds"] {
+        assert!(report["summary_work"][counter].as_u64().is_some(), "{counter}: {report}");
+    }
+    for counter in [
+        "discovery_passes", "candidate_messages", "remote_event_pages",
+        "remote_changed_messages", "legacy_peer_discovery_passes",
+    ] {
+        assert_eq!(report["relayed_close_work"][counter].as_u64(), Some(0), "{counter}: {report}");
+    }
+    for collection in ["work", "missions", "runtimes"] {
+        assert_eq!(report["published_list_work"][collection]["refolded"], 0, "{collection}: {report}");
+    }
+}
+
 #[test]
 fn worker_authorization_warning_is_process_wide_and_rate_limited() {
     let now = std::time::Instant::now();
@@ -494,7 +578,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), None, |_, _| HarnessAncestry::Bound("agent/example".into()),
+        reserved, router(state), Some(store.clone()), None, None, |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -546,7 +630,7 @@ async fn scratch_clients_under_program_ancestry_publish_only_as_their_explicit_a
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state.clone()), Some(store.clone()), None, harness_ancestor,
+        reserved, router(state.clone()), Some(store.clone()), None, None, harness_ancestor,
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -611,7 +695,7 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             WorkerAuthority::new("test-replication.service", || Ok(std::process::id()))
         });
         let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
-            reserved, app, Some(state.store), authority, lookup,
+            reserved, app, Some(state.store), authority, None, lookup,
             move || { let _ = ready.send(()); },
         ));
         waiting.await.unwrap();
@@ -659,7 +743,7 @@ async fn leave_state_read_admits_unreadable_ancestor_without_granting_actor_auth
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
-        reserved, router(state.clone()), Some(state.store), None,
+        reserved, router(state.clone()), Some(state.store), None, None,
         |_, _| with_process_fixture(
             std::process::Command::new("sh").args(["-c", "echo $$; read answer"]),
             |pid| {
@@ -2503,6 +2587,56 @@ fn a_stream_items_delivery_is_unknown_while_its_seat_runs_on_another_host() {
     let graph = store.append_claim(&message("message/00000000000000d3", "agent/example/far")).unwrap();
     let graph_mail = delivery(&graph.subject, graph.accepted_at_unix_ms);
     assert_eq!((&graph_mail["state"], &graph_mail["phase"]), (&json!("pending"), &json!("sent")), "{graph_mail}");
+}
+
+#[test]
+fn message_delivery_reports_stopped_recipients_until_they_start() {
+    let store = Store::open_memory("stopped-recipient-delivery").unwrap();
+    let seat = "agent/stopped-recipient";
+    let append = |subject: &str, kind: &str, fields: Value| {
+        store.append_client_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(seat.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    let sent = append("message/stopped-recipient", "message.sent", json!({
+        "from": "person/sender", "to": seat, "content": "waiting for startup", "status": "sent"
+    }));
+    let message = store.message(&sent.subject).unwrap().unwrap();
+    let at = sent.accepted_at_unix_ms;
+    let delivery = |message: &MessageView| message_delivery_for(&store, message, at, at, None).unwrap();
+    // No observation is not evidence that the recipient has stopped.
+    assert_eq!(delivery(&message)["state"], "pending");
+    for status in ["stopped", "exited", "absent"] {
+        append(seat, "runtime.observed", json!({"status": status}));
+        for phase in ["sent", "staged"] {
+            let mut queued = message.clone();
+            queued.status = phase.into();
+            let waiting = delivery(&queued);
+            assert_eq!(waiting["state"], "waiting");
+            assert_eq!(waiting["phase"], phase);
+            assert_eq!(waiting["reason"], "recipient stopped; queued message will be delivered when it starts");
+        }
+        // Accepted/read messages keep their receipt, even after the recipient stops.
+        for phase in ["delivered", "read", "closed"] {
+            let mut accepted = message.clone();
+            accepted.status = phase.into();
+            let accepted = delivery(&accepted);
+            assert_eq!(accepted["phase"], phase);
+            assert!(!accepted["reason"].as_str().unwrap().contains("recipient stopped"));
+        }
+    }
+    let resources = client_message_resources_at(&store, None, false, Some(seat), at).unwrap();
+    assert_eq!(resources[0]["delivery"], delivery(&message));
+    let rows = store.client_messages_page(None, Some(seat), false, store.index().unwrap(), None, 20).unwrap();
+    let (view, metadata, current) = rows.into_iter().next().unwrap();
+    let resource = client_message_resource(&store, view, &metadata, current, at).unwrap();
+    assert_eq!(resource["delivery"], delivery(&message));
+    append(seat, "runtime.observed", json!({"status": "running", "incarnation_id": "next"}));
+    let running = delivery(&message);
+    assert_eq!(running["state"], "pending");
+    assert_eq!(running["reason"], "waiting for delivery; the durable message remains queued");
 }
 
 #[test]
@@ -10297,6 +10431,40 @@ fn roster_claims_fixture() -> RosterClaimsFixture {
     fixture
 }
 
+#[test]
+fn agent_roster_production_work_counts_only_changed_card_enrichment() {
+    let _clock = RosterFixtureClock::at(1_900_000_000_000);
+    let fixture = roster_claims_fixture();
+    let store = &fixture.store;
+    let read = || store.read_snapshot(|index| {
+        client_agent_resources_cached(store, false, index)
+    }).unwrap();
+    let original = read();
+    let warm = store.agent_roster_work();
+    assert_eq!(read(), original);
+    assert_eq!(store.agent_roster_work(), warm);
+
+    roster_fixture_append(store, &fixture.subjects[0], "harness.todo.observed",
+        roster_fixture_todo(0, 1));
+    let changed = read();
+    let after = store.agent_roster_work();
+    for field in ["builds", "card_rebuilds", "presentations", "fault_enrichments", "ref_enrichments"] {
+        assert_eq!(after[field].as_u64().unwrap(), warm[field].as_u64().unwrap() + 1,
+            "{field}: a changed agent enriches exactly one card");
+    }
+    for row in &original {
+        if row["id"] != fixture.subjects[0] {
+            assert_eq!(changed.iter().find(|new| new["id"] == row["id"]).unwrap(), row);
+        }
+    }
+
+    roster_fixture_append(store, "daemon/fixture", "daemon.diagnostic",
+        json!({"code":"fixture","severity":"warning","reason":"Unrelated roster input."}));
+    assert_eq!(read(), changed);
+    assert_eq!(store.agent_roster_work(), after,
+        "an unrelated commit must not fold, present, enrich faults or resolve references");
+}
+
 // Freeze the old policy here so the same measurement remains meaningful after cutover.
 fn roster_old_cold_fallback(subject: &str, kind: &str) -> bool {
     kind != "daemon.diagnostic" && !(subject.starts_with("agent/") && matches!(kind,
@@ -12795,6 +12963,22 @@ fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     assert!(card()["live_model"].is_null());
     let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
     assert!(typed.live_model.is_none());
+    assert_eq!(card()["declared_model"], "anthropic/claude-opus-5-5");
+    assert_eq!(card()["model_drift"]["state"], "unknown");
+    assert_eq!(card()["model_drift"]["return_attempts"], 0);
+    let roundtrip = serde_json::to_value(&typed).unwrap();
+    assert_eq!(roundtrip["declared_model"], "anthropic/claude-opus-5-5");
+    assert_eq!(roundtrip["model_drift"]["state"], "unknown");
+    assert_eq!(roundtrip["model_drift"]["return_attempts"], 0);
+    let mut legacy = card();
+    legacy.as_object_mut().unwrap().remove("declared_model");
+    legacy.as_object_mut().unwrap().remove("model_drift");
+    let legacy: fractal_client::Agent = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.header.id, typed.header.id);
+    assert!(legacy.live_model.is_none());
+    let legacy = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy.get("declared_model").is_none());
+    assert!(legacy.get("model_drift").is_none());
     // Usage on another incarnation does not leak into this card.
     append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "zero", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
     assert!(card()["live_model"].is_null());
@@ -12803,6 +12987,12 @@ fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     assert_eq!(card()["live_model"], "gpt-6.1-sol");
     let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
     assert_eq!(typed.live_model.as_deref(), Some("gpt-6.1-sol"));
+    // Untimestamped legacy observations cannot establish current health.
+    assert_eq!(card()["model_drift"]["state"], "stale");
+    append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "one", "model": "gpt-6.1-sol", "context_used_tokens": 1, "observed_at_unix_ms": now_ms() as u64}));
+    assert_eq!(card()["model_drift"]["state"], "drifted");
+    // No detector episode yet: do not fabricate an onset from the last sample.
+    assert!(card()["model_drift"]["drift_since"].is_null());
     // Response spend on another model (a subagent's, rolled up on the parent) is not what
     // the seat runs on: the card keeps the session's model.
     append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "one", "model": "claude-haiku-4-5", "total_tokens": 1}));
@@ -12811,6 +13001,7 @@ fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
     append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "two"}));
     append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "two"}));
     assert!(card()["live_model"].is_null());
+    assert_eq!(card()["model_drift"]["state"], "unknown");
 }
 
 #[test]
@@ -17620,7 +17811,7 @@ async fn invocation_artifact_unix_server_preserves_verified_person_ancestry() {
         // Use the production accept/ancestry-to-request handoff, not manually inserted
         // request extensions. Only the completed ancestry lookup result is controlled.
         let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
-            reserved, router(state), Some(store), None,
+            reserved, router(state), Some(store), None, None,
             move |_, _| Ok(match caller {
                 "person" => HarnessAncestry::Person,
                 "own-agent" => HarnessAncestry::Bound("agent/example/unix-private".into()),

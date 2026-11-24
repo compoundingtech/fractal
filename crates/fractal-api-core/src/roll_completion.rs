@@ -143,6 +143,53 @@ struct Source {
     writer: Mutex<Option<Connection>>,
     registry: RwLock<Registry>,
     installed: AtomicBool,
+    key_authority: Mutex<KeyAuthority>,
+}
+
+// Two right-edge seeks in the existing (kind, store_index) index, not MAX
+// over an IN-list (which walks every matching claim).
+const KEY_AUTHORITY_HEADS: &str = "SELECT
+    (SELECT MAX(store_index) FROM claims INDEXED BY claims_kind_index WHERE kind='principal.key-granted'),
+    (SELECT MAX(store_index) FROM claims INDEXED BY claims_kind_index WHERE kind='principal.key-revoked')";
+const KEY_AUTHORITY_IDS: &str = "SELECT id FROM claims
+    WHERE kind IN ('principal.key-granted','principal.key-revoked') ORDER BY id";
+
+#[derive(Default)]
+struct KeyAuthority {
+    heads: Option<(Option<u64>, Option<u64>)>,
+    ids: Vec<String>,
+    #[cfg(test)]
+    reads: usize,
+    #[cfg(test)]
+    rows: usize,
+    #[cfg(test)]
+    head_steps: i32,
+}
+
+impl KeyAuthority {
+    // The caller pins a read snapshot: heads and IDs must describe the same cut.
+    // This cache belongs to the Store, so reopening/restoring never reuses it.
+    fn ids(&mut self, reader: &Connection) -> Result<&[String]> {
+        let mut query = reader.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8350c67aa905 owner=fractal_api_core::roll_completion TODO=trace-statement-and-value-representation */ KEY_AUTHORITY_HEADS)?;
+        let heads = query.query_row(/* sqlite-large-value: allow-for-now lv-hadb0a84c2fdb owner=fractal_api_core::roll_completion TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        #[cfg(test)]
+        {
+            self.head_steps = query.reset_status(rusqlite::StatementStatus::VmStep);
+        }
+        if self.heads != Some(heads) {
+            let mut keys = reader.prepare_cached(/* sqlite-large-value: allow-for-now lv-hab7ab063d565 owner=fractal_api_core::roll_completion TODO=trace-statement-and-value-representation */ KEY_AUTHORITY_IDS)?;
+            let ids = keys.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            #[cfg(test)]
+            {
+                self.reads += 1;
+                self.rows += ids.len();
+            }
+            self.ids = ids;
+            self.heads = Some(heads);
+        }
+        Ok(&self.ids)
+    }
 }
 
 impl Registry {
@@ -967,9 +1014,10 @@ pub(crate) fn authority_cut(store: &Store) -> Result<Vec<String>> {
             cut.push(store.selected_desired_token(producer)?.unwrap_or_default());
         }
         let reader = store.readers.get();
-        let mut keys = reader.prepare_cached("SELECT id FROM claims
-            WHERE kind IN ('principal.key-granted','principal.key-revoked') ORDER BY id")?;
-        cut.extend(keys.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
+        let source = store.fractal.extensions.get::<Source>();
+        let mut keys = source.key_authority.lock().unwrap_or_else(PoisonError::into_inner);
+        cut.extend_from_slice(keys.ids(&reader)?);
+        drop(keys);
         let mut model = reader.prepare_cached("SELECT key,value FROM meta
             WHERE key='claim_candidate_verdict_roots' OR
                 (key>='claim_candidate_requeue:' AND key<'claim_candidate_requeue;') ORDER BY key")?;
@@ -980,7 +1028,6 @@ pub(crate) fn authority_cut(store: &Store) -> Result<Vec<String>> {
         let migration: Option<i64> = reader.query_row(
             "SELECT serving_legacy FROM claim_signature_migration WHERE id=1", [], |row| row.get(0)).optional()?;
         cut.push(format!("serving-legacy={migration:?}"));
-        let source = store.fractal.extensions.get::<Source>();
         let registry = source.registry.read().unwrap_or_else(PoisonError::into_inner);
         let mut unsettled = reader.prepare_cached(
             "SELECT claim_id FROM claim_verdicts WHERE verdict IN ('held','rejected','invalid','unsigned')
