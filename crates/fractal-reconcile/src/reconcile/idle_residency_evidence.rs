@@ -508,7 +508,7 @@ mod tests {
             "amber").unwrap();
         let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
         store.apply(&intent, &expected, "audit-wake-seat").unwrap();
-        let desired = fractal_store::store::current_desired_row(
+        let desired = crate::store::current_desired_row(
             &store.readers.get(), "agent/amber.worker").unwrap().unwrap().claim_id;
         let suspended = action_claim(&store, "runtime.action.requested",
             json!({"action":"suspend","cause":"idle"}), vec![desired.clone()]);
