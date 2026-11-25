@@ -2,9 +2,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use fractal_light_node_core::{journal::{RunRequest, RunResult, Selection, RunRefusal}, session::RunEffects, authority::local::AuthorityChange};
 
-pub struct StoreRunEffects { store: Arc<crate::Store> }
+pub struct StoreRunEffects { store: Arc<crate::store::Store> }
 impl StoreRunEffects {
-    pub fn new(store: Arc<crate::Store>) -> Self { Self { store } }
+    pub fn new(store: Arc<crate::store::Store>) -> Self { Self { store } }
 }
 impl RunEffects for StoreRunEffects {
     fn execute(&self, request: &RunRequest) -> Result<RunResult> {
