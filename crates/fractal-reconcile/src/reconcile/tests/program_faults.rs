@@ -70,6 +70,7 @@ fn a_quiet_journal_raises_program_stalled_at_its_deadline_and_an_entry_closes_it
             bundle: "/bundles/program.mjs".into(),
             bundle_hash: "a".repeat(64),
             stalled_after_ms: Some(10 * MINUTE as u64),
+            finalizer_grace_ms: None,
         };
         let ((), due) = smallclaims::touched::record_due(|| reconciler.reconcile_program_faults(&view, &spec, at).unwrap());
         due

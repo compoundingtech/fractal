@@ -2634,7 +2634,7 @@ fn parse_after_run(node: &KdlNode) -> Result<String, FractalError> {
 /// `program "/abs/bundle.mjs" sha256="HEX" stalled-after="10m"?`: the bundle's path, the exact
 /// bytes it must have, and how long it may go without journal progress.
 fn parse_program(node: &KdlNode) -> Result<ProgramSpec, FractalError> {
-    ensure_only_properties(node, &["sha256", "stalled-after"])?;
+    ensure_only_properties(node, &["sha256", "stalled-after", "finalizer-grace"])?;
     let bundle = first_string(node)?;
     if !bundle.starts_with('/') {
         return Err(FractalError::new(
@@ -2653,7 +2653,14 @@ fn parse_program(node: &KdlNode) -> Result<ProgramSpec, FractalError> {
     if stalled_after_ms == Some(0) {
         return Err(FractalError::new("invalid-program", "a program's stalled-after must be greater than zero"));
     }
-    Ok(ProgramSpec { bundle, bundle_hash, stalled_after_ms })
+    let finalizer_grace_ms = property_string(node, "finalizer-grace")?
+        .map(|value| parse_duration(&value).map_err(|error| FractalError::new("invalid-finalizer-grace", error.message)))
+        .transpose()?;
+    if finalizer_grace_ms.is_some_and(|ms| ms == 0 || ms > 15 * 60 * 1000) {
+        return Err(FractalError::new("invalid-finalizer-grace",
+            "a program's finalizer-grace must be greater than zero and at most 15 minutes"));
+    }
+    Ok(ProgramSpec { bundle, bundle_hash, stalled_after_ms, finalizer_grace_ms })
 }
 
 /// The step that a run started with `--after RUN` waits in before its other work starts.
