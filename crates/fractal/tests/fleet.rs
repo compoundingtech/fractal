@@ -6851,6 +6851,25 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
     n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
     o.start().await;
     n.start().await;
+    // Enroll the existing legacy identities through supported migration before archiving.
+    // A fresh restore writer must recover trust from membership, not the original node key.
+    o.stop();
+    o.migrate(&["--anchor"]);
+    o.start().await;
+    o.wait_listening().await;
+    let code = o.invite("n", &["--migrate"]);
+    n.stop();
+    n.migrate(&[&code, "--via", &format!("http://127.0.0.1:{}", o.port)]);
+    n.start().await;
+    for node in [&o, &n] {
+        wait_until("both legacy identities have authenticated membership", 90, || async {
+            let status = node.st_json(&["fleet", "status"]);
+            status["view"]["members"].as_array().is_some_and(|members| {
+                ["o", "n"].iter().all(|name| members.iter()
+                    .any(|member| member["name"] == *name && member["state"] == "current"))
+            })
+        }).await;
+    }
     let rows = |node: &Node, sql: &str| -> i64 {
         rusqlite::Connection::open_with_flags(
             node.state_dir().join("claims.sqlite3"),
@@ -6860,8 +6879,7 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
     };
-    // Every signed claim's verdict. A peer's claims read held here, since the legacy fleet does not
-    // enroll node keys; what matters is that no verdict changes across upgrade and rollback.
+    // Every signed claim's verdict must survive upgrade and fresh-writer archive recovery.
     let verdicts = |node: &Node| -> BTreeMap<String, String> {
         let connection = rusqlite::Connection::open_with_flags(
             node.state_dir().join("claims.sqlite3"),
@@ -7057,6 +7075,25 @@ async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_acros
     n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
     o.start().await;
     n.start().await;
+    // Enroll the existing legacy identities through supported migration before archiving.
+    // A fresh restore writer must recover trust from membership, not the original node key.
+    o.stop();
+    o.migrate(&["--anchor"]);
+    o.start().await;
+    o.wait_listening().await;
+    let code = o.invite("n", &["--migrate"]);
+    n.stop();
+    n.migrate(&[&code, "--via", &format!("http://127.0.0.1:{}", o.port)]);
+    n.start().await;
+    for node in [&o, &n] {
+        wait_until("both legacy identities have authenticated membership", 90, || async {
+            let status = node.st_json(&["fleet", "status"]);
+            status["view"]["members"].as_array().is_some_and(|members| {
+                ["o", "n"].iter().all(|name| members.iter()
+                    .any(|member| member["name"] == *name && member["state"] == "current"))
+            })
+        }).await;
+    }
     let rows = |node: &Node, sql: &str| -> i64 {
         rusqlite::Connection::open_with_flags(
             node.state_dir().join("claims.sqlite3"),
@@ -7066,8 +7103,7 @@ async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_acros
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
     };
-    // Every signed claim's verdict. A peer's claims read held here, since the legacy fleet does not
-    // enroll node keys; what matters is that no verdict changes across upgrade and rollback.
+    // Every signed claim's verdict must survive upgrade and fresh-writer archive recovery.
     let verdicts = |node: &Node| -> BTreeMap<String, String> {
         let connection = rusqlite::Connection::open_with_flags(
             node.state_dir().join("claims.sqlite3"),
