@@ -251,8 +251,15 @@ fn cancel(store: &Store, actor: &MissionRunView, target: &MissionRunView, key: &
 fn a_request_credential_can_cancel_its_own_run_without_rechecking_ended_steps() {
     let _mode = hold_mode();
     set_run_authority_mode(RunAuthorityMode::Enforce);
-    let store = missions();
-    let run = start(&store, "land", "credential-self-cancel", None).unwrap();
+    let store = Store::open_memory("node").unwrap();
+    // A credential binds identity, not authority: self-cancellation must declare its write.
+    publish_mission(&store, r#"version 2
+mission "self-cancel" state="ready" {
+  goal "Cancel this run."
+  authority { write "mission-run/*"; }
+  step "program" { agentless }
+}"#, "self-cancel");
+    let run = start(&store, "self-cancel", "credential-self-cancel", None).unwrap();
     let step = &run.steps[0].subject;
     store.set_step_run_state_for_tests(step, "working", 1);
     let secret = store.issue_run_credential(step, 1, 60_000).unwrap();
