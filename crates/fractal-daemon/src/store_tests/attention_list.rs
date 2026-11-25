@@ -1117,6 +1117,7 @@ fn source_retention_is_bounded_through_completion_and_eligibility_changes() {
         store.attention_source_snapshot(None, None, &BTreeSet::new(), now_ms())
     }).unwrap();
     let baseline = snapshot.retained_subjects();
+    let mut asked_subjects = BTreeSet::new();
     for turn in 0..32 {
         if turn > 0 {
             store.work_action(&origin.subject, "claim", &WorkRequest {
@@ -1126,7 +1127,11 @@ fn source_retention_is_bounded_through_completion_and_eligibility_changes() {
             }).unwrap();
         }
         request.idempotency_key = format!("retention-{turn}");
+        // A new key alone reuses an equivalent completed answer; churn needs new questions.
+        request.reason = format!("Choose the release date for retention turn {turn}.");
         let ask = store.ask_person(&request).unwrap();
+        assert!(asked_subjects.insert(ask.subject.clone()), "each turn creates a distinct ask");
+        assert_eq!(ask.status, "ready", "retention must start with a live candidate");
         snapshot = store.read_snapshot(|_| store.attention_source_snapshot(
             Some(&snapshot), Some(&BTreeSet::from([ask.subject.clone()])),
             &BTreeSet::from(["work.person-asked".into()]), now_ms(),
@@ -1221,12 +1226,19 @@ fn a_future_prompt_is_invalidated_by_runtime_stop_before_admission() {
         json!({"status":"running","incarnation_id":"one"}))).unwrap();
     let admission = now_ms() + 60_000;
     store.set_write_clock_at(admission).unwrap();
-    store.append_claim(&input(seat, "harness.observed", Some(seat),
-        json!({"state":"working","driver":"claude","incarnation_id":"one",
-            "blocked_on":"human","ask":"permission","reason":"Bash",
-            "ownership_sequence":1,"transition_sequence":1}))).unwrap();
+    {
+        // Claim acceptance time alone does not date a prompt: its observed opening does.
+        let _clock = crate::store::work_summaries_ivm::tests_shared_seats::freeze(admission);
+        store.append_claim(&input(seat, "harness.observed", Some(seat),
+            json!({"state":"working","driver":"claude","incarnation_id":"one",
+                "blocked_on":"human","ask":"permission","reason":"Bash",
+                "ownership_sequence":1,"transition_sequence":1}))).unwrap();
+    } // Restore the early reader clock before publishing, including on unwind.
+    let observed = store.latest_claim(seat, Some("harness.observed")).unwrap().unwrap();
+    assert_eq!(observed.body["fields"]["observed_since_ms"], json!(admission as u64));
     store.start_attention_list_refresher().unwrap();
     let before = refresh_and_check(&store);
+    assert_eq!(before.due_at_unix_ms, Some(admission));
     assert!(before.rows.iter().all(|row| row["attention_kind"] != "harness-prompt"));
     assert!(before.source_snapshot.as_deref().unwrap().candidate_seats().any(|candidate| candidate == seat));
     store.append_claim(&input(seat, "runtime.observed", Some(seat),
