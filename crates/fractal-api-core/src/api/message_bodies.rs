@@ -118,8 +118,10 @@ pub async fn client_body(
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     let subject = message_subject(&id);
-    let lookup = state.clone();
-    let message = blocking_store(move || lookup.store.message(&subject))
+    let lookup = state.store.clone();
+    let person = records::client_message_person(&session).map(str::to_owned);
+    let bound = session.bound_agent.clone();
+    let message = blocking_store(move || records::exact_message(&lookup, &subject, person.as_deref(), bound.as_deref()))
         .await?
         .ok_or_else(|| ApiError::not_found(format!("message `{id}` does not exist")))?;
     let actor = session.authority_actor.as_str();
@@ -144,10 +146,13 @@ pub async fn client_body(
 pub async fn body(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
+    bound: Option<Extension<BoundAgent>>,
 ) -> Result<Json<Value>, ApiError> {
     let subject = message_subject(&subject);
-    let lookup = state.clone();
-    let message = blocking_store(move || lookup.store.message(&subject))
+    let lookup = state.store.clone();
+    let message = blocking_store(move || records::exact_message(
+        &lookup, &subject, None, bound.as_ref().map(|Extension(agent)| agent.0.as_str()),
+    ))
         .await?
         .ok_or_else(|| ApiError::not_found("this message does not exist"))?;
     let actor = [&message.to, &message.from]

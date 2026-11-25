@@ -16,6 +16,7 @@ vi.mock('../data/react.tsx', () => ({
   useConnection: () => ({ _tag: 'Live' }),
   // Roster names for mail headers; an empty roster reads refs by their last segment.
   useFleetSelection: () => noRosterNames,
+  useAgent: () => ({ _tag: 'Observed', value: undefined, freshness: 'live' }),
   usePausedNow: () => undefined,
 }))
 vi.mock('../conversation/todos/AgentTodos.tsx', () => ({ LiveAgentTodos: () => <details aria-label="To-dos"><summary>To-dos · Example phase 1/2</summary></details> }))

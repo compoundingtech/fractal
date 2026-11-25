@@ -1,0 +1,13 @@
+{
+  "commit": "f3793f9547ea522c5f74bf9727fa761000088f90",
+  "tag": "fleet-f3793f9547ea522c5f74bf9727fa761000088f90",
+  "why": "Genuine storage-version-22 old reader from run 43754534624 artifact 14177834342, with source independently stamped in BUILD.json; distributed through the immutable compatibility release asset.",
+  "exception_reason": null,
+  "bundles": {
+    "x86_64-unknown-linux-gnu": {
+      "url": "https://github.com/compoundingtech/fractal/releases/download/fleet-f3793f9547ea522c5f74bf9727fa761000088f90/fractal-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "a6f21f2fbf16a6801935747db6d48e76861336716a2ec3eb8e0c5611bf2777aa",
+      "elf_sha256": "d90c48379aed5a14f22eda694e1e4fde514d9b73ab8030aa8e75645b95d43fd0"
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "summary": "Compose durable topic threads with current web, terminal, iOS and scoped MCP readers",
+  "replay": {
+    "status": "changed",
+    "detail": "Retain authoritative thread, message, operation and pairing history. Current-main message expiry, read-position and authority behavior remains present alongside causal thread metadata. No history rewrite or store copy is required."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Normal store open advances storage 20, 21 or 22 to 23 and installs additive thread indexes. Generated Rust, TypeScript and Swift clients must be regenerated together from the composed contracts. Signed thread_reader_version remains 2; complete serving readiness is version 3.",
+    "transitions": [[20, 23], [21, 23], [22, 23]]
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Any exact Inbox source may create a durable thread using the canonical responsible agent or an explicitly configured inboxFallbackAgent. There is no inferred fallback. Metadata edits retain causal revision fencing; closed replies remain closed. Retries retain their captured request. Timeline presentation follows server order under clock skew. MCP thread reads require the existing conversation read grant; no thread MCP writes or thread attachments are added."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Upgrade daemon and all web, TUI, iOS and MCP clients together before enabling writers. Removed native feed fallback, ask-only writers, pseudo-chat and obsolete pairing-query inventory are not restored. Ordinary chat retains its existing attachments and outbox. iOS cache updates follow both REST and websocket summaries and ignore cancelled contexts."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "Use normal rolling reader upgrades with writers disabled and preserve a consistent pre-upgrade backup. Additive local indexes install on startup. This source composition does not deploy or enable writers."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Directly verify reader-readiness version 3 on every serving and configured member, including inactive peers before rejoin, then obtain separate writer-enable approval. Configure an explicit Inbox fallback if desired. Source integration and local checks are not rollout authorization."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Older binaries refuse the version-23 store. After thread writes, do not lower user_version or treat a binary revert as rollback. Disable writers and use a compatible forward repair while retaining history and pairings. A coordinated stopped restore may use a consistent pre-upgrade backup and matching binary only with explicit acceptance of losing later writes; preserve the upgraded history separately."
+  }
+}

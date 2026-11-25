@@ -2391,13 +2391,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   linux-test-build:
     name: linux-test-build
-    needs:
-      [
-        pick-runner,
-        evidence-gate-linux-gate,
-        evidence-gate-rust-tests,
-        compat-archives-x86_64-unknown-linux-gnu,
-      ]
+    needs: [pick-runner, evidence-gate-linux-gate, evidence-gate-rust-tests, compat-archives-x86_64-unknown-linux-gnu]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && vars.CI_MERGE_TEST_BUILD_OWNED && (needs.pick-runner.outputs.ci1_build || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) || github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
@@ -4083,7 +4077,7 @@ jobs:
         run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
-      - name: Run fleet compatibility against the pinned older st3
+      - name: Run fleet compatibility and the pinned v20/v22 thread storage floors
         shell: bash
         run: nix develop -c bash scripts/ci-linux fleet-compat
       - name: Save Nix outputs to the local Nix cache
@@ -4741,12 +4735,15 @@ jobs:
               "apps/fractal-web/src/conversation/todos/fixtures.ts",
               "apps/fractal-web/src/conversation/todos/model.ts",
               "apps/fractal-web/src/conversation/vocabulary.ts",
+              "apps/fractal-web/src/data/agentName.ts",
               "apps/fractal-web/src/data/arrangements.ts",
               "apps/fractal-web/src/data/asking.ts",
               "apps/fractal-web/src/data/attachmentSchema.ts",
               "apps/fractal-web/src/data/attention.ts",
-              "apps/fractal-web/src/data/contextOccupancy.ts",
+              # Workspace stories bundle ConversationPane's browser pairing state and thread send capability checks.
               "apps/fractal-web/src/data/browserPairing.ts",
+              "apps/fractal-web/src/data/conversationPort.ts",
+              "apps/fractal-web/src/data/contextOccupancy.ts",
               "apps/fractal-web/src/data/fixtureSource.ts",
               "apps/fractal-web/src/data/lazySdk.ts",
               "apps/fractal-web/src/data/nativeDeclarations.ts",
@@ -4761,6 +4758,7 @@ jobs:
               "apps/fractal-web/src/data/sdk-browser/trace.ts",
               "apps/fractal-web/src/data/sidebarPins.ts",
               "apps/fractal-web/src/data/source.ts",
+              "apps/fractal-web/src/data/subjectReadPort.gateway.fixtures.json",
               "apps/fractal-web/src/data/subjectReadPort.ts",
               "apps/fractal-web/src/declarations/model.ts",
               "apps/fractal-web/src/declarations/sourceMap.ts",
@@ -4862,6 +4860,22 @@ jobs:
               "apps/fractal-web/src/terminal/TerminalResize.tsx",
               "apps/fractal-web/src/terminal/terminalText.ts",
               "apps/fractal-web/src/terminal/TerminalViewport.tsx",
+              # ThreadWorkspace and LiveAgentWorkspace stories bundle the production thread pane, including lazy chunks.
+              "apps/fractal-web/src/threads/LiveThreads.tsx",
+              "apps/fractal-web/src/threads/MarkedUnreadThreads.tsx",
+              "apps/fractal-web/src/threads/markedUnreadPages.ts",
+              "apps/fractal-web/src/threads/meaningfulGeometry.ts",
+              "apps/fractal-web/src/threads/RelatedRequests.tsx",
+              "apps/fractal-web/src/threads/requestHistoryPages.ts",
+              "apps/fractal-web/src/threads/ThreadEditor.tsx",
+              "apps/fractal-web/src/threads/ThreadPanel.tsx",
+              "apps/fractal-web/src/threads/ThreadRefusalAlert.tsx",
+              "apps/fractal-web/src/threads/threadAnchor.ts",
+              "apps/fractal-web/src/threads/threadSource.ts",
+              "apps/fractal-web/src/threads/UnreadReminderControls.tsx",
+              "apps/fractal-web/src/threads/unread-action-port.ts",
+              "apps/fractal-web/src/threads/unreadVisit.ts",
+              "apps/fractal-web/src/threads/useForegroundVisibility.ts",
               "apps/fractal-web/src/ui-compat/components.tsx",
               "apps/fractal-web/src/ui-compat/foundations.ts",
               "apps/fractal-web/src/ui-compat/live-theme.stylex.ts",
@@ -4969,6 +4983,7 @@ jobs:
               "docs/st3/client-v0/fixtures/github-plugin-run.json",
               "docs/st3/client-v0/fixtures/github-plugin-stale.json",
               "docs/st3/client-v0/fixtures/github-plugin-unavailable.json",
+              "docs/st3/client-v0/fixtures/thread-start-refusals.json",
               "fixtures/clients/transcripts/wakes.json",
               "apps/fractal-web/src/web/index.html",
               "clients/typescript/fractal-scenarios/**",

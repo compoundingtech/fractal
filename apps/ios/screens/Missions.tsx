@@ -1,6 +1,9 @@
+import { threadViewportChanged, ThreadViewport } from '../threadViewport';
+import { ThreadGroup } from './Threads';
 import { markdownSource } from '../../../clients/typescript/fractal-client/markdown-text';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, SectionList, View } from 'react-native';
+import { Pressable, ScrollView, SectionList, View } from 'react-native';
+import { OwnedAlert as Alert } from '../ownedPresentationNative';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { DocumentReference, LaunchVariant, Mission } from '../../../clients/typescript/fractal-client';
@@ -89,7 +92,10 @@ export function MissionsScreen() {
 // One mission: what finished, what is happening, what is next, and who holds each step.
 export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   const { data, status, actions, caps, client } = useStore();
+  const threadViewport = useRef<ScrollView>(null);
   useMissionsOnFocus();
+  // Pulling also reloads this mission's thread group, which shows no manual refresh while followed.
+  const refresh = useRefresh();
   const listed = data.missions.find(mission => mission.id === route.params.id);
   const [detail, setDetail] = useState<Mission | null>(null);
   useEffect(() => { let live = true; void actions.mission(route.params.id).then(found => { if (live && found) setDetail(found); }); return () => { live = false; }; }, [route.params.id, listed?.revision, status]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -118,7 +124,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   const waiting = homeRows(data.attention.filter(item => item.mission_id === mission.id), caps?.session_actor);
   return <Screen>
     <Banners />
-    <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 32 }}>
+    <ScrollView ref={threadViewport} onLayout={() => threadViewportChanged(threadViewport)} onScroll={() => threadViewportChanged(threadViewport)} scrollEventThrottle={16} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ paddingBottom: 32 }}>
       <StatusLine />
       <View style={{ padding: 12, gap: 4 }}>
         <T><T bold color={wordStyle(word).color}>{wordStyle(word).glyph} {missionLabel(mission)}</T><T dim>  {mission.state} · {mission.runs.length} run{mission.runs.length === 1 ? '' : 's'}</T></T>
@@ -137,6 +143,9 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />)}
       </> : null}
+      <ThreadViewport viewport={threadViewport}>
+        <ThreadGroup context={{ mission_id: mission.id }} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
+      </ThreadViewport>
       <SectionHeader title="steps" count={steps.length} />
       {steps.map(({ shown, step }) => {
         const style = stepStyle(shown?.word);

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose per-person thread unread reminders with return anchors in client-v0",
+  "replay": {"status": "none", "detail": "This API adapter introduces no store replay rules; the companion thread-reading store patch supplies persistence."},
+  "schema": {"status": "changed", "detail": "Add thread.mark-unread and thread.clear-unread actions with idempotency keys and captured observed_marks, plus ThreadSummary.unread_reminder with all active marks and the canonical primary return anchor. Mark IDs are opaque stable signed operation IDs, never claim IDs. Existing thread.list accepts exclusive marked_unread=true; thread.timeline accepts around instead of cursor and returns optional previous_cursor and anchor resolution state."},
+  "rules": {"status": "changed", "detail": "Reminder writes require control.messages and the acting person. Existing summary reads and feeds retain their read grant. Natural message unread and read history are unchanged; unobserved concurrent marks are preserved."},
+  "compatibility": {"status": "changed", "detail": "Generated Rust, Swift, and TypeScript clients expose the new actions and optional summary reminder. Auto-clear only captured mark IDs whose own anchor was deliberately viewed on a later visit; the current visit stays sticky."},
+  "downtime": {"status": "none", "detail": "No API-specific migration."},
+  "manual": {"status": "none", "detail": "No API-specific manual steps."},
+  "recovery": {"status": "none", "detail": "No API-specific recovery changes."}
+}

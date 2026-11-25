@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expand native thread scenario harness evidence through rename, reopen and visible-read shortcuts",
+  "replay": { "status": "none", "detail": "Only disposable test members and opt-in preview captures are affected." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes." },
+  "rules": { "status": "none", "detail": "Production authority boundaries remain unchanged." },
+  "compatibility": { "status": "none", "detail": "The native socket integration test now exercises an accepted Inbox first-message start with draft retention, proves the original ask stays open, and exercises accepted rename and reopen mutations in addition to reply and close." },
+  "downtime": { "status": "none", "detail": "No production daemon is touched." },
+  "manual": { "status": "changed", "detail": "With THREAD_PREVIEW_CAPTURE_DIR, the native socket test exports before/after frames. The ignored preview harness also captures first-message dispatch, draft recovery and the visible-message read shortcut. These captures are explicitly harness evidence, not installed-binary writes." },
+  "recovery": { "status": "none", "detail": "The socket test removes its temporary member on completion." }
+}

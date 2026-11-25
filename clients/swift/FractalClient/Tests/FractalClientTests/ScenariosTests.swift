@@ -86,6 +86,33 @@ final class ScenariosTests: XCTestCase {
         XCTAssertEqual(committed, Set(indexed), "Index and committed slice files must agree in both directions")
     }
 
+    func testTopicThreadScenarioDecodesAndRejectsCorruptWireValues() throws {
+        let reader = ScenarioReader(directory: fixtures)
+        let slice = try reader.loadSlice(world: "fleet-mid-refactor", slice: "attention")
+        let state = try object(slice.state)
+        let topics = try array(state.required("topic_threads"))
+        XCTAssertFalse(topics.isEmpty)
+        try validate(slice)
+        for value in topics {
+            let topic = try object(value)
+            _ = try decode(ThreadSummary.self, topic.required("summary"))
+            XCTAssertFalse(try decode([ThreadTimelineEvent].self, topic.required("events")).isEmpty)
+        }
+        let data = try Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/attention.json"))
+        let original = try object(JSONDecoder().decode(JSONValue.self, from: data))
+        for field in ["summary", "events", "unexpected"] {
+            var root = original
+            var state = try object(root.required("state"))
+            var topics = try array(state.required("topic_threads"))
+            var topic = try object(XCTUnwrap(topics.first))
+            topic[field] = .string("invalid")
+            topics[0] = .object(topic)
+            state["topic_threads"] = .array(topics)
+            root["state"] = .object(state)
+            XCTAssertThrowsError(try validate(decode(ScenarioSlice.self, .object(root))), field)
+        }
+    }
+
     func testPublicReaderAndClockPrecision() throws {
         let reader = ScenarioReader(directory: fixtures)
         let slice = try reader.loadSlice(world: "fleet-mid-refactor", slice: "roster", now: Date(timeIntervalSince1970: 1_893_499_201.5009))
@@ -430,8 +457,18 @@ final class ScenariosTests: XCTestCase {
             if let values = state["resources"] { try resources(values, at: "/state/resources", slice: slice) }
         case "attention":
             let fields = ["attention", "messages"]
-            try keys(state, required: Set(fields))
+            try keys(state, required: Set(fields), optional: ["resources", "topic_threads"])
             for key in fields { try resources(state.required(key), at: "/state/\(key)", slice: slice) }
+            if let values = state["resources"] { try resources(values, at: "/state/resources", slice: slice) }
+            if let topics = state["topic_threads"] {
+                for value in try array(topics) {
+                    let topic = try object(value)
+                    try keys(topic, required: ["origin_attention_id", "summary", "events"])
+                    _ = try decode(String.self, topic.required("origin_attention_id"))
+                    _ = try decode(ThreadSummary.self, topic.required("summary"))
+                    _ = try decode([ThreadTimelineEvent].self, topic.required("events"))
+                }
+            }
         case "conversation":
             try keys(state, required: ["threads"])
             for (index, value) in try array(state.required("threads")).enumerated() { try thread(value, at: "/state/threads/\(index)", slice: slice) }

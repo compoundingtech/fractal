@@ -32,7 +32,7 @@ pub struct Redeem { request_key: String }
 fn field<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
     claim.body["fields"][name].as_str()
 }
-fn request(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
+pub(super) fn request(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
     if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return Err(validation("invalid browser request id"));
     }
@@ -65,18 +65,68 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
     }
     let _guard = REQUESTS.lock().await;
     let now = client_now_ms();
-    let recent: i64 = state.store.readers.get().query_row(
-        "SELECT count(*) FROM claims WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.publisher_grant')=?2 AND json_extract(body,'$.fields.requested_at_unix_ms')>?3",
-        rusqlite::params![state.store.origin(),session.pairing_grant,now.saturating_sub(300_000) as u64],
-        |row|row.get(0),
-    ).map_err(ApiError::internal)?;
+    // Retained records without a client-operation receipt cannot consume a device's quota.
+    let recent = {
+        let connection = state.store.readers.get();
+        let mut subjects = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.publisher_grant')=?2 AND json_extract(body,'$.fields.requested_at_unix_ms')>?3",
+        ).map_err(ApiError::internal)?;
+        let cutoff = now.saturating_sub(300_000);
+        let mut rows = subjects.query(rusqlite::params![state.store.origin(), session.pairing_grant, cutoff as u64])
+            .map_err(ApiError::internal)?;
+        let mut recent = 0;
+        while let Some(row) = rows.next().map_err(ApiError::internal)? {
+            let subject: String = row.get(0).map_err(ApiError::internal)?;
+            let Some(begun) = state.store.newest_admitted_client_operation(
+                &subject, "custom.client.pairing-begun",
+            ).map_err(ApiError::internal)? else { continue };
+            if begun.origin == state.store.origin()
+                && begun.body["fields"]["browser_request"] == true
+                && begun.body["fields"]["publisher_grant"].as_str() == session.pairing_grant.as_deref()
+                && begun.body["fields"]["requested_at_unix_ms"].as_u64()
+                    .is_some_and(|requested| u128::from(requested) > cutoff)
+            {
+                recent += 1;
+                if recent == 10 { break; }
+            }
+        }
+        recent
+    };
     if recent >= 10 {
         return Err(ApiError {status:StatusCode::TOO_MANY_REQUESTS,code:"rate-limited".into(),
             message:"at most ten browser pairing requests per device in five minutes".into(),details:Box::default()});
     }
-    let pending: i64 = state.store.readers.get().query_row(
-        "SELECT count(*) FROM claims AS begun WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.tailnet_login')=?2 AND json_extract(body,'$.fields.expires_at_unix_ms')>?3 AND NOT EXISTS(SELECT 1 FROM claims AS done WHERE done.subject=begun.subject AND done.kind='custom.client.pairing-completed') AND NOT EXISTS(SELECT 1 FROM claims AS answered WHERE answered.subject=json_extract(begun.body,'$.fields.browser_ask') AND answered.kind IN ('work.person-done','work.person-cancelled'))",
-        rusqlite::params![state.store.origin(), body.tailnet_login, now as u64], |r| r.get(0)).map_err(ApiError::internal)?;
+    let pending = {
+        let connection = state.store.readers.get();
+        let mut subjects = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.tailnet_login')=?2 AND json_extract(body,'$.fields.expires_at_unix_ms')>?3",
+        ).map_err(ApiError::internal)?;
+        let mut rows = subjects.query(rusqlite::params![state.store.origin(), body.tailnet_login, now as u64])
+            .map_err(ApiError::internal)?;
+        let mut pending = 0;
+        while let Some(row) = rows.next().map_err(ApiError::internal)? {
+            let subject: String = row.get(0).map_err(ApiError::internal)?;
+            let Some(begun) = state.store.newest_admitted_client_operation(
+                &subject, "custom.client.pairing-begun",
+            ).map_err(ApiError::internal)? else { continue };
+            // Raw rows discover candidates; only the admitted request defines quota membership.
+            if begun.origin != state.store.origin()
+                || begun.body["fields"]["browser_request"] != true
+                || begun.body["fields"]["tailnet_login"].as_str() != Some(body.tailnet_login.as_str())
+                || begun.body["fields"]["expires_at_unix_ms"].as_u64()
+                    .is_none_or(|expires| u128::from(expires) <= now)
+            {
+                continue;
+            }
+            if state.store.newest_admitted_pairing_completion(&subject, now)
+                .map_err(ApiError::internal)?.is_none() && approval(&state, &begun)? == "pending"
+            {
+                pending += 1;
+                if pending == 3 { break; }
+            }
+        }
+        pending
+    };
     if pending >= 3 { return Err(forbidden("at most three browser pairing requests may be pending")); }
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;

@@ -3,13 +3,18 @@ import { DateTime, Option } from 'effect'
 import { alertConversations, homeKind, openAlerts, TIERS } from '../../../../clients/typescript/fractal-views/homeView.ts'
 import { askDeadline } from '../../../../clients/typescript/fractal-views/requestView.ts'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
+import { alertFrom } from '../conversation/alerts/alertChoices.ts'
 import { isWaitingForAnswer } from '../data/attention.ts'
 import type { Feed } from '../data/source.ts'
 
 export type AlertsTabRow = { readonly item: Attention; readonly id: string; readonly title: string; readonly glyph: '?' | '◆' | '!'; readonly tier: number
   readonly line2: string; readonly age: string; readonly conversation?: string; readonly mission?: string }
 
-/** Keep Home's admission/order, plus the served fault cards the sidebar brief includes. */
+/**
+ * Keep Home's admission/order, plus the served fault cards the sidebar brief includes. A row names who raised it only
+ * when Fractal serves `raised_by`, and then as its card names it (`alertFrom`): never the served label raw, which is
+ * 'st' for Fractal's own machinery and a path for a seat that declares no name.
+ */
 export const alertsTabRows = (items: readonly Attention[], now: number): readonly AlertsTabRow[] => {
   const admitted = new Set(openAlerts(items, undefined))
   return items.filter(item => item.state === 'open' && (admitted.has(item) ||
@@ -23,7 +28,7 @@ export const alertsTabRows = (items: readonly Attention[], now: number): readonl
       return {
         item, id: item.id, title: item.title, glyph,
         tier: TIERS.findIndex(value => value === tier),
-        line2: [Option.getOrUndefined(item.presentation?.raised_by ?? Option.none())?.label,
+        line2: [Option.isSome(item.presentation?.raised_by ?? Option.none()) ? alertFrom(item) : undefined,
           Option.getOrUndefined(item.presentation?.waiting ?? Option.none())?.path, deadline].filter(Boolean).join(' · '),
         age: ago(DateTime.formatIso(item.requested_at), now),
         conversation: alertConversations(item).find(ref => ref.startsWith('agent/')),
