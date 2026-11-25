@@ -3966,11 +3966,12 @@ fn fleet_workflows_have_no_path_filter() {
             "previous_release_replicates_with_new_members_and_preserves_history_on_upgrade"
         )
     );
-    // The optional macOS job lives in macos.yml so label events cannot restart this gate.
-    assert!(
-        !compat.to_ascii_lowercase().contains("macos-"),
-        "fleet.yml runs a macOS job"
-    );
+    // Required agent lifecycle proof belongs in this gate; the optional general
+    // macOS lane remains separate and must not reintroduce label-triggered work.
+    assert!(compat.contains("  light-node-darwin:\n"));
+    assert!(compat.contains("needs.light-node-darwin.result"));
+    assert!(compat.contains("test \"$DARWIN_RESULT\" = success"));
+    assert!(!compat.contains("macos-ci"), "fleet.yml depends on an optional macOS label");
     let baseline: Value = serde_json::from_str(
         &fs::read_to_string(workflows.join("../fleet-compat-baseline.json")).unwrap(),
     )
