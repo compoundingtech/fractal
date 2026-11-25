@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The public-repository pre-push check no longer rescans already published history when it updates an existing branch. Commits already reachable from the remote's branches are excluded from the scan.",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes; the check still rejects the same findings in new commits."},
+  "compatibility": {"status": "none", "detail": "Development tooling only; no runtime or wire changes."},
+  "downtime": {"status": "none", "detail": "No migration or downtime is required."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Reverting restores the previous scan range."}
+}
