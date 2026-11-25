@@ -5,7 +5,7 @@ use serde_json::json;
 
 const G: u64 = 1 << 30;
 
-fn two_gib_outside() -> Option<fractal_runtime::host::HostMemoryObservation> {
+fn two_gib_outside(_: &fractal_runtime::resource_pressure::Policy) -> Option<fractal_runtime::host::HostMemoryObservation> {
     Some(fractal_runtime::host::HostMemoryObservation { outside_bytes: 2 * G, psi_blocked: false })
 }
 

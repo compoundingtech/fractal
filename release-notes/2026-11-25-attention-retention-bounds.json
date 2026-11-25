@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound attention and delivery-presence retention and invalidate future prompts on runtime changes",
+  "replay": {"status": "none", "detail": "Volatile attention snapshots rebuild normally; no claim replay is required."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Attention eligibility and delivery health rules are unchanged; incremental publication now follows current source and runtime state."},
+  "compatibility": {"status": "none", "detail": "Terminal, non-person and undeclared attention sources and obsolete delivery incarnations are no longer retained. Live candidates keep negative dependencies and future prompts observe runtime invalidation before admission."},
+  "downtime": {"status": "none", "detail": "No migration or downtime is required."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Restarting rebuilds the volatile publication caches from current store state."}
+}
