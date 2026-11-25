@@ -178,7 +178,8 @@ def outgoing_findings(repo, remote, lines):
         head = git(repo, "rev-parse", "--verify", f"{local_oid}^{{commit}}").decode().strip()
         if remote_oid != zero:
             # Missing old objects are an error, not permission to skip a range.
-            args = ["rev-list", head, f"^{remote_oid}"]
+            # Merge-ups do not republish history already reachable on this remote.
+            args = ["rev-list", head, f"^{remote_oid}", "--not", f"--remotes={remote}"]
         else:
             # New refs may start anywhere, not necessarily on the checked-out branch.
             args = ["rev-list", head, "--not", f"--remotes={remote}"]
