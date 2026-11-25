@@ -649,7 +649,7 @@ impl Drop for Node {
     }
 }
 
-async fn wait_until<F, Fut>(what: &str, seconds: u64, mut check: F)
+async fn wait_until<F, Fut>(what: impl std::fmt::Display, seconds: u64, mut check: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
@@ -9545,6 +9545,14 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
     // Rolled back, it keeps those counts and counts nothing new; upgraded again it catches up.
     let restored = previous_release_rollback(&mut o, &old, &recovery).await;
     if let Some(restored) = &restored {
+        let last_count = std::cell::Cell::new(None);
+        wait_until(format_args!(
+            "the restored release counts what it mirrored (expected {release_counts}, last observed count {last_count:?})"
+        ), 60, || async {
+            let count = agent_mail_counted(restored).await;
+            last_count.set(Some(count));
+            count == release_counts
+        }).await;
         assert_eq!(agent_mail_counted(restored).await, release_counts);
     }
     let late = "message/0000000000000c04";

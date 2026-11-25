@@ -273,16 +273,32 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
     let definitions = |connection: &rusqlite::Connection| {
         fractal_daemon::owner_indexes::INDEX_NAMES.iter().map(|name| {
             connection.query_row(
-                "SELECT sql FROM sqlite_master WHERE name=?1", [name],
-                |row| row.get::<_, String>(0),
+                "SELECT (SELECT sql FROM sqlite_master WHERE name=?1)", [name],
+                |row| row.get::<_, Option<String>>(0),
             ).unwrap()
         }).collect::<Vec<_>>()
     };
-    let expected = definitions(&startup.connection.write());
+    let startup_definitions = definitions(&startup.connection.write());
+    let expected = {
+        let connection = startup.connection.write();
+        connection.execute_batch(fractal_daemon::owner_indexes::THREAD_INDEXES).unwrap();
+        definitions(&connection)
+    };
+    let offline_names = fractal_daemon::owner_indexes::THREAD_INDEXES.lines()
+        .filter_map(|line| line.strip_prefix("CREATE INDEX IF NOT EXISTS "))
+        .collect::<Vec<_>>();
+    for ((name, startup), prepared) in fractal_daemon::owner_indexes::INDEX_NAMES.iter()
+        .zip(&startup_definitions).zip(&expected) {
+        assert_eq!(startup.is_none(), offline_names.contains(name), "{name}");
+        if let Some(startup) = startup {
+            assert_eq!(Some(startup), prepared.as_ref());
+        }
+        assert!(prepared.is_some());
+    }
     drop(startup);
     let connection = rusqlite::Connection::open(&path).unwrap();
     for name in fractal_daemon::owner_indexes::INDEX_NAMES {
-        connection.execute_batch(&format!("DROP INDEX {name}")).unwrap();
+        connection.execute_batch(&format!("DROP INDEX IF EXISTS {name}")).unwrap();
     }
     let run = || async {
         let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));

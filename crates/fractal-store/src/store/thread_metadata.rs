@@ -1414,7 +1414,7 @@ mod marked_read_helper_tests {
             actor: Some(agent.into()),
             fields: serde_json::from_value(json!({"from":agent,"to":person,"status":"sent",
                 "content":"Retained reply","thread_id":"thread/offline-indexes"})).unwrap(),
-            evidence: vec![], expected_subject: None, idempotency_key: None,
+            evidence: vec![], expected_subject: None, idempotency_key: Some("offline-indexes-reply".into()),
         }, PersonAuthority::TrustedLocal, None).unwrap();
         for n in 0..4 {
             let thread = format!("thread/offline-{n}");
@@ -1426,7 +1426,7 @@ mod marked_read_helper_tests {
                 subject: message.clone(), kind: "message.sent".into(), actor: Some(agent.into()),
                 fields: serde_json::from_value(json!({"from":agent,"to":person,"status":"sent",
                     "content":"Pagination reply","thread_id":thread})).unwrap(),
-                evidence: vec![], expected_subject: None, idempotency_key: None,
+                evidence: vec![], expected_subject: None, idempotency_key: Some(format!("offline-reply-{n}")),
             }, PersonAuthority::TrustedLocal, None).unwrap();
             thread_reading::apply_as(&store, PersonAuthority::TrustedLocal, person, &thread,
                 &format!("mark-{n}"), thread_reading::Edit::Mark {

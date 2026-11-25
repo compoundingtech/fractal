@@ -184,7 +184,7 @@ fn inbox_mission_and_linked_history_pages_match_without_and_with_offline_indexes
                 ("from".into(), json!(AGENT)), ("to".into(), json!(PERSON)),
                 ("content".into(), json!("Unread native reply")), ("status".into(), json!("sent")),
                 ("thread_id".into(), json!(thread)),
-            ]), evidence: vec![], expected_subject: None, idempotency_key: None,
+            ]), evidence: vec![], expected_subject: None, idempotency_key: Some(format!("offline-reply-{thread}")),
         }, crate::store::thread_metadata::PersonAuthority::TrustedLocal, None).unwrap();
     }
     let b = ask(&store, &input, "offline-linked-b");
@@ -604,8 +604,8 @@ fn request_history_denied_heavy_keyset_pages_match_visible_only_metadata() {
     }
 
     // The plan proof covers explicitly prepared indexes, not startup DDL.
-    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-ha1bd494efa68 owner=fractal_seats::store::thread_request_history_tests TODO=trace-statement-and-value-representation */ fractal_store::owner_indexes::THREAD_INDEXES).unwrap();
-    let connection = store.readers.get();
+    let connection = store.connection.write();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha1bd494efa68 owner=fractal_seats::store::thread_request_history_tests TODO=trace-statement-and-value-representation */ fractal_store::owner_indexes::THREAD_INDEXES).unwrap();
     let mut statement = connection.prepare(
         "EXPLAIN QUERY PLAN
          SELECT json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')
