@@ -508,8 +508,10 @@ mod tests {
             "amber").unwrap();
         let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
         store.apply(&intent, &expected, "audit-wake-seat").unwrap();
+        let desired = fractal_store::store::current_desired_row(
+            &store.readers.get(), "agent/amber.worker").unwrap().unwrap().claim_id;
         let suspended = action_claim(&store, "runtime.action.requested",
-            json!({"action":"suspend","cause":"idle"}), vec![]);
+            json!({"action":"suspend","cause":"idle"}), vec![desired.clone()]);
         store.append_claim(&ClaimInput {
             subject: suspended.subject.clone(), kind: "runtime.action.succeeded".into(),
             actor: suspended.actor.clone(),
@@ -537,7 +539,7 @@ mod tests {
         assert_eq!(fields(&wakes[0])["suspension_id"], suspended.id);
         let resume = action_claim(&store, "runtime.action.requested",
             json!({"action":"resume","cause":"idle","suspend_operation_id":suspended.id}),
-            vec![suspended.id.clone()]);
+            vec![desired, suspended.id.clone()]);
         let completed = action_claim(&store, "runtime.action.succeeded",
             json!({"action":"resume","operation_status":"resumed"}), vec![resume.id.clone()]);
         RuntimeEvidence::default().drain_resume_audits(&store, completed.accepted_at_unix_ms).unwrap();
