@@ -27,6 +27,9 @@ pub fn with<T>(binding: Option<RunBinding>, callback: impl FnOnce() -> T) -> T {
     callback()
 }
 
+/// Check once at writer admission, before the operation mutates its run or step.
+/// Per-claim authority checks must not repeat this fence: an admitted cancellation or
+/// revision can end the authenticated attempt while appending its remaining claims.
 pub(crate) fn admit_tx(tx: &Transaction<'_>) -> Result<(), FractalError> {
     if let Ok(result) = REQUEST.try_with(|binding| check_tx(tx, binding)) { return result; }
     BLOCKING.with(|slot| {
