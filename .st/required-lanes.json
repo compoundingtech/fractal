@@ -197,7 +197,8 @@
         "scripts/ci-local",
         "tests",
         "clippy",
-        "fleet-compat"
+        "fleet-compat",
+        "isolation-vm"
       ],
       "definition_paths": [
         ".cargo/config.toml",
@@ -210,6 +211,8 @@
         "flake.lock",
         "flake.nix",
         "nix/hm-module.nix",
+        "nix/sekrets-vm.nix",
+        "nix/transport-isolation-vm.nix",
         "scripts/build-stamp-watch-test",
         "scripts/check-fractal-boundary",
         "scripts/check-fractal-boundary-test",

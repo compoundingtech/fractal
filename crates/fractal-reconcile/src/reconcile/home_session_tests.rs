@@ -124,9 +124,7 @@ impl NativePair {
         assert!(std::env::var_os(FINITE_LANE_CHILD).is_some(),
             "finite lane configuration requires an isolated fixture process");
         let lane_configuration = FiniteLaneConfiguration(fractal_runtime::lanes_enforced());
-        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
-        let binary = fractal_runtime::resolve_executable("st3", &environment)
-            .expect("native finite acceptance requires the built real st3 executable on PATH");
+        let binary = crate::ci_test_paths::built_cli_binary();
         let mut pair = Self::with_pregraph_setup(SessionCustody::Owned, false, |executor, _store| {
             // Use the daemon's initialization contract: LaneHost alone configures
             // admission but does not enable the runtime's actual kernel lanes.
@@ -957,12 +955,28 @@ async fn connected_unknown_start_recovers_late_native_provenance_and_cancel_with
 #[tokio::test]
 async fn native_ordinary_agents_hold_aggregate_physical_envelopes_without_graph_reads() {
     let mut pair = NativePair::for_start().await;
-    let room = fractal_runtime::host::for_lanes(fractal_runtime::host::size().unwrap());
-    let outside = fractal_runtime::host::outside_lane_memory().unwrap().outside_bytes;
-    let lane = fractal_runtime::Capacity { cores: 1, memory: room.memory.saturating_sub(outside) / 3 * 2 };
-    assert!(lane.memory >= 512 * 1024 * 1024, "native capacity acceptance requires physical headroom");
-    let lane_host = seat_admission::LaneHost { room,
-        outside: fractal_runtime::host::outside_lane_memory, burst_lane: None };
+    // This ordinary-agent fixture does not require a systemd user manager.
+    // Observe actual whole-host usage without subtracting any lane cgroup usage
+    // or crediting ARC: charging all used memory as outside is conservative.
+    fn outside() -> Option<fractal_runtime::host::HostMemoryObservation> {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        fractal_runtime::host::outside_memory(&meminfo, None, None, None)
+    }
+    // Use the physical host as this fixture's configured budget, not the daemon
+    // policy that reserves at least two CPUs and leaves a two-core runner no lanes.
+    let room = fractal_runtime::host::size()
+        .expect("ordinary capacity fixture requires actual online CPUs and installed memory");
+    let observation = outside().unwrap_or_else(|| panic!(
+        "ordinary capacity fixture requires actual host memory: room={room:?}; meminfo={:?}",
+        std::fs::read_to_string("/proc/meminfo")));
+    let available = room.memory.saturating_sub(observation.outside_bytes);
+    let lane = fractal_runtime::Capacity { cores: 1, memory: available / 3 * 2 };
+    let capacity = format!("room={room:?}; outside={observation:?}; available={available}; lane={lane:?}");
+    assert!(lane.memory >= 512 * 1024 * 1024,
+        "native capacity acceptance requires physical headroom: {capacity}");
+    assert!(lane.cores <= room.cores && lane.memory <= available && lane.memory * 2 > available,
+        "each request must fit individually but their sum must exceed actual available memory: {capacity}");
+    let lane_host = seat_admission::LaneHost { room, outside, burst_lane: None };
     let executor = Arc::new(Reconciler::new(pair.store.clone(), pair.runtime.clone(), pair.selection.host.clone(),
         Arc::new(Notify::new())).with_lane_host(Some(lane_host)));
     executor.install_home_session_journal(pair.seat.clone()).unwrap();
@@ -977,27 +991,43 @@ async fn native_ordinary_agents_hold_aggregate_physical_envelopes_without_graph_
     second.member.launch = crate::model::LaunchSpec::Shell("printf second > forbidden-second; exec sleep 600".into());
     second.launch_member = second.member.clone();
     second.seal().unwrap();
-    assert!(pair.executor.remote_seat_lane_fits("agent/example/worker", &first.member).unwrap());
-    assert!(pair.executor.remote_seat_lane_fits("agent/example/second", &second.member).unwrap());
+    let first_fit = pair.executor.remote_seat_lane_fits("agent/example/worker", &first.member);
+    assert!(matches!(first_fit, Ok(true)), "first individual fit={first_fit:?}; {capacity}; now={:?}", outside());
+    let second_fit = pair.executor.remote_seat_lane_fits("agent/example/second", &second.member);
+    assert!(matches!(second_fit, Ok(true)), "second individual fit={second_fit:?}; {capacity}; now={:?}", outside());
     let start = pair.home.enqueue(pair.draft("ordinary-first", Operation::Start { authorization: Box::new(first) })).unwrap();
     pair.connect();
     pair.settled(&start).await;
-    assert!(matches!(pair.home.command_receipt(&start.execution_id).unwrap().unwrap().state,
-        ReceiptState::Settled { outcome: Outcome::Started { .. } }));
+    let receipt = pair.home.command_receipt(&start.execution_id);
+    let incarnation = match &receipt {
+        Ok(Some(Receipt { state: ReceiptState::Settled { outcome: Outcome::Started { incarnation } }, .. })) =>
+            incarnation.clone(),
+        _ => panic!("first actual producer must start: receipt={receipt:?}; {capacity}; now={:?}", outside()),
+    };
     assert_eq!(native_file(&pair.root.path().join("first-entered")).await, b"first");
-    assert!(!pair.executor.remote_seat_lane_fits("agent/example/second", &second.member).unwrap());
+    let aggregate_fit = pair.executor.remote_seat_lane_fits("agent/example/second", &second.member);
+    assert!(matches!(aggregate_fit, Ok(false)),
+        "second must fail aggregate fit: fit={aggregate_fit:?}; {capacity}; now={:?}", outside());
     let mut binding = pair.binding.clone();
     binding.subject = "agent/example/second".into();
     binding.runtime = "native-second".into();
     let denied = pair.home.enqueue(CommandDraft { decision_id: "ordinary-second".into(), binding,
         operation: Operation::Start { authorization: Box::new(second) } }).unwrap();
     pair.settled(&denied).await;
-    assert!(matches!(pair.home.command_receipt(&denied.execution_id).unwrap().unwrap().state,
-        ReceiptState::Settled { outcome: Outcome::Refused { .. } }));
+    let receipt = pair.home.command_receipt(&denied.execution_id);
+    assert!(matches!(&receipt,
+        Ok(Some(Receipt { state: ReceiptState::Settled { outcome: Outcome::Refused { reason } }, .. }))
+            if reason.contains("native agent lane does not fit the physical host envelope")),
+        "second actual Start must be refused for aggregate capacity: receipt={receipt:?}; {capacity}; now={:?}", outside());
     assert!(!pair.root.path().join("forbidden-second").exists());
     assert!(!pair.runtime.snapshot_ptys().unwrap().iter().any(|entry| entry.runtime_id == "native-second"));
     pair.home.request_cancel(&start.execution_id, "capacity fixture cleanup").unwrap();
     pair.stopped(&start).await;
+    let local = pair.store.local_session_at(&start.binding.subject, &incarnation)
+        .expect("read first producer's exact native custody")
+        .expect("first producer's exact generation must retain retirement proof");
+    assert!(pair.store.local_session_retirement_verified(&local)
+        .expect("read exact first producer's retirement verification"));
     pair.disconnect().await;
 }
 

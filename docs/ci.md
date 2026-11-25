@@ -51,9 +51,9 @@ disabled in GitHub Actions; it does not currently run on PRs or main pushes. The
 fast lane requires `linux-test-build`, `linux-clippy` and `linux-fleet-compat`. The full
 `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` checks still run as
 advisory hosted proof. Merge-group support remains available (see [Merge queue](#merge-queue)).
-The VM tests
-(`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
-requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
+The real-systemd VM tests (`isolation-vm`) are required members of `linux-gate`
+on ready pull requests and merge groups, as well as daily coverage. Mail redelivery
+canaries remain in `daily-long.yml`; a red daily run comments on its one open issue.
 
 Every **ready** pull request, including a fork, gets the Linux gate, the freshness check, the
 TypeScript client check and the web lane. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
@@ -114,9 +114,10 @@ lists must prove that the selected inventories form a disjoint, complete union.
 `linux-gate` aggregates `upgrade-impact`, applicable build/test and Rust stages,
 and `ci-script-tests`. Each must succeed, except for a stage its matching evidence
 gate explicitly permits to skip; failure, cancellation or an unexplained skip fails
-the aggregate. Mail redelivery and isolation VM coverage run in the daily lanes.
+the aggregate. Mail redelivery runs in the daily lanes; native isolation VM coverage
+is required per pull request and merge group and also runs daily.
 Namespace build/test stages use `nscloud-ubuntu-24.04-amd64-8x16-with-features`;
-the daily `isolation-vm` uses `namespace-profile-linux-x86-64`.
+`isolation-vm` uses `namespace-profile-linux-x86-64`.
 The four required Workspace gates (`linux-gate`, `typescript-client`, `fractal-web`,
 `genie-freshness`) and supporting controls (`upgrade-impact` and web change detection)
 use the existing `ci1-priority` owned role only for `merge_group` and protected-main
@@ -655,24 +656,29 @@ survives. The test remains ignored in ordinary CI; the VM explicitly selects it 
 `fractal_runtime` binary, `lib` kind and full name. This execution does not authorize production
 activation of the retirement primitive.
 
-All five controls need a real systemd user manager, which Namespace's runner image does not
-boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily `daily-isolation-vm`
-job (`daily-long.yml`):
+These controls need a real systemd user manager, which Namespace's runner image
+does not boot. They run alongside the two required graph-free remote Start controls
+in `nix/transport-isolation-vm.nix`, through the per-PR `isolation-vm` gate and the
+daily `daily-isolation-vm` job. The guest has four cores and 8 GiB RAM so the real
+finite lane fits without bypassing the production system reserve.
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
 2. The producer prebuilds the current workspace into one archive, including the
-   fractal-runtime `scope_cascade` and library binaries.
+   runtime and reconciler library binaries and the authenticated standalone CLI.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive and extracts it at the producer checkout's
-   path for its package working directories. It runs the five controls through nextest as a
-   transient service of that user's systemd manager. The VM compiles nothing.
+   path for its package working directories. It runs all seven controls through
+   nextest as a transient service of that user's systemd manager. The VM compiles
+   nothing. `CI_TEST_CLI_BINARY` names the exact producer CLI, never ambient `st3`.
 
-The archive inventory must match the five exact package, binary, kind and test identities.
-Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
-The JUnit report must contain exactly those five distinct successful results, with no missing,
-extra, skipped, rerun or flaky result. All five tests must run and pass, with no isolation
+The archive inventory must match the seven exact package, binary, kind and test
+identities: the preceding five runtime controls plus real CLI/Bun enforced remote
+Start and inherited parent/sibling Stop/withdrawal/refusal. Both listing and
+execution use `--run-ignored all`, and execution sets retries to zero. JUnit must
+contain exactly seven distinct successful results, with no missing, extra,
+skipped, rerun or flaky result. All seven must run and pass, with no isolation
 opt-out. The job summary records the KVM probe and each phase's elapsed time.
 
 ### TypeScript client
@@ -1824,7 +1830,7 @@ gh workflow run burst.yml --ref main -f sha=FULL_SHA -f suite=cargo-test \
 | --- | --- |
 | `cargo-test` | `nix develop -c cargo test --locked ARGS` |
 | `nextest` | `nix develop -c cargo nextest run --locked ARGS` |
-| `st-test-all` | Every whole-run check in `scripts/st-test`'s local table, in its order and unsigned: today `typescript-client`, `genie-freshness`, `ci-script-tests` and `linux-gate` (`scripts/ci-local tests clippy fleet-compat`). The report readers sign nothing here, and the path-filtered `fractal-web` stays with Workspace CI. Takes no `args`. |
+| `st-test-all` | Every whole-run check in `scripts/st-test`'s local table, in its order and unsigned: today `typescript-client`, `genie-freshness`, `ci-script-tests` and `linux-gate` (`scripts/ci-local tests clippy fleet-compat isolation-vm`). The report readers sign nothing here, and the path-filtered `fractal-web` stays with Workspace CI. Takes no `args`. |
 
 `sha` must be 40 lowercase hex characters, `request` must match `^[A-Za-z0-9._-]{1,64}$`, and `args`
 must match `^[A-Za-z0-9_:./=@ ,+-]*$`. `args` reaches the command only through the environment and

@@ -1,11 +1,12 @@
-# Runs the five current-runtime scope controls in a VM with a real
+# Runs the seven current-runtime and remote-start scope controls in a VM with a real
 # systemd user manager for a lingering user, as on a fleet host. The isolation-vm CI job builds
 # this test's driver and runs it outside the Nix sandbox with its prebuilt nextest archive:
 #
-#   ST_ISOLATION_ARCHIVE    workspace archive containing the fractal-runtime tests
+#   ST_ISOLATION_ARCHIVE    workspace archive containing the runtime and reconciler tests
 #   ST_ISOLATION_WORKSPACE  the checkout the archive was built in; nextest requires each
 #                           selected package's original working directory.
 #   ST_ISOLATION_TIMINGS    JSON file that receives the boot and test durations
+#   CI_TEST_CLI_BINARY      verified exact-source production CLI from the producer
 #
 # The VM compiles nothing. KVM is required; there is no emulation fallback.
 { pkgs, pty }:
@@ -42,6 +43,18 @@ let
       binary = "fractal_runtime";
       kind = "lib";
       name = "isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor";
+    }
+    {
+      package = "fractal-reconcile";
+      binary = "fractal_reconcile";
+      kind = "lib";
+      name = "reconcile::home_session::tests::native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_and_retirement";
+    }
+    {
+      package = "fractal-reconcile";
+      binary = "fractal_reconcile";
+      kind = "lib";
+      name = "reconcile::home_session::tests::inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_parent_and_sibling";
     }
   ];
   controlFilter = pkgs.lib.concatStringsSep " or " (
@@ -119,6 +132,7 @@ let
     unset ST2_ALLOW_ISOLATION_SKIP ST2_ALLOW_PTY_SKIP
     export CI_TEST_EXTRACTED="$1" CI_TEST_BUILD_WORKSPACE="$2" CI_TEST_WORKSPACE="$1"
     export CI_TEST_TARGET_TMPDIR=/tmp/ci-test-scratch
+    export CI_TEST_CLI_BINARY=/tmp/isolation-fractal
     mkdir -p "$CI_TEST_TARGET_TMPDIR"
     common=(--archive-file /tmp/isolation.tar.zst --workspace-remap "$1" --extract-to "$1"
       --extract-overwrite --profile default --run-ignored all -E ${pkgs.lib.escapeShellArg controlFilter})
@@ -135,7 +149,9 @@ pkgs.testers.runNixOSTest {
   qemu.forceAccel = true;
   nodes.machine = {
     virtualisation.cores = 4;
-    virtualisation.memorySize = 2048;
+    # Native admission retains the production 4 GiB system reserve, in addition
+    # to the enforced 512 MiB lane and actual CLI/Bun/test-process working sets.
+    virtualisation.memorySize = 8192;
     # The workspace archive is copied here and expands to the complete prebuilt test inventory.
     # The former 4 GiB disk held the small legacy archive, but cannot hold both new inputs.
     virtualisation.diskSize = 16384;
@@ -146,6 +162,7 @@ pkgs.testers.runNixOSTest {
     };
     environment.systemPackages = [
       pty
+      pkgs.bun
       pkgs.cargo-nextest
     ];
   };
@@ -162,6 +179,7 @@ pkgs.testers.runNixOSTest {
     workspace = (os.environ["FRACTAL_ISOLATION_WORKSPACE"] if "FRACTAL_ISOLATION_WORKSPACE" in os.environ else os.environ["ST_ISOLATION_WORKSPACE"])
     # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     build_workspace = (os.environ["FRACTAL_ISOLATION_BUILD_WORKSPACE"] if "FRACTAL_ISOLATION_BUILD_WORKSPACE" in os.environ else os.environ["ST_ISOLATION_BUILD_WORKSPACE"])
+    cli = os.environ["CI_TEST_CLI_BINARY"]
 
     started = time.monotonic()
     machine.wait_for_unit("multi-user.target")
@@ -171,9 +189,11 @@ pkgs.testers.runNixOSTest {
     assert virt == "kvm", f"the VM runs under {virt}, not KVM"
 
     machine.copy_from_host(archive, "/tmp/isolation.tar.zst")
+    machine.copy_from_host(cli, "/tmp/isolation-fractal")
+    machine.succeed("chmod 755 /tmp/isolation-fractal")
     # Archives carry built binaries, not package source directories. Provision the manifests
-    # and working directories for the selected crates/fractal-runtime package.
-    for manifest in ("Cargo.toml", "crates/fractal-runtime/Cargo.toml"):
+    # and working directories for every selected package.
+    for manifest in ("Cargo.toml", "crates/fractal-runtime/Cargo.toml", "crates/fractal-reconcile/Cargo.toml"):
         path = os.path.join(workspace, manifest)
         directory = shlex.quote(os.path.dirname(path))
         machine.succeed(f"mkdir -p {directory} && chown ${user} {directory}")
@@ -189,7 +209,7 @@ pkgs.testers.runNixOSTest {
     )
     test_seconds = time.monotonic() - started
     print(output)
-    assert re.search(r"\b5 tests run: 5 passed\b", output), "all five explicitly selected systemd-scope cases must run and pass"
+    assert re.search(r"\b7 tests run: 7 passed\b", output), "all seven explicitly selected native systemd-scope cases must run and pass"
 
     # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     with open((os.environ["FRACTAL_ISOLATION_TIMINGS"] if "FRACTAL_ISOLATION_TIMINGS" in os.environ else os.environ["ST_ISOLATION_TIMINGS"]), "w") as timings:

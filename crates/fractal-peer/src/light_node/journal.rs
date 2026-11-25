@@ -438,7 +438,7 @@ impl Journal {
         let receipt = append_receipt(&tx, &selection, command, ReceiptState::Accepted, &self.limits)?;
         if let Some(reason)=cancellation {
             local::revoke_execution_tx(&tx,&command.binding.host,&command.binding.authorization_revision)?;
-            tx.execute(/* sqlite-large-value: allow-for-now lv-hc3cd8ed405bc owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1",params![command.execution_id,reason])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h8bd3c4b8c8b9 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1",params![command.execution_id,reason])?;
             settle(&tx,command,Outcome::Cancelled {reason:reason.to_owned()},&self.limits)?;
         } else if let Some(outcome)=entry_refusal(&tx,command)? {
             settle(&tx,command,outcome,&self.limits)?;
@@ -646,7 +646,7 @@ impl Journal {
         let binding=&command.binding;
         local::revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision)?;
         let authority_changed=tx.total_changes()!=authority_before;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h8bd3c4b8c8b9 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1", params![execution,reason])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hc3cd8ed405bc owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1", params![execution,reason])?;
         let native_result:Result<()>=if state == "admitted" {
             settle(&tx,&command,Outcome::Cancelled { reason },&self.limits)?;
             tx.commit()?;
