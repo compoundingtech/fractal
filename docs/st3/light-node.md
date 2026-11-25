@@ -255,13 +255,16 @@ Configuration version `1` contains these explicit operator-selected fields:
 | `native_sessions` | Explicit canonical `LocalSession` custody metadata, not a list of subjects to discover or adopt. |
 
 Configuration and credential files must be owned regular files inaccessible to
-group/other users; final-component symlinks are refused. The state directory is
-created private (`0700`), and retained files are never permission-repaired or
-truncated. An exclusive directory process lock prevents a second agent from
+group/other users; final-component symlinks and special files are refused without
+waiting for a FIFO writer. The state directory is created private (`0700`), and
+retained files are never permission-repaired or truncated. An exclusive directory process lock prevents a second agent from
 replacing a live API socket. Fresh native custody requires positive exact native
 generation/provenance evidence and current grant authority; reoffering identical
 retained custody is restart-idempotent, including after a completed Stop. An empty
 journal does not claim processes merely because their subject appears in a grant.
+Command cancellation keeps its exact authority revision durably revoked, including
+after refresh, home acknowledgment and restart; a healthy native process does not
+silently regain that revoked authority.
 This provisioning interface does not implement production custody transfer from
 the full graph or permission to run two decision owners over the same execution.
 

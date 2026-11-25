@@ -34,7 +34,7 @@ pub struct LocalSession {
 
 /// The additive proof column intentionally leaves pre-existing authoritative rows unproven.
 pub fn initialize(connection: &Connection) -> Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS local_session_custody (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3c23c0ba712a owner=fractal_light_node_core::custody TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_session_custody (
         subject TEXT NOT NULL, incarnation TEXT NOT NULL, body TEXT NOT NULL,
         active INTEGER NOT NULL DEFAULT 1, custody_settled INTEGER NOT NULL DEFAULT 0,
         detached_by TEXT, detach_receipted INTEGER NOT NULL DEFAULT 0,
@@ -45,7 +45,7 @@ pub fn initialize(connection: &Connection) -> Result<()> {
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_session_custody') WHERE name='native_retirement_verified')",
         [], |row| row.get(0))?;
     if !installed {
-        connection.execute("ALTER TABLE local_session_custody ADD COLUMN native_retirement_verified INTEGER NOT NULL DEFAULT 0", [])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h882f0e8d73bc owner=fractal_light_node_core::custody TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE local_session_custody ADD COLUMN native_retirement_verified INTEGER NOT NULL DEFAULT 0", [])?;
     }
     Ok(())
 }
@@ -99,9 +99,9 @@ pub fn bind(connection: &Connection, binding: &LocalSession) -> Result<()> {
         let count: u64 = connection.query_row("SELECT count(*) FROM local_session_custody", [], |row| row.get(0))?;
         anyhow::ensure!(count < 4096, "executor session custody capacity reached");
     }
-    connection.execute("UPDATE local_session_custody SET active=0 WHERE subject=?1 AND incarnation<>?2 AND active=1",
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hdbc7a27c2329 owner=fractal_light_node_core::custody TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET active=0 WHERE subject=?1 AND incarnation<>?2 AND active=1",
         params![binding.subject, binding.incarnation])?;
-    connection.execute("INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hede201226d04 owner=fractal_light_node_core::custody TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)
         ON CONFLICT(subject,incarnation) DO UPDATE SET body=excluded.body,active=1,native_retirement_verified=0
         WHERE local_session_custody.detached_by IS NULL
           AND (local_session_custody.body<>excluded.body OR local_session_custody.active<>1)",
@@ -133,7 +133,7 @@ pub fn detached(connection: &Connection, subject: &str, incarnation: &str) -> Re
 /// Durable logical detach only; never signal a person's shell.
 pub fn detach(connection: &Connection, subject: &str, incarnation: &str, operation: &str) -> Result<()> {
     anyhow::ensure!(!operation.is_empty() && operation.len() <= 1024, "invalid detach operation");
-    let changed = connection.execute("UPDATE local_session_custody
+    let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h5c791af4b869 owner=fractal_light_node_core::custody TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody
         SET detached_by=COALESCE(detached_by,?3),custody_settled=1 WHERE subject=?1 AND incarnation=?2
         AND json_extract(body,'$.custody')='Borrowed'",
         params![subject, incarnation, operation])?;
@@ -143,7 +143,7 @@ pub fn detach(connection: &Connection, subject: &str, incarnation: &str, operati
 
 pub fn verify_retirement(connection: &Connection, binding: &LocalSession) -> Result<()> {
     anyhow::ensure!(binding.custody == SessionCustody::Owned, "borrowed custody cannot retire its native runtime");
-    let changed = connection.execute("UPDATE local_session_custody SET native_retirement_verified=1
+    let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h8a25b5eed90b owner=fractal_light_node_core::custody TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET native_retirement_verified=1
         WHERE subject=?1 AND incarnation=?2 AND body=?3 AND active=1
           AND custody_settled=0 AND detached_by IS NULL",
         params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
@@ -161,7 +161,7 @@ pub fn retirement_verified(connection: &Connection, binding: &LocalSession) -> R
 /// Requires exact positive physical proof; receipt remains blocked until this succeeds.
 pub fn settle(connection: &Connection, binding: &LocalSession) -> Result<()> {
     anyhow::ensure!(retirement_verified(connection, binding)?, "native custody settlement lacks retirement proof");
-    let changed = connection.execute("UPDATE local_session_custody SET custody_settled=1
+    let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-hdc9de3b1d6b7 owner=fractal_light_node_core::custody TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET custody_settled=1
         WHERE subject=?1 AND incarnation=?2 AND body=?3 AND native_retirement_verified=1",
         params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
     anyhow::ensure!(changed == 1, "native custody changed before local finalization");

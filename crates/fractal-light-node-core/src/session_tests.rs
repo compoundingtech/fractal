@@ -274,7 +274,7 @@ async fn requester_retains_original_receipt_for_freshly_signed_retries_across_re
     assert_ne!(request.assertion.signature,retry.assertion.signature);
     f.seat_journal.enqueue_run_request(&request).unwrap();
     let graph=Arc::new(fractal_store::Store::open(&f._root.path().join("requester-graph"),f.selected.home.clone()).unwrap());
-    let original=StoreRunEffects::new(graph).execute(/* sqlite-large-value: allow-for-now lv-h40707d5ec849 owner=fractal_light_node_core::session_tests TODO=trace-statement-and-value-representation */ &request).unwrap();
+    let original=StoreRunEffects::new(graph).execute(/* sqlite-large-value: allow-for-now lv-h2b3b02477b75 owner=fractal_light_node_core::session_tests TODO=trace-statement-and-value-representation */ &request).unwrap();
     assert!(original.result.is_err(),"the actual graph must refuse an expired assertion");
     f.seat_journal.accept_run_result(&original).unwrap();
     let requester=Requester {journal:f.seat_journal.clone()};

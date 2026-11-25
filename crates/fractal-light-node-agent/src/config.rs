@@ -84,7 +84,8 @@ impl Config {
 #[cfg(unix)]
 pub fn private_file(path: &Path) -> Result<File> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    // A FIFO must reach the descriptor-type rejection below, not wait for a writer.
+    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let metadata = file.metadata()?;
     ensure!(metadata.is_file() && metadata.uid() == effective_uid()
         && metadata.mode() & 0o077 == 0, "private file must be regular, owned by this user, and inaccessible to group/other users");

@@ -434,6 +434,35 @@ mod unix {
     }
 
     #[test]
+    fn binary_rejects_owned_fifo_config_and_credentials_without_waiting_for_a_writer() {
+        for input in ["config", "fleet-secret", "member-key"] {
+            let fixture = Fixture::new();
+            let path = match input {
+                "config" => &fixture.config_path,
+                "fleet-secret" => &fixture.config.fleet_secret_file,
+                "member-key" => &fixture.config.member_key_file,
+                _ => unreachable!(),
+            };
+            fs::remove_file(path).unwrap();
+            assert!(Command::new("mkfifo").args(["-m", "600"]).arg(path).status().unwrap().success());
+            let mut child = fixture.command().arg("--config").arg(&fixture.config_path)
+                .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if child.try_wait().unwrap().is_some() { break; }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{input} FIFO blocked startup instead of rejecting its descriptor type");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_failure(&child.wait_with_output().unwrap(), "private file must be regular");
+            assert!(!fixture.config.socket_path().exists());
+        }
+    }
+
+    #[test]
     fn binary_rejects_private_auth_permissions_symlinks_and_oversized_files_before_backend() {
         for member_key in [false, true] {
             for permissions in [0o640, 0o604] {

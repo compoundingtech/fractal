@@ -92,7 +92,6 @@ pub use fractal_telemetry::otel;
 pub use fractal_telemetry::otel_client_class;
 pub use fractal_telemetry::otlp;
 pub use fractal_peer::peer;
-pub use fractal_peer::light_node;
 pub use fractal_reconcile::placement;
 pub use fractal_store::person_request;
 pub use fractal_kernel::pricing;

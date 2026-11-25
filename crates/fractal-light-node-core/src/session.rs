@@ -384,7 +384,7 @@ async fn serve_home(home: &Home, journal: &Journal, connection:&Semaphore, socke
                     ensure!(drained, "retained evidence must drain before new effects");
                     ensure!(request.assertion.binding.home == selected.home && request.assertion.binding.host == selected.host && request.assertion.binding.epoch == selected.epoch, "run effect selection is fenced");
                     ensure!(selected.grant.subjects.contains(&request.assertion.binding.subject), "run effect outside provisioned subject grant");
-                    let result = home.0.effects.execute(/* sqlite-large-value: allow-for-now lv-h2784ce849550 owner=fractal_light_node_core::session TODO=trace-statement-and-value-representation */ &request)?;
+                    let result = home.0.effects.execute(/* sqlite-large-value: allow-for-now lv-h7893a43c53a3 owner=fractal_light_node_core::session TODO=trace-statement-and-value-representation */ &request)?;
                     ensure!(result.request_id == request.assertion.request.request_id, "effect result identity differs");
                     server_send(socket, Frame::RunResult { result }).await?;
                 }

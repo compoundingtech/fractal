@@ -96,6 +96,32 @@ fn spawn_pty(pty: &PtyRuntime, cwd: &Path) {
 }
 
 #[test]
+fn cancellation_keeps_native_process_alive_without_resurrecting_revoked_authority_after_restart() {
+    for entered in [false, true] {
+        let fixture = Fixture::new(false);
+        fixture.acknowledge();
+        let command = fixture.command("cancel-observation", Operation::Observe);
+        if entered { fixture.enter(&command); } else {
+            assert!(matches!(fixture.seat.admit(&command).unwrap(), Admission::Accepted(_)));
+        }
+        fixture.seat.cancel_or_revoke(&command.execution_id, "withdrawn".into(),
+            |command, authority, reason| fixture.driver.cancel(command, authority, reason)).unwrap();
+        fixture.driver.refresh_bindings().unwrap();
+        assert!(fixture.running(), "cancellation revokes authority, not the native process");
+        assert!(fixture.seat.with_authority(|authority| Ok(local::execution_revoked(authority, &fixture.binding)?)).unwrap());
+        fixture.acknowledge();
+        let (seat, driver) = fixture.reopened();
+        driver.bootstrap(&fixture.selection, std::slice::from_ref(&fixture.local)).unwrap();
+        assert!(seat.with_authority(|authority| Ok(local::execution_revoked(authority, &fixture.binding)?)).unwrap());
+        assert!(seat.with_authority(|authority| {
+            Ok(local::require_acknowledged_execution(authority, &fixture.binding).is_err())
+        }).unwrap());
+        assert!(seat.pending_authority().unwrap().is_empty(), "retained cancellation must not emit a new admission");
+        assert!(fixture.running());
+    }
+}
+
+#[test]
 fn native_entry_requires_home_ack_and_current_exact_authority() {
     let fixture = Fixture::new(false);
     let command = Command { version: 1, sequence: 1, execution_id: "direct-observation".into(),

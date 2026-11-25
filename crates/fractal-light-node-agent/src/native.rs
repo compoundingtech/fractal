@@ -96,7 +96,17 @@ impl NativeExecutor {
         for prior in self.journal.reported_executions()? {
             if !bindings.contains(&prior) { self.journal.revoke_execution(&prior)?; }
         }
-        for binding in bindings { let _ = self.journal.offer_execution(&binding)?; }
+        for binding in bindings {
+            self.journal.with_authority_transaction(|authority| {
+                if journal::current(authority)? != selection || journal::is_closing(authority)? { return Ok(()); }
+                // Cancellation revokes authority, not native process lifetime. Keep the
+                // retained revocation terminal and check it atomically with any offer.
+                if !local::execution_revoked(authority, &binding)? {
+                    let _ = local::offer_execution_tx(authority, &binding)?;
+                }
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 
