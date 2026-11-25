@@ -2250,6 +2250,8 @@ impl CompactReplicationInventory {
 
     /// The identities of one writer sequence range.
     pub fn range(&self, writer: &str, start: u64) -> &[CompactEnvelopeId] {
+        #[cfg(test)]
+        INVENTORY_RANGE_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
         let Ok(writer) = self
             .writers
             .binary_search_by(|name| name.as_str().cmp(writer))
@@ -5573,9 +5575,13 @@ pub fn compact_replication_difference_turn(
     let (mut live, mut payloadless) = (Vec::new(), Vec::new());
     for bucket in buckets {
         let key = (bucket.writer.as_str(), bucket.start);
+        let theirs = remote_buckets.get(&key);
+        if theirs.is_some_and(|theirs| theirs.digest == bucket.digest) {
+            continue;
+        }
         let local = inventory.range(&bucket.writer, bucket.start);
         let room = page_limit.saturating_sub(missing.len());
-        let Some(theirs) = remote_buckets.get(&key) else {
+        let Some(theirs) = theirs else {
             if omitted_buckets {
                 if local.iter().any(|envelope| inventory.has_payload(envelope)) {
                     live.push(bucket);
@@ -5594,9 +5600,6 @@ pub fn compact_replication_difference_turn(
             );
             continue;
         };
-        if theirs.digest == bucket.digest {
-            continue;
-        }
         if local.iter().any(|envelope| inventory.has_payload(envelope)) {
             live.push(bucket);
         } else {
@@ -6009,6 +6012,48 @@ impl TestReplica {
         self.0.extend(pulled);
         listed
     }
+}
+
+/// Even when the roots differ, an equal bucket proves no identities need looking up in it.
+#[cfg(test)]
+#[test]
+pub fn compact_replication_exchange_skips_looking_up_matching_ranges() {
+    let identities = [
+        test_envelope_ids("writer-a", 1..=20_000, "a"),
+        test_envelope_ids("writer-b", 1..=20_000, "a"),
+    ]
+    .concat();
+    let local = TestReplica(identities.iter().cloned().collect());
+    let (inventory, buckets) = local.inventory();
+    let mut remote = local.summary();
+    // Exercise this difference function directly, not the equal-root export fast path.
+    INVENTORY_RANGE_LOOKUPS.with(|lookups| lookups.set(0));
+    let (missing, listed) =
+        compact_replication_difference_turn(&inventory, &buckets, &remote, usize::MAX, 0);
+    assert!(missing.is_empty() && listed.is_empty());
+    assert_eq!(INVENTORY_RANGE_LOOKUPS.with(std::cell::Cell::get), 0);
+
+    // The first bucket differs; every other bucket still matches. Supply a complete listing,
+    // so both the missing payload and the differing bucket listing must remain unchanged.
+    let absent = identities[0].clone();
+    let peer = TestReplica(
+        identities
+            .iter()
+            .filter(|identity| **identity != absent)
+            .cloned()
+            .collect(),
+    );
+    remote = peer.summary();
+    let (peer_inventory, _) = peer.inventory();
+    remote.envelopes = peer_inventory.identities(peer_inventory.range("writer-a", 0));
+    INVENTORY_RANGE_LOOKUPS.with(|lookups| lookups.set(0));
+    let (missing, listed) =
+        compact_replication_difference_turn(&inventory, &buckets, &remote, usize::MAX, 0);
+    assert_eq!(missing, vec![absent]);
+    // One lookup to find missing payloads and one to list the differing range; none for the
+    // other matching ranges. Check before looking up the expected listing below.
+    assert_eq!(INVENTORY_RANGE_LOOKUPS.with(std::cell::Cell::get), 2);
+    assert_eq!(listed, inventory.identities(inventory.range("writer-a", 0)));
 }
 
 #[cfg(test)]
@@ -12200,6 +12245,8 @@ pub fn select_replicated_document(
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
+    /// Bucket ranges this thread looked up while constructing replication differences.
+    pub static INVENTORY_RANGE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Replica envelope identities this thread hashed into inventory digests.
     pub static INVENTORY_IDENTITIES_HASHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Legacy graph digests this thread computed.
