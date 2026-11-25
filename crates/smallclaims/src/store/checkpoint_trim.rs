@@ -811,9 +811,9 @@ impl Store {
     }
 
     /// Initialize checkpoint history in a fresh offline restore after admitting its claim log.
-    /// The source may have learned a newer certificate without applying it yet; its recorded
-    /// tombstones still belong to the older certified manifest. This never replaces existing
-    /// checkpoint state, and verifies the manifest through the same certificate path as sync.
+    /// Certified manifests keep sync's verification; a local cut has no certificate, so check
+    /// its shape and record the archived tombstones as this member's own. This never replaces
+    /// existing checkpoint state.
     pub /* sqlite-large-value-flow: allow-for-now flow-h3436182aecc1 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn restore_checkpoint_history(
         &self,
         manifest: &CheckpointManifest,
@@ -836,7 +836,43 @@ impl Store {
                 "checkpoint restore requires empty checkpoint state",
             ));
         }
-        self.adopt_checkpoint_checked(manifest, false)
+        let claims = self.checkpoint_claims().map_err(internal)?;
+        if chosen_certificate(&certificates(&claims, &manifest.checkpoint)).is_some() {
+            return self.adopt_checkpoint_checked(manifest, false);
+        }
+        let _completion = super::checkpoint_completion::Completion::outer();
+        let drop_digest = super::checkpoint::check_checkpoint_manifest(manifest)?;
+        let checkpoint = manifest.checkpoint.as_str();
+        {
+            let mut connection = self.connection.write();
+            let transaction = connection.transaction().map_err(internal)?;
+            start_local_walk_tx(&transaction, checkpoint).map_err(internal)?;
+            record_checkpoint_tombstones_tx(&transaction, checkpoint, &manifest.envelopes, &manifest.claims)
+                .map_err(internal)?;
+            transaction
+                .execute(
+                    /* sqlite-large-value: allow-for-now lv-h0000000000000 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, detail, updated_at_unix_ms)
+                     VALUES (?1, ?2, 'trimming', ?3, ?4, ?5)",
+                    params![
+                        checkpoint,
+                        i64::try_from(manifest.cut_unix_ms).map_err(internal)?,
+                        drop_digest,
+                        json!({"envelopes": manifest.envelopes.len(), "claims": manifest.claims.len()}).to_string(),
+                        i64::try_from(now_ms()).map_err(internal)?
+                    ],
+                )
+                .map_err(internal)?;
+            transaction.commit().map_err(internal)?;
+        }
+        self.replica_rows_changed();
+        // A restore is not a day's trim: what is left of the cut is deleted whole.
+        let cap = self.local_trim_daily_claims();
+        self.trim_locally_at_most(u64::MAX);
+        let mut actions = Vec::new();
+        let finished = self.finish_trim(checkpoint, &mut actions);
+        self.trim_locally_at_most(cap);
+        finished.map_err(internal)?;
+        Ok(actions)
     }
 
     fn adopt_checkpoint_checked(
