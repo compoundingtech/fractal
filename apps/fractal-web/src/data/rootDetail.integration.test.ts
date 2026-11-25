@@ -8,7 +8,7 @@ import { createDetailsSupplementAtom, createDetailsSupplementCache, relayRootDet
 
 const root = '8cf4a5a1-3423-4e43-86cc-615f442f4ce2'
 const query: DetailsSupplementQuery = { agentRef: 'agent/fictional', harness: 'omp', host: 'host/fictional', incarnationId: 'fixture-incarnation', nativeSessionId: root }
-const answer = { agent: query.agentRef, host: query.host, incarnationId: query.incarnationId, nativeSessionId: root, window: '1d', inclusiveUsd: 99, childCount: 0, children: [], attributedFraction: 0.98 }
+const answer = { agent: query.agentRef, host: query.host, incarnationId: query.incarnationId, nativeSessionId: root, window: '7d', inclusiveUsd: 99, childCount: 0, children: [], attributedFraction: 0.98 }
 
 /** A loopback relay stand-in; the source reads it at `${origin}/v1/client/usage/root-detail`. */
 const withRelay = async (handler: (req: IncomingMessage, res: ServerResponse) => void, use: (origin: string) => Promise<void>) => {
@@ -45,10 +45,30 @@ it('waits for native root facts and reads nothing for an ineligible root', async
     const release = registry.mount(ready)
     await vi.waitFor(() => expect(registry.get(ready)).toMatchObject({ _tag: 'Observed', value: { totalUsd: { value: 99 } } }))
     expect(fetchImpl).toHaveBeenCalledTimes(1)
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe('/v1/client/usage/root-detail?agent=agent%2Ffictional&window=1d')
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('/v1/client/usage/root-detail?agent=agent%2Ffictional&window=7d')
     expect(cache(query)).toBe(ready)
     release()
   } finally { registry.dispose() }
+})
+
+it('defaults to the 7-day window and labels the ledger as reported over 7d', async () => {
+  const registry = AtomRegistry.make()
+  const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ ...answer, wallHours: 2.5, producerHost: 'fictional-ledger-host' }))
+  const source = relayRootDetailSource({ fetchImpl })
+  expect(source.window).toBe('7d')
+  const atom = createDetailsSupplementAtom({ source, query })
+  const release = registry.mount(atom)
+  try {
+    await vi.waitFor(() => expect(registry.get(atom)).toMatchObject({ _tag: 'Observed' }))
+    expect(fetchImpl.mock.calls.map(([input]) => input)).toEqual(['/v1/client/usage/root-detail?agent=agent%2Ffictional&window=7d'])
+    const feed = registry.get(atom)
+    if (feed._tag !== 'Observed') throw new TypeError('Expected an observation')
+    expect(feed.value.usdWindow).toMatchObject({ value: { label: 'last 7 days (as reported; exact cut bounds and as-of unknown)' } })
+    expect(feed.value.durations?.[0]?.label).toContain('reported 7d, cut bounds unknown')
+  } finally {
+    release()
+    registry.dispose()
+  }
 })
 
 it('reads the declared window, once per mounted demand, and aborts the read on release', async () => {
@@ -64,7 +84,7 @@ it('reads the declared window, once per mounted demand, and aborts the read on r
     started.resolve()
   }, async (origin) => {
     try {
-      const atom = createDetailsSupplementAtom({ source: relayRootDetailSource({ origin, fetchImpl: fetch, window: '7d' }), query })
+      const atom = createDetailsSupplementAtom({ source: relayRootDetailSource({ origin, fetchImpl: fetch, window: '1d' }), query })
       expect(paths).toEqual([])
       const first = registry.mount(atom)
       const second = registry.mount(atom)
@@ -72,7 +92,7 @@ it('reads the declared window, once per mounted demand, and aborts the read on r
       first()
       second()
       await closed.promise
-      expect(paths).toEqual(['/v1/client/usage/root-detail?agent=agent%2Ffictional&window=7d'])
+      expect(paths).toEqual(['/v1/client/usage/root-detail?agent=agent%2Ffictional&window=1d'])
     } finally { registry.dispose() }
   })
 })

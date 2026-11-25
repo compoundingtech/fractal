@@ -490,6 +490,10 @@ pub struct ReplicationStatus {
     /// since it started, by error code. Absent from a daemon that does not count them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_fallbacks: Option<BTreeMap<String, u64>>,
+    /// What each retention pass has done and why it stops (`store::retention`). Absent from a
+    /// daemon that does not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<crate::store::retention::RetentionStatus>,
 }
 
 /// Operational evidence expires even when the stored claim history is nonempty.

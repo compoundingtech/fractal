@@ -23,8 +23,8 @@ export interface RootDetailSource {
   readonly refreshMs: number
 }
 
-/** The relay at `${origin}${rootDetailPath}`; 1-day window and 30-second refresh unless declared otherwise. */
-export const relayRootDetailSource = ({ origin = '', fetchImpl, window = '1d', refreshMs = 30_000 }: {
+/** The relay at `${origin}${rootDetailPath}`; 7-day window and 30-second refresh unless declared otherwise. */
+export const relayRootDetailSource = ({ origin = '', fetchImpl, window = '7d', refreshMs = 30_000 }: {
   readonly origin?: string
   readonly fetchImpl: typeof globalThis.fetch
   readonly window?: RootDetailWindow
