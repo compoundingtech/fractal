@@ -611,7 +611,10 @@ fn defaults_discover_service_system_and_interactive_app_slice() {
         PathBuf::from("gate.slice"), PathBuf::from("app-lanes.slice"), PathBuf::from("app-capped.slice"),
         PathBuf::from("app-capped-heavy.slice"), PathBuf::from("app-batch.slice"), PathBuf::from("app-batch-heavy.slice"),
     ]);
-    assert_eq!(fixture.policy.excluded_cgroups, vec![PathBuf::from("app-lanes.slice"), PathBuf::from("gate.slice")]);
+    assert_eq!(fixture.policy.excluded_cgroups, vec![
+        PathBuf::from("app-lanes.slice"), PathBuf::from("gate.slice"),
+        PathBuf::from("app-agent-seats.slice"),
+    ]);
 }
 
 #[test]
