@@ -10898,7 +10898,7 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
     ]).output().unwrap();
     let stderr = String::from_utf8_lossy(&refusal.stderr);
     assert!(!refusal.status.success(), "H3: a307411d must refuse its local-trim archive");
-    let code = stderr.lines().rev().find_map(|line| line.strip_prefix("st: "))
+    let code = stderr.lines().rev().find_map(|line| line.strip_prefix("fractal: "))
         .and_then(|message| message.split_once(':'))
         .map(|(code, _)| code);
     assert_eq!(code, Some("checkpoint-not-stable"), "unexpected restore refusal: {stderr}");
