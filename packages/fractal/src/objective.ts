@@ -122,7 +122,12 @@ export type Indicator =
 type IndicatorOf<K extends Indicator['kind']> = Extract<Indicator, { readonly kind: K }>
 
 /** One statistic and its bound; `scope: 'remote'` is a latency target for reads served remotely. */
-export type Target = { readonly stat: string; readonly scope?: 'remote' } & (
+export type Target = {
+  readonly stat: string
+  readonly scope?: 'remote'
+  /** Display-only aspiration on the better side of the bound; durations use milliseconds. */
+  readonly goal?: number
+} & (
   | { readonly within: Duration; readonly max?: never; readonly min?: never; readonly minPercent?: never }
   | { readonly max: number; readonly within?: never; readonly min?: never; readonly minPercent?: never }
   | { readonly min: number; readonly within?: never; readonly max?: never; readonly minPercent?: never }
@@ -540,7 +545,7 @@ type CheckedTarget = { readonly target: Target; readonly ms?: number; readonly n
 
 const parseTarget = ({ value, fail }: { readonly value: unknown; readonly fail: Fail }): CheckedTarget => {
   if (isRecord(value) === false || typeof value.stat !== 'string') return fail('a target needs a `stat`')
-  only({ value, allowed: ['stat', 'within', 'max', 'min', 'minPercent', 'scope'], what: '`target`', fail })
+  only({ value, allowed: ['stat', 'within', 'max', 'min', 'minPercent', 'scope', 'goal'], what: '`target`', fail })
   const stat = value.stat
   const bounds = (['within', 'max', 'min', 'minPercent'] as const).filter((name) => value[name] !== undefined)
   if (bounds.length !== 1) return fail(`target \`${stat}\` needs one bound: \`within\`, \`max\`, \`min\` or \`minPercent\``)
@@ -549,21 +554,33 @@ const parseTarget = ({ value, fail }: { readonly value: unknown; readonly fail: 
   }
   const scope = value.scope === undefined ? {} : { scope: 'remote' as const }
   const bound = bounds[0]!
+  const goal = value.goal
+  if (goal !== undefined && (typeof goal !== 'number' || Number.isFinite(goal) === false)) {
+    return fail(`target \`${stat}\`'s \`goal\` is not a finite number`)
+  }
+  const display = goal === undefined ? {} : { goal }
+  const checkGoal = (limit: number): void => {
+    if (goal !== undefined && (bound === 'min' || bound === 'minPercent' ? goal < limit : goal > limit)) {
+      fail(`target \`${stat}\`'s \`goal\` must be on the better side of its bound`)
+    }
+  }
   const raw = value[bound]
   if (bound === 'within') {
     if (typeof raw !== 'string') return fail(`target \`${stat}\`'s \`within\` is not a duration`)
     const ms = durationMs({ value: raw, fail })
-    return { target: freeze({ stat, within: raw as Duration, ...scope }), ms }
+    checkGoal(ms)
+    return { target: freeze({ stat, within: raw as Duration, ...scope, ...display }), ms }
   }
   if (typeof raw !== 'number' || Number.isFinite(raw) === false) {
     return fail(`target \`${stat}\`'s \`${bound}\` is not a number`)
   }
+  checkGoal(raw)
   if (bound === 'minPercent') {
     if ((raw > 0 && raw <= 100) === false) return fail(`target \`${stat}\`'s \`minPercent\` is not between 0 and 100`)
-    return { target: freeze({ stat, minPercent: raw, ...scope }), number: raw }
+    return { target: freeze({ stat, minPercent: raw, ...scope, ...display }), number: raw }
   }
-  if (bound === 'min') return { target: freeze({ stat, min: raw, ...scope }), number: raw }
-  return { target: freeze({ stat, max: raw, ...scope }), number: raw }
+  if (bound === 'min') return { target: freeze({ stat, min: raw, ...scope, ...display }), number: raw }
+  return { target: freeze({ stat, max: raw, ...scope, ...display }), number: raw }
 }
 
 const parseAgent = ({ value, field, fail }: { readonly value: unknown; readonly field: string; readonly fail: Fail }): AgentTarget => {
@@ -667,6 +684,9 @@ const checkTargets = ({
       fail(`repeats target \`${target.stat}\``)
     }
     if (target.scope === 'remote' && indicator.kind !== 'latency') fail('only a latency target has a remote scope')
+    if (target.goal !== undefined && (indicator.kind === 'database' || (indicator.kind === 'statement' && target.stat === 'max'))) {
+      fail(`target \`${target.stat}\`'s \`goal\` has no independently representable native row`)
+    }
   })
   if (indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') {
     if (hasWindow) fail('GitHub indicators own their rolling hour and calendar windows')
@@ -860,6 +880,7 @@ const targetProps = (target: Target): Record<string, Value> => ({
   ...(target.min === undefined ? {} : { min: target.min }),
   ...(target.minPercent === undefined ? {} : { 'min-percent': target.minPercent }),
   ...(target.scope === undefined ? {} : { scope: target.scope }),
+  ...(target.goal === undefined ? {} : { goal: target.goal }),
 })
 
 /** Checks a named objective and lowers it to its `objective` KDL node. */

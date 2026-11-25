@@ -227,6 +227,9 @@ pub struct Target {
     /// What the indicator reports: `p99`, `max`, `cores`, `live-gb`, ...
     pub stat: String,
     pub bound: Bound,
+    /// Display-only aspiration in the bound's numeric unit (milliseconds for `within`).
+    /// It never changes target, breach or budget decisions.
+    pub goal: Option<f64>,
     /// A latency target for reads served through this member from another that owns them.
     pub remote: bool,
 }
@@ -860,7 +863,7 @@ impl Interval {
 }
 
 fn parse_target(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<Target, FractalError> {
-    only_properties(node, &["within", "max", "min", "min-percent", "scope"], fail)?;
+    only_properties(node, &["within", "max", "min", "min-percent", "scope", "goal"], fail)?;
     let stat = one_string(node, fail)?.to_owned();
     let bounds = ["within", "max", "min", "min-percent"]
         .into_iter()
@@ -882,12 +885,25 @@ fn parse_target(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<T
         }
         _ => return Err(fail(format!("target `{stat}` needs one bound: `within`, `max`, `min` or `min-percent`"))),
     };
+    let goal = property(node, "goal")
+        .map(|value| number(value, &format!("target `{stat}`'s `goal`"), fail))
+        .transpose()?;
+    if let Some(goal) = goal {
+        let valid = match bound {
+            Bound::Within(ms) => goal <= ms as f64,
+            Bound::Max(max) => goal <= max,
+            Bound::Min(min) | Bound::MinPercent(min) => goal >= min,
+        };
+        if !valid {
+            return Err(fail(format!("target `{stat}`'s `goal` must be at least as ambitious as its bound")));
+        }
+    }
     let remote = match property(node, "scope") {
         None => false,
         Some(Value::String(scope)) if scope == "remote" => true,
         Some(other) => return Err(fail(format!("target `{stat}` has an unknown scope {other}"))),
     };
-    Ok(Target { stat, bound, remote })
+    Ok(Target { stat, bound, goal, remote })
 }
 
 fn parse_breach(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<Breach, FractalError> {
@@ -920,6 +936,12 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
         }
         if target.remote && !matches!(objective.indicator, Indicator::Latency { .. }) {
             return Err(fail("only a latency target has a remote scope".into()));
+        }
+        if target.goal.is_some()
+            && (matches!(objective.indicator, Indicator::Database)
+                || (matches!(objective.indicator, Indicator::Statement) && target.stat == "max"))
+        {
+            return Err(fail(format!("target `{}`'s `goal` has no independently representable native row", target.stat)));
         }
     }
     let kind = objective.indicator.kind();
