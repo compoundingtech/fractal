@@ -942,6 +942,11 @@ updates. Real retention expiry still returns
 feed retention boundary, authenticated session actor, and capabilities. Unknown required capability
 versions stop the client; unknown optional capabilities may be ignored.
 
+Optional `issuer` and `issuer_key` identify the issuer of the same person-root grant
+returned by pairing. They remain stable across daemon restarts and are absent without
+a held person root, including non-person and unpaired sessions. Reading capabilities
+does not create a root or mint a key.
+
 The following resources have list and detail routes. List routes accept `limit` and `cursor` plus
 documented filters. The server clamps `limit` to `capabilities.limits.max_page_items`. Empty values
 sort after present values, strings compare as Unicode scalar sequences, and the final key is always
@@ -2000,12 +2005,19 @@ After authentication and snapshot admission, `message.send` waits at most three 
 for confirmation of dispatch and its action receipt. HTTP 503 `message-send-unconfirmed`
 has `retryable: false` and details `{applied: "unknown", action_id, idempotency_key}`.
 The admitted send can still finish; this response does not assert rollback or rejection.
-Keep the original action ID, key and payload, and resend that identical request to recover
-the durable outcome. Never create a new key for this response. At most sixteen send workers
-remain pending in a daemon. Concurrent retries wait for the held key within the same
-confirmation deadline and consume no additional worker capacity while waiting. Healthy
-retries return the original durable receipt; an expired wait returns the same unconfirmed
-outcome. A full limit returns the existing `rate-limited` code with
+Keep the original action ID, key, fence, payload and transport. The API supports
+explicit submission of that identical request to recover the durable outcome;
+never create a new key for this response. Interactive clients retain intent before
+I/O and never automatically resend an unknown attempt. The TUI shows delivery as
+unknown and blocks another dispatch of that original, including after a session or
+daemon change. A live resource summary alone is not its completed action receipt.
+Only explicit `applied: "none"` proof permits a fresh submission; for a stale
+snapshot the TUI reads a fresh snapshot before trying once more. That one-refresh
+budget belongs to the whole intent: the outer live retry loop cannot reset it.
+At most sixteen send workers remain pending in a daemon. Concurrent exact retries
+wait for the held key within the same confirmation deadline and consume no additional
+worker capacity while waiting. Healthy retries return the original durable receipt;
+an expired wait returns the same unconfirmed outcome. A full limit returns the existing `rate-limited` code with
 `applied: "none"` before submitting that request. This bounds confirmation waiting and
 pending send workers, not authentication, snapshot admission or the underlying writer hold.
 

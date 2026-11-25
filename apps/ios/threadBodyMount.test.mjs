@@ -171,7 +171,7 @@ function deliveryStore(thread) {
   const deliveriesByClient = { current: new WeakMap() };
   const ledger = () => new Map(deliveriesByClient.current.get(member)?.getSnapshot()
     .filter(attempt => attempt.phase === 'sending' || attempt.phase === 'unconfirmed')
-    .map(attempt => [attempt.id, { ...attempt.draft, retry: attempt.retry }]));
+    .map(attempt => [attempt.id, { ...attempt.draft, phase: attempt.phase, result: attempt.result, retry: attempt.retry }]));
   const unreadPorts = { current: undefined };
   const store = {
     actor: 'person/one', data: { agents: [] }, status: 'online', threadRefresh: 0, threadDeliveries: new Map(), reads: [], unreadEnabled: true,
@@ -288,18 +288,8 @@ test('laid-out Markdown lines survive the shared clock rerender; a scroll then r
 });
 
 const unconfirmedThread = () => ({ id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: reminder });
-const sameRequest = (retried, original) => {
-  assert.equal(retried.kind, original.kind);
-  assert.equal(retried.request.id, original.request.id, 'the original request ID');
-  assert.equal(retried.request.idempotency_key, original.request.idempotency_key, 'the original idempotency key');
-  assert.deepEqual(retried.request.parameters, original.request.parameters, 'the original observed marks');
-  assert.notDeepEqual(retried.request.fence, original.request.fence, 'only the fence is read again');
-  const { fence: _oldFence, ...oldIdentity } = original.request;
-  const { fence: _newFence, ...retriedIdentity } = retried.request;
-  assert.deepEqual(retriedIdentity, oldIdentity, 'all signed fields and original operation identity remain unchanged');
-};
 
-test('an unconfirmed Mark read clear is recovered after remount before a held metadata edit, with its original request', async () => {
+test('an unknown Mark read survives remount without replay or a retry affordance', async () => {
   frames.clear();
   const thread = unconfirmedThread();
   const harness = deliveryStore(thread);
@@ -308,42 +298,23 @@ test('an unconfirmed Mark read clear is recovered after remount before a held me
     await layOut(100);
     await press('Mark read');
     assert.deepEqual(harness.member.sends.map(({ kind, request }) => [kind, request.parameters]), [
-      ['clear', { target_id: thread.id, observed_marks: ['mark/one'] }], ['clear', { target_id: thread.id, observed_marks: ['mark/one'] }],
-    ], 'one lost receipt, repeated once as the identical request');
-    assert.equal(harness.member.sends[1].request.id, harness.member.sends[0].request.id);
-    assert.deepEqual([...harness.ledger().keys()], [`unread/${thread.id}`], 'the store retains the bound clear');
-    assert.ok(button('Retry original change'));
-    assert.equal(button('Mark read').disabled, true);
-
-    // A metadata edit whose receipt was also lost is held under its own scope.
-    let metadataRetries = 0;
-    await step(() => harness.track(threadEditScope(thread.id), thread.id, async () => ({
-      how: 'unconfirmed', retry: async () => { metadataRetries++; return { how: 'sent' }; },
-    })));
-    await view.unmount();
-    view = await mountBody(harness, thread, page);
-    assert.equal(button('Retry original change').disabled, false, 'the remounted body recovers the retained retry');
-    assert.equal(button('Mark read').disabled, true, 'no new edit while a delivery is held');
-    assert.equal(button('Mark unread').disabled, true);
-
-    harness.member.outcome = 'confirmed';
-    await press('Retry original change');
-    assert.equal(harness.member.sends.length, 3);
-    sameRequest(harness.member.sends[2], harness.member.sends[0]);
-    assert.equal(metadataRetries, 0, 'the unread delivery takes precedence over the metadata edit');
-    assert.deepEqual([...harness.ledger().keys()], [threadEditScope(thread.id)], 'the confirmed clear releases its slot');
-    assert.equal(button('Mark read').disabled, true, 'the metadata edit is still held');
-
-    await press('Retry original change');
-    assert.equal(metadataRetries, 1, 'the metadata edit retries its own original request next');
-    assert.equal(harness.member.sends.length, 3);
-    assert.equal(harness.ledger().size, 0);
+      ['clear', { target_id: thread.id, observed_marks: ['mark/one'] }],
+    ], 'a lost receipt never triggers a second POST');
+    assert.deepEqual([...harness.ledger().keys()], [`unread/${thread.id}`]);
     assert.equal(button('Retry original change'), undefined);
-    assert.equal(button('Mark read').disabled, false);
+    assert.equal(button('Mark read').disabled, true);
+    await view.unmount();
+    harness.member.outcome = 'confirmed';
+    view = await mountBody(harness, thread, page);
+    assert.equal(button('Retry original change'), undefined);
+    assert.equal(button('Mark read').disabled, true);
+    assert.equal(button('Mark unread').disabled, true);
+    assert.equal(harness.member.sends.length, 1, 'remount does not dispatch the retained unknown');
+    assert.equal(harness.ledger().size, 1, 'unknown remains retained');
   } finally { await view.unmount(); }
 });
 
-test('an unconfirmed Mark unread is recovered after remount and retried with its original request', async () => {
+test('an unknown Mark unread survives remount without replay', async () => {
   frames.clear();
   const thread = unconfirmedThread();
   const harness = deliveryStore(thread);
@@ -353,22 +324,14 @@ test('an unconfirmed Mark unread is recovered after remount and retried with its
     await press('Mark unread');
     assert.deepEqual(harness.member.sends.map(({ kind, request }) => [kind, request.parameters]), [
       ['mark', { target_id: thread.id, anchor_message_id: 'message/reply', observed_marks: ['mark/one'] }],
-      ['mark', { target_id: thread.id, anchor_message_id: 'message/reply', observed_marks: ['mark/one'] }],
     ]);
-    assert.deepEqual([...harness.ledger().keys()], [`unread/${thread.id}`]);
-
     await view.unmount();
-    view = await mountBody(harness, thread, page);
-    assert.equal(button('Retry original change').disabled, false);
-    assert.equal(button('Mark unread').disabled, true);
-
     harness.member.outcome = 'confirmed';
-    await press('Retry original change');
-    assert.equal(harness.member.sends.length, 3);
-    sameRequest(harness.member.sends[2], harness.member.sends[0]);
-    assert.equal(harness.ledger().size, 0, 'the confirmed mark releases its slot');
+    view = await mountBody(harness, thread, page);
     assert.equal(button('Retry original change'), undefined);
-    assert.equal(button('Mark unread').disabled, false);
+    assert.equal(button('Mark unread').disabled, true);
+    assert.equal(harness.member.sends.length, 1);
+    assert.equal(harness.ledger().size, 1);
   } finally { await view.unmount(); }
 });
 
@@ -406,10 +369,9 @@ test('specific unread action revocation or offline status blocks a retained retr
     harness.setGrant(`${kind === 'mark' ? 'mark' : 'clear'}-unread`, 'granted');
     harness.setOnline(true);
     const restored = await blocked.retry();
-    assert.equal(restored.how, 'sent');
-    assert.equal(harness.member.sends.length, before.length + 1);
-    sameRequest(harness.member.sends.at(-1), before[0]);
-    assert.equal(harness.ledger().size, 0, 'only a legitimate receipt releases the original slot');
+    assert.equal(restored.how, 'unconfirmed');
+    assert.deepEqual(harness.member.sends, before, 'restored access does not permit unknown replay');
+    assert.equal(harness.ledger().size, 1, 'unknown remains retained');
   }
 });
 

@@ -106,8 +106,8 @@ pub enum Body {
     /// A graph event worth a line: a step became ready, a run started.
     Event(String),
     /// A message sent from here that st has not reported back yet, or that failed.
-    /// `unconfirmed` means st did not answer: the message may have arrived, and sending it
-    /// again is safe because st answers a repeat with the first result.
+    /// `unconfirmed` means delivery is unknown: the message may have arrived.
+    /// It must not be resent without explicit proof of nonapplication.
     Pending {
         text: String,
         failed: Option<String>,

@@ -135,7 +135,6 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
     }),
     timeline: id => Atom.make(get => observed({ freshness: scenario === 'offline' ? 'stale' : 'live', value: { items: scenario === 'clock-skew' && ordering === 'timestamp' ? [...(get(history)[id] ?? [])].sort((a, b) => b.accepted_at_unix_ms - a.accepted_at_unix_ms) : get(history)[id] ?? [], next_cursor: Option.none() } })),
     pendingChange: () => unconfirmed,
-    retryChange: async () => { registry.set(unconfirmed, undefined); return undefined },
     draft: drafts,
     start: async (_draft, input) => {
       const refused = refusal("Couldn't start this thread.")
@@ -341,7 +340,9 @@ export const EmptyStart: Story = {
     await AllStates.play?.(context)
     const details = await alertDetails(context.canvasElement)
     const agentName = await details.findByText('Worker tests', { selector: 'span' })
-    await expect(agentName.closest('p')).toHaveTextContent(/^Ask Worker tests about this item without answering it\.$/)
+    await expect(agentName.parentElement).toHaveTextContent(/^Ask Worker tests about this item without answering it\.$/)
+    await expect(details.getByText('agent/build-host-a/worker-tests', { selector: 'code' })).toBeVisible()
+    await expect(details.getByText('Original recipient')).toBeVisible()
     await expect(details.getByRole('button', { name: 'Start thread' })).toBeTruthy()
   },
 }
@@ -356,7 +357,10 @@ export const CustomInboxSource: Story = {
     const details = await alertDetails(context.canvasElement)
     await details.findByRole('textbox', { name: 'Message' })
     await expect(details.getByRole('textbox', { name: 'Thread title' })).toHaveValue('Worker report ready')
-    await expect(details.getByText((_content, element) => element?.tagName === 'P' && element.textContent === 'To Worker tests')).toBeTruthy()
+    const agentName = await details.findByText('Worker tests', { selector: 'span' })
+    await expect(agentName.parentElement).toHaveTextContent(/^To Worker tests$/)
+    await expect(details.getByText('agent/build-host-a/worker-tests', { selector: 'code' })).toBeVisible()
+    await expect(details.getByText('Configured recipient')).toBeVisible()
   },
 }
 
@@ -450,8 +454,10 @@ export const UnconfirmedChange: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await canvas.findByText('Fractal has not confirmed the previous rename.', {}, { timeout: 60_000 })
-    await userEvent.click(canvas.getByRole('button', { name: 'Retry rename' }))
-    await waitFor(() => expect(canvas.queryByText('Fractal has not confirmed the previous rename.')).toBeNull())
+    await expect(canvas.queryByRole('button', { name: 'Retry rename' })).toBeNull()
+    await expect(canvas.getByRole('button', { name: 'Rename' })).toBeDisabled()
+    await expect(canvas.getByRole('button', { name: 'Close thread' })).toBeDisabled()
+    await expect(canvas.getByText('Do not send it again.')).toBeVisible()
   },
 }
 /** Close acts at once; the confirmed result names the thread, and the lifecycle button beside it now reads Reopen. */

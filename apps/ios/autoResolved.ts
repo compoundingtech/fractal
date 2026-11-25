@@ -3,7 +3,7 @@
 // (Fractal says so with `action_parameters`), the person may still give their own answer: one of the
 // ask's other named answers replaces the default, and the asker is told.
 import { ago, type KeptAttention } from '@fractal/views';
-import { ClientError, notApplied, outcomeUnknown, plainError, type AutoResolvedAsk, type RequestAnswerOption } from '../../clients/typescript/fractal-client';
+import { ClientError, notApplied, plainError, type AutoResolvedAsk, type RequestAnswerOption } from '../../clients/typescript/fractal-client';
 
 export type OverrideChoice = Pick<RequestAnswerOption, 'id' | 'label' | 'outcome'>;
 /** What `work.override` sends as the answer: the named answer's ID, with the person's words when it asks for changes. */
@@ -98,12 +98,12 @@ export function overrideRequest(ask: AutoResolvedAsk, answer: OverrideAnswer, fe
 }
 
 /**
- * Whether to send again: a refusal that applied nothing, except a stale fence (the window closed or the
- * ask was answered), or a reply that was lost; the identical action returns Fractal's first answer.
+ * Whether explicit proof of nonapplication permits another dispatch, except a stale fence
+ * (the override window closed or the ask was answered). Unknown outcomes never authorize replay.
  */
 export function overrideRetryable(error: unknown): boolean {
   if (error instanceof ClientError && error.response.code === 'stale-fence') return false;
-  return notApplied(error) || outcomeUnknown(error);
+  return notApplied(error);
 }
 
 /** A refused override as the person reads it. */

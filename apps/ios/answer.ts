@@ -1,13 +1,6 @@
-// Answering something that waits on the person (a decision, an ask, a gate) must end in what the
-// person would call true: if the answer landed, the app says so, however the reply came back.
-//
-// An answer is sent once with its own key. When Fractal's reply is lost, or Fractal says it may still
-// complete (`applied: "unknown"`), the identical request is sent again (the same key, so Fractal
-// returns its first answer and never records a second). When Fractal refuses with a stale fence, or the
-// reply never arrives for good, the app asks whether the thing still waits: if it does not, the
-// answer is done (this one landed, or someone answered it first) and a repeat submit is a success,
-// not a failure. A refusal while it still waits is shown as the refusal it is.
-import { notApplied, outcomeUnknown } from '../../clients/typescript/fractal-client';
+// Answers with unknown delivery are never replayed. A read-only prompt check can
+// establish that no answer is needed, not that this particular answer landed.
+import { notApplied } from '../../clients/typescript/fractal-client';
 
 export type AnswerPorts<R> = {
   /** A fresh request with its own key, fenced to the viewed revision; a known-refused retry reads a fresh snapshot. */
@@ -22,10 +15,8 @@ export type AnswerOutcome =
   | { ok: true; how: 'sent' | 'already' }
   | { ok: false; error: unknown };
 
-/** How many requests a stale fence may cost before the refusal is shown. */
+/** How many explicit nonapplication refusals to allow before showing the last refusal. */
 export const ANSWER_TRIES = 8;
-/** How long to wait before sending the identical request again after a lost reply. */
-export const REPEAT_AFTER_MS = 1000;
 
 export async function submitAnswer<R>(ports: AnswerPorts<R>): Promise<AnswerOutcome> {
   let last: unknown;
@@ -34,12 +25,7 @@ export async function submitAnswer<R>(ports: AnswerPorts<R>): Promise<AnswerOutc
     let request: R;
     try { request = await ports.build(); } catch (error) { return { ok: false, error }; }
     try { await ports.send(request); return { ok: true, how: 'sent' }; } catch (error) { last = error; }
-    if (outcomeUnknown(last)) {
-      // Fractal may have taken it: the identical request gets Fractal's first answer.
-      await ports.wait(REPEAT_AFTER_MS);
-      try { await ports.send(request); return { ok: true, how: 'sent' }; } catch (error) { last = error; }
-    }
-    // Whatever went wrong, an answer that is no longer waited for is an answer that landed.
+    // A satisfied prompt needs no further answer, regardless of which answer satisfied it.
     if ((await settled(ports)) === true) return { ok: true, how: 'already' };
     // Only a refusal that guarantees nothing was applied is tried again with a new request.
     if (!notApplied(last) || attempt + 1 >= ANSWER_TRIES) return { ok: false, error: last };

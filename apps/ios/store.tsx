@@ -174,10 +174,10 @@ export function threadStartAttemptScope(origin: Pick<ThreadStartOrigin, 'sourceI
 }
 export function threadEditScope(thread: string): string { return `edit/${thread}`; }
 export type ThreadStartPresentation = { origin: ThreadStartOrigin; title: string };
-type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult>; start?: ThreadStartPresentation; submitted?: { text: string; quoteId?: string } };
+type ThreadDelivery = { target: string; phase?: 'sending' | 'unconfirmed'; result?: ThreadEditResult; retry?: () => Promise<ThreadEditResult>; start?: ThreadStartPresentation; submitted?: { text: string; quoteId?: string } };
 function threadDeliveryRows(attempts: ConversationAttempts<ThreadDelivery, ThreadEditResult> | undefined): Map<string, ThreadDelivery> {
   return new Map(attempts?.getSnapshot().filter(attempt => attempt.phase === 'sending' || attempt.phase === 'unconfirmed')
-    .map(attempt => [attempt.id, { ...attempt.draft, retry: attempt.retry }]));
+    .map(attempt => [attempt.id, { ...attempt.draft, phase: attempt.phase === 'sending' ? 'sending' : 'unconfirmed', result: attempt.result, retry: attempt.retry }]));
 }
 
 function actionId() { return `action/ios-${Crypto.randomUUID()}`; }
@@ -284,7 +284,7 @@ function useAppStore(proof?: FabricProfile) {
   // Read positions belong to this device's pairing: the gateway and the person signed in to it. A daemon
   // that keeps them for every device syncs them below; this device's copy is then an offline cache.
   useEffect(() => { if (!proof) void readPositions.load(url, caps?.session_actor ?? ''); }, [proof, url, caps?.session_actor]);
-  // The request of a send Fractal never confirmed, so sending the same message again repeats it instead of making a second.
+  // Unknown sends retain their original packet for reconciliation, never for replay.
   // Attention the person acted on from here: Fractal closing it is their doing, not a vanishing.
   const acted = useRef(new Set<string>());
   // Whether this connection has delivered its first attention window: what a stored copy held
@@ -1111,7 +1111,7 @@ function useAppStore(proof?: FabricProfile) {
     };
     const id = actionId();
     const readFence = async () => { ensureOriginalConnection(); return fence(revisions); };
-    // Build signed fields once. Every retry retains the same key, signature and nonce.
+    // Prepare signed fields once; unknown delivery never permits a second dispatch.
     let submit: ((request: ThreadRequest) => Promise<void>) | undefined;
     let acceptedSnapshot: Snapshot | undefined;
     const finish = (result: DeliveryOutcome<BoundAction<ThreadRequest>>): ThreadEditResult => {
@@ -1545,7 +1545,7 @@ function useAppStore(proof?: FabricProfile) {
       if (!proof) observations.observe('ios-message-ack', performance.now() - began);
       return outcome;
     },
-    /** Retry only through the transport captured by the original send. Fabric listeners are per-dial. */
+    /** Retain unknown delivery without dispatching or refreshing the original transport. */
     async resend(request: MessageRequest): Promise<Sent> {
       return sentAs(await resendBoundAction(request));
     },

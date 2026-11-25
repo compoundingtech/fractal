@@ -621,7 +621,7 @@ test('collapsing the first draft preserves its origin composer for reopening and
   assert.equal(find(tree, 'ThreadBody').props.start.cacheKey, start.cacheKey);
 });
 
-test('a lost Start receipt remains retryable after the source episode and agent disappear on remount', async () => {
+test('a lost Start receipt stays unknown after the source episode and agent disappear on remount', async () => {
   const origin = { sourceId: 'notice/stable-source', episode: 'episode/original', agentId: 'agent/original' };
   const client = {};
   const byClient = { current: new WeakMap() };
@@ -641,7 +641,7 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   const scope = value => JSON.stringify([value.sourceId, value.episode]);
   await exports.track(attemptScope(origin, 'thread/original'), 'thread/original', async () => ({ how: 'unconfirmed', retry }), undefined,
     { origin: { ...origin }, title: original.title });
-  const ledger = new Map(byClient.current.get(client).getSnapshot().map(attempt => [attempt.id, { ...attempt.draft, retry: attempt.retry }]));
+  const ledger = new Map(byClient.current.get(client).getSnapshot().map(attempt => [attempt.id, { ...attempt.draft, phase: attempt.phase, result: attempt.result, retry: attempt.retry }]));
   const cache = { current: new Map() };
   const store = {
     threadClient: client, threadActions: new Set(['thread.start']), threadDeliveries: ledger,
@@ -673,11 +673,11 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   });
   const tree = composer({ start, canReply: true, selectionVersion: 0 });
   assert.equal(find(tree, 'ThreadComposeField').props.enabled, false);
-  find(tree, 'ThreadActionFeedback').props.onRetry();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(exactRetries, 1);
-  assert.deepEqual(observed, [original]);
-  assert.equal(byClient.current.get(client).getSnapshot().length, 0);
+  assert.equal(find(tree, 'ThreadActionFeedback').props.onRetry, undefined);
+  assert.equal(exactRetries, 0);
+  assert.deepEqual(observed, []);
+  assert.equal(byClient.current.get(client).getSnapshot().length, 1, 'the original unknown remains retained');
+  assert.equal([...ledger.values()][0].retry, undefined);
 });
 
 test('Inbox recovery lists each independent pending attempt separately, including origins still listed', () => {
@@ -1310,7 +1310,7 @@ test('Clear reminder in a body sends the observed summary marks for a current or
   }
 });
 
-test('loading, rejected, pending and unavailable seeks offer summary-only Clear reminder, keeping retained retries first', async () => {
+test('loading, rejected, pending and unavailable seeks offer summary-only Clear reminder while unknown changes stay held', async () => {
   for (const anchorState of ['loading', 'rejected', 'pending', 'unavailable']) for (const granted of [true, false]) {
     const edits = [], seeks = [];
     const store = {
@@ -1358,15 +1358,14 @@ test('loading, rejected, pending and unavailable seeks offer summary-only Clear 
     assert.deepEqual(seeks, ['message/anchor'], 'clearing never seeks again or falls back to newer history');
   }
 
-  // A retained unconfirmed unread change offers its own original retry first and blocks a new clear,
-  // with or without the clear grant; the metadata edit's retry waits behind it.
+  // Retained unknown changes block a new clear without offering mutation-based recovery.
   for (const granted of [true, false]) {
     const retries = [];
     const store = {
       actor: 'person/one', status: 'online', threadActions: new Set(granted ? ['thread.clear-unread'] : []),
       threadDeliveries: new Map([
-        ['unread/thread/one', { retry: async () => { retries.push('unread'); return { how: 'sent' }; } }],
-        ['edit/thread/one', { retry: async () => { retries.push('edit'); return { how: 'sent' }; } }],
+        ['unread/thread/one', { phase: 'unconfirmed', result: { how: 'unconfirmed' } }],
+        ['edit/thread/one', { phase: 'unconfirmed', result: { how: 'unconfirmed' } }],
       ]),
       unreadClient: { forThread: () => ({ state: 'ready', actions: { edit: () => assert.fail('no new clear while a delivery is held') } }) },
     };
@@ -1377,9 +1376,8 @@ test('loading, rejected, pending and unavailable seeks offer summary-only Clear 
     assert.equal(button(rendered, 'Clear reminder')?.props.disabled ?? true, true);
     const feedback = find(rendered, 'ThreadActionFeedback');
     assert.equal(feedback.props.result.how, 'unconfirmed');
-    feedback.props.onRetry();
-    await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(retries, ['unread']);
+    assert.equal(feedback.props.onRetry, undefined);
+    assert.deepEqual(retries, []);
   }
 });
 
@@ -1614,7 +1612,7 @@ test('pending episode A never replaces or disables the fresh Start for episode B
   assert.equal(recovered.props.canStart, false);
 });
 
-test('same-origin Starts have independent slots and action keys; first recovery cannot replay the second', async () => {
+test('same-origin Starts have independent slots and keys; neither unknown attempt can replay', async () => {
   const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
   const track = source.slice(source.indexOf('  async function trackThreadDelivery('), source.indexOf('  const actions ='));
   const start = source.slice(source.indexOf('    startThread(thread:'), source.indexOf('    replyToThread('));
@@ -1647,12 +1645,9 @@ test('same-origin Starts have independent slots and action keys; first recovery 
   assert.notEqual(sent[0].idempotency_key, sent[1].idempotency_key);
   const ledger = byClient.current.get(client);
   assert.deepEqual(ledger.getSnapshot().map(attempt => attempt.id), [attemptScope(origin, 'thread/first'), attemptScope(origin, 'thread/second')]);
-  assert.equal((await first.retry()).how, 'sent');
-  assert.deepEqual(sent[2], sent[0], 'first recovery retains only its original signed intent and key');
-  assert.deepEqual(ledger.getSnapshot().map(attempt => attempt.id), [attemptScope(origin, 'thread/second')], 'only the first slot is released');
-  assert.equal((await second.retry()).how, 'sent');
-  assert.deepEqual(sent[3], sent[1]);
-  assert.equal(ledger.getSnapshot().length, 0);
+  assert.ok(ledger.getSnapshot().every(attempt => attempt.retry === undefined), 'unknown has no controller replay permission');
+  assert.equal(sent.length, 2, 'one POST per independent Start');
+  assert.equal(ledger.getSnapshot().length, 2, 'both unknown slots remain retained');
 });
 
 test('an unconfirmed first composer moves to separate recovery and leaves a fresh UUID-free Start available', () => {
@@ -1667,7 +1662,7 @@ test('an unconfirmed first composer moves to separate recovery and leaves a fres
   const render = () => { state.reset(); return component(props); };
   button(render(), 'Start thread').props.onPress();
   const first = find(render(), 'InlineThread').props.start;
-  threadDeliveries.set(attemptScope(origin, 'thread/first'), { target: 'thread/first', start: { origin, title: 'Notice' }, retry() {} });
+  threadDeliveries.set(attemptScope(origin, 'thread/first'), { target: 'thread/first', phase: 'unconfirmed', result: { how: 'unconfirmed' }, start: { origin, title: 'Notice' } });
   first.onSubmitted('thread/first', JSON.stringify({ text: '' }));
   const after = render();
   assert.equal(find(after, 'InlineThread'), undefined, 'the first signed request is recovered separately');
@@ -1689,7 +1684,7 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
   let store = {
     status: 'online', threadRefresh: 0, draftsReady: true,
     draftCache: { current: new Map([[originKey, original]]) },
-    threadDeliveries: new Map([[attemptScope(origin, 'thread/first'), { target: 'thread/first', retry() {} }]]),
+    threadDeliveries: new Map([[attemptScope(origin, 'thread/first'), { target: 'thread/first', phase: 'unconfirmed', result: { how: 'unconfirmed' } }]]),
     saveDrafts() { writes.push(persistence.save('person/one', store.draftCache.current)); },
   };
   store.saveDrafts(); await Promise.all(writes);

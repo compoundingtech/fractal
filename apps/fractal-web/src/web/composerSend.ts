@@ -67,7 +67,7 @@ const sendFailureDetails: Readonly<Record<Extract<SendState, { _tag: 'Failed' }>
     failed: 'The message could not be sent. Check your connection and retry.',
     'stale-fence': 'The conversation changed before this message could be sent. Retry to use its current state.',
     'snapshot-unavailable': 'The conversation could not be loaded for sending. Nothing was sent. Retry when it is available.',
-    unconfirmed: 'Fractal may have taken this message and has not confirmed it yet. Sending it again is safe.',
+    unconfirmed: 'Fractal may have taken this message and has not confirmed it yet. Do not send it again.',
   }
 
 /** Send diagnostics are not display copy, including for unclassified failure reasons. */
@@ -155,10 +155,10 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
       // Deliberately no onCancel: runtime.signal is not a send-cancel contract. The pane wires Stop to the agent's interrupt.
     },
     retry: async (item) => {
-      if (item._tag !== 'Text' || (item.sendState?._tag !== 'Failed' && item.sendState?._tag !== 'Unconfirmed')
+      if (item._tag !== 'Text' || item.sendState?._tag !== 'Failed'
         || !item.id.startsWith('pending/')) return
       // pending/<key> is the source-owned outbox identity, not a text/time dedupe heuristic.
-      // The source resends the key's recorded action id and parameters; these only route it.
+      // Only a failed (not unknown) attempt may use this explicit retry path.
       const attachments: SendAttachment[] = []
       for (const attachment of item.attachments) {
         const reference = sendAttachment({ blob: attachment.id, mediaType: attachment.mediaType, name: attachment.name ?? null })

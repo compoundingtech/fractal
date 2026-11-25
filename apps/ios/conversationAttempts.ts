@@ -44,7 +44,7 @@ export class ConversationAttempts<TDraft, TResult extends AttemptOutcome> {
     let result: TResult;
     try { result = await operation(); }
     catch (error) { result = this.failed(error); }
-    const original = this.retryOf(result);
+    const original = result.how === 'unconfirmed' ? undefined : this.retryOf(result);
     const retry = original ? () => this.rows.find(row => row.id === previous.id)?.retry === retry
       ? this.run(settled, original, onSettled) : Promise.resolve(result) : undefined;
     const settled: ConversationAttempt<TDraft, TResult> = { id: previous.id, draft: previous.draft,

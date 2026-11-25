@@ -16,7 +16,8 @@
     "code": "stale-fence",
     "message": "the client snapshot belongs to another host or a future store position",
     "retryable": false,
-    "details": {}
+    "applied": "none",
+    "details": {"applied": "none"}
   },
   "recipient-retired": {
     "api_version": "fractal.client.v0",

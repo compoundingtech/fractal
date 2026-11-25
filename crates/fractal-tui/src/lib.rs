@@ -1494,7 +1494,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn terminal_fence_uses_owner_sequence_for_relayed_screen() {
         let mut screen: fractal_client::Envelope<fractal_client::TerminalScreen> = serde_json::from_str(

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Thread stories assert recipient metadata separately from their introductory text, and the related-request state comparison uses accessible tabs instead of duplicate landmarks.",
+  "replay": { "status": "none", "detail": "Story fixtures only; no history replay or rebuild changes." },
+  "schema": { "status": "none", "detail": "No storage or wire schema changes." },
+  "rules": { "status": "none", "detail": "No grants or delivery policy changes." },
+  "compatibility": { "status": "none", "detail": "Production components and APIs are unchanged. Related-request story tabs mount one state at a time and exercise each existing state assertion." },
+  "downtime": { "status": "none", "detail": "No runtime changes or service interruption." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "No persistent state changes to recover." }
+}

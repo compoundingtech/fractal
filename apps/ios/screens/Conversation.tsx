@@ -45,7 +45,7 @@ const c = tokenColor;
 
 const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
 // Keep both the original member binding and local images for an explicit new send.
-type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; retryOriginal?: () => Promise<Sent>; resending?: boolean; images?: number; pickedImages?: Picked[] };
+type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number; pickedImages?: Picked[] };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
 
 function nowClock() {
@@ -120,14 +120,14 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   }, [issue]);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const attempts = useMemo(() => new ConversationAttempts<Pending, Sent>(
-    result => result.how === 'unconfirmed' ? () => actions.resend(result.request) : undefined,
+    () => undefined,
     error => ({ how: 'failed', error: String(error) })), [target, draftsOwner.current, draftGeneration.current]);
   const pendingAttempts = useSyncExternalStore(attempts.subscribe, attempts.getSnapshot);
   const nextAttempt = useRef(0);
   const pending = useMemo((): Pending[] => pendingAttempts.map(attempt => ({ ...attempt.draft,
     failed: attempt.result?.how === 'failed' ? attempt.result.error : undefined,
     unconfirmed: attempt.result?.how === 'unconfirmed' ? attempt.result.request : undefined,
-    retryOriginal: attempt.retry, resending: attempt.phase === 'sending' && !!attempt.result })), [pendingAttempts]);
+    resending: attempt.phase === 'sending' && !!attempt.result })), [pendingAttempts]);
   // Opened from search ("said in conversations"), the conversation arrives found.
   const [find, setFind] = useState(route.params.find ?? '');
   const [findOpen, setFinding] = useState(!!route.params.find);
@@ -349,11 +349,8 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   function sendAgain(item: Pending) {
     const bound = item.unconfirmed;
     if (!bound || item.resending) return;
-    Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. Retry only contacts that original connection. Sending as new uses the current member and a new key, and may create a duplicate.`, [
+    Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. The original attempt cannot be resent. Sending as new uses the current member and a new key, and may create a duplicate.`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Retry original', onPress: async () => {
-        if (item.retryOriginal) settle(item.id, await item.retryOriginal());
-      } },
       { text: 'Send as new', style: 'destructive', onPress: async () => {
         const parameters = bound.request.parameters;
         const sent = await attempts.sendAsNew(item.id, () => actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages));

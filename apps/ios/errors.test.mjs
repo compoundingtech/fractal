@@ -6,7 +6,7 @@ import { ClientError, appliedAnswer, isTransient, isTransientCode, notApplied, o
 import { threadRefusalMessage } from './threadEdits.ts';
 
 // Fractal's errors read as sentences, as in the Rust client: no codes reach a person.
-assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'Fractal changed while this was on its way, so it was not applied');
+assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'Fractal changed while this was on its way');
 // A native prompt's refusal keeps Fractal's own words: why it cannot be answered from here.
 assert.equal(plainMessage('stale-fence', 'that prompt is no longer waiting: it was answered or replaced'), 'that prompt is no longer waiting: it was answered or replaced');
 assert.equal(plainMessage('remote-unavailable', 'owner host/Juniper is temporarily unavailable; cached data remains usable'), 'Juniper cannot be reached right now');
@@ -21,15 +21,15 @@ assert.ok(isTransientCode(undefined) && isTransientCode('page-cursor-expired') &
 // A terminal out of reach comes back; one whose process exited does not.
 assert.ok(isTransientCode('terminal-unavailable') && !isTransientCode('terminal-ended'));
 assert.equal(plainMessage('terminal-ended', 'the terminal process exited'), 'the terminal ended: its process exited');
-assert.ok(notApplied(refused('stale-fence')) && !notApplied(new TypeError('Network request failed')), 'a lost answer may have applied');
+assert.ok(!notApplied(refused('stale-fence')) && !notApplied(new TypeError('Network request failed')), 'neither a bare code nor a lost answer proves nonapplication');
 // A prompt Fractal says is gone stays gone: its answer is never sent again; a race is.
 const gone = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'stale-fence', message: 'that prompt is no longer waiting: it was answered or replaced', retryable: false, details: {} }, 422);
 assert.ok(promptGone(gone) && !promptGone(refused('stale-fence')));
 
 // A race is tried again with a fresh request; a refusal is not.
 let tries = 0;
-assert.equal(await retryTransient(5, async () => { if (tries++ < 2) throw refused('stale-fence'); return 'sent'; }, notApplied), 'sent');
-assert.equal(tries, 3);
+await assert.rejects(retryTransient(5, async () => { tries++; throw refused('stale-fence'); }, notApplied));
+assert.equal(tries, 1);
 tries = 0;
 await assert.rejects(retryTransient(5, async () => { tries++; throw refused('forbidden'); }, notApplied));
 assert.equal(tries, 1);
@@ -45,13 +45,13 @@ assert.equal(expiredTries, 1, 'an expired committed request must never be retrie
 const answered = (code, applied, status = 503) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'the database has not confirmed the send', retryable: false, details: { applied, action_id: 'action/a', idempotency_key: 'key/a' } }, status);
 const unconfirmed = answered('message-send-unconfirmed', 'unknown');
 assert.equal(appliedAnswer(unconfirmed), 'unknown');
-assert.ok(outcomeUnknown(unconfirmed) && !notApplied(unconfirmed), 'it may still complete: repeat the identical request, never a new one');
-assert.equal(plainError(unconfirmed), 'Fractal may have taken it and has not confirmed it yet; sending it again is safe');
+assert.ok(outcomeUnknown(unconfirmed) && !notApplied(unconfirmed), 'it may still complete: retain without resending');
+assert.equal(plainError(unconfirmed), 'Fractal may have taken it and has not confirmed it yet; do not send it again');
 const queueFull = answered('rate-limited', 'none', 429);
 assert.ok(notApplied(queueFull) && !outcomeUnknown(queueFull), 'nothing was queued: a fresh request is safe');
 assert.ok(notApplied(answered('some-future-code', 'none')), 'the answer decides, not the code');
 assert.equal(appliedAnswer(refused('forbidden')), undefined);
-assert.ok(!outcomeUnknown(refused('forbidden')), 'a plain refusal is not an unknown outcome');
+assert.ok(outcomeUnknown(refused('forbidden')), 'a bare refusal lacks proof of nonapplication');
 assert.ok(outcomeUnknown(new TypeError('Network request failed')), 'a lost answer is an unknown outcome');
 
 // The phone's generic error decoder keeps unfamiliar terminal codes and their definitive

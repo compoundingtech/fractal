@@ -1,6 +1,16 @@
 import type { ActionOf, ActionRequest, ConversationSearchHit, NoticeSnapshot, Resource, TimelineMessageBody } from './Models.generated.ts';
 import type { ClientOptions, RequestOptions, FractalClient, TraceContext } from './Client.generated.ts';
 import type { FabricClientOptions, FabricTransport, FabricEndpoint } from './fabric.mjs';
+import { createOutboxRecord, prepareOutboxRecord } from '@fractal/client/outbox';
+import type { OutboxRepository } from '@fractal/client/outbox';
+import { prepareMessageSendPacket } from '@fractal/client/prepared-packet';
+import type { PreparedPacket } from '@fractal/client/prepared-packet';
+
+declare const outboxRepository: OutboxRepository<PreparedPacket>;
+declare const messagePacketInput: Omit<ActionOf<'message.send'>, 'api_version' | 'type'>;
+const outboxRecord = createOutboxRecord('attempt/example', { text: 'Hello', attachments: [] });
+void outboxRepository.commit(outboxRecord);
+void prepareOutboxRecord(outboxRecord, prepareMessageSendPacket(messagePacketInput), ['message/example']);
 
 type InternalNoticeAssert<T extends true> = T;
 type InternalNoticeBoundary = [

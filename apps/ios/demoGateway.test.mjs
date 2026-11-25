@@ -323,7 +323,7 @@ test('mutable thread fixture acknowledges close, closed reply, reopen and rename
     assert.equal(error.status, 409);
     assert.equal(error.response.code, 'stale-fence');
     assert.equal(error.response.retryable, false);
-    assert.ok(notApplied(error), 'the SDK classifies a stale-fence code as a definitive refusal');
+    assert.ok(!notApplied(error), 'a bare stale-fence code does not prove nonapplication');
     assert.equal(error.response.applied, undefined);
     assert.deepEqual(error.response.details, {});
     decodeUnknownSync(ErrorEnvelope, 'strict')(error.response);
