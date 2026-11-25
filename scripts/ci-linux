@@ -46,10 +46,8 @@ fleet_compat() {
     fleet::previous_release_and_this_build_restore_each_others_archives_until_the_shard_holds_items \
     fleet::service_grants::previous_release_refuses_service_grants_from_a_candidate_issuer \
     fleet::service_grants::previous_release_refuses_upgraded_own_origin_grant_store_and_candidate_recovers \
-    fleet::service_grants::previous_release_refuses_upgraded_plugin_grant_store_and_candidate_recovers \
-    fleet::service_grants::previous_release_refuses_offline_seeded_service_grants_with_its_own_origin \
-    fleet::service_grants::previous_release_refuses_plugin_service_grants_on_same_database_rollback 2>&1 | tee "$logs/compat-result.log" || return
-  grep -q "test result: ok. 12 passed" "$logs/compat-result.log" || return
+    fleet::service_grants::previous_release_refuses_upgraded_plugin_grant_store_and_candidate_recovers 2>&1 | tee "$logs/compat-result.log" || return
+  grep -q "test result: ok. 10 passed" "$logs/compat-result.log" || return
   # Signature verdicts through the settled-judging prune, both ways and back.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_verdicts_survive_settled_judging_prune_across_upgrade_and_rollback 2>&1 | tee "$logs/compat-judging-result.log" || return

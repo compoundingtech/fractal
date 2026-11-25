@@ -6561,7 +6561,7 @@ impl Ui {
                     (full_width, (!matches!(hit, Hit::Message | Hit::Subject)).then_some(hit))
                 });
                 if action.as_ref().is_some_and(|hit| !full_width || matches!(hit,
-                    Hit::Composer | Hit::ChatComposer | Hit::Field(_) | Hit::ResourceFilter
+                    Hit::Composer | Hit::Field(_) | Hit::ResourceFilter
                 )) {
                     self.click(action.unwrap());
                     return;

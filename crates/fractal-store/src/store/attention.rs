@@ -700,7 +700,7 @@ impl Store {
         self.current_attention_with_context(items, as_of, |_| Ok(()))
     }
 
-    fn current_attention_with_context(
+    pub(super) fn current_attention_with_context(
         &self,
         mut items: Vec<AttentionItemView>,
         as_of: u128,
