@@ -471,7 +471,8 @@ async fn the_feed_waits_for_st_then_keeps_every_window_current_on_one_socket() {
 
     // Nothing changes, so nothing arrives: no polling.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(rx.try_recv().is_err(), "an idle feed sends nothing");
+    let unexpected = rx.try_recv();
+    assert!(unexpected.is_err(), "an idle feed sends nothing: {unexpected:?}");
     feed.abort();
     server.abort();
 }
