@@ -3308,7 +3308,7 @@ async fn receive_pairing_admission<B: Backend>(
         return StatusCode::BAD_REQUEST.into_response();
     };
     if admission.expected_fleet_id != state.auth.fleet_id()
-        || state.auth.member.as_ref().map(|key| key.public())
+        || state.auth.member_key()
             != Some(admission.expected_sponsor_key.as_str())
         || admission.request.node_id.as_deref() != Some(admission.node_id.as_str())
         || admission.node_id.len() != 64
@@ -3340,9 +3340,9 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
     let Ok(request) = serde_json::from_slice::<fractal_auth::handshake::JoinRequest>(&body) else {
         return refused();
     };
-    let Some(member) = state.auth.member.clone() else {
+    if state.auth.member_key().is_none() {
         return StatusCode::NOT_FOUND.into_response();
-    };
+    }
     let answer = match state.backend.redeem(&request).await {
         Ok(answer) => answer,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -3372,7 +3372,7 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
             Vec::new()
         },
     };
-    match fractal_auth::handshake::seal_response(&request, &token, &state.node, &member, &payload) {
+    match state.auth.seal_join_response(&request, &token, &state.node, &payload) {
         Ok(response) => {
             // A test fault point: drop this one answer after the invite is bound, as a lost
             // response would.

@@ -108,6 +108,15 @@ impl FleetAuth {
         self.member.as_deref().map(MemberKey::public)
     }
 
+    /// Seal the existing invitation protocol without exposing the configured member signer.
+    pub fn seal_join_response(
+        &self, request: &crate::handshake::JoinRequest, token: &[u8], sponsor: &str,
+        payload: &crate::handshake::SealedJoin,
+    ) -> Result<crate::handshake::JoinResponse> {
+        let member = self.member.as_deref().context("join sponsor has no member signing key")?;
+        crate::handshake::seal_response(request, token, sponsor, member, payload)
+    }
+
     /// The fleet secret as the hexadecimal text a secret file holds.
     pub fn secret_hex(&self) -> String {
         hex::encode(self.secret.as_slice())

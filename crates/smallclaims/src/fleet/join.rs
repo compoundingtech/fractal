@@ -989,7 +989,7 @@ mod tests {
             let app = axum::Router::new().route("/v1/fleet/join", axum::routing::post({
                 let waiting = waiting.clone();
                 let release = release.clone();
-                move |axum::Json(request): axum::Json<super::super::handshake::JoinRequest>| {
+                move |axum::Json(request): axum::Json<fractal_auth::handshake::JoinRequest>| {
                     let backend = backend.clone();
                     let key = key.clone();
                     let secret = secret.clone();
@@ -1009,7 +1009,7 @@ mod tests {
                             sponsor_node_id: answer["sponsor_node_id"].as_str().map(str::to_owned),
                             sponsor_endpoints: answer["sponsor_endpoints"].as_array().unwrap().clone(),
                         };
-                        let response = super::super::handshake::seal_response(
+                        let response = fractal_auth::handshake::seal_response(
                             &request, &hex::decode(answer["token"].as_str().unwrap()).unwrap(),
                             "sponsor", &key, &payload,
                         ).unwrap();
@@ -1094,7 +1094,7 @@ mod tests {
         let backend = crate::sync::Local(store.clone());
         let secret = fs::read_to_string(sponsor_dir.join("fleet/secret")).unwrap();
         let app = axum::Router::new().route("/v1/fleet/join", axum::routing::post(
-            move |axum::Json(request): axum::Json<super::super::handshake::JoinRequest>| {
+            move |axum::Json(request): axum::Json<fractal_auth::handshake::JoinRequest>| {
                 let backend = backend.clone();
                 let key = sponsor_key.clone();
                 let secret = secret.clone();
@@ -1112,7 +1112,7 @@ mod tests {
                         sponsor_node_id: answer["sponsor_node_id"].as_str().map(str::to_owned),
                         sponsor_endpoints: answer["sponsor_endpoints"].as_array().unwrap().clone(),
                     };
-                    axum::Json(super::super::handshake::seal_response(
+                    axum::Json(fractal_auth::handshake::seal_response(
                         &request, &hex::decode(answer["token"].as_str().unwrap()).unwrap(),
                         "sponsor", &key, &payload,
                     ).unwrap())

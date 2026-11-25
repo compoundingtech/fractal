@@ -410,8 +410,11 @@ mod tests {
         let (code, sponsor, joiner, payload) = fixture();
         let session = Joiner::start(&code, &joiner, "laptop", "dial-out", None, "test").unwrap();
         verify_request(session.request(), &code.token).unwrap();
-        let response =
-            seal_response(session.request(), &code.token, "studio", &sponsor, &payload).unwrap();
+        let auth = crate::FleetAuth::test(&payload.fleet_id, &[0xab; 32]);
+        assert!(auth.seal_join_response(session.request(), &code.token, "studio", &payload).is_err());
+        let auth = auth.with_member_key(Some(std::sync::Arc::new(sponsor)));
+        assert_eq!(auth.member_key(), Some(payload.anchor_key.as_str()));
+        let response = auth.seal_join_response(session.request(), &code.token, "studio", &payload).unwrap();
         // The answer never carries the secret in the clear.
         let wire = serde_json::to_string(&response).unwrap();
         assert!(!wire.contains(payload.secret.as_deref().unwrap()));
