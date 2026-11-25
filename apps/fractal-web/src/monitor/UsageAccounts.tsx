@@ -126,7 +126,8 @@ const styles = stylex.create({
   // Two lines: what and how much, then the meter and when it resets; one grid keeps every meter on one column.
   limit: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: s.md, rowGap: 2, alignItems: 'center', paddingBlock: s.xs, fontSize: t.metaSize },
   // Selection is the accent (bar, tint, weight); focus is a neutral ring, as in the sidebar lists, so the two never read alike.
-  row: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: s.md, rowGap: 2, padding: s.md, borderRadius: r.sm, fontSize: t.metaSize, cursor: 'pointer', outline: 'none', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `${g.focusRing} solid ${c.fgMuted}`, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  // Hover follows react-aria's data-hovered, as the workbench controls do, so a play can hover a row and see its style.
+  row: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: s.md, rowGap: 2, padding: s.md, borderRadius: r.sm, fontSize: t.metaSize, cursor: 'pointer', outline: 'none', backgroundColor: { default: null, ':is([data-hovered])': c.rowHover }, ':focus-visible': { outline: `${g.focusRing} solid ${c.fgMuted}`, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   // The tint is the hover surface: the stronger rowActive drops the muted and amber inks below 4.5:1.
   selected: { backgroundColor: c.rowHover, boxShadow: `inset 3px 0 0 ${c.primary}` },
   selectedName: { fontWeight: t.weightSemibold },
