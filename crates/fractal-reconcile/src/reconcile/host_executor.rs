@@ -98,14 +98,20 @@ impl StartCommand {
         if let Err(error) = result {
             let rejected = error.downcast_ref::<fractal_runtime::StartRejected>()
                 .is_some_and(|proof| proof.operation.as_deref() == Some(id.as_str()));
-            let closed = rejected || runtime.start_operation_closed(launch_member)?;
+            // Retain the backend's causal error before any fallible native inspection.
+            // A failed closure/provenance read must not erase it or imply nonentry.
             proof["error"] = Value::from(format!("{error:#}"));
+            proof["producer_closed"] = Value::from(rejected);
+            store.finish_remote_runtime_start(id, &proof)?;
+            let closed = rejected || runtime.start_operation_closed(launch_member)?;
             proof["producer_closed"] = Value::from(closed);
             if closed {
                 proof["verification"] = Value::from("producer-closed");
                 proof["phase"] = Value::from("failed");
             }
         }
+        // Keep the exact returned result even if observing its generation fails.
+        store.finish_remote_runtime_start(id, &proof)?;
         // Acceptance is not success. Only native operation provenance can bind an
         // actual generation, including when the backend returned an uncertain error.
         if let Some(observed) = runtime.observe_start(launch_member)?

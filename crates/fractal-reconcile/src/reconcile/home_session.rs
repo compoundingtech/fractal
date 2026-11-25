@@ -328,6 +328,19 @@ impl NativeSessionExecutor {
                 reconciler.store.finish_remote_runtime_start(&operation.id, &result)?;
                 operation.result = Some(result.clone());
             }
+            if result["verification"] != "operation-incarnation" && result["producer_closed"] != true {
+                // Revisit only exact native producer evidence, never repeat dispatch.
+                // The immutable authorization predates the operation tag added at entry.
+                let mut launch_member = authorization.launch_member.clone();
+                launch_member.tags.insert(start_jobs::OPERATION_TAG.into(), operation.id.clone());
+                if reconciler.runtime.start_operation_closed(&launch_member)? {
+                    result["producer_closed"] = Value::from(true);
+                    result["verification"] = Value::from("producer-closed");
+                    result["phase"] = Value::from("failed");
+                    reconciler.store.finish_remote_runtime_start(&operation.id, &result)?;
+                    operation.result = Some(result.clone());
+                }
+            }
         }
         let Some(incarnation) = result["incarnation"].as_str()
             .filter(|_| result["verification"] == "operation-incarnation") else {
@@ -336,7 +349,8 @@ impl NativeSessionExecutor {
                 reconciler.store.settle_remote_runtime_start(&operation.id)?;
                 return Ok(Outcome::Refused { reason: result["error"].as_str().unwrap_or("native launch refused").into() });
             }
-            anyhow::bail!("entered native Start retains unresolved producer custody");
+            anyhow::bail!("entered native Start retains unresolved producer custody: operation={}, result={result}",
+                operation.id);
         };
         let binding = LocalSession {
             subject: command.binding.subject.clone(), runtime_id: authorization.member.runtime_id.clone(),

@@ -1072,6 +1072,18 @@ impl RuntimeControl for NativeRuntime {
         let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
         let mut backend_entered = false;
         self.start_checked_inner(member, operation, Some(guard), &mut backend_entered, Some((store, &request)))
+            .map_err(|error| {
+                // The durable dispatch fence is not physical producer entry. Finite
+                // coverage, environment and membership checks can still reject before
+                // a backend is called, just as in start_checked.
+                if backend_entered {
+                    error
+                } else {
+                    error.context(fractal_runtime::StartRejected {
+                        operation: operation.map(|operation| operation.0.clone()),
+                    })
+                }
+            })
     }
     fn retire_resource_lane(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);

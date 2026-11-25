@@ -277,6 +277,12 @@ physical facts before changing the recovery generation. Positive resource cleanu
 is retained independently from applied custody; local-session finalization must
 succeed before the remote start is applied or either associated terminal receipt
 can be transmitted, including during reopened-journal recovery.
+An exact operation rejected before actual backend entry retains a typed no-entry
+witness even if its durable dispatch intent already committed. Intent alone does
+not prove physical entry; conversely, an error after backend entry cannot create
+that witness. The original backend error is retained before fallible native
+inspection, and later recovery rechecks positive exact-operation closure without
+respawning or treating absence as proof.
 
 Finite remote admission authenticates the immutable lane request against the
 admitted, undispatched native Start before enrolling canonical resource membership

@@ -43,6 +43,39 @@ fn existing_native_custody_schema_upgrades_without_inventing_retirement_proof() 
     assert!(!verified, "upgrading retained authority cannot manufacture positive physical proof");
 }
 
+// Lane configuration is process-wide, just as in the daemon. Run each finite
+// fixture alone rather than change the defaults under concurrently running tests
+// or hold a blocking global test lock across async work.
+#[cfg(target_os = "linux")]
+const FINITE_LANE_CHILD: &str = "FRACTAL_NATIVE_FINITE_LANE_TEST";
+
+#[cfg(target_os = "linux")]
+fn run_finite_lane_test_in_child(test: &str) -> bool {
+    if let Some(child) = std::env::var_os(FINITE_LANE_CHILD) {
+        assert_eq!(child.as_os_str(), std::ffi::OsStr::new(test), "finite lane child must run only its selected fixture");
+        return false;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let test_path = format!("{module}::{test}");
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &test_path, "--nocapture", "--test-threads=1"])
+        .env(FINITE_LANE_CHILD, test)
+        .status()
+        .expect("launch isolated native finite acceptance fixture");
+    assert!(status.success(), "isolated native finite acceptance fixture failed: {test}");
+    true
+}
+
+#[cfg(target_os = "linux")]
+struct FiniteLaneConfiguration(bool);
+
+#[cfg(target_os = "linux")]
+impl Drop for FiniteLaneConfiguration {
+    fn drop(&mut self) {
+        fractal_runtime::set_lanes_enforced(self.0);
+    }
+}
+
 struct NativePair {
     root: tempfile::TempDir,
     selection: Selection,
@@ -60,6 +93,8 @@ struct NativePair {
     server: tokio::task::JoinHandle<()>,
     client: Option<tokio::task::JoinHandle<Result<()>>>,
     stop: Option<watch::Sender<bool>>,
+    #[cfg(target_os = "linux")]
+    _lane_configuration: Option<FiniteLaneConfiguration>,
 }
 impl NativePair {
     async fn new() -> Self {
@@ -85,16 +120,23 @@ impl NativePair {
 
     #[cfg(target_os = "linux")]
     async fn for_finite_start_with_setup(pregraph: impl FnOnce(&Self)) -> Self {
+        assert!(std::env::var_os(FINITE_LANE_CHILD).is_some(),
+            "finite lane configuration requires an isolated fixture process");
+        let lane_configuration = FiniteLaneConfiguration(fractal_runtime::lanes_enforced());
         let environment = std::env::vars().collect::<BTreeMap<_, _>>();
         let binary = fractal_runtime::resolve_executable("st3", &environment)
             .expect("native finite acceptance requires the built real st3 executable on PATH");
-        let lane_host = seat_admission::LaneHost {
-            room: fractal_runtime::host::for_lanes(fractal_runtime::host::size().expect("native finite host sizing")),
-            outside: fractal_runtime::host::outside_lane_memory,
-            burst_lane: Some(seat_admission::BURST_LANE),
-        };
-        Self::with_pregraph_setup(SessionCustody::Owned, false, |executor, _store| {
-            let mut executor = executor.with_lane_host(Some(lane_host));
+        let mut pair = Self::with_pregraph_setup(SessionCustody::Owned, false, |executor, _store| {
+            // Use the daemon's initialization contract: LaneHost alone configures
+            // admission but does not enable the runtime's actual kernel lanes.
+            let mut executor = executor.with_lanes(true);
+            let policy = fractal_runtime::FiniteLane {
+                name: "native-finite-acceptance".into(), capacity: None,
+                member_capacity: None, memory_high_bytes: None,
+                class: fractal_runtime::RequestClass::Check, require_enforced: true,
+            };
+            assert_eq!(policy.coverage().expect("native finite acceptance requires actual kernel lane coverage"),
+                fractal_runtime::ResourceCoverage::Enforced);
             executor.st_binary = Some(binary);
             // These fixtures do not run the daemon's host observer loop. Initialize
             // its real kernel PSI observation before either parent or child admission;
@@ -104,7 +146,9 @@ impl NativePair {
             assert!(!pressure.blocked,
                 "native finite acceptance requires healthy actual host pressure: {pressure:?}");
             executor
-        }, pregraph).await
+        }, pregraph).await;
+        pair._lane_configuration = Some(lane_configuration);
+        pair
     }
 
     async fn with_setup(
@@ -182,7 +226,9 @@ impl NativePair {
         let app = home_service.router();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let mut pair = Self { root, selection, home, seat, store, graph, runtime, executor, driver, binding, seat_auth, endpoint,
-            home_service, server, client: None, stop: None };
+            home_service, server, client: None, stop: None,
+            #[cfg(target_os = "linux")]
+            _lane_configuration: None };
         // Full-node fixtures may admit parent memberships and launch their native
         // roots, but every remote operation below must run without graph tables.
         pregraph(&pair);
@@ -297,7 +343,26 @@ impl NativePair {
                 }
                 changed.await;
             }
-        }).await.expect("real native result must reach durable home custody");
+        }).await.unwrap_or_else(|timeout| {
+            let membership = match &command.operation {
+                Operation::Start { authorization } => resource_lanes::request(&authorization.launch_member)
+                    .map(|request| request.map(|request|
+                        self.store.resource_membership_record(&request.id, &request.owner))),
+                _ => Ok(None),
+            };
+            panic!("real native result must reach durable home custody: {timeout}; \
+                execution={}; home={:?}; seat={:?}; operation={:?}; membership={membership:?}; \
+                native_exec={:?}; native_ptys={:?}; recovery_generation={}; recovery_failures={}; client_finished={}",
+                command.execution_id,
+                self.home.command_receipt(&command.execution_id),
+                self.seat.command_receipt(&command.execution_id),
+                self.store.remote_runtime_start(&command.execution_id),
+                self.runtime.exec.observe(&command.binding.runtime),
+                self.runtime.snapshot_ptys_with_provenance()
+                    .map(|snapshot| (snapshot.observations, snapshot.start_operations)),
+                self.driver.recovery_generation(), *self.driver.recovery_failures.borrow(),
+                self.client.as_ref().is_none_or(|client| client.is_finished()));
+        });
         match self.home.command_receipt(&command.execution_id) {
             Ok(Some(receipt)) => assert!(matches!(receipt.state, ReceiptState::Settled { .. })),
             Err(error) => {
@@ -1124,6 +1189,9 @@ async fn native_helper_exit_event_withdraws_remote_producer_without_fleet_graph_
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_and_retirement() {
+    if run_finite_lane_test_in_child("native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_and_retirement") {
+        return;
+    }
     use crate::store::resource_membership::{Coverage, LaneRequest, Owner};
     let mut pair = NativePair::for_finite_start().await;
     let mut authorization = pair.start_authorization("unused");
@@ -1142,6 +1210,18 @@ async fn native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_an
     resource_lanes::set_request(&mut authorization.member, &request).unwrap();
     authorization.launch_member = authorization.member.clone();
     authorization.seal().unwrap();
+    // Finite pre-backend failures carry the same exact nonentry witness as
+    // ordinary starts. An SQL dispatch fence alone must not strand custody.
+    let rejected_operation = fractal_runtime::LaunchOperation("finite-prebackend-refusal".into());
+    let mut rejected_member = authorization.launch_member.clone();
+    rejected_member.launch = crate::model::LaunchSpec::Argv(vec![
+        pair.root.path().join("missing-finite-executable").to_string_lossy().into_owned(),
+    ]);
+    let error = pair.runtime.start_resource_guarded(&pair.store, &rejected_member,
+        Some(&rejected_operation), &|| Ok(())).unwrap_err();
+    assert!(error.downcast_ref::<fractal_runtime::StartRejected>()
+        .is_some_and(|proof| proof.operation.as_deref() == Some(rejected_operation.0.as_str())),
+        "finite pre-backend rejection must retain exact positive nonentry proof: {error:#}");
     let start = pair.home.enqueue(pair.draft("real-finite-start",
         Operation::Start { authorization: Box::new(authorization) })).unwrap();
     pair.connect();
@@ -1240,6 +1320,9 @@ mod stop_tests;
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_parent_and_sibling() {
+    if run_finite_lane_test_in_child("inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_parent_and_sibling") {
+        return;
+    }
     use crate::store::resource_membership::{Admission as ResourceAdmission, Coverage, LaneRequest, Owner};
     for boundary in ["stop", "withdraw", "refusal", "undispatched-withdrawal"] {
         let mut inherited = None;
