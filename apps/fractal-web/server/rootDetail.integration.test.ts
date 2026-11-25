@@ -79,6 +79,7 @@ interface FixtureState {
   granted: boolean
   usageStatus: number
   agent: AgentEncoded
+  agentBody?: string
   usage: UsageRowEncoded[]
   body: string
   producerStatus: number
@@ -107,7 +108,7 @@ const upstreams = async () => {
     } else if (path === `/v1/client/agents/${encodeURIComponent(agentRef)}`) {
       gatewayReads.push(received(req))
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(envelope(state.agent, state.versions.agent))
+      res.end(state.agentBody ?? envelope(state.agent, state.versions.agent))
     } else if (path.startsWith('/v1/client/usage?')) {
       gatewayReads.push(received(req))
       res.writeHead(state.usageStatus, { 'content-type': 'application/json' })
@@ -178,6 +179,7 @@ const expectFailure = async (response: Response, status: number, code: string) =
   const body = await response.json() as { code: string; message: string }
   expect(body.code).toBe(code)
   expect(typeof body.message).toBe('string')
+  return body
 }
 
 describe('root-detail relay', () => {
@@ -207,6 +209,18 @@ describe('root-detail relay', () => {
     expect(await response.json()).toEqual({
       code: 'root-detail-gateway-unavailable',
       message: `native envelope; api_version=${apiVersion}; admitted=${admittedNativeApiVersions.join(',')}; $.api_version: expected "st3.client.v0" | "fractal.client.v0"`,
+    })
+    expect(setup.producerReads).toHaveLength(0)
+  })
+
+  it('names the native admitted set for malformed JSON without disclosing response data', async () => {
+    const setup = await fixture()
+    setup.state.agentBody = `not JSON ${JSON.stringify(produced())}`
+    const response = await fetch(setup.base + detailUrl())
+    const body = await expectFailure(response, 502, 'root-detail-gateway-unavailable')
+    expect(body).toEqual({
+      code: 'root-detail-gateway-unavailable',
+      message: `native envelope; api_version=unavailable; admitted=${admittedNativeApiVersions.join(',')}; $: expected JSON object`,
     })
     expect(setup.producerReads).toHaveLength(0)
   })
@@ -404,7 +418,7 @@ describe('producer answers', () => {
 
   it('refuses incompatible answers with explicit codes and caches none of them', async () => {
     const cases: readonly (readonly [string, string])[] = [
-      ['not JSON', 'root-detail-incompatible'],
+      [`not JSON ${JSON.stringify(produced())}`, 'root-detail-incompatible'],
       [JSON.stringify({ ...produced(), root_session_id: otherRoot }), 'root-detail-wrong-root'],
       [JSON.stringify({ ...produced(), host: 'host/wrong-owner' }), 'root-detail-wrong-host'],
       [JSON.stringify({ ...produced(), usd: -1 }), 'root-detail-incompatible'],
@@ -418,7 +432,11 @@ describe('producer answers', () => {
     for (const [body, code] of cases) {
       const setup = await fixture()
       setup.state.body = body
-      await expectFailure(await fetch(setup.base + detailUrl()), 502, code)
+      const refusal = await expectFailure(await fetch(setup.base + detailUrl()), 502, code)
+      if (body.startsWith('not JSON')) expect(refusal).toEqual({
+        code: 'root-detail-incompatible',
+        message: 'producer lens; lens_version=unavailable; $: expected JSON object',
+      })
       setup.state.body = JSON.stringify(produced())
       expect((await fetch(setup.base + detailUrl())).status, code).toBe(200)
       expect(setup.producerReads).toHaveLength(2)

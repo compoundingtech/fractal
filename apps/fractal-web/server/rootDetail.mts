@@ -92,10 +92,14 @@ const failingField = (issue: SchemaIssue.Issue, ast: SchemaAST.AST, path = '$'):
 }
 const decode = <T,>(schema: Schema.Decoder<T>, body: string, code: string): T => {
   const native = code === 'root-detail-gateway-unavailable'
-  const contract = native ? 'native envelope' : 'producer lens'
   let input: unknown
   try { input = JSON.parse(body) }
-  catch { throw new Refusal(502, code, `${contract}; version unavailable; $: expected JSON object`) }
+  catch {
+    const context = native
+      ? `native envelope; api_version=unavailable; admitted=${admittedNativeApiVersions.join(',')}`
+      : 'producer lens; lens_version=unavailable'
+    throw new Refusal(502, code, `${context}; $: expected JSON object`)
+  }
   const version = input !== null && typeof input === 'object'
     ? Reflect.get(input, native ? 'api_version' : 'lens_version') : undefined
   const identifier = native
