@@ -195,13 +195,10 @@ impl FractalRuntime {
         // Fence old readers before any application can admit private thread data.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version < fractal_schema::STORAGE_VERSION {
+            if version == smallclaims::store::record_bytes::VALID_RECORDS_GONE_VERSION {
+                smallclaims::store::record_bytes::mark_valid_records_gone(connection)?;
+            }
             connection.pragma_update(None, "user_version", fractal_schema::STORAGE_VERSION)?;
-            // The reference writer has its own activation flag; a storage fence alone
-            // must not activate it in plain graph stores.
-            connection.execute(
-                /* sqlite-large-value: allow-for-now lv-ha92fff729c08 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES ('claim_signature_reference_writer','1')",
-                [],
-            )?;
         }
         runtime_starts::create_schema(connection)?;
         local_sessions::create_schema(connection)?;

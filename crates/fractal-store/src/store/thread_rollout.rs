@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn privacy_floor_activates_reference_writers_only_for_application_stores() {
+    fn privacy_floor_preserves_reference_writer_and_valid_record_formats() {
         use smallclaims::fleet::MemberKey;
         use smallclaims::principal::Verdict;
 
@@ -201,6 +201,15 @@ mod tests {
                 None, "user_version", |row| row.get::<_, u32>(0),
             ).unwrap();
             assert_eq!(version, 28);
+            assert_eq!(
+                smallclaims::store::record_bytes::valid_records_kept(&store.readers.get()).unwrap(),
+                previous != Some(27),
+                "only an existing version-27 records-gone store keeps that format",
+            );
+            assert_eq!(store.readers.get().query_row(
+                "SELECT COUNT(*) FROM meta WHERE key='claim_signature_reference_writer'",
+                [], |row| row.get::<_, u32>(0),
+            ).unwrap(), 0, "privacy does not activate the reference writer");
             // Every pre-privacy reader, including main's max27 build, refuses
             // this application DB before reading private thread data.
             assert!((10..=27).contains(&20));
@@ -213,7 +222,7 @@ mod tests {
                 actor: Some("person/owner".into()),
                 fields: serde_json::from_value(json!({
                     "from": "person/owner", "to": "agent/reviewer",
-                    "content": "Signed reference survives reopen", "status": "sent",
+                    "content": "Signed text survives the privacy fence", "status": "sent",
                 })).unwrap(),
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
@@ -223,16 +232,21 @@ mod tests {
             assert_eq!(store.readers.get().query_row(
                 "SELECT typeof(signature) FROM claim_signatures WHERE claim_id=?1",
                 [&message.id], |row| row.get::<_, String>(0),
-            ).unwrap(), "blob");
+            ).unwrap(), "text");
             drop(store);
 
             let reopened = Store::open(&path, "writer").unwrap();
+            assert_eq!(
+                smallclaims::store::record_bytes::valid_records_kept(&reopened.readers.get()).unwrap(),
+                previous != Some(27),
+                "reopen preserves the records-gone marker across 27 to 28",
+            );
             assert_eq!(reopened.graph.claim_verdict(&message.id).unwrap(), Verdict::Verified);
             assert_eq!(reopened.graph.claim_by_id(&message.id).unwrap().unwrap().body, message.body);
             assert_eq!(reopened.readers.get().query_row(
                 "SELECT typeof(signature) FROM claim_signatures WHERE claim_id=?1",
                 [&message.id], |row| row.get::<_, String>(0),
-            ).unwrap(), "blob");
+            ).unwrap(), "text");
         }
     }
 
