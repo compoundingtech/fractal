@@ -86,7 +86,7 @@ fn a_revision_runs_the_stored_blob_it_pins() {
     let engine = engine(dir.path());
     let hash = engine.store.put_blob(b"export default 1").unwrap();
     // The author's path is provenance only: the member runs the store's bytes.
-    let program = ProgramSpec { bundle: "/nowhere/land.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None };
+    let program = ProgramSpec { bundle: "/nowhere/land.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None, finalizer_grace_ms: None };
     let pinned = engine.pinned_module(&program).unwrap();
     assert_eq!(std::fs::read(&pinned).unwrap(), b"export default 1");
     // A damaged pinned copy is replaced from the blob, never run.
@@ -130,7 +130,7 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         step: step.into(),
         attempt: 2,
         run: "mission-run/run".into(),
-        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
+        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None, finalizer_grace_ms: None },
         payload: BTreeMap::new(),
         env: BTreeMap::new(),
         cwd: "/".into(),
@@ -138,7 +138,7 @@ fn messages_for_another_attempt_or_host_change_nothing() {
     let execution = engine.execution(fractal_light_node_core::authority::RunBinding {
         run: dispatch.run.clone(), step_run: dispatch.step.clone(), attempt: dispatch.attempt,
     }, 1, None);
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, execution, requests: BTreeMap::new(),
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, execution, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
@@ -175,7 +175,7 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         step: step.subject.clone(),
         attempt,
         run: step.run.clone(),
-        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None },
+        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None, finalizer_grace_ms: None },
         payload: BTreeMap::new(),
         env: BTreeMap::new(),
         cwd: "/".into(),
@@ -183,7 +183,7 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
     let execution = engine.execution(fractal_light_node_core::authority::RunBinding {
         run: step.run.clone(), step_run: step.subject.clone(), attempt: 1,
     }, 1, None);
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, execution, requests: BTreeMap::new(),
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, execution, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
@@ -301,15 +301,29 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
     engine.lock().running.insert(step.clone(), Running {
         dispatch: Dispatch {
             step: step.clone(), attempt, run: run.subject.clone(),
-            program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
+            program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None, finalizer_grace_ms: None },
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
         execution: engine.execution(fractal_light_node_core::authority::RunBinding {
             run: run.subject.clone(), step_run: step.clone(), attempt,
         }, generation, None),
-        generation, requests: BTreeMap::new(),
+        generation, finalizing: false, step_keys: HashMap::new(), requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]),
     });
+}
+
+#[test]
+fn a_request_backed_operation_cannot_overwrite_the_finalizer_control_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "reserved-finalizer-key");
+    let step = &run.steps[0].subject;
+    running_attempt(&engine, &run, 1, 1);
+    engine.request(step, 1, 1, &"a".repeat(64),
+        &json!({"t": "run", "key": "$finalizers", "mission": "child", "input": {}, "seq": 1})).unwrap();
+    assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "failed");
+    assert!(engine.requests(&run.subject).is_empty());
+    assert!(!engine.journal_claims(step).unwrap().iter().any(|claim| claim.body["fields"]["key"] == "$finalizers"));
 }
 
 #[test]
@@ -1130,7 +1144,7 @@ export default {
         engine.install_run_authority(authority.clone()).unwrap();
         let dispatch = Dispatch {
             step: step.subject, attempt: 1, run: step.run,
-            program: ProgramSpec { bundle: "/fixture.mjs".into(), bundle_hash: hash, stalled_after_ms: None },
+            program: ProgramSpec { bundle: "/fixture.mjs".into(), bundle_hash: hash, stalled_after_ms: None, finalizer_grace_ms: None },
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: dir.path().to_string_lossy().into_owned(),
         };
         Self { engine, authority, dispatch, _dir: dir, revoked: receiver }
@@ -1248,4 +1262,71 @@ fn a_failed_terminal_write_resumes_with_new_authority_on_the_same_host_and_attem
     let credential = &running.dispatch.env[crate::store::run_credentials::RUN_CREDENTIAL_ENV];
     assert_eq!(local::local_binding(&fixture.authority.local.lock().unwrap(), credential, 1_000).unwrap(),
         fixture.authority.binding(&resumed));
+}
+
+#[test]
+fn finalization_retains_execution_authority_until_its_outcome_and_then_revokes_it() {
+    use crate::store::run_credentials::local;
+    let fixture = AuthorityFixture::new();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    fixture.authority.acknowledge();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::Started);
+    let step = &fixture.dispatch.step;
+    let credential = fixture.engine.lock().running[step].dispatch.env[
+        crate::store::run_credentials::RUN_CREDENTIAL_ENV
+    ].clone();
+    let mut run = fixture.engine.store.mission_run(&fixture.dispatch.run).unwrap().unwrap();
+    run.status = "cancelled".into();
+    fixture.engine.release_left(&run).unwrap();
+    assert!(fixture.engine.lock().running[step].finalizing);
+    assert!(local::local_binding(&fixture.authority.local.lock().unwrap(), &credential, 1_000).is_ok());
+    fixture.engine.handle(&json!({
+        "t": "finalizers", "step": step, "attempt": 1, "outcome": "completed",
+    }), 1).unwrap();
+    assert!(local::local_binding(&fixture.authority.local.lock().unwrap(), &credential, 1_000).is_err());
+    assert!(fixture.engine.lock().running.contains_key(step), "termination still needs its exact ACK");
+    fixture.engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 2).unwrap();
+    assert!(fixture.engine.lock().running.contains_key(step));
+    fixture.engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();
+    assert!(!fixture.engine.lock().running.contains_key(step));
+}
+
+#[test]
+fn a_queued_root_outcome_cannot_complete_a_cancelled_program() {
+    for released in [false, true] {
+        for exit in [json!({"_tag": "Success", "value": true}), json!({"_tag": "Failure", "error": {"_tag": "BodyFailed"}})] {
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(dir.path());
+            let hash = engine.store.put_blob(b"export default {}").unwrap();
+            crate::reconcile::tests::apply_source(&engine.store, &format!(r#"version 2
+mission "cancel-queued-root" state="ready" {{
+  goal "Fence a queued root outcome."
+  step "program" {{ program "/bundle.mjs" sha256="{hash}" }}
+}}"#), "cancel-queued-root-declaration");
+            let run = engine.store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "cancel-queued-root".into(), revision: None, workspace: "/tmp".into(),
+                requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "cancel-queued-root".into(),
+            }).unwrap();
+            let step = &run.steps[0].subject;
+            running_attempt(&engine, &run, 1, 1);
+            engine.lock().running.get_mut(step).unwrap().dispatch.program.bundle_hash = hash.clone();
+            // The host has ended the worker and queued its normal root notification.
+            engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
+            let done = json!({"t": "done", "step": step, "attempt": 1, "exit": exit});
+            engine.store.request_mission_run_cancellation(&run.subject, "cancel before queued done").unwrap();
+            let cancelled = engine.store.mission_run(&run.subject).unwrap().unwrap();
+            if released { engine.release_left(&cancelled).unwrap(); }
+            engine.handle(&done, 1).unwrap();
+            assert!(engine.lock().running[step].finalizing);
+            assert_eq!(engine.store.step_run(step).unwrap().unwrap().status, "working");
+            assert!(!engine.journal_claims(step).unwrap().iter().any(|claim| claim.body["fields"]["key"] == RESULT_KEY));
+            // A stale normal append is also refused inside its own transaction.
+            assert_eq!(engine.write_journal(step, 1, &hash, RESULT_KEY, "completed",
+                &json!({"value": true}), None).unwrap_err().code, "program-finalizing");
+            engine.handle(&json!({"t": "finalizers", "step": step, "attempt": 1, "outcome": "completed"}), 1).unwrap();
+            assert!(engine.journal_claims(step).unwrap().iter().any(|claim|
+                claim.body["fields"]["key"] == "$finalizers" && claim.body["fields"]["status"] == "completed"));
+        }
+    }
 }
