@@ -1266,7 +1266,7 @@ fn a_failed_terminal_write_resumes_with_new_authority_on_the_same_host_and_attem
 
 #[test]
 fn finalization_retains_execution_authority_until_its_outcome_and_then_revokes_it() {
-    use crate::store::run_credentials::local;
+    use fractal_light_node_core::authority::local;
     let fixture = AuthorityFixture::new();
     assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
     fixture.authority.acknowledge();
