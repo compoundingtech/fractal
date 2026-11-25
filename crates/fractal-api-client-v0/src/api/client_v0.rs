@@ -16610,10 +16610,18 @@ subscription "watch/source" {
 
     #[test]
     fn temporary_pairing_allowance_preserves_scope_expiry_and_revocation() {
-        let root = tempfile::tempdir().unwrap();
-        let state = test_state(root.path());
         let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
         let now = cap - 60_000;
+        struct ResetClock;
+        impl Drop for ResetClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        smallclaims::store::set_thread_clock(Some(now));
+        let _clock = ResetClock;
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
         let claim = state.store.append_claim(&ClaimInput {
             subject:"custom/client/pairing-existing".into(), kind:"custom.client.pairing-completed".into(),
             actor:Some("person/alex".into()),
@@ -16636,6 +16644,7 @@ subscription "watch/source" {
         assert!(session.allows("read.projections"));
         assert!(!session.allows("terminal.control"));
         assert_eq!(session.grant_expires_at, Some(cap));
+        // The legacy allowance ends at LEGACY_ALLOWANCE_CAP_UNIX_MS, even if the grant lives on.
         assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, cap).is_err());
         let mut changed = claim.clone();
         changed.body["fields"]["scopes"] = json!(ALL_SCOPES);

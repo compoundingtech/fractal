@@ -317,18 +317,16 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
         evidence:vec![],expected_subject:None,idempotency_key:None,
     }).unwrap();
     assert!(answer(&state,&owner,&another,"approve").is_err());
-    let mut allowance = fractal_store::config::LegacyPairingAllowance {
+    let allowance = fractal_store::config::LegacyPairingAllowance {
         completion_id:legacy.id.clone(),
         record_hash:fractal_store::pairing::record_hash(&legacy.origin,legacy.actor.as_deref(),&legacy.body["fields"]).unwrap(),
         until_unix_ms:(client_now_ms()+60_000) as u64,
     };
-    state.store.configure_pairing_legacy_allowances(&[allowance.clone()]).unwrap();
-    answer(&state,&owner,&another,"approve").unwrap();
-    assert!(poll(&state,&owner,&another,&key).await.unwrap().0["bearer"].is_string());
-    let after_deadline = start(&state,&owner,&key).await;
-    allowance.until_unix_ms = 1;
     state.store.configure_pairing_legacy_allowances(&[allowance]).unwrap();
-    assert!(answer(&state,&owner,&after_deadline,"approve").is_err());
+    let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
+    assert!(client_now_ms() >= cap, "legacy allowances ended at LEGACY_ALLOWANCE_CAP_UNIX_MS");
+    assert!(answer(&state,&owner,&another,"approve").is_err(),
+        "LEGACY_ALLOWANCE_CAP_UNIX_MS refuses even a configured legacy allowance");
 }
 
 #[tokio::test]
