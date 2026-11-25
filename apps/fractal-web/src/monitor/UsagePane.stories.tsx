@@ -198,6 +198,11 @@ export const QuotaAtLimit: Story = {
     expect(ring.outlineStyle).toBe('solid')
     expect(parseFloat(ring.outlineWidth)).toBeGreaterThan(0)
     expect(ring.outlineColor).not.toBe(getComputedStyle(selected).boxShadow.match(/rgba?\([^)]*\)/)![0])
+    // The pointer over the selected row must not hide the selection: the bar and the bold name stay.
+    await userEvent.hover(selected)
+    await waitFor(() => expect(selected).toHaveAttribute('data-hovered', 'true'))
+    expect(getComputedStyle(selected).boxShadow).toMatch(/3px 0px 0px( 0px)? inset/)
+    expect(Number(getComputedStyle(selected.querySelector('span')!).fontWeight)).toBeGreaterThanOrEqual(600)
     canvasElement.dataset.proof = 'passed'
   },
 }
