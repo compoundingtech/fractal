@@ -215,7 +215,7 @@ impl Store {
 /// This ledger is not a projection: never rebuild it from old claims. Missing history is
 /// unknown, and a restart must not manufacture acceptance-time suspension observations.
 pub(super) fn create_audit_capture(connection: &Connection, graph_cut: &str) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h21a2a41a2d4e owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ &format!("
+    connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h21a2a41a2d4e owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ "
         CREATE TABLE IF NOT EXISTS local_residency_wake_capture (
             message TEXT PRIMARY KEY, seat TEXT NOT NULL, accepted_at INTEGER NOT NULL,
             received_at INTEGER NOT NULL, graph_cut INTEGER NOT NULL, metadata TEXT NOT NULL,
