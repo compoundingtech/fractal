@@ -371,6 +371,7 @@ const programDeclaration = Effect.fnUntraced(function* ({
           bundle,
           sha256,
           ...(intent.stalledAfter === undefined ? {} : { stalledAfter: intent.stalledAfter }),
+          ...(intent.finalizerGrace === undefined ? {} : { finalizerGrace: intent.finalizerGrace }),
         },
       },
     ],
