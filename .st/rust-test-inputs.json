@@ -86,6 +86,9 @@
     "scripts/ci-test-paths.rs"
    ]
   },
+  "fractal-auth": {
+   "extra": []
+  },
   "fractal-build-stamp": {
    "extra": []
   },
@@ -252,6 +255,14 @@
     "slo/fractal-ci.kdl",
     "slo/objectives.kdl"
    ]
+  },
+  "fractal-light-node-agent": {
+   "extra": [
+    "scripts/ci-test-paths.rs"
+   ]
+  },
+  "fractal-light-node-core": {
+   "extra": []
   },
   "fractal-mac-custody": {
    "extra": [
