@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { once } from 'node:events'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -13,6 +13,7 @@ import type { MiddlewareOptions } from './core.mts'
 import { loopbackProducer } from './relayHttp.mts'
 import { createRootDetailRelay, rootDetailRoute, type RootDetailWindow } from './rootDetail.mts'
 import { webfractalGateway } from '../scripts/vite-gateway.mjs'
+import { admittedNativeApiVersions } from './nativeEnvelope.mts'
 
 // Assembled so the source itself never carries a literal bearer credential pair.
 const publisherAuthorization = 'Bearer' + ' fx-publisher'
@@ -46,8 +47,8 @@ const produced = (window: RootDetailWindow = '1d') => ({
   coverage: { account_share: 0.98 }, wall_hours: 2.4, active_hours: 0.7, worktree: '/not-disclosed', seat: 'undisclosed-seat', hourly: [],
   children: Array.from({ length: 25 }, (_, i) => ({ session_id: `child-${i}`, role: 'subagent', model: i === 0 ? '.unknown' : 'reported-model', usd: 1 + i / 10, requests: i + 1 })),
 })
-const envelope = (value: unknown) => JSON.stringify({ api_version: 'fractal.client.v0', value })
-const capabilities = (granted: boolean) => envelope({ kind: 'capabilities', capabilities: [{ id: 'read.projections', state: granted ? 'granted' : 'ungranted' }] })
+const envelope = (value: unknown, apiVersion = 'fractal.client.v0') => JSON.stringify({ api_version: apiVersion, value })
+const capabilities = (granted: boolean, apiVersion?: string) => envelope({ kind: 'capabilities', capabilities: [{ id: 'read.projections', state: granted ? 'granted' : 'ungranted' }] }, apiVersion)
 
 interface Received { readonly path: string | undefined; readonly authorization: string | undefined; readonly cookie: string | undefined }
 const received = (req: IncomingMessage): Received => ({ path: req.url, authorization: req.headers.authorization, cookie: req.headers.cookie })
@@ -73,10 +74,12 @@ const portOf = (server: Server): number => {
 }
 
 interface FixtureState {
+  versions: Partial<Record<'capabilities' | 'agent' | 'usage', string>>
   grantStatus: number
   granted: boolean
   usageStatus: number
   agent: AgentEncoded
+  agentBody?: string
   usage: UsageRowEncoded[]
   body: string
   producerStatus: number
@@ -89,6 +92,7 @@ const upstreams = async () => {
   const dir = await mkdtemp(join(tmpdir(), 'root-detail-test-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const state: FixtureState = {
+    versions: {},
     grantStatus: 200, granted: true, usageStatus: 200, agent: agent(), usage: [usage()], body: JSON.stringify(produced()),
     producerStatus: 200, producerMode: 'answer', revokeOnProducerRead: false, echoWindow: true,
   }
@@ -100,15 +104,15 @@ const upstreams = async () => {
     if (path === '/v1/client/capabilities') {
       gatewayReads.push(received(req))
       res.writeHead(state.grantStatus, { 'content-type': 'application/json' })
-      res.end(capabilities(state.granted))
+      res.end(capabilities(state.granted, state.versions.capabilities))
     } else if (path === `/v1/client/agents/${encodeURIComponent(agentRef)}`) {
       gatewayReads.push(received(req))
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(envelope(state.agent))
+      res.end(state.agentBody ?? envelope(state.agent, state.versions.agent))
     } else if (path.startsWith('/v1/client/usage?')) {
       gatewayReads.push(received(req))
       res.writeHead(state.usageStatus, { 'content-type': 'application/json' })
-      res.end(envelope({ since_ms: 0, until_ms: 1, rows: state.usage }))
+      res.end(envelope({ since_ms: 0, until_ms: 1, rows: state.usage }, state.versions.usage))
     } else {
       forwarded.push(received(req))
       res.writeHead(404)
@@ -175,9 +179,65 @@ const expectFailure = async (response: Response, status: number, code: string) =
   const body = await response.json() as { code: string; message: string }
   expect(body.code).toBe(code)
   expect(typeof body.message).toBe('string')
+  return body
 }
 
 describe('root-detail relay', () => {
+  it('admits the version emitted by the native server', async () => {
+    // Generated sender defaults still use the legacy name; check the actual server authority.
+    const source = await readFile(new URL('../../../crates/fractal-api-core/src/api.rs', import.meta.url), 'utf8')
+    const declarations = [...source.matchAll(/^\s*pub\s+const\s+CLIENT_API_VERSION\s*:\s*&\s*(?:'static\s+)?str\s*=\s*"([^"]+)"\s*;/gm)]
+    expect(declarations, 'Expected exactly one native CLIENT_API_VERSION string declaration; update this contract test if its syntax changes').toHaveLength(1)
+    expect(admittedNativeApiVersions, 'The native server changed CLIENT_API_VERSION; update receiver compatibility before shipping').toContain(declarations[0]?.[1])
+  })
+
+  it.each(admittedNativeApiVersions)('accepts %s envelopes and additive producer fields', async apiVersion => {
+    const setup = await fixture()
+    setup.state.versions = { capabilities: apiVersion, agent: apiVersion, usage: apiVersion }
+    const response = await fetch(setup.base + detailUrl())
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(body).toMatchObject({ inclusiveUsd: 543.21 })
+    for (const key of ['lens_version', 'worktree', 'seat', 'hourly', 'coverage_ok']) expect(body).not.toHaveProperty(key)
+  })
+
+  it.each((['capabilities', 'agent', 'usage'] as const).flatMap(target => ['fractal.client.v999', 'future.client.v0'].map(apiVersion => ({ target, apiVersion }))))('names unknown $target envelope version $apiVersion without reading the producer', async ({ target, apiVersion }) => {
+    const setup = await fixture()
+    setup.state.versions[target] = apiVersion
+    const response = await fetch(setup.base + detailUrl())
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({
+      code: 'root-detail-gateway-unavailable',
+      message: `native envelope; api_version=${apiVersion}; admitted=${admittedNativeApiVersions.join(',')}; $.api_version: expected "st3.client.v0" | "fractal.client.v0"`,
+    })
+    expect(setup.producerReads).toHaveLength(0)
+  })
+
+  it('names the native admitted set for malformed JSON without disclosing response data', async () => {
+    const setup = await fixture()
+    setup.state.agentBody = `not JSON ${JSON.stringify(produced())}`
+    const response = await fetch(setup.base + detailUrl())
+    const body = await expectFailure(response, 502, 'root-detail-gateway-unavailable')
+    expect(body).toEqual({
+      code: 'root-detail-gateway-unavailable',
+      message: `native envelope; api_version=unavailable; admitted=${admittedNativeApiVersions.join(',')}; $: expected JSON object`,
+    })
+    expect(setup.producerReads).toHaveLength(0)
+  })
+
+  it.each(['wrong type', 'missing'] as const)('names a native field with %s without disclosing response data', async kind => {
+    const setup = await fixture()
+    if (kind === 'missing') Reflect.deleteProperty(setup.state.agent, 'name')
+    else Reflect.set(setup.state.agent, 'name', { private: produced() })
+    const response = await fetch(setup.base + detailUrl())
+    expect(response.status).toBe(502)
+    const body = await response.json()
+    expect(body.code).toBe('root-detail-gateway-unavailable')
+    expect(body.message).toContain('native envelope; api_version=fractal.client.v0; admitted=')
+    expect(body.message).toContain('$.value.name: expected string')
+    for (const value of [agentRef, nativeOwner, root, '543.21', 'private']) expect(body.message).not.toContain(value)
+  })
+
   it('derives the root from the gateway and returns only allowlisted fields, at most 20 descendants', async () => {
     const setup = await fixture()
     const response = await fetch(setup.base + detailUrl(), { headers: { cookie: 'browser=fixture' } })
@@ -339,9 +399,26 @@ describe('root binding', () => {
 })
 
 describe('producer answers', () => {
+  it.each(['usd', 'nested', 'missing'] as const)('names the producer lens and failing %s field without response values', async kind => {
+    const setup = await fixture()
+    const detail = produced()
+    if (kind === 'usd') Reflect.set(detail, 'usd', { private: agentRef, amount: 9876.54 })
+    else if (kind === 'nested') Reflect.set(detail.children[0]!, 'usd', { private: root })
+    else Reflect.deleteProperty(detail, 'root_session_id')
+    setup.state.body = JSON.stringify(detail)
+    const response = await fetch(setup.base + detailUrl())
+    expect(response.status).toBe(502)
+    const body = await response.json()
+    expect(body.code).toBe('root-detail-incompatible')
+    expect(body.message).toContain('producer lens; lens_version=15;')
+    expect(body.message).toContain(kind === 'nested' ? '$.children[*].usd: expected' : kind === 'missing' ? '$.root_session_id: expected string' : '$.usd: expected')
+    expect(body.message).toContain(kind === 'missing' ? 'string' : 'number')
+    for (const value of [agentRef, nativeOwner, root, detail.host, '9876.54', 'private']) expect(body.message).not.toContain(value)
+  })
+
   it('refuses incompatible answers with explicit codes and caches none of them', async () => {
     const cases: readonly (readonly [string, string])[] = [
-      ['not JSON', 'root-detail-incompatible'],
+      [`not JSON ${JSON.stringify(produced())}`, 'root-detail-incompatible'],
       [JSON.stringify({ ...produced(), root_session_id: otherRoot }), 'root-detail-wrong-root'],
       [JSON.stringify({ ...produced(), host: 'host/wrong-owner' }), 'root-detail-wrong-host'],
       [JSON.stringify({ ...produced(), usd: -1 }), 'root-detail-incompatible'],
@@ -355,7 +432,11 @@ describe('producer answers', () => {
     for (const [body, code] of cases) {
       const setup = await fixture()
       setup.state.body = body
-      await expectFailure(await fetch(setup.base + detailUrl()), 502, code)
+      const refusal = await expectFailure(await fetch(setup.base + detailUrl()), 502, code)
+      if (body.startsWith('not JSON')) expect(refusal).toEqual({
+        code: 'root-detail-incompatible',
+        message: 'producer lens; lens_version=unavailable; $: expected JSON object',
+      })
       setup.state.body = JSON.stringify(produced())
       expect((await fetch(setup.base + detailUrl())).status, code).toBe(200)
       expect(setup.producerReads).toHaveLength(2)
