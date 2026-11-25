@@ -4,8 +4,9 @@
  * (`compare_pressure`, `meter_style`), so this section's tiers are its own: the shared model's 75/90
  * severity is left as it is.
  */
-import { dependencyNote, type QuotaRow, type QuotaState } from './model.ts'
+import { cellState, dependencyNote, type QuotaRow, type QuotaState } from './model.ts'
 import { spanText } from './usageModel.ts'
+import type { QuotaLimit } from './wire.ts'
 
 /** The terminal monitor's colour tiers, as used percentages. */
 export const USAGE_TIERS = { warn: 60, high: 80, limit: 100 } as const
@@ -62,39 +63,59 @@ const STATE_WORDS: Readonly<Record<UsageLevel, string>> = { limit: 'at limit', h
 const percentText = (percent: number): string =>
   `${percent >= USAGE_TIERS.limit ? Math.round(percent) : Math.min(USAGE_TIERS.limit - 1, Math.round(percent))}%`
 
-/** The anchor's unrounded reading; `cellState` keeps only a display percent. */
-const usedPercent = (row: QuotaRow, limitId: string): number | undefined => {
-  const limit = row.account.limits.find(candidate => candidate.limitId === limitId)
-  const fraction = limit?.observation.state === 'reported' ? limit.observation.usage.usedFraction : undefined
-  return fraction === undefined || fraction === null ? undefined : fraction * 100
+/** One limit read as the section reads its anchor: same tiers, and a window that has reset has no reading. */
+export interface LimitReading {
+  readonly fill: number | undefined
+  readonly percent: string
+  readonly level: UsageLevel
+  readonly exhausted: boolean
+  /** "resets 4d", "reset 17d ago", "reset ?". */
+  readonly reset: string
+  /** The reading in words: "72% used, nearly at limit", "no reading since its reset". */
+  readonly state: string
 }
 
-const ageText = (iso: string, now: number): string => `${spanText(now - Date.parse(iso))} old`
+export const limitReading = (limit: QuotaLimit, now: number): LimitReading => {
+  const reported = limit.observation.state === 'reported' ? limit.observation : undefined
+  const resetAt = typeof reported?.window.resetsAt === 'string' ? Date.parse(reported.window.resetsAt) : undefined
+  const expired = resetAt !== undefined && resetAt <= now
+  const fraction = expired ? undefined : reported?.usage.usedFraction
+  const reading = fraction === undefined || fraction === null ? undefined : fraction * 100
+  const cell = cellState(limit)
+  const exhausted = !expired && (cell._tag === 'exhausted' || (cell._tag === 'fraction' && cell.exhausted))
+  const level: UsageLevel = exhausted ? 'limit' : reading === undefined ? 'unknown' : levelOf(reading)
+  const percent = reading !== undefined ? percentText(reading) : exhausted ? '100%' : '?'
+  return {
+    fill: exhausted ? 100 : reading === undefined ? undefined : Math.min(100, Math.max(0, reading)),
+    percent,
+    level,
+    exhausted,
+    reset: resetAt === undefined ? 'reset ?' : expired ? `reset ${spanText(now - resetAt)} ago` : `resets ${spanText(resetAt - now)}`,
+    state: expired ? 'no reading since its reset' : reading === undefined && !exhausted ? STATE_WORDS.unknown
+      : [`${percent} used`, STATE_WORDS[level]].filter(part => part !== '').join(', '),
+  }
+}
+
+export const ageText = (iso: string, now: number): string => `${spanText(now - Date.parse(iso))} old`
 
 const rowView = (row: QuotaRow, now: number): UsageRowView => {
   const name = row.accountId
   const old = row.retained ? ageText(row.account.valueObservedAt, now) : undefined
-  if (row.summary._tag === 'incompatible') {
+  const summary = row.summary._tag === 'summary' ? row.summary : undefined
+  const anchorLimit = row.account.limits.find(limit => limit.limitId === summary?.anchor.limitId)
+  if (summary === undefined || anchorLimit === undefined) {
     return { id: row.accountId, name, window: '', fill: undefined, percent: '?', level: 'unknown', exhausted: false, reset: 'unreadable', old,
       more: undefined, words: `${name}, this account's limits could not be read` }
   }
-  const { anchor, anchorReset, omitted, second } = row.summary
-  const resetAt = anchorReset._tag === 'at' ? Date.parse(anchorReset.iso) : undefined
-  const expired = resetAt !== undefined && resetAt <= now
-  const reading = expired ? undefined : usedPercent(row, anchor.limitId)
-  const exhausted = !expired && (anchor.state._tag === 'exhausted' || (anchor.state._tag === 'fraction' && anchor.state.exhausted))
-  const level: UsageLevel = exhausted ? 'limit' : reading === undefined ? 'unknown' : levelOf(reading)
-  const percent = reading !== undefined ? percentText(reading) : exhausted ? '100%' : '?'
-  const reset = resetAt === undefined ? 'reset ?' : expired ? `reset ${spanText(now - resetAt)} ago` : `resets ${spanText(resetAt - now)}`
+  const { anchor, omitted, second } = summary
+  const { fill, percent, level, exhausted, reset, state } = limitReading(anchorLimit, now)
   const count = omitted + (second === undefined ? 0 : 1)
   const hiddenLimit = level !== 'limit' && row.severity === 'exhausted'
-  const state = expired ? 'no reading since its reset' : reading === undefined && !exhausted ? STATE_WORDS.unknown
-    : [`${percent} used`, STATE_WORDS[level]].filter(part => part !== '').join(', ')
   return {
     id: row.accountId,
     name,
     window: anchor.label,
-    fill: exhausted ? 100 : reading === undefined ? undefined : Math.min(100, Math.max(0, reading)),
+    fill,
     percent,
     level,
     exhausted,

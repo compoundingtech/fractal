@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The web Usage pane shows the selected quota account at the top: every limit with its percent and reset, banked resets, and how old the reading is and why. Clicking an account in the sidebar's Usage section now opens the pane on that account.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of persisted state." },
+  "schema": { "status": "none", "detail": "No database, wire or client-v0 schema changes. The pane reads the same usage-hub quota answer the sidebar already reads." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Web-only. Severity tiers, the reset wording and the producer's held-reading flag are the sidebar's; nothing is reclassified in the browser." },
+  "downtime": { "status": "none", "detail": "No startup work. The pane shares the sidebar's quota poll, so opening it adds no request." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Reverting the web build restores the previous pane. No persistent state changes." }
+}
