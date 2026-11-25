@@ -1003,12 +1003,15 @@ impl RuntimeStartsStore for Store {
             }
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
+            fractal_store::store::local_sessions::admit_capacity(tx, Some(id))?;
             Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h9cfcb3ca5088 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,body=json_set(body,'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','before-backend')) WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
     fn enter_runtime_start_backend(&self, id: &str, owner: &str) -> Result<()> {
         self.connection.batched(|tx| -> Result<()> {
+            // Also covers already-dispatched operations recovered from older versions.
+            fractal_store::store::local_sessions::admit_capacity(tx, Some(id))?;
             let changed = tx.execute(
                 /* sqlite-large-value: allow-for-now lv-h32881e5b0f45 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE local_runtime_starts SET body=json_set(body,'$.backend_entry.phase','backend-entering')
@@ -1397,6 +1400,43 @@ mod tests {
     use fractal_missions::MissionsStore;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+
+    #[test]
+    fn custody_capacity_is_reserved_before_backend_entry() {
+        let store = Store::open_memory("node").unwrap();
+        store.connection.write().execute_batch(
+            "WITH RECURSIVE slots(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM slots WHERE n<4095)
+             INSERT INTO local_session_custody(subject,incarnation,body)
+             SELECT 'agent/retained/'||n,'generation','{}' FROM slots").unwrap();
+        let mut first = operation("reserved", "agent/reserved", None);
+        let mut second = operation("no-capacity", "agent/no-capacity", None);
+        assert_eq!(store.admit_runtime_start(&mut first, 2).unwrap(), RuntimeStartAdmission::Admitted);
+        assert_eq!(store.admit_runtime_start(&mut second, 2).unwrap(), RuntimeStartAdmission::Admitted);
+        assert!(store.dispatch_runtime_start(&first.id, 2).unwrap());
+        let error = store.dispatch_runtime_start(&second.id, 2).unwrap_err();
+        assert!(error.downcast_ref::<fractal_store::store::local_sessions::SessionCustodyCapacityReached>().is_some());
+        assert!(!store.runtime_start_for(&second.subject).unwrap().unwrap().dispatched);
+        store.enter_runtime_start_backend(&first.id, &first.owner).unwrap();
+        store.bind_local_session(&fractal_store::store::local_sessions::LocalSession {
+            subject: first.subject.clone(), runtime_id: "reserved".into(),
+            incarnation: "reserved-generation".into(), native_incarnation: "reserved-generation".into(),
+            terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
+            custody: fractal_store::store::local_sessions::SessionCustody::Owned,
+            start_operation: Some(first.id.clone()), invocation: None,
+        }).unwrap();
+        assert!(store.has_current_local_session(&first.subject).unwrap(),
+            "launch completion consumes its reservation even at the cap");
+        store.settle_local_session_custody(&first.subject, "reserved-generation").unwrap();
+        assert!(store.dispatch_runtime_start(&second.id, 2).unwrap());
+        store.finish_runtime_start(&second.id, &json!({
+            "error": "refused before native launch", "producer_closed": true,
+            "closure_kind": "before-backend", "verification": "producer-closed",
+        })).unwrap();
+        let mut third = operation("after-failure", "agent/after-failure", None);
+        assert_eq!(store.admit_runtime_start(&mut third, 2).unwrap(), RuntimeStartAdmission::Admitted);
+        assert!(store.dispatch_runtime_start(&third.id, 2).unwrap(),
+            "a proven failed producer releases its reserved slot");
+    }
 
     #[test]
     fn cleanup_receipts_are_reclaimed_only_by_a_fenced_start_result() {
