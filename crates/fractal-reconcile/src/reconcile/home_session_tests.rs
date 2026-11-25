@@ -805,6 +805,9 @@ async fn native_file(path: &Path) -> Vec<u8> {
             tokio::pin!(notified);
             notified.as_mut().enable();
             match std::fs::read(path) {
+                // Shell redirection creates the file before the child writes its
+                // readiness payload. Creation alone is not payload publication.
+                Ok(bytes) if bytes.is_empty() => notified.await,
                 Ok(bytes) => return bytes,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => notified.await,
                 Err(error) => panic!("native fixture file: {error}"),
