@@ -7993,6 +7993,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "resource_profile_keys": 1,
                     "resource_recovery_observations": 1,
                     "idle_residency": 1,
+                    "residency_audit": 1,
                     "per_run_missions": 1,
                     "work_rebind_v1": 1,
                     "shell_resource_exec": 2,

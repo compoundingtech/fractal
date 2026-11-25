@@ -672,7 +672,7 @@ person-authored claim preservation, and invalid/pending-record checks remain unc
 `step.execution-phase`, `work.rebound`, and `harness.model-fallback.observed`,
 the execution and delivery fields on `runtime.observed`, and
 `runtime.action.requested.model_return_attempt`. Earlier snapshots remain unchanged.
-The simulation loader, exact registry equality check, and audit reports select v45.
+The simulation loader, exact registry equality check, and audit reports selected v45.
 Regenerate the complete snapshot with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v45.json`;
 never assemble a corpus from individual field deltas or rename a partial snapshot.
@@ -690,4 +690,25 @@ newline, as emitted by the `claim_corpus` example.
 
 Member-local trim convergence, retained claim equality, oracle reader comparisons,
 person-authored claim preservation, and invalid/pending-record checks remain unchanged.
+
+## Owner-emitted residency audit corpus
+
+`claims-v46.json` captures the complete registry with `residency.wake-audit`,
+`residency.resume-audit`, and `residency.audit-coverage`. Versions 1 through 45
+remain frozen. The simulation loader, registry freshness check, and audit reports select v46.
+Regenerate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v46.json`.
+
+This snapshot and `docs/st3/schema.md` were recovered losslessly from the complete owning
+serialization outputs of the registry freshness tests in
+[hosted Workspace run 45618628343](https://github.com/compoundingtech/fractal/actions/runs/45618628343),
+at source commit `374024722cb9bcb6577d35bd1518bb0f90ffb0e7`.
+The registry and storage-version sources are unchanged since that run. The corpus is exactly
+`serde_json::to_string_pretty(&fractal_schema::registry().claims)`, with no added newline;
+the schema document is exactly `registry().markdown()`. Local Cargo generation was not
+attempted because available space was below the local disk floor.
+
+The residency corpus regression validates every audit kind, including resume admission
+phase and a dependency-complete empty coverage page. Existing convergence, retained-claim
+equality, and invalid/pending-record checks remain unchanged.
 

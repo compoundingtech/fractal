@@ -7,6 +7,16 @@ const FEATURE: declared_admission::FleetFeature = declared_admission::FleetFeatu
     carries: "automatic idle suspension and wake",
 };
 
+pub(super) const AUDIT_FEATURE: declared_admission::FleetFeature = declared_admission::FleetFeature {
+    keys: &["idle_residency", "residency_audit"],
+    code: "residency-audit-feature-barrier",
+    carries: "replicated residency audits",
+};
+
+pub(super) fn is_audit(kind: &str) -> bool {
+    matches!(kind, "residency.wake-audit" | "residency.resume-audit" | "residency.audit-coverage")
+}
+
 /// Use the replicated claim-operation identity and request digest, not the receipt cache key.
 /// This keeps transaction-local residency writers interchangeable with normal claim retries.
 #[allow(clippy::too_many_arguments)]
@@ -68,7 +78,8 @@ impl Store {
     pub fn append_residency_evidence(&self, input: &ClaimInput) -> Result<bool, FractalError> {
         self.validate_claim_input(input)?;
         self.connection.batched(|transaction| -> Result<bool, FractalError> {
-            if declared_admission::validate_fleet(transaction, &self.origin, &FEATURE).is_err() {
+            let feature = if is_audit(&input.kind) { &AUDIT_FEATURE } else { &FEATURE };
+            if declared_admission::validate_fleet(transaction, &self.origin, feature).is_err() {
                 return Ok(false);
             }
             // A retire writer may have ended this sleep after the runtime read its evidence.
@@ -104,7 +115,7 @@ mod tests {
 
     fn started(store: &Store, supported: bool) {
         claim(store, "daemon/alder", "daemon.started", None,
-            json!({"status":"running","features":{"idle_residency":u8::from(supported)}}));
+            json!({"status":"running","features":{"idle_residency":u8::from(supported),"residency_audit":u8::from(supported)}}));
         store.replication_snapshot().unwrap();
     }
 

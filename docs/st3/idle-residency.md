@@ -117,6 +117,9 @@ every active member's current incarnation. A missing, unsigned or withdrawn
 advertisement refuses admission; an older positive advertisement is never a fallback.
 The same feature covers suspension provenance, wake admission and residency evidence
 readers. It is not an operator assertion or a comparison of version strings.
+The three audit kinds additionally require `daemon.started.features.residency_audit = 1`
+from every active member. Older `idle_residency` advertisements alone do not admit the
+new audit writers; a partial reader rollout leaves certification coverage unknown.
 
 Activation requires both that barrier and a member `idle_suspend_after` other than
 `"off"`. Turning the policy off, or declaring `idle-suspend "never"`, prevents new
@@ -253,6 +256,9 @@ in metric labels.
 | `eligibility/<epoch id>` | `residency.eligibility-outcome` | `host`, `eligible_since`, `decided_at`, `refused` 0/1, bounded `reason` | once per eligible epoch that reaches its due time |
 | `unrouted/<incident id>` | `residency.unrouted` | `host`, `observed_at`, `kind` | on terminal attach or explicit resume of an idle-suspended seat with no wake demand |
 | `host/<host>` | `residency.host-sample` | `host`, `observed_at`, `held_silent_age_seconds`, `asleep_seats`, memory deltas with coverage | every 5 minutes on an enabled member; a failed sensor writes no age, never zero |
+| `wake-audit/<message key>` | `residency.wake-audit` | `host`, `seat`, `message_id`, `accepted_at`, `suspension_id`, `suspension_cause`, `owner_received_at` | once per wake-class message accepted or observed by the owner while idle-suspended, independently of resume admission |
+| `resume-audit/<operation phase key>` | `residency.resume-audit` | `host`, `seat`, `resume_operation_id`, `suspension_id`, `phase`, `suspension_cause_at_admission`, `admitted_at`; completion adds `suspension_cause_at_completion` and exactly one of `resumed_at` or `failure` | one immutable `admitted` claim and one immutable `completed` claim per automatic resume, including failed operations and operations without wake-demand episode evidence |
+| `audit-coverage/<frontier key>` | `residency.audit-coverage` | `host`, `observed_at`, `covered_since`, `through_at`, `audit_ids`, `audit_count`, `audit_digest`, `audit_complete`, optional `previous_coverage` | bounded linked pages after the owner drains audit evidence; only a complete frontier advances coverage, and restart or unavailable sources leave gaps |
 
 Unrouted incidents are owner-local and reader-barrier gated. Terminal attachment (including
 local-terminal lookup) and explicit resume record at most one incident per suspend operation
@@ -260,6 +266,28 @@ and kind, including across retries and daemon restarts. The owner validates a ca
 unchanged wake frontier under the source and graph writer fences before recording absence
 of wake demand; lag is unknown, not an incident. Manual suspension never records one.
 Only a newly committed incident increments the bounded `kind` counter.
+
+Audit claims are durable replicated system-only claims, not system-local runtime action
+receipts. Wake identity is the message id; resume identity is the operation id plus phase.
+The suspension id joins wake and resume records. Event times are integer Unix milliseconds.
+Cause values are `idle`, `manual`, or `unknown`; admission and completion causes are historical
+values at their respective boundaries, not the seat's current cause at query time.
+An `unknown` cause cannot certify manual precedence. Admission alone is not a successful wake.
+Native message acceptance uses a writer-local capture trigger and a durable capture ledger.
+The trigger does not survive connection shutdown, so rollback cannot leave an older writer
+dependent on a new SQL function. A later audited owner starts a new coverage span; messages
+accepted by an unaudited older writer are not retroactively treated as covered.
+
+Coverage certifies only `[covered_since, through_at]` on the named owner; `observed_at` is the
+sample time, not permission to extend that interval. A checker unions the published intervals
+and treats uncovered time, missing samples and missing audit dependencies as unknown, never
+zero. Replicated consumers must have all evidence for the claimed frontier before certifying
+a window; a lone coverage claim arriving ahead of its dependencies is insufficient.
+Each coverage page names at most 128 wake/resume audit claim ids in `audit_ids`; `audit_count`
+is their count and `audit_digest` is the SHA-256 of those ids in page order, each followed by
+a newline. `previous_coverage` links the preceding page by claim id. The checker resolves every
+page and audit id back to the chain root and verifies each count/digest and owner. Only an
+`audit_complete=true` page certifies its interval; incomplete pages never advance `through_at`.
 
 A fleet declares objectives over these claims with `fractal apply`, one set per enabled member,
 each with an `only "host"` filter so a busy member cannot hide a quiet one. The recommended set
@@ -275,6 +303,8 @@ uses seven-day windows, because one-day windows on a member with few wakes are m
 | refused epochs | `ratio` over `eligibility-outcome`, bad when `refused` > 0 | < 5%, min 10 |
 | held silent age | `gauge` over `host-sample`, bad above 86,400 s | < 1% of covered time |
 | unrouted activity | `count` over `unrouted` | max 0 per hour |
+| lost wakes | join `wake-audit` to successful completed `resume-audit` on host, seat and suspension id, within 60 s of `owner_received_at`, only inside covered windows | zero |
+| manual precedence | automatic `resume-audit` has cause `manual` at admission or completion | zero |
 
 ```kdl
 version 2
@@ -295,6 +325,15 @@ objective "example/residency-first-turn" {
 The wake objectives start at the owner's receipt, so they measure residency and not cross-member
 propagation; propagation from the sender to the owner adds to what the sender sees and is judged
 by its own objective. `origin_accepted_at` keeps it visible per wake.
+
+The zero-violation gates use the owner audits rather than reconstructing native mail from
+`message.sent` or treating system-local `runtime.action.*` absence as proof. A lost wake is a
+`wake-audit` without a successful completed `resume-audit` within the deadline for that same
+suspension. Both the receipt and its entire deadline must lie inside covered time. A manual
+precedence violation is a `resume-audit` with `suspension_cause_at_admission` or
+`suspension_cause_at_completion` equal to `manual`, including an unfinished admitted operation.
+Absent coverage, unknown causes, or incomplete replicated evidence make the gate unknown,
+not a pass; an observed violation still fails.
 
 Benefit is not an objective: memory released and asleep seat-hours are measurements on the host
 sample and dashboards. A fault goes to the declared owner, who changes the member's
