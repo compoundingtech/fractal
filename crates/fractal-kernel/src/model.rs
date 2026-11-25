@@ -1079,6 +1079,9 @@ pub struct ProgramSpec {
     /// How long the program may go without a new journal entry before its run reports it stalled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Grace for Effect finalizers after cancellation; absent uses the engine default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalizer_grace_ms: Option<u64>,
 }
 
 impl MissionSpec {

@@ -11,7 +11,10 @@ let
           };
         };
         lib = lib // {
-          hm.dag.entryAfter = after: data: { inherit after data; };
+          hm.dag = {
+            entryAfter = after: data: { inherit after data; };
+            entryBetween = before: after: data: { inherit before after data; };
+          };
         };
       };
       modules = [
@@ -47,6 +50,16 @@ let
   disabled = (evaluate { enabled = false; }).config;
   darwin = evaluate { linux = false; };
   composed = evaluate { fullGraph = true; };
+  darwinConfig = darwin.config;
+  darwinDisabled = (evaluate { linux = false; enabled = false; }).config;
+  darwinEscaped = (evaluate {
+    linux = false;
+    configFile = "/Users/example/private config/'quoted' $HOME.json";
+  }).config;
+  receipt = ".local/share/fractal-light-node-agent/lifecycle-owner";
+  activation = darwinConfig.home.activation.fractalLightNodeAgent;
+  disabledActivation = darwinDisabled.home.activation.fractalLightNodeAgent;
+  executable = "${package}/bin/fractal-light-node-agent";
 in
 assert package.cargoBuildFlags == [ "-p" "fractal-light-node-agent" "--bin" "fractal-light-node-agent" ];
 assert package.meta.mainProgram == "fractal-light-node-agent";
@@ -69,8 +82,49 @@ assert lib.hasInfix "%%u $$HOME \\\"quoted\\\"" escaped.systemd.user.services.fr
 assert !succeeds (evaluate { configFile = "relative.json"; });
 assert !succeeds (evaluate { configFile = "${builtins.storeDir}/private-config.json"; });
 assert !succeeds (evaluate { configFile = builtins.storeDir; });
-assert !succeeds darwin;
-assert darwin.config.systemd.user.services == { } && darwin.config.launchd.agents == { };
+assert succeeds darwin;
+assert darwinConfig.systemd.user.services == { } && darwinConfig.launchd.agents == { };
+assert darwinConfig.home.packages == [ package ];
+assert builtins.attrNames darwinConfig.home.file == [ receipt ];
+assert darwinConfig.xdg.configFile == { };
+assert darwinConfig.home.file.${receipt}.text == ''
+  lightNodeAgentExecutable=${lib.escapeShellArg executable}
+  lightNodeAgentConfig=${lib.escapeShellArg "/run/user/1000/private-agent/config.json"}
+'';
+assert lib.hasInfix
+  "lightNodeAgentConfig=${lib.escapeShellArg "/Users/example/private config/'quoted' $HOME.json"}"
+  darwinEscaped.home.file.${receipt}.text;
+assert activation.before == [ "linkGeneration" ] && activation.after == [ "writeBoundary" ];
+# Store-context-bearing paths cannot be regular expressions in builtins.match.
+# Exact substitution keeps the full executable assertion without discarding context.
+assert builtins.replaceStrings
+  [ "desiredExecutable=${lib.escapeShellArg executable}" ] [ "" ] activation.data != activation.data;
+assert lib.hasInfix ''source "$oldGenPath/home-files/${receipt}"'' activation.data;
+assert lib.hasInfix ''
+  if [[ "$lightNodeAgentExecutable" == "$desiredExecutable" && "$lightNodeAgentConfig" == "$desiredConfig" ]]; then
+'' activation.data;
+assert lib.hasInfix ''exit 0'' activation.data;
+assert lib.hasInfix ''
+  "$lightNodeAgentExecutable" service uninstall --config "$lightNodeAgentConfig"
+'' activation.data;
+assert lib.hasInfix ''
+  "$desiredExecutable" service install --config "$desiredConfig"
+  '' activation.data;
+assert lib.hasInfix ''"$desiredExecutable" service start --config "$desiredConfig"'' activation.data;
+# The binary exclusively owns fixed-label GUI rendering, ownership fences, and
+# PTY-preserving unload. HM must not bootstrap/kickstart or grant permissions.
+assert !(lib.hasInfix "launchctl" activation.data);
+assert !(lib.hasInfix "kickstart" activation.data);
+assert !(lib.hasInfix "tccutil" activation.data);
+assert !(lib.hasInfix "/bin/fractal " activation.data);
+assert darwinDisabled.home.file == { } && darwinDisabled.home.packages == [ ];
+assert darwinDisabled.launchd.agents == { } && darwinDisabled.systemd.user.services == { };
+assert lib.hasInfix "service uninstall --config" disabledActivation.data;
+assert lib.hasInfix "desiredExecutable=''" disabledActivation.data;
+assert !succeeds (evaluate { linux = false; configFile = "relative.json"; });
+assert !succeeds (evaluate { linux = false; configFile = "${builtins.storeDir}/private-config.json"; });
+assert !succeeds (evaluate { linux = false; fullGraph = true; });
 assert !succeeds composed;
 assert disabled.systemd.user.services == { } && disabled.home.packages == [ ];
+assert disabled.home.activation == { } && disabled.home.file == { };
 true

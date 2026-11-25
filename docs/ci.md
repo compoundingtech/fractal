@@ -698,6 +698,21 @@ not a partial input list. The per-crate signing policy includes reviewed entries
 for every split auth, protocol-core and agent workspace member and the repository
 fixtures their tests consume.
 
+### Darwin light-node lifecycle
+
+`light-node-darwin` is a hosted Mac job in Workspace CI and a required dependency
+of `linux-gate`; neither a Linux evidence note nor an optional macOS label waives
+it. `scripts/ci-light-node-darwin` requires a real GUI login launchd domain,
+checks the minimal agent's normal dependency closure, runs its unit contracts
+and the real separate-process lifecycle/native-PTY fixture, and realizes the
+Darwin Nix package and module assertions. Missing launchd or the pinned PTY fails
+the job instead of skipping it. The fixture uses the actual authenticated home,
+private journal and owned service definition; existing foreign definitions are
+never fixture cleanup targets. It proves install/start idempotency, private
+identity health, home-offline restart and stop/uninstall preserving native
+custody, not production transfer, full caller parity or CPU budget acceptance.
+
+
 ### TypeScript client
 
 `typescript-client` runs on every PR and merge-group entry. Main retains the queue check;

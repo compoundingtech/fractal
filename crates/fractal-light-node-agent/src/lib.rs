@@ -6,3 +6,4 @@ pub mod agent;
 pub mod config;
 pub mod native;
 pub mod performance;
+pub mod service;

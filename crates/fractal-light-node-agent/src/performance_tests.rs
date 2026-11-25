@@ -49,7 +49,7 @@ fn invalid_clock_values_and_syscall_failures_are_errors() {
     }
     assert!(matches!(timespec_ns(i64::MAX, 0, "test"), Err(Error::CounterOverflow { .. })));
     assert_eq!(timespec_ns(7, 123, "test").unwrap(), 7_000_000_123);
-    assert!(matches!(clock_ns(-1, "invalid-test-clock"), Err(Error::ClockRead { .. })));
+    assert!(matches!(clock_ns(libc::clockid_t::MAX, "invalid-test-clock"), Err(Error::ClockRead { .. })));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
