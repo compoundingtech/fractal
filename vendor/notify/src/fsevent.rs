@@ -567,13 +567,13 @@ unsafe fn callback_impl(
         }
 
         let events = translate_flags(&flag, true);
+        let subtree_rescan = events.iter().any(|event| event.attrs.info() == Some("rescan: subtree"));
         // Loss flags are stream-wide even when their sentinel path is outside
         // the watched namespace. HistoryDone alone is only a replay barrier.
         let mut handle_event = events.iter().any(|event| event.need_rescan()
             && event.attrs.info() != Some("rescan: subtree"));
         for (p, r) in &(*info).recursive_info {
-            if events.iter().any(|event| event.attrs.info() == Some("rescan: subtree"))
-                && (p.starts_with(&path) || path.starts_with(p)) {
+            if subtree_rescan && (p.starts_with(&path) || path.starts_with(p)) {
                 handle_event = true;
                 break;
             }
