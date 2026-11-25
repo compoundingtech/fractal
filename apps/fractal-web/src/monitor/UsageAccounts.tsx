@@ -1,5 +1,5 @@
-// The Usage pane's quota accounts: the selected account's every limit on top, then the accounts worst first to pick from.
-import { useAtom } from '@effect/atom-react'
+// The Usage pane's quota accounts: the selected account's every limit and daily history on top, then the accounts worst first to pick from.
+import { useAtom, useAtomValue } from '@effect/atom-react'
 import { SystemNotice } from '@fractal/ui/assistant-ui/shell'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
@@ -7,8 +7,10 @@ import * as Aria from 'react-aria-components'
 
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
-import { selectionAtom } from './state.ts'
-import { accountDetailView, selectedRow, type AccountDetailView } from './usageAccountView.ts'
+import type { QuotaRow } from './model.ts'
+import type { UsageSource } from './source.ts'
+import { historyAtom, historyUnitAtom, selectionAtom } from './state.ts'
+import { accountDetailView, historyView, selectedRow, type AccountDetailView, type HistoryView } from './usageAccountView.ts'
 import { fills, levels, QUOTA_FAILED, useUsageSectionView } from './UsageSection.tsx'
 import type { UsageSectionView } from './usageSectionView.ts'
 
@@ -41,6 +43,39 @@ const Detail = ({ detail, muted }: { readonly detail: AccountDetailView; readonl
   </article>
 }
 
+const History = ({ view }: { readonly view: HistoryView }) => {
+  const captionId = React.useId()
+  switch (view._tag) {
+    case 'not-configured': return <SystemNotice kind="empty" title="No account history here" detail="Daily usage shows here once this Fractal relays usage history for the account" />
+    case 'loading': return <SystemNotice kind="loading" title="Reading history…" />
+    case 'unavailable': return <SystemNotice kind="error" title="Could not read history" detail={view.reason} />
+    case 'incompatible': return <SystemNotice kind="error" title="History is in a shape this app cannot read" detail={view.reason} />
+  }
+  return <figure aria-labelledby={captionId} data-usage-history="" {...stylex.props(styles.figure)}>
+    <figcaption id={captionId} {...stylex.props(styles.name)}>{view.caption}</figcaption>
+    <div role="img" aria-label={view.summary} {...stylex.props(styles.bars)}>
+      {view.bars.map(bar => <span key={bar.day} title={bar.words} data-usage-day={bar.day} data-state={bar.state} data-open={bar.open || undefined}
+        style={{ blockSize: bar.state === 'recorded' ? `${Math.max(bar.fill ?? 0, 1)}%` : undefined }}
+        {...stylex.props(styles.bar, styles[bar.state], bar.open && styles.open)} />)}
+    </div>
+    <p aria-hidden="true" {...stylex.props(styles.axis)}><span>{view.bars[0]?.day}</span><span>today, so far</span></p>
+    <p {...stylex.props(styles.meta)}>{view.summary}</p>
+    {view.notes.map(note => <p key={note} {...stylex.props(styles.meta, styles.held)}>{note}</p>)}
+  </figure>
+}
+
+const LiveHistory = ({ source, ledgerAccountId }: { readonly source: UsageSource; readonly ledgerAccountId: string }) =>
+  <History view={historyView({ ledgerAccountId, history: useAtomValue(historyAtom({ source, ledgerAccountId })), preferred: useAtomValue(historyUnitAtom) })} />
+
+/** Only a declared source with a published ledger account has history to read. */
+const AccountHistory = ({ row }: { readonly row: QuotaRow }) => {
+  const monitor = useDataSource().usage
+  const ledgerAccountId = row.account.ledgerAccountId
+  return monitor._tag === 'declared' && ledgerAccountId !== undefined
+    ? <LiveHistory source={monitor.source} ledgerAccountId={ledgerAccountId} />
+    : <History view={{ _tag: 'not-configured' }} />
+}
+
 /** `label` prefixes the region's landmark, as the pane's other sections do. */
 export const UsageAccounts = ({ label }: { readonly label: string }): React.ReactNode => {
   const { state, view } = useUsageSectionView()
@@ -51,7 +86,10 @@ export const UsageAccounts = ({ label }: { readonly label: string }): React.Reac
   return <section aria-label={`${label}: quota`} data-usage-accounts={view._tag} {...stylex.props(styles.region)}>
     {view._tag !== 'ready' ? <Note view={view} /> : <>
       {view.old === undefined ? null : <p role="status" {...stylex.props(styles.meta, styles.inset, styles.held)}>Last reading, {view.old}</p>}
-      {row === undefined ? null : <Detail detail={accountDetailView({ row, now })} muted={view.old !== undefined || row.retained} />}
+      {row === undefined ? null : <>
+        <Detail detail={accountDetailView({ row, now })} muted={view.old !== undefined || row.retained} />
+        <AccountHistory row={row} />
+      </>}
       <h3 id={headingId} {...stylex.props(styles.section)}>quota accounts <span {...stylex.props(styles.meta)}>{view.rows.length}</span></h3>
       <Aria.GridList aria-labelledby={headingId} selectionMode="single" selectionBehavior="replace" disallowEmptySelection selectedKeys={row === undefined ? [] : [row.accountId]}
         onSelectionChange={keys => { const [key] = keys === 'all' ? [] : keys; if (key !== undefined) select(String(key)) }} {...stylex.props(styles.list)}>
@@ -70,6 +108,17 @@ export const UsageAccounts = ({ label }: { readonly label: string }): React.Reac
 const styles = stylex.create({
   region: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0 },
   detail: { display: 'flex', flexDirection: 'column', gap: s.xs, padding: s.md, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: r.sm },
+  figure: { margin: 0, display: 'flex', flexDirection: 'column', gap: s.xs, paddingInline: s.md },
+  // One column per day. The open day is an outline, since its total is still growing; a day the producer
+  // did not report, or reported without a rate, is an empty dotted slot, unlike a recorded zero's flat tick.
+  bars: { display: 'flex', alignItems: 'flex-end', gap: 2, blockSize: 72, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
+  bar: { flex: '1 1 0', minWidth: 0, borderStartStartRadius: 2, borderStartEndRadius: 2, backgroundColor: c.primary },
+  recorded: {},
+  zero: { blockSize: 2, backgroundColor: c.fgMuted },
+  unreported: { blockSize: '100%', backgroundColor: 'transparent', borderWidth: 1, borderBottomWidth: 0, borderStyle: 'dotted', borderColor: c.borderStrong },
+  unrated: { blockSize: '100%', backgroundColor: 'transparent', borderWidth: 1, borderBottomWidth: 0, borderStyle: 'dotted', borderColor: c.attention },
+  open: { backgroundColor: 'transparent', borderWidth: 1, borderBottomWidth: 0, borderStyle: 'dashed', borderColor: c.primary },
+  axis: { margin: 0, display: 'flex', justifyContent: 'space-between', color: c.fgMuted, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
   name: { margin: 0, fontSize: t.metaSize, fontWeight: t.weightSemibold, overflowWrap: 'anywhere' },
   section: { margin: 0, paddingInline: s.md, paddingBlock: s.xs, fontSize: t.metaSize, fontWeight: t.weightSemibold, color: c.fgMuted },
   inset: { paddingInline: s.md },
