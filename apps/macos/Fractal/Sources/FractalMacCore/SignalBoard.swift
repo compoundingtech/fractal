@@ -149,7 +149,8 @@ public struct SignalBoard: Sendable, Equatable {
           goalValueDetail = aspiration
           let detail = "target \(target) · goal \(aspiration)"
           goalDetail = members.count == 1 || current.isEmpty ? detail : "\(current) · \(detail)"
-          goalFullDetail = "target \(worst.target) · goal \(aspiration)"
+          let fullDetail = "target \(worst.target) · goal \(aspiration)"
+          goalFullDetail = members.count == 1 || current.isEmpty ? fullDetail : "\(current) · \(fullDetail)"
         }
       } else {
         value = "—"

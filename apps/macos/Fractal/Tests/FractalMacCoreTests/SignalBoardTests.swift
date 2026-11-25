@@ -264,6 +264,7 @@ final class SignalBoardTests: XCTestCase {
     ]))
     XCTAssertEqual(counted.value, "1/2")
     XCTAssertEqual(counted.goalDetail, "5h · target 4h · goal 3h", "a count leads with the worst reading")
+    XCTAssertEqual(counted.goalFullDetail, "5h · target ≤ 4h · goal 3h")
 
     let without = signal("merge-latency", in: SignalBoard(rows: [
       row("fractal/merge-latency/p50", current: "1h", goal: 1),
