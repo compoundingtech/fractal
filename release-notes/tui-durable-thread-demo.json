@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Preview durable thread histories in the existing fleet-mid-refactor TUI demo world",
+  "replay": {
+    "status": "none",
+    "detail": "Demo fixtures do not write or replay durable claims. Thread timelines preserve their supplied server order even when timestamps are skewed."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored claim schema changes. The optional attention scenario inventory carries existing ThreadSummary and ThreadTimelineEvent wire values."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "All demo thread windows use default read-only ThreadAccess. No thread mutation transport or synthetic authority is introduced."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The existing fleet-mid-refactor attention slice includes optional topic_threads with strict wire decoding and timestamp rebasing. Slices without the inventory remain supported."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "This preview does not connect to or restart a daemon."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Run fractal tui --demo and open the worker typecheck Inbox item for fixture/preliminary open, closed, multiple-thread and read-only histories. Writable composer and lifecycle controls require the live mutation receipt driver and are not shown."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Quit the demo; no daemon state, pairings or conversation history is changed."
+  }
+}

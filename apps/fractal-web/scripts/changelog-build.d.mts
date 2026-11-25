@@ -11,14 +11,14 @@ export const prepareChangelogBuild: (options: {
   readonly deployment: ChangelogDeployment
   readonly entryIds: readonly string[]
   readonly privateEntries: readonly ChangelogEntry[]
-  readonly privateDirectory: string | undefined
+  readonly privateDirectories: readonly string[]
   readonly compile: (build: { readonly machineVersion: string }) => ChangelogManifest
 }>
 export const evaluateBuildIdentityModule: (code: string) => Promise<{ readonly machineVersion: string }>
 export const assertPublicChangelogBoundary: (input: {
   readonly manifest: ChangelogManifest | undefined
   readonly privateEntries: readonly ChangelogEntry[]
-  readonly privateDirectory: string | undefined
+  readonly privateDirectories: readonly string[]
   readonly modules: readonly string[]
   readonly texts: readonly string[]
 }) => void

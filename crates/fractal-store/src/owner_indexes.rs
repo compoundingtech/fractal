@@ -1,20 +1,56 @@
-//! Offline preparation of the mandatory conversation-owner query indexes.
+//! Offline preparation of conversation-owner and optional thread query indexes.
 use std::{io::Write, path::Path, time::Duration};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior};
 
-pub const INDEX_NAMES: [&str; 5] = [
+pub const INDEX_NAMES: [&str; 13] = [
     "claims_transport_pair_accepted_index",
     "claims_actual_accepted_index",
     "claims_runtime_origin_accepted_index",
     "claims_identity_runtime_id_accepted_index",
     "claims_identity_incarnation_id_accepted_index",
+    "claims_thread_conversation_index",
+    "claims_thread_message_accepted_index",
+    "claims_thread_inbox_origin_index",
+    "claims_thread_mission_index",
+    "claims_operational_episode_index",
+    "claims_thread_unread_owner_time_index",
+    "claims_thread_closed_owner_index",
+    "claims_thread_history_link_index",
 ];
+
+pub const THREAD_INDEXES: &str = /* sqlite-large-value: allow-for-now lv-h13ae1ea01435 owner=fractal_store::owner_indexes TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
+ON claims(json_extract(body, '$.fields.thread_id'), length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='message.sent' AND json_extract(body, '$.fields.thread_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS claims_thread_inbox_origin_index
+ON claims(json_extract(body, '$.fields.person'),
+          coalesce(json_extract(body, '$.fields.origin_source'),json_extract(body, '$.fields.origin_ask')),
+          coalesce(json_extract(body, '$.fields.origin_episode'),json_extract(body, '$.fields.origin_ask_episode')), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_mission_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.mission'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_operational_episode_index
+ON claims(json_extract(body,'$.fields.episode'))
+WHERE kind IN ('operational.failure','operational.recovered');
+CREATE INDEX IF NOT EXISTS claims_thread_unread_owner_time_index
+ON claims(actor, length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, subject)
+WHERE kind='thread.unread-marked';
+CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
+ON claims(actor, store_index DESC)
+WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
+CREATE INDEX IF NOT EXISTS claims_thread_history_link_index
+ON claims(json_extract(body, '$.fields.thread_id'), json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'), subject)
+WHERE kind='thread.ask-linked';";
 
 fn install(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h00d5d1e046d7 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ smallclaims::store::TRANSPORT_PAIR_INDEX)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc41ef8140f43 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ &crate::store::RUNTIME_ID_INDEX)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf9f402581c23 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ THREAD_INDEXES)?;
     Ok(())
 }
 
@@ -36,7 +72,7 @@ fn report(output: &mut impl Write, phase: &str, definitions: &[Option<String>]) 
 
 fn expected_definitions() -> Result<Vec<Option<String>>> {
     let connection = Connection::open_in_memory()?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2d43c40cfa36 owner=fractal_store::owner_indexes TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims (store_index INTEGER PRIMARY KEY, subject TEXT, kind TEXT, origin TEXT, body TEXT, accepted_at_unix_ms TEXT);")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8800757870b9 owner=fractal_store::owner_indexes TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims (store_index INTEGER PRIMARY KEY, subject TEXT, kind TEXT, origin TEXT, actor TEXT, body TEXT, accepted_at_unix_ms TEXT);")?;
     install(&connection)?;
     definitions(&connection)
 }
@@ -82,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_idempotently_with_startup_identical_definitions() {
+    fn prepares_idempotently_with_startup_and_offline_only_definitions() {
         let (_directory, path) = fixture();
         let mut output = Vec::new();
         prepare(&path, &mut output).unwrap();
@@ -94,7 +130,10 @@ mod tests {
         assert_eq!(before, after);
         assert_eq!(sql, definitions(&connection).unwrap());
         let startup = crate::store::Store::open_memory("owner-index-startup").unwrap();
-        assert_eq!(sql, definitions(&startup.connection.write()).unwrap());
+        let startup_sql = definitions(&startup.connection.write()).unwrap();
+        assert_eq!(&sql[..5], &startup_sql[..5]);
+        assert!(startup_sql[5..].iter().all(Option::is_none));
+        assert!(sql[5..].iter().all(Option::is_some));
         let output = String::from_utf8(output).unwrap();
         for name in INDEX_NAMES {
             assert!(output.contains(&format!("before: {name}: missing")));
@@ -102,6 +141,38 @@ mod tests {
         }
         let wal = std::fs::metadata(format!("{}-wal", path.display())).unwrap();
         assert_eq!(wal.len(), 0);
+    }
+
+    #[test]
+    fn prepared_thread_predicates_choose_each_offline_index_without_hints() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        drop(crate::store::Store::open(&path, "owner-plans").unwrap());
+        prepare(&path, &mut Vec::new()).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        let cases = [
+            ("claims_thread_conversation_index", "kind='thread.created' AND json_extract(body,'$.fields.person')=?1 AND json_extract(body,'$.fields.agent')=?2 AND subject>?3", "subject"),
+            ("claims_thread_message_accepted_index", "kind='message.sent' AND json_extract(body,'$.fields.thread_id')=?1 AND json_extract(body,'$.fields.thread_id') IS NOT NULL", "length(accepted_at_unix_ms),accepted_at_unix_ms"),
+            ("claims_thread_inbox_origin_index", "kind='thread.created' AND json_extract(body,'$.fields.person')=?1 AND coalesce(json_extract(body,'$.fields.origin_source'),json_extract(body,'$.fields.origin_ask'))=?2 AND coalesce(json_extract(body,'$.fields.origin_episode'),json_extract(body,'$.fields.origin_ask_episode'))=?3", "subject"),
+            ("claims_thread_mission_index", "kind='thread.created' AND json_extract(body,'$.fields.person')=?1 AND json_extract(body,'$.fields.mission')=?2 AND subject>?3", "subject"),
+            ("claims_operational_episode_index", "kind IN ('operational.failure','operational.recovered') AND json_extract(body,'$.fields.episode')=?1", "store_index"),
+            ("claims_thread_unread_owner_time_index", "kind='thread.unread-marked' AND actor=?1 AND length(accepted_at_unix_ms)<length(?2)", "length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC,subject"),
+            ("claims_thread_closed_owner_index", "kind='thread.state-set' AND json_extract(body,'$.fields.state')='closed' AND actor=?1 AND store_index<?2", "store_index DESC"),
+            ("claims_thread_history_link_index", "kind='thread.ask-linked' AND json_extract(body,'$.fields.thread_id')=?1 AND (json_extract(body,'$.fields.ask'),json_extract(body,'$.fields.ask_episode'),subject)>(?2,?3,?4)", "json_extract(body,'$.fields.ask'),json_extract(body,'$.fields.ask_episode'),subject"),
+        ];
+        for (name, predicate, order) in cases {
+            let sql = format!("EXPLAIN QUERY PLAN SELECT subject FROM claims WHERE {predicate} ORDER BY {order} LIMIT 2");
+            assert!(!sql.contains("INDEXED BY"));
+            let mut statement = connection.prepare(&sql).unwrap();
+            let values = vec![rusqlite::types::Value::Text("example".into()); statement.parameter_count()];
+            let plan = statement.query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
+            assert!(
+                plan.contains(&format!("USING INDEX {name} "))
+                    || plan.contains(&format!("USING COVERING INDEX {name} ")),
+                "{name}: {plan}",
+            );
+        }
     }
 
     #[test]

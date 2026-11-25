@@ -74,6 +74,21 @@ pub fn invalidated() -> ApiError {
         details: Box::new(serde_json::Map::from_iter([("full_resync".into(), json!(true))])) }
 }
 
+/// A bound harness transcript has one canonical managed-session identity. The
+/// external inventory already omits it, and direct aliases must obey that boundary.
+pub fn ensure_unmanaged_source(state: &AppState, source: &ExternalSession) -> Result<(), ApiError> {
+    let bound: bool = state.store.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='harness.session-file'
+         AND COALESCE(json_extract(body,'$.fields.session_id'),json_extract(body,'$.session_id'))=?1)",
+        [&source.native_id],
+        |row| row.get(0),
+    ).map_err(ApiError::internal)?;
+    if bound {
+        return Err(ApiError::not_found("the external session does not exist"));
+    }
+    Ok(())
+}
+
 pub fn source(
     state: &AppState, session_id: &str, managed: Option<&super::super::ManagedSessionOwner>,
 ) -> Result<ExternalSession, ApiError> {
@@ -126,7 +141,10 @@ pub fn source(
     )
     .map_err(ApiError::internal)?
     {
-        Some(ExternalConversation::Readable(source)) => Ok(source),
+        Some(ExternalConversation::Readable(source)) => {
+            ensure_unmanaged_source(state, &source)?;
+            Ok(source)
+        },
         Some(ExternalConversation::Unavailable(_)) => Err(transcript_unavailable(
             "the native session could not be identified",
         )),

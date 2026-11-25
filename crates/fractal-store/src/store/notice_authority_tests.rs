@@ -605,3 +605,109 @@ fn concurrent_same_owner_digest_sources_select_lowest_claim_id_not_arrival_order
         assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
     }
 }
+
+fn discussion_agent(fleet: &Fleet) {
+    let intent = crate::parse_intent(&format!(
+        "version 2\nnotice-owner {{ member \"alder\"; member-key \"{}\"; always-on }}\n\
+         agent \"example/producer\" {{ workspace \"/work/example\"; command \"true\" }}",
+        fleet.alder_key.public(),
+    ), "alder").unwrap();
+    let expected = [notice_owner::SUBJECT, "agent/example/producer"].into_iter().map(|subject| {
+        let token = fleet.alder.selected_desired_token(subject).unwrap();
+        (subject.to_owned(), token.into_iter().collect())
+    }).collect();
+    fleet.alder.apply_as(&intent, &expected, "notice-discussion-agent", Some("person/example")).unwrap();
+    fleet.alder.configure_thread_write_rollout([]);
+    // Every admitted reader must advertise the existing thread privacy floor.
+    for reader in [&fleet.a, &fleet.alder, &fleet.birch] {
+        reader.append_claim(&input(&format!("daemon/{}", reader.origin()), "daemon.started", RUNTIME,
+            json!({"status":"running","features":{"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION}}))).unwrap();
+    }
+    sync(&fleet.birch, &fleet.alder);
+    sync(&fleet.a, &fleet.alder);
+}
+
+fn discuss_notice(store: &Store, person: &str, source: &str, episode: &str, key: &str) -> Result<(ClaimRecord, bool), FractalError> {
+    let origin = thread_metadata::InboxOrigin { source_id:source.into(), episode:episode.into() };
+    let message = input(&format!("message/{key}"), "message.sent", person,
+        json!({"from":person,"to":"agent/example/producer","content":"Discuss notice.","status":"sent"}));
+    thread_metadata::start_from_inbox(store, thread_metadata::StartFromInbox {
+        thread:&format!("thread/{key}"), title:"Notice discussion", person, origin:&origin,
+        key, first_message:&message,
+    })
+}
+
+#[test]
+fn current_and_suppressed_reserved_notices_start_only_from_the_pinned_source_creation() {
+    for suppressed in [false, true] {
+        let fleet = written();
+        discussion_agent(&fleet);
+        if suppressed {
+            let mut fields = snapshot(&fleet.source);
+            fields["policy"]["disposition"] = json!("suppress");
+            fleet.alder.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-updated", RUNTIME, fields)).unwrap();
+        }
+        let (creation, appended) = discuss_notice(&fleet.alder, "person/example", SOURCE,
+            &fleet.source.id, "notice-discussion").unwrap();
+        assert!(appended);
+        assert_eq!(creation.body["fields"]["origin_source"], SOURCE);
+        assert_eq!(creation.body["fields"]["origin_episode"], fleet.source.id);
+        assert_eq!(thread_metadata::summary(&fleet.alder, "person/example", &creation.subject).unwrap().message_count, 1);
+        for (person, source, episode, key) in [
+            ("person/other", SOURCE, fleet.source.id.as_str(), "foreign-notice-person"),
+            ("person/example", SOURCE, "claim/fabricated", "fabricated-notice"),
+            ("person/example", SNAPSHOT, fleet.source.id.as_str(), "snapshot-not-source"),
+            ("person/example", "custom/attention/source/never-opened", fleet.source.id.as_str(), "foreign-notice-source"),
+        ] {
+            assert_eq!(discuss_notice(&fleet.alder, person, source, episode, key).unwrap_err().code, "thread-unavailable");
+            assert!(fleet.alder.claims_for(&format!("thread/{key}"), None).unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn label_about_and_arbitrary_attention_claims_never_establish_notice_discussion_authority() {
+    let fleet = written();
+    discussion_agent(&fleet);
+    for (source, kind, fields) in [
+        ("message/notice-label", "message.sent", json!({
+            "tags":["attention"],"from":"agent/example/producer",
+            "to":"person/example","content":"Attention label only","status":"sent",
+        })),
+        ("message/notice-about", "message.sent", json!({
+            "from":"agent/example/producer","to":"person/example","content":"About this notice","status":"sent",
+            "tags":[format!("about:{SOURCE}")],
+        })),
+    ] {
+        let claim = fleet.alder.connection.batched(|tx| append_claim_tx(tx, "alder",
+            source, kind, Some("agent/example/producer"), &json!({"fields":fields}), &[], None))
+            .unwrap().unwrap();
+        assert_eq!(discuss_notice(&fleet.alder, "person/example", source, &claim.id, source.rsplit('/').next().unwrap())
+            .unwrap_err().code, "thread-unavailable");
+    }
+    // Replication can retain an arbitrary old producer kind; its spelling is not authority.
+    let arbitrary = fleet.alder.connection.batched(|tx| append_claim_tx(tx, "alder",
+        "custom/attention/source/arbitrary", "custom.attention.arbitrary", Some("agent/example/producer"),
+        &json!({"fields":{"recipient":"person/example","about":[SOURCE],"label":"attention"}}), &[], None))
+        .unwrap().unwrap();
+    assert_eq!(discuss_notice(&fleet.alder, "person/example", &arbitrary.subject, &arbitrary.id, "arbitrary-notice")
+        .unwrap_err().code, "thread-unavailable");
+}
+
+#[test]
+fn foreign_notice_snapshot_cannot_authorize_a_retained_discussion() {
+    let fleet = setup();
+    discussion_agent(&fleet);
+    // Exercise the same old-peer/import boundary as the native authority regression:
+    // a non-owner member's real claim reaches this store, but cannot confer authority.
+    fleet.birch.connection.batched(|tx| {
+        let mut fields = snapshot(&fleet.source);
+        fields["_registration"] = json!(custom::registration(tx, SNAPSHOT)?.unwrap().0);
+        append_claim_tx(tx, "birch", SNAPSHOT, "custom.attention.snapshot-created",
+            Some(RUNTIME), &json!({"fields":fields}), &[], None)
+    }).unwrap().unwrap();
+    sync(&fleet.birch, &fleet.alder);
+    assert_eq!(discuss_notice(&fleet.alder, "person/example", SOURCE, &fleet.source.id, "foreign-snapshot")
+        .unwrap_err().code, "thread-unavailable");
+    assert!(fleet.alder.claims_for("thread/foreign-snapshot", None).unwrap().is_empty());
+}

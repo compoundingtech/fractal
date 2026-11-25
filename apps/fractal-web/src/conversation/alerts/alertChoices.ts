@@ -3,6 +3,7 @@ import { Option } from 'effect'
 
 import { alertsIn, alertConversations } from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { ANSWERS, isRequest, personAnswer, yesNo } from '../../../../../clients/typescript/fractal-views/requestView.ts'
+import { agentDisplayName, FRACTAL_NAME, isFractalMachinery, personName } from '../../data/agentName.ts'
 import type { AlertAction } from './alert-action-port.ts'
 
 // What an alert offers, separate from how it looks: the answers the Fractal terminal UI and the phone give (a structured
@@ -117,9 +118,30 @@ export const webLink = (url: string | undefined): string | undefined => {
   }
 }
 
-/** Who an alert is from: the agent that asked, else the seat it is about. */
-export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id'>): string =>
-  (alert.requester_id ?? alert.source_id).replace(/^agent\//, '')
+/**
+ * A name read from an id: Fractal for its own machinery (the daemon and the st3 reconciler), checked first; an agent's
+ * served name through the shared formatter, which reads an agent with no name as An agent; a person's short name. Step, mission and custom ids
+ * are addresses, not names.
+ */
+const actorName = (id: string, served?: string): string | undefined =>
+  isFractalMachinery(id) ? FRACTAL_NAME
+    : id.startsWith('agent/') ? agentDisplayName({ id, name: served })
+      : personName(id)
+
+/**
+ * Who an alert is from, by name, or undefined when nothing names it. Fractal's served `raised_by` is the attribution
+ * (the requester, else the agent behind its conversation or step, else its mission); an agent's served label goes
+ * through the shared formatter, and Fractal's machinery, served as 'st', reads as Fractal. Without `raised_by`, the
+ * requester, else the source, names the alert only when it is an actor: a step, mission or custom source id is an
+ * address, and the card shows the step already.
+ */
+export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id' | 'presentation'>): string | undefined => {
+  const raisedBy = Option.getOrUndefined(alert.presentation?.raised_by ?? Option.none())
+  if (raisedBy === undefined) return actorName(alert.requester_id ?? alert.source_id)
+  const label = raisedBy.label.trim()
+  if (raisedBy.id.startsWith('agent/') || isFractalMachinery(raisedBy.id)) return actorName(raisedBy.id, label)
+  return label === '' || label === raisedBy.id ? actorName(raisedBy.id) : label
+}
 
 export const KIND_WORDS: Record<string, string> = {
   'human-gate': 'Review',

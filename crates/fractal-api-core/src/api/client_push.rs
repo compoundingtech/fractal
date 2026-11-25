@@ -21,6 +21,10 @@ fn unavailable() -> ApiError {
 }
 
 /// Cleanup proof is deliberately not a session: retired credentials regain no read/write scopes.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep session authentication inline without adding an allocation to each push request"
+)]
 pub enum Authentication {
     Session(ClientSession),
     Cleanup(PushCleanupProof),

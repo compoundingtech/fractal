@@ -324,10 +324,28 @@ pub const VALID_RECORDS_GONE_VERSION: u32 = 27;
 /// otherwise switch that writer on too.
 pub const VALID_RECORD_DELETION: bool = false;
 
-/// Whether this store still stores a record for each valid claim.
+/// Whether this store still stores a record for each valid claim. Version 27
+/// committed that format directly; later reader fences require its explicit marker.
 pub fn valid_records_kept(connection: &Connection) -> Result<bool> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    Ok(version < VALID_RECORDS_GONE_VERSION)
+    if version <= VALID_RECORDS_GONE_VERSION {
+        return Ok(version < VALID_RECORDS_GONE_VERSION);
+    }
+    Ok(connection.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key='valid_records_gone' AND value='1')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Preserve the records-gone format when a later reader fence replaces version 27.
+/// Call before raising that fence, or in the first deletion's transaction.
+pub fn mark_valid_records_gone(connection: &Connection) -> Result<()> {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hcbb38b2e6195 owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('valid_records_gone','1')",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Remove the record an earlier attempt kept for a claim or blob that is valid now. A repaired
@@ -374,10 +392,11 @@ impl Store {
     /// Delete one bounded page of valid replica records, once `delete_after_ms` has passed since
     /// this store first ran a build that does this. A valid claim needs no record: its row, its
     /// position and its envelope say everything the record did (`replica_record_rows`). The first
-    /// deletion commits storage version [`VALID_RECORDS_GONE_VERSION`] in its own transaction, so
-    /// from then on admission and sealing store no valid record either and an older build that
-    /// would read one refuses the store. The cursor commits with each page and stays after the
-    /// pass, as the bytes pass's does.
+    /// deletion commits storage version [`VALID_RECORDS_GONE_VERSION`], or sets the explicit
+    /// records-gone marker when a newer reader fence is already present. It never lowers that
+    /// fence. From then on admission and sealing store no valid record either; older builds
+    /// refuse the store. The cursor commits with each page and stays after the pass, as the
+    /// bytes pass's does.
     pub fn release_valid_records(&self, delete_after_ms: u64) -> Result<ValidRecordsRelease> {
         self.connection
             .batched(|tx| release_records_page(tx, delete_after_ms))
@@ -420,7 +439,12 @@ fn release_records_page(tx: &Connection, delete_after_ms: u64) -> Result<ValidRe
     for (rowid, deletable) in &page {
         if *deletable {
             if report.deleted == 0 && valid_records_kept(tx)? {
-                tx.pragma_update(None, "user_version", VALID_RECORDS_GONE_VERSION)?;
+                let version: u32 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+                if version > VALID_RECORDS_GONE_VERSION {
+                    mark_valid_records_gone(tx)?;
+                } else {
+                    tx.pragma_update(None, "user_version", VALID_RECORDS_GONE_VERSION)?;
+                }
             }
             delete.execute(/* sqlite-large-value: allow-for-now lv-h6fab9c5ca933 owner=smallclaims::store::record_bytes TODO=trace-statement-and-value-representation */ [rowid])?;
             report.deleted += 1;
