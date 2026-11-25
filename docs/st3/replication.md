@@ -277,6 +277,13 @@ bucket proofs and a bounded listing of complete ranges, prioritizing ranges with
 live payloads over checkpoint-only ranges. Omitted probe proofs mean unknown
 ranges, not empty ones: the responder does not send speculative payloads.
 
+While comparing differing roots, the responder checks each bucket's digest before
+looking up its identities. Matching buckets require no inventory range searches;
+only differing or unknown buckets need those searches. This leaves bucket-proof
+comparison linear in the number of buckets, but avoids writer and envelope binary
+searches for every unchanged bucket. Missing-payload proofs and listing rotation
+are unchanged.
+
 The initiator uses those listings to push the reverse difference in its second
 request, alongside its own bounded range listings; the second answer pulls the
 remaining envelopes. Thus gaps within already-shared live ranges converge in one
