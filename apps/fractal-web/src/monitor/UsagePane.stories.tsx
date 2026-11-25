@@ -236,14 +236,14 @@ export const QuotaHistory: Story = {
       ['copilot/main', '27 days not reported'],
       ['zai/main', '2 without a rate'],
     ] as const) {
-      await userEvent.click(accountRow(canvasElement, account))
+      await userEvent.click(await accountRow(canvasElement, account))
       await expect(await usage.findByText(text, { exact: false })).toBeVisible()
     }
     expect(canvasElement.querySelectorAll('[data-state="unrated"]')).toHaveLength(2)
     expect(canvasElement.querySelectorAll('[data-state="zero"]')).toHaveLength(1)
-    await userEvent.click(accountRow(canvasElement, 'copilot/main'))
+    await userEvent.click(await accountRow(canvasElement, 'copilot/main'))
     await waitFor(() => expect(canvasElement.querySelectorAll('[data-state="unreported"]')).toHaveLength(27))
-    await userEvent.click(accountRow(canvasElement, 'claude/alpha'))
+    await userEvent.click(await accountRow(canvasElement, 'claude/alpha'))
     await expect(await usage.findByText('USD coverage is below the producer’s gate, so this shows tokens')).toBeVisible()
     canvasElement.dataset.proof = 'passed'
   },
