@@ -9,7 +9,7 @@ const COMPLETE: &str = "local_wake_demand_v1_complete";
 const AFTER: &str = "local_wake_demand_v1_after";
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    create_audit_capture(connection, "NEW.store_index")?;
+    create_audit_capture(connection, "NEW.store_index", false)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3eddd3ad87ca owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ "
         CREATE TABLE IF NOT EXISTS local_wake_demand_v1 (
             subject TEXT PRIMARY KEY, recipient TEXT NOT NULL, class INTEGER NOT NULL,
@@ -214,8 +214,11 @@ impl Store {
 
 /// This ledger is not a projection: never rebuild it from old claims. Missing history is
 /// unknown, and a restart must not manufacture acceptance-time suspension observations.
-pub(super) fn create_audit_capture(connection: &Connection, graph_cut: &str) -> Result<()> {
-    connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h21a2a41a2d4e owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ "
+pub(super) fn create_audit_capture(connection: &Connection, graph_cut: &str, temporary: bool) -> Result<()> {
+    // Native capture calls a current-writer scalar. Never persist that dependency into
+    // a database an older runtime must still be able to accept replicated messages into.
+    let temporary = if temporary { "TEMP" } else { "" };
+    connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h614b7a067991 owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ "
         CREATE TABLE IF NOT EXISTS local_residency_wake_capture (
             message TEXT PRIMARY KEY, seat TEXT NOT NULL, accepted_at INTEGER NOT NULL,
             received_at INTEGER NOT NULL, graph_cut INTEGER NOT NULL, metadata TEXT NOT NULL,
@@ -223,7 +226,7 @@ pub(super) fn create_audit_capture(connection: &Connection, graph_cut: &str) -> 
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS local_residency_wake_capture_pending
             ON local_residency_wake_capture(processed,message);
-        CREATE TRIGGER IF NOT EXISTS residency_wake_capture AFTER INSERT ON claims
+        CREATE {temporary} TRIGGER IF NOT EXISTS residency_wake_capture AFTER INSERT ON claims
         WHEN NEW.kind='message.sent' BEGIN
             INSERT OR IGNORE INTO local_residency_wake_capture
                 (message,seat,accepted_at,received_at,graph_cut,metadata)
@@ -312,7 +315,7 @@ impl Store {
                 && state.phase != "resumed"
             {
                 let suspension = state.suspend_operation_id.as_deref().unwrap_or(&state.operation_id);
-                idle_residency::evidence(tx, &self.origin, &seat, "wake-audit",
+                idle_residency::evidence(tx, &self.origin, seat, "wake-audit",
                     &format!("wake-audit:{}:{message}", self.origin), "residency.wake-audit",
                     json!({"message_id":message,"accepted_at":accepted,"owner_received_at":received,
                         "suspension_id":suspension,"suspension_cause":"idle"}))?;

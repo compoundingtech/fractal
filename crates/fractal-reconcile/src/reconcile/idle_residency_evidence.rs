@@ -511,7 +511,7 @@ mod tests {
         let suspended = action_claim(&store, "runtime.action.requested",
             json!({"action":"suspend","cause":"idle"}), vec![]);
         action_claim(&store, "runtime.action.succeeded",
-            json!({"action":"suspend","operation_status":"suspended","suspended_at_unix_ms":1}),
+            json!({"action":"suspend","operation_status":"suspended"}),
             vec![suspended.id.clone()]);
         let message = store.append_claim(&ClaimInput {
             subject:"message/audit-wake".into(), kind:"message.sent".into(),

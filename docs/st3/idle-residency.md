@@ -273,6 +273,10 @@ The suspension id joins wake and resume records. Event times are integer Unix mi
 Cause values are `idle`, `manual`, or `unknown`; admission and completion causes are historical
 values at their respective boundaries, not the seat's current cause at query time.
 An `unknown` cause cannot certify manual precedence. Admission alone is not a successful wake.
+Native message acceptance uses a writer-local capture trigger and a durable capture ledger.
+The trigger does not survive connection shutdown, so rollback cannot leave an older writer
+dependent on a new SQL function. A later audited owner starts a new coverage span; messages
+accepted by an unaudited older writer are not retroactively treated as covered.
 
 Coverage certifies only `[covered_since, through_at]` on the named owner; `observed_at` is the
 sample time, not permission to extend that interval. A checker unions the published intervals
@@ -282,8 +286,8 @@ a window; a lone coverage claim arriving ahead of its dependencies is insufficie
 Each coverage page names at most 128 wake/resume audit claim ids in `audit_ids`; `audit_count`
 is their count and `audit_digest` is the SHA-256 of those ids in page order, each followed by
 a newline. `previous_coverage` links the preceding page by claim id. The checker resolves every
-page and audit id, verifies each count/digest and owner, and accepts coverage only when the
-chain reaches an `audit_complete=true` page. Incomplete pages do not advance `through_at`.
+page and audit id back to the chain root and verifies each count/digest and owner. Only an
+`audit_complete=true` page certifies its interval; incomplete pages never advance `through_at`.
 
 A fleet declares objectives over these claims with `fractal apply`, one set per enabled member,
 each with an `only "host"` filter so a busy member cannot hide a quiet one. The recommended set
