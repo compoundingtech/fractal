@@ -20,7 +20,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::fleet::{MemberKey, verify_signature};
+use fractal_auth::{MemberKey, verify_signature};
 use crate::hash::{canonical_hash, canonical_json_value};
 
 pub mod facts;

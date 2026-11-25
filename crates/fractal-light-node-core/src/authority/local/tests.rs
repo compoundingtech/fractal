@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::run_credentials::RunBinding;
+use crate::authority::RunBinding;
 
 fn binding(attempt: u32, epoch: u64) -> ExecutionBinding {
     ExecutionBinding {
@@ -37,6 +37,25 @@ fn ack(connection: &mut Connection, epoch: u64, through: u64) {
     let tx = connection.transaction().unwrap();
     acknowledge_changes_tx(&tx, epoch, through).unwrap();
     tx.commit().unwrap();
+}
+
+#[test]
+fn native_entry_and_credential_issuance_share_the_durable_admission_ack_fence() {
+    let mut local = connection();
+    let binding = binding(1, 1);
+    let tx = local.transaction().unwrap();
+    admit_execution_tx(&tx, &binding).unwrap();
+    require_execution(&tx, &binding).unwrap();
+    assert_eq!(require_acknowledged_execution(&tx, &binding).unwrap_err().code,
+        "local-authority-backpressure");
+    tx.commit().unwrap();
+    ack(&mut local, binding.epoch, 1);
+    require_acknowledged_execution(&local, &binding).unwrap();
+    let tx = local.transaction().unwrap();
+    revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(require_acknowledged_execution(&local, &binding).unwrap_err().code,
+        "local-execution-authority-refused");
 }
 
 #[test]
@@ -136,7 +155,7 @@ fn unexpired_credential_hashes_are_bounded_and_actual_expiry_reclaims_them() {
     let execution = binding(1, 1);
     admit(&mut local, &execution);
     local.execute(
-        /* sqlite-large-value: allow-for-now lv-h1c35b12b5b69 owner=fractal_store::store::run_credentials::local::tests TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE numbers(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM numbers WHERE value<?1)
+        /* sqlite-large-value: allow-for-now lv-h9a6695b55943 owner=fractal_light_node_core::authority::local::tests TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE numbers(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM numbers WHERE value<?1)
          INSERT INTO local_execution_credentials_v1(secret_hash, host, revision, expires_at_unix_ms)
          SELECT printf('%064x',value), ?2, ?3, 10000 FROM numbers",
         params![MAX_CREDENTIALS - 1, execution.host, execution.authorization_revision],

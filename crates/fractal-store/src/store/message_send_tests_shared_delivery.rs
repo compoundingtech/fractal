@@ -20,7 +20,7 @@ pub fn request() -> ClaimInput {
 }
 
 pub fn signed(input: &ClaimInput) -> ClaimSignature {
-    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let (key, _) = fractal_auth::MemberKey::generate().unwrap();
     let mut signature = ClaimSignature::sign(
         &key,
         "",

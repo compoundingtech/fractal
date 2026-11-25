@@ -810,7 +810,7 @@ mod tests {
             json!({"driver":"claude", "account":"claude/example",
                 "five_hour_percent":20.0, "measured_at_unix_ms":2000}),
         ] {
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject:"agent/sample/harness".into(), actor:Some("agent/sample/harness".into()),
                 kind:"harness.limits".into(), fields:serde_json::from_value(fields).unwrap(),
                 evidence:vec![], expected_subject:None, idempotency_key:None,

@@ -1,4 +1,4 @@
-# Runs the five current-runtime scope controls in a VM with a real
+# Runs the five current-runtime scope controls and standalone agent scope custody in a VM with a real
 # systemd user manager for a lingering user, as on a fleet host. The isolation-vm CI job builds
 # this test's driver and runs it outside the Nix sandbox with its prebuilt nextest archive:
 #
@@ -42,6 +42,12 @@ let
       binary = "fractal_runtime";
       kind = "lib";
       name = "isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor";
+    }
+    {
+      package = "fractal-light-node-agent";
+      binary = "binary_session";
+      kind = "test";
+      name = "standalone_exec_observe_stop_restart_and_private_accounting_requires_systemd";
     }
   ];
   controlFilter = pkgs.lib.concatStringsSep " or " (
@@ -135,10 +141,11 @@ pkgs.testers.runNixOSTest {
   qemu.forceAccel = true;
   nodes.machine = {
     virtualisation.cores = 4;
-    virtualisation.memorySize = 2048;
-    # The workspace archive is copied here and expands to the complete prebuilt test inventory.
-    # The former 4 GiB disk held the small legacy archive, but cannot hold both new inputs.
-    virtualisation.diskSize = 16384;
+    virtualisation.memorySize = 8192;
+    # The authenticated archive expands to the complete workspace test inventory.
+    # Keep real sparse-disk headroom for all binaries, the archive and native scratch.
+    virtualisation.diskSize = 65536;
+    boot.tmp.useTmpfs = false;
     users.users.${user} = {
       isNormalUser = true;
       inherit uid;
@@ -172,8 +179,8 @@ pkgs.testers.runNixOSTest {
 
     machine.copy_from_host(archive, "/tmp/isolation.tar.zst")
     # Archives carry built binaries, not package source directories. Provision the manifests
-    # and working directories for the selected crates/fractal-runtime package.
-    for manifest in ("Cargo.toml", "crates/fractal-runtime/Cargo.toml"):
+    # and working directories for the selected native-runtime and agent packages.
+    for manifest in ("Cargo.toml", "crates/fractal-runtime/Cargo.toml", "crates/fractal-light-node-agent/Cargo.toml"):
         path = os.path.join(workspace, manifest)
         directory = shlex.quote(os.path.dirname(path))
         machine.succeed(f"mkdir -p {directory} && chown ${user} {directory}")
@@ -189,7 +196,7 @@ pkgs.testers.runNixOSTest {
     )
     test_seconds = time.monotonic() - started
     print(output)
-    assert re.search(r"\b5 tests run: 5 passed\b", output), "all five explicitly selected systemd-scope cases must run and pass"
+    assert re.search(r"\b6 tests run: 6 passed\b", output), "all six explicitly selected scope/custody cases must run and pass"
 
     # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     with open((os.environ["FRACTAL_ISOLATION_TIMINGS"] if "FRACTAL_ISOLATION_TIMINGS" in os.environ else os.environ["ST_ISOLATION_TIMINGS"]), "w") as timings:

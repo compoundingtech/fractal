@@ -1,0 +1,27 @@
+[package]
+name = "fractal-auth"
+version = "0.1.0"
+edition = "2024"
+description = "Fleet authentication and signing primitives without graph storage"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+data-encoding = "2"
+hex = "0.4"
+hmac = "0.12"
+http = "1"
+ring = "0.17"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid = "1"
+
+[features]
+test-support = []
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v7"] }
+getrandom = { version = "0.3", features = ["std"] }
+tempfile = "3"

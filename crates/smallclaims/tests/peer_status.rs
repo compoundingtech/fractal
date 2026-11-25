@@ -1,5 +1,5 @@
+use fractal_wire::ClaimInput;
 use smallclaims::{
-    claim::ClaimInput,
     replication::ReplicationInventory,
     store::{PEER_QUIET_EXCHANGE_MS, Store, clock_snapshot, now_ms, runtime::Plain},
 };
@@ -248,7 +248,7 @@ fn failure_details_round_trip_and_legacy_observations_remain_readable() {
     let mut transport: ReplicationExchangeTransport = serde_json::from_value(legacy.clone()).unwrap();
     assert!(transport.failure.is_none());
     assert_eq!(serde_json::to_value(&transport).unwrap(), legacy);
-    let error = anyhow::Error::new(smallclaims::error::Error::new(
+    let error = anyhow::Error::new(fractal_wire::Error::new(
         "replication-exchange-metadata-too-large",
         "secret=do-not-record request-body=private",
     )).context("https://user:password@example.test/?token=private");

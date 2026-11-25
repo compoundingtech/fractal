@@ -9,7 +9,7 @@ fn listing_work(stopped: usize) -> smallclaims::sqlite::work::SqliteWork {
     let store = Store::open_memory("node").unwrap();
     let append = |subject: String, kind: &str, fields: serde_json::Value| {
         store
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject,
                 kind: kind.into(),
                 actor: None,

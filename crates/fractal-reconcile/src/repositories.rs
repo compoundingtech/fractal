@@ -122,7 +122,7 @@ mod tests {
                 .is_empty()
         );
         store
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: "agent/example/plain".into(),
                 kind: "workspace.observed".into(),
                 actor: None,

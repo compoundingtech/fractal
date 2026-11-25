@@ -9,9 +9,11 @@ license = "MIT"
 # Enabled by the fractal package for its tests and fixtures, and by the dev-dependency below for this package's
 # own tests (so `cargo test -p fractal-daemon --lib` runs the test-support tests, as `-p fractal --lib` did).
 # Never enabled by a production build.
-test-support = ["fractal-telemetry/test-support", "fractal-store/test-support", "fractal-delivery/test-support", "fractal-missions/test-support", "fractal-seats/test-support", "fractal-attention/test-support", "fractal-evidence/test-support", "fractal-github/test-support", "fractal-peer/test-support", "fractal-reconcile/test-support", "fractal-api-core/test-support", "fractal-api-mailbox/test-support", "fractal-api-client-v0/test-support"]
+test-support = ["fractal-auth/test-support", "fractal-telemetry/test-support", "fractal-store/test-support", "fractal-delivery/test-support", "fractal-missions/test-support", "fractal-seats/test-support", "fractal-attention/test-support", "fractal-evidence/test-support", "fractal-github/test-support", "fractal-peer/test-support", "fractal-reconcile/test-support", "fractal-api-core/test-support", "fractal-api-mailbox/test-support", "fractal-api-client-v0/test-support"]
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
+fractal-auth = { path = "../fractal-auth" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
@@ -86,6 +88,8 @@ uuid = { version = "1", features = ["v4", "v7"] }
 walkdir = "2"
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
 data-encoding = "2"
 alacritty_terminal = { version = "0.26", default-features = false }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }

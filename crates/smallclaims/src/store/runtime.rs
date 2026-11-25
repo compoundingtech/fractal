@@ -15,8 +15,9 @@ use serde_json::{Value, json};
 use super::checkpoint::{ClaimTombstone, DropPlan, SealedSet};
 use super::checkpoint_staging::{CheckpointClaimFacts, StagedPlanner};
 use super::{ReplicatedClaimAdmission, Store, append_claim_record_tx};
-use crate::claim::{ClaimInput, ClaimRecord, ReplicaBatch};
-use crate::error::Error;
+use crate::claim::{ ClaimRecord, ReplicaBatch};
+use fractal_wire::{ClaimInput};
+use fractal_wire::Error;
 
 /// One table of the six-table graph digest older peers still compare: digest label, table,
 /// digested columns in order, and row order.
@@ -129,7 +130,7 @@ pub trait Runtime: Send + Sync {
         _writer: &str,
         _kind: &str,
         _subject: &str,
-    ) -> Result<(), crate::error::Error> {
+    ) -> Result<(), fractal_wire::Error> {
         Ok(())
     }
 

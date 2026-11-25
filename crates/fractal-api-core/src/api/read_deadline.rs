@@ -394,8 +394,8 @@ async fn envelope_work(
 pub enum WorkError {
     Join(tokio::task::JoinError),
     Panic,
-    Deadline(crate::model::FractalError),
-    Store(crate::model::FractalError),
+    Deadline(fractal_wire::Error),
+    Store(fractal_wire::Error),
 }
 
 impl std::fmt::Display for WorkError {
@@ -826,11 +826,11 @@ pub fn query<T>(
 
 pub fn error(error: &WorkError) -> Option<ApiError> {
     match error {
-        WorkError::Deadline(_) => Some(ApiError::bad(crate::model::FractalError::new(
+        WorkError::Deadline(_) => Some(ApiError::bad(fractal_wire::Error::new(
             "read-deadline",
             "the read exceeded its deadline or was cancelled",
         ))),
-        WorkError::Store(error) => Some(ApiError::bad(crate::model::FractalError {
+        WorkError::Store(error) => Some(ApiError::bad(fractal_wire::Error {
             code: error.code,
             message: error.message.clone(),
             details: error.details.clone(),
@@ -1606,7 +1606,7 @@ use super::*;
         let unrelated = tokio::time::timeout(
             Duration::from_secs(5), app.oneshot(request(Method::GET, "/v1/probe")),
         ).await;
-        state.store.append_claim(&crate::model::ClaimInput {
+        state.store.append_claim(&fractal_wire::ClaimInput {
             subject: "agent/admission-wake".into(), kind: "runtime.observed".into(), actor: None,
             fields: serde_json::from_value(json!({
                 "status": "running", "runtime_id": "admission-wake", "incarnation_id": "one",
@@ -1957,9 +1957,9 @@ use super::*;
                     writing.connection.batched(|transaction| {
                         transaction.execute(
                             "INSERT INTO meta(key,value) VALUES('blocking-ack','committed')", [],
-                        ).map_err(|error| crate::model::FractalError::new("internal", error.to_string()))?;
+                        ).map_err(|error| fractal_wire::Error::new("internal", error.to_string()))?;
                         Ok(())
-                    }).map_err(|error| crate::model::FractalError::new("internal", error))?
+                    }).map_err(|error| fractal_wire::Error::new("internal", error))?
                 }))
             }).await;
             let acknowledged_before_release = !released_flag.load(Ordering::SeqCst);
@@ -2315,9 +2315,8 @@ use super::*;
 
     #[tokio::test]
     async fn forwarded_real_handler_preserves_long_poll_wait_through_a_signed_peer() {
-        use crate::peer::{
-            ClientReadOperation, ClientReadRequest, ClientReadRoute, ClientRelay, FleetAuth,
-        };
+        use fractal_auth::{FleetAuth};
+        use crate::peer::{ClientReadOperation, ClientReadRequest, ClientReadRoute, ClientRelay};
         use axum::{Router, routing::post};
         use std::os::unix::fs::PermissionsExt;
         use tower::ServiceExt;
@@ -2572,7 +2571,7 @@ use super::*;
                         read_budget::check()?;
                         count.fetch_add(1, Ordering::Relaxed);
                     }
-                    Ok::<_, crate::model::FractalError>(())
+                    Ok::<_, fractal_wire::Error>(())
                 })();
                 let _ = done_tx.send(result);
             })
@@ -2621,7 +2620,7 @@ use super::*;
                         std::hint::black_box(items);
                     }
                     #[allow(unreachable_code)]
-                    Ok::<_, crate::model::FractalError>(())
+                    Ok::<_, fractal_wire::Error>(())
                 })();
                 let _ = done_tx.send((items, result));
             })

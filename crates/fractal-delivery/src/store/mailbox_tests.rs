@@ -9,7 +9,7 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::client::Fence;
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use serde_json::json;
 use std::collections::BTreeMap;
 use axum::{Json, Router};

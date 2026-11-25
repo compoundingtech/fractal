@@ -1333,7 +1333,7 @@ impl SignerInput {
 /// The key a claim is signed with, the principal it signs as, the principal it acts for and the
 /// delegation chain from its key: what a claim signature records about its signer.
 pub(crate) struct ClaimSigner {
-    pub(crate) key: Arc<crate::fleet::MemberKey>,
+    pub(crate) key: Arc<fractal_auth::MemberKey>,
     pub(crate) signer: String,
     pub(crate) on_behalf: Option<String>,
     pub(crate) chain: Vec<String>,
@@ -1548,7 +1548,7 @@ impl Store {
 
     /// The key that signs this node's own claims and vouches for the people and agents it
     /// speaks for. A fleet member's node key is its member key.
-    pub fn set_node_key(&self, key: Arc<crate::fleet::MemberKey>) -> Result<()> {
+    pub fn set_node_key(&self, key: Arc<fractal_auth::MemberKey>) -> Result<()> {
         let public = key.public().to_owned();
         self.keyring.set_node(Some(key));
         let connection = self.connection.write();
@@ -1592,7 +1592,7 @@ impl Store {
         }
         let node_subject = self.node_subject();
         let grant = |subject: &str,
-                     key: &crate::fleet::MemberKey,
+                     key: &fractal_auth::MemberKey,
                      role: Role,
                      issuer: &str,
                      issuer_key: &str,
@@ -1680,7 +1680,7 @@ impl Store {
         &self,
         principal: &str,
         role: Role,
-        key: Arc<crate::fleet::MemberKey>,
+        key: Arc<fractal_auth::MemberKey>,
         chain: Vec<String>,
     ) -> Result<HeldKey, FractalError> {
         let role_name = serde_json::to_value(role)
@@ -2688,7 +2688,7 @@ mod paced_verdict_tests {
         // A single node with no fleet: nothing exchanges, so nothing else judges. Its node key
         // signs its claims as they are sealed.
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
-        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
         store.judge_claims_slice(true).unwrap();
         let wakes = || crate::store::SIGNATURE_JOB_WAKES.with(std::cell::Cell::get);
         let start = wakes();
@@ -2733,7 +2733,7 @@ mod paced_verdict_tests {
     #[tokio::test]
     async fn a_request_whose_deadline_ends_mid_judgment_leaves_the_work_to_the_job_unfaulted() {
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
-        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
         store.judge_claims_slice(true).unwrap();
         let claim = store.append_claim(&ClaimInput {
             subject: "agent/studio.first".into(),
@@ -2999,8 +2999,8 @@ mod paced_verdict_tests {
 #[cfg(test)]
 mod freshness_tests {
     use super::*;
-    use crate::claim::ClaimInput;
-    use crate::fleet::MemberKey;
+    use fractal_wire::ClaimInput;
+    use fractal_auth::{MemberKey};
     use crate::principal::{BatchTime, FRESHNESS_FROM_UNIX_MS};
 
     fn note(store: &Store, text: &str, at: u64) -> String {

@@ -114,7 +114,7 @@ pub fn original_claim(connection: &Connection, key: &str) -> Result<Option<Strin
     )
 }
 
-pub fn cached_response(connection: &Connection, key: &str) -> Result<Option<String>, crate::Error> {
+pub fn cached_response(connection: &Connection, key: &str) -> Result<Option<String>, fractal_wire::Error> {
     let cached = connection
         .query_row(
             "SELECT response FROM idempotency WHERE operation_id=?1",
@@ -127,7 +127,7 @@ pub fn cached_response(connection: &Connection, key: &str) -> Result<Option<Stri
         return Ok(cached);
     }
     if let Some(claim) = original_claim(connection, key).map_err(crate::error::internal)? {
-        return Err(crate::Error::new(
+        return Err(fractal_wire::Error::new(
             "idempotency-key-expired",
             "this request was already committed; its saved response has expired",
         )

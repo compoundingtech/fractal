@@ -7,9 +7,12 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = ["fractal-reconcile/test-support", "tokio/test-util"]
+test-support = ["fractal-auth/test-support", "fractal-reconcile/test-support", "tokio/test-util"]
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
+fractal-auth = { path = "../fractal-auth" }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
 fractal-reconcile = { path = "../fractal-reconcile" }
 fractal-store = { path = "../fractal-store" }
 fractal-github = { path = "../fractal-github" }
@@ -59,6 +62,7 @@ uuid = { version = "1", features = ["v4", "v7"] }
 inotify = "0.11"
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 fractal_api_core_self = { package = "fractal-api-core", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }

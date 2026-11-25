@@ -21,7 +21,7 @@ fn admitted_backlog() -> Store {
         fields.insert("status".into(), json!("running"));
         fields.insert("incarnation_id".into(), json!(format!("incarnation-{number}")));
         source
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: format!("agent/catch-up/runtime-{number}"),
                 kind: "runtime.observed".into(),
                 actor: None,

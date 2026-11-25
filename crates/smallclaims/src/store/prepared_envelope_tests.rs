@@ -7,9 +7,9 @@
 use super::checkpoint::{DropPlan, SealedSet};
 use super::runtime::{IncrementalProjection, LegacyDigestTable, Plain};
 use super::*;
-use crate::error::Error;
+use fractal_wire::Error;
 use crate::claim::{EnvelopePayload, ReplicaEnvelopeSignature};
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -657,7 +657,7 @@ fn a_signature_that_arrives_after_preparation_admits_in_the_same_pass() {
             sequence: envelope.sequence,
             hash: envelope.hash.clone(),
             member_key: key.public().into(),
-            signature: key.sign(&crate::fleet::envelope_signature_message(
+            signature: key.sign(&fractal_auth::envelope_signature_message(
                 FLEET,
                 &envelope.writer,
                 envelope.sequence,

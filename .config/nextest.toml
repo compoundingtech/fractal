@@ -145,7 +145,7 @@ status-level = "fail"
 final-status-level = "flaky"
 # The gate covers the current workspace. It leaves out the retained fractal-drivers
 # catalog library modules. Current scope controls
-# need real systemd user scopes and run in the daily isolation VM.
+# need real systemd user scopes and run in the required isolation VM.
 # The cost check and the load test (`daemon_cost`, `daemon_load`) run in their own
 # perf jobs (scripts/ci-perf). Only the in-memory targets-file linkage unit and the cost
 # check's route coverage and route-inventory units also run here: they start no daemon or load,
@@ -165,6 +165,8 @@ not (
     and not test(=daemon_cost::the_cost_check_covers_every_route)
     and not test(/^daemon_cost::the_cost_route_inventory_/))
   or (package(=smallclaims) and test(/^sync::worker::tests::retry_tests::isolated_outbound_only_node_converges_after_two_minutes_and_four_hours$/))
+  or (package(=fractal-light-node-agent) and binary(=binary_session)
+    and test(=standalone_exec_observe_stop_restart_and_private_accounting_requires_systemd))
 )
 '''
 

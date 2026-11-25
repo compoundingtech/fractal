@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 use crate::github_http::GithubAuth;
 use smallclaims::hash::canonical_hash;
 
-use crate::model::{MessageView, ObserverSpec, FractalError, WatchSpec};
+use crate::model::{MessageView, ObserverSpec, WatchSpec};
+use fractal_wire::{Error as FractalError};
 
 /// Standing observers poll immediately after restart, then every three minutes while active.
 /// Quiet polls back off to six then ten minutes; any observed fact change resets three minutes.

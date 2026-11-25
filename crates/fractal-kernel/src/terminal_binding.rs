@@ -1,7 +1,9 @@
 //! A harness borrows a person's terminal. Its invocation fence is independent of the shell.
 use serde_json::Value;
 
-use crate::model::{DesiredSubject, MemberLifecycle, FractalError, TerminalBinding};
+use crate::model::{DesiredSubject, TerminalBinding};
+use fractal_wire::{Error as FractalError};
+use fractal_light_node_core::custody::MemberLifecycle;
 
 pub fn from_desired(desired: &Value) -> Result<Option<TerminalBinding>, FractalError> {
     let Some(node) = desired

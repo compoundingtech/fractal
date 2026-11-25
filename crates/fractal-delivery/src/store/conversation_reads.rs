@@ -1018,7 +1018,7 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
             Ok(())
         }).unwrap().unwrap();
         let stream = |subject: &str, from: &str, to: &str| {
-            let claim = shard.append_claim(&smallclaims::claim::ClaimInput {
+            let claim = shard.append_claim(&fractal_wire::ClaimInput {
                 subject: subject.into(),
                 kind: "message.sent".into(),
                 actor: Some(from.into()),

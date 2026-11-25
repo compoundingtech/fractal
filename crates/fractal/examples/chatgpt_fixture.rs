@@ -4,7 +4,8 @@ use fractal_daemon::SeatsStoreCore;
 use std::{path::PathBuf,sync::Arc};
 use serde_json::json;
 use sha2::{Digest,Sha256};
-use fractal_daemon::{api::AppState,store::Store,model::{ClaimInput,PersonAskRequest}};
+use fractal_daemon::{api::AppState,store::Store,model::{PersonAskRequest}};
+use fractal_wire::{ClaimInput};
 // Exercise the production DING renderer against the daemon's stored recipient message.
 async fn delivery(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -28,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
     fractal_daemon::store::assistant_write_gate::install(&root.join("mutation-gate"), None)?;
     let store=Arc::new(Store::open(&root.join("store.sqlite"),"prototype")?);
     store.bind_fleet("3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69")?;
-    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate()?.0))?;
+    store.set_node_key(Arc::new(fractal_auth::MemberKey::generate()?.0))?;
     let source=format!("version 2\nagent \"example-worker.local\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"prototype-mission\" state=\"ready\" {{ goal \"Prototype mission\"; }}",root);
     let intent=fractal_daemon::graph::parse_intent(&source,"prototype")?;
     store.apply_internal(&intent,"prototype-seed")?;

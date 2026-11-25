@@ -1,7 +1,8 @@
 //! st's Claude channel: daemon push input, native transcript receipts, and no file mailbox.
 use crate::client::Client;
 use crate::mailbox::{Fence, Frame, Receipt, Subscription};
-use crate::model::{ClaimInput, ClaimRecord, ClaimsPage, MessageView};
+use crate::model::{ ClaimRecord, ClaimsPage, MessageView};
+use fractal_wire::{ClaimInput};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

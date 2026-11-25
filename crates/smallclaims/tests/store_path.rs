@@ -1,7 +1,7 @@
 //! Opened database paths, not caller aliases, select readers and checkpoint sidecars.
 use rusqlite::{Connection, OpenFlags};
+use fractal_wire::ClaimInput;
 use smallclaims::{
-    claim::ClaimInput,
     sqlite::ReadPool,
     store::{AdmittedStore, Store, runtime::Plain},
 };

@@ -7,9 +7,13 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = ["fractal-peer/test-support"]
+test-support = ["fractal-auth/test-support", "fractal-peer/test-support"]
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
+fractal-auth = { path = "../fractal-auth" }
+fractal-store = { path = "../fractal-store" }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
 fractal-peer = { path = "../fractal-peer" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
@@ -43,6 +47,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 fractal_reconcile_self = { package = "fractal-reconcile", path = ".", features = ["test-support"] }
 opentelemetry_sdk = { version = "0.30", features = ["testing"] }
 pty-core = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }

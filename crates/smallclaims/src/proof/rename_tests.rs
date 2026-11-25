@@ -1,6 +1,6 @@
 use super::*;
 use super::super::history::tests::{FLEET, anchor, sealed};
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use serde_json::json;
 
 fn fixture() -> (RenameProofBundle, MemberKey) {
@@ -165,7 +165,7 @@ fn unsigned_competing_fact_cannot_fence_authenticated_identity() {
     let mut bytes = Vec::new();
     ciborium::into_writer(&payload, &mut bytes).unwrap();
     envelope.hash = crate::hash::replica_envelope_hash(&envelope.writer, envelope.sequence, envelope.previous_hash.as_deref(), envelope.accepted_at_unix_ms, &bytes);
-    envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(FLEET, &envelope.writer, envelope.sequence, &envelope.hash)));
+    envelope.signature = Some(key.sign(&fractal_auth::envelope_signature_message(FLEET, &envelope.writer, envelope.sequence, &envelope.hash)));
     envelope.payload = bytes.into();
     assert!(verify_rename_proof(&bundle, key.public(), None).is_ok());
 }

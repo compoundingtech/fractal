@@ -1646,7 +1646,7 @@ fn idle_residency_arms_the_exact_stable_epoch_deadline_and_rearms_after_a_blocke
     let _clock = Clock::at(START);
     let (store, runtime, reconciler, _) = stopping();
     // A mature deadline now reaches the owner writer, so model the signed reader barrier.
-    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     store.bind_fleet(fleet).unwrap();
     store.pin_fleet_anchor(key.public()).unwrap();

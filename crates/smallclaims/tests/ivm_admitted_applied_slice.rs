@@ -8,15 +8,13 @@ use rusqlite::{Connection, Transaction, params, types::Value as Sql};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use smallclaims::{
-    ClaimInput, ClaimRecord, Store,
+use smallclaims::{ ClaimRecord, Store,
     ivm::install::{
         Installer, Limits, Mutation, Namespace, Operator, Outcome, ScanPage,
         capture::Change,
-        prepared::{CaptureLimits, PreparedPage, PublicationLimits},
-    },
-    store::runtime::{Plain, Runtime},
-};
+        prepared::{CaptureLimits, PreparedPage, PublicationLimits}},
+    store::runtime::{Plain, Runtime}};
+use fractal_wire::{ClaimInput};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},

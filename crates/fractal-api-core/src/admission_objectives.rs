@@ -276,7 +276,7 @@ mod tests {
         let request = request("queued");
         store.request_resource_membership(&request, fit(true), 1000).unwrap();
         assert_eq!(check(&store, 2000)["source"]["local_authority"], true);
-        store.append_claim(&smallclaims::claim::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: "resource-admission/example-host".into(), kind: COVERAGE_KIND.into(),
             actor: None,
             fields: serde_json::from_value(json!({"host":"example-host","epoch":"epoch","complete":false})).unwrap(),

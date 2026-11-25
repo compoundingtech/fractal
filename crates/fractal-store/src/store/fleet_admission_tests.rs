@@ -11,7 +11,8 @@ pub use crate::store::fleet_admission_tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
 use super::*;
-use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_signature};
+use fractal_auth::{MemberKey, envelope_signature_message, verify_signature};
+use crate::fleet::{MemberState};
 
 fn remove(by: &Store, name: &str, member: Option<&MemberKey>, high_water: u64) {
     let mut fields = json!({"high_water": high_water, "reason": "test"});

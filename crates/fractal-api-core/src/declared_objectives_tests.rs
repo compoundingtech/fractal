@@ -1,5 +1,6 @@
 use super::*;
-use crate::model::{ClaimInput, IntentInput};
+use crate::model::{ IntentInput};
+use fractal_wire::{ClaimInput};
 
 const MINUTE: u64 = 60_000;
 /// The evaluation time; claim times are given relative to it in their fields. It is the clock's,

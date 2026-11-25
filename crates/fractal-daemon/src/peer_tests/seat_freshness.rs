@@ -11,13 +11,14 @@ use std::time::{Duration, Instant};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
-use smallclaims::sync::{FleetAuth, FleetContext, PeerState, peer_router};
+use fractal_auth::{FleetAuth};
+use smallclaims::sync::{FleetContext, PeerState, peer_router};
 use tokio::sync::watch;
 use tower::ServiceExt as _;
 
 use crate::api::seat_freshness::{SeatFreshnessPushed, push_seat_freshness};
 use crate::config::{Config, PeerConfig};
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use crate::store::{RelayedFreshness, Store};
 use fractal_peer::peer::*;
 

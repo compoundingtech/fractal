@@ -147,7 +147,7 @@ mod tests {
         assert_eq!(project(&seat, None, None, None, None, true, "2026-10-04T00:00:00Z").unwrap()["kind"], "retired");
     }
     fn observe(store: &crate::store::Store, subject: &str, kind: &str, fields: Value) {
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(), kind: kind.into(), actor: None,
             fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
             expected_subject: None, idempotency_key: None,
@@ -307,7 +307,7 @@ mod tests {
         observe(&store, &id, "runtime.observed", json!({"status":"running","incarnation_id":"one"}));
         let token = store.selected_desired_token(&id).unwrap().unwrap();
         let append = |kind: &str, actor: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: id.clone(), kind: kind.into(), actor: Some(actor.into()),
                 fields: serde_json::from_value(fields).unwrap(), evidence,
                 expected_subject: None, idempotency_key: key,

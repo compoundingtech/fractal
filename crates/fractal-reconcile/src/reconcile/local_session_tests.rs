@@ -1,6 +1,6 @@
 //! Real registry/process boundaries with the graph tables deliberately unavailable.
 use super::*;
-use crate::store::local_sessions::{LocalSession, SessionCustody};
+use fractal_light_node_core::custody::{LocalSession, SessionCustody};
 
 fn without_graph(store: &Store) {
     store.connection.write().execute_batch(

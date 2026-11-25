@@ -67,7 +67,7 @@ pub use crate::store::agent_queue_values::{
 use crate::model::ClientReplicated;
 use crate::model::{
     ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView,
-    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
+    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest,
     ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer,
     ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest,
     DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord,
@@ -87,9 +87,9 @@ use crate::model::{
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
     RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
-    SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
-    WorkRequest, WorkRetryRequest, WorkWakeRequest,
-};
+    SessionLogChunk, SessionScreen, SessionSignalRequest, StatusResponse, StepRunView,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest};
+use fractal_wire::{ClaimInput, Error as FractalError};
 pub mod effects;
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
@@ -7923,7 +7923,7 @@ impl std::fmt::Debug for RunCredential {
 
 /// The run a request's credential binds, set by the serving guard and never by a client.
 #[derive(Clone, Debug)]
-pub struct BoundRun(pub crate::store::run_credentials::RunBinding);
+pub struct BoundRun(pub fractal_light_node_core::authority::RunBinding);
 
 pub use crate::store::run_credentials::RUN_CREDENTIAL_ENV;
 
@@ -8754,7 +8754,7 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
 pub async fn serve_tcp(address: &str, app: Router) -> anyhow::Result<()> {
     let address = address.parse::<std::net::SocketAddr>()?;
     anyhow::ensure!(
-        crate::fleet::transport::is_permitted_route_address(&address.ip()),
+        fractal_auth::is_permitted_route_address(&address.ip()),
         "the peer listener must bind to a loopback or Tailscale address"
     );
     let listener = TcpListener::bind(address).await?;
@@ -11448,7 +11448,7 @@ fn suspension_target(
         .map(|(desired, _)| desired)
         .filter(|desired| desired.kind == "agent")
         .and_then(|desired| desired.member)
-        .filter(|member| member.lifecycle == crate::model::MemberLifecycle::Service)
+        .filter(|member| member.lifecycle == fractal_light_node_core::custody::MemberLifecycle::Service)
         .ok_or_else(|| {
             ApiError::bad(FractalError::new(
                 "suspend-not-declared",
@@ -13461,7 +13461,7 @@ pub struct LiveSession {
     pub runtime_id: String,
     pub incarnation_id: String,
     pub native_incarnation_id: String,
-    pub custody: crate::store::local_sessions::SessionCustody,
+    pub custody: fractal_light_node_core::custody::SessionCustody,
     pub owner_host_id: String,
     pub terminal: bool,
     pub driver: Option<String>,
@@ -13555,9 +13555,9 @@ pub fn live_session(
         .map(|member| member.terminal)
         .or_else(|| fields.get("terminal").and_then(Value::as_bool))
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no runtime kind")))?;
-    let custody = if member.as_ref().is_some_and(|member| member.lifecycle == crate::model::MemberLifecycle::TerminalBound) {
+    let custody = if member.as_ref().is_some_and(|member| member.lifecycle == fractal_light_node_core::custody::MemberLifecycle::TerminalBound) {
         return Err(ApiError::not_found("bound invocation has no current local custody"));
-    } else { crate::store::local_sessions::SessionCustody::Owned };
+    } else { fractal_light_node_core::custody::SessionCustody::Owned };
     Ok(LiveSession {
         runtime_id: runtime_id.into(),
         incarnation_id: incarnation_id.into(),
@@ -13723,7 +13723,7 @@ pub async fn signal_session_as(
         return Ok(Json(session_control_response(&subject, &result)));
     }
     let session = live_session(&state, &subject, Some(&request.expected_incarnation))?;
-    if session.custody == crate::store::local_sessions::SessionCustody::Borrowed && request.signal != "terminate" {
+    if session.custody == fractal_light_node_core::custody::SessionCustody::Borrowed && request.signal != "terminate" {
         return Err(ApiError::bad(FractalError::new("unsupported-capability",
             "a borrowed invocation may be detached, never signalled")));
     }
@@ -13794,7 +13794,7 @@ pub async fn signal_session_as(
 fn apply_session_signal(
     state: &AppState, subject: &str, session: &LiveSession, signal: i32, operation: &str,
 ) -> anyhow::Result<()> {
-    if session.custody == crate::store::local_sessions::SessionCustody::Borrowed {
+    if session.custody == fractal_light_node_core::custody::SessionCustody::Borrowed {
         anyhow::ensure!(signal == libc::SIGTERM, "a borrowed invocation may be detached, never signalled");
         state.store.detach_local_session(subject, &session.incarnation_id, operation)
     } else if session.terminal {

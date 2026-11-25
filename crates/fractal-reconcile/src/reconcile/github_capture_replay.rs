@@ -153,7 +153,7 @@ mod tests {
     }
 
     fn append(store: &Store, subject: String, kind: &str, record: &impl Serialize) -> crate::model::ClaimRecord {
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject, kind: kind.into(), actor: None,
             fields: BTreeMap::from([("record".into(), serde_json::to_value(record).unwrap())]),
             evidence: vec![], expected_subject: None, idempotency_key: None,

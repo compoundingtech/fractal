@@ -10,9 +10,9 @@ use crate::model::{
     AuthorityGrant, AuthorityVerb, BaselineSpec, CompletionSpec, DependencySpec, GateSpec,
     LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec,
     MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, ProgramSpec,
-    RetrySpec, RevisionCutover, FractalError, StepSpec, UsedMissionSpec, WorkSelector,
-    EscalationSpec, EscalationClock, EscalationStage, EscalationAction, EscalationState, EscalationOverride,
-};
+    RetrySpec, RevisionCutover, StepSpec, UsedMissionSpec, WorkSelector,
+    EscalationSpec, EscalationClock, EscalationStage, EscalationAction, EscalationState, EscalationOverride};
+use fractal_wire::{Error as FractalError};
 
 pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
 pub const LOOP_FEEDBACK_INPUT: &str = "__st3_loop_feedback";

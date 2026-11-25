@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use smallclaims::claim::ClaimInput;
+use fractal_wire::ClaimInput;
 use smallclaims::fleet::join::{self, InviteOptions, JoinOptions, MemberSettings};
 use smallclaims::fleet::{FleetFile, FleetMode};
 use smallclaims::store::Store;

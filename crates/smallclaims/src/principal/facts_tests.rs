@@ -1,5 +1,6 @@
 use super::*;
-use crate::fleet::{FleetClaim, MemberKey};
+use fractal_auth::{MemberKey};
+use crate::fleet::{FleetClaim};
 use serde_json::json;
 
 #[test]

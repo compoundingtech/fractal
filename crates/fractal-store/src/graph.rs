@@ -9,7 +9,9 @@ use crate::declaration_kdl::canonical_node;
 pub use crate::declaration_syntax::parse_duration;
 #[cfg(test)]
 use crate::model::GateSpec;
-use crate::model::{DesiredSubject, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec, MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation, NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation, PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec, ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType, RuntimeResetOperation, ScheduleSpec, FractalError, SubscriptionConditionSpec, SubscriptionSpec};
+use crate::model::{DesiredSubject, LaunchSpec, MemberKind, MemberSpec, MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation, NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation, PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec, ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType, RuntimeResetOperation, ScheduleSpec, SubscriptionConditionSpec, SubscriptionSpec};
+use fractal_wire::{Error as FractalError};
+use fractal_light_node_core::custody::MemberLifecycle;
 
 const ROOT_NODES: &[&str] = &[
     "account",

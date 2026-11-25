@@ -7,9 +7,10 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = ["fractal-github/test-support"]
+test-support = ["fractal-auth/test-support", "fractal-github/test-support"]
 
 [dependencies]
+fractal-auth = { path = "../fractal-auth" }
 fractal-github = { path = "../fractal-github" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
@@ -34,6 +35,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 parking_lot = "0.12"
 fractal_peer_self = { package = "fractal-peer", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }

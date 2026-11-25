@@ -131,8 +131,8 @@ pub(crate) fn add_detail(fields: &mut BTreeMap<String, Value>, detail: Option<&V
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::fleet::MemberKey;
-    use crate::model::ClaimInput;
+    use fractal_auth::{MemberKey};
+    use fractal_wire::{ClaimInput};
     use std::sync::Arc;
 
     pub(crate) const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";

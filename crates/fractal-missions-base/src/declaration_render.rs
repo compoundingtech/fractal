@@ -2,7 +2,8 @@
 use kdl::KdlNode;
 use crate::gate_render::{block, node, property, render_gate_node, scalar, text};
 use crate::loop_render::comment;
-use crate::model::{BaselineSpec, GateSpec, ProductSpec, FractalError, WorkSelector};
+use crate::model::{BaselineSpec, GateSpec, ProductSpec, WorkSelector};
+use fractal_wire::{Error as FractalError};
 
 pub fn protection(root: &mut KdlNode, human: bool, reviewer: Option<&str>, timeout: Option<u64>) {
     if human { property(root, "revisions", "human-only"); }

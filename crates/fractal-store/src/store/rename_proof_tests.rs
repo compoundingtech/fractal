@@ -9,7 +9,7 @@ const RENAMED: &str = "agent/example-renamed/worker";
 const FINAL: &str = "agent/example-final/worker";
 const ACTOR: &str = "person/operator";
 
-fn signed_store() -> (Store, Arc<crate::fleet::MemberKey>) {
+fn signed_store() -> (Store, Arc<fractal_auth::MemberKey>) {
     let member = key();
     let store = node("example", Some(&member), Some(&member));
     store.admit_fleet_anchor(FLEET, member.public(), "listening").unwrap();
@@ -33,7 +33,7 @@ fn rename(store: &Store, kind: IdentityKind, from: &str, to: &str, operation: &s
     receipt
 }
 
-fn twice_renamed() -> (Store, Arc<crate::fleet::MemberKey>, RenameReceipt, RenameReceipt) {
+fn twice_renamed() -> (Store, Arc<fractal_auth::MemberKey>, RenameReceipt, RenameReceipt) {
     let (store, member) = signed_store();
     publish(&store, "version 2\nagent \"example-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n", "declare-agent");
     let first = rename(&store, IdentityKind::Agent, ORIGINAL, RENAMED, "first");
@@ -41,7 +41,7 @@ fn twice_renamed() -> (Store, Arc<crate::fleet::MemberKey>, RenameReceipt, Renam
     (store, member, first, second)
 }
 
-fn exported() -> (RenameProofBundle, Arc<crate::fleet::MemberKey>) {
+fn exported() -> (RenameProofBundle, Arc<fractal_auth::MemberKey>) {
     let (store, member, _, _) = twice_renamed();
     let proof = store.export_rename_proof(IdentityKind::Agent, FINAL, None).unwrap();
     // The verifier below cannot consult this store, its principal cache or its anchor.
@@ -137,7 +137,7 @@ fn portable_proof_rejects_outsider_member_wrong_anchor_and_truncated_history() {
     let mut changed = proof.clone();
     let envelope = changed.envelopes.last_mut().unwrap();
     envelope.member_key = Some(outsider.public().to_owned());
-    envelope.signature = Some(outsider.sign(&crate::fleet::envelope_signature_message(
+    envelope.signature = Some(outsider.sign(&fractal_auth::envelope_signature_message(
         &proof.fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
     )));
     assert_eq!(verify_rename_proof(&changed, member.public(), None).unwrap_err().code, "untrusted-membership");
@@ -180,7 +180,7 @@ fn portable_proof_rejects_claim_fields_and_signatures_inside_valid_member_envelo
             envelope.accepted_at_unix_ms, &bytes,
         );
         envelope.payload = bytes.into();
-        envelope.signature = Some(member.sign(&crate::fleet::envelope_signature_message(
+        envelope.signature = Some(member.sign(&fractal_auth::envelope_signature_message(
             &proof.fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
         )));
         assert_eq!(verify_rename_proof(&proof, member.public(), None).unwrap_err().code, "invalid-signature");

@@ -5,7 +5,7 @@ fn fixture() -> (tempfile::TempDir, Arc<Store>) {
     let store =
         Arc::new(Store::open(&directory.path().join("claims.sqlite3"), "node").unwrap());
     store
-        .append_claim(&smallclaims::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "custom/test/clock-anchor".into(),
             kind: "custom.test.recorded".into(),
             actor: None,
@@ -84,7 +84,7 @@ async fn response_expiry_defers_without_claim_time_and_wakes_on_a_committed_anch
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(store.next_idempotency_expiry().unwrap(), Some(0));
     store
-        .append_claim(&smallclaims::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "custom/test/clock-anchor".into(),
             kind: "custom.test.recorded".into(),
             actor: None,

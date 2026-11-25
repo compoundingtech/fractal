@@ -23,7 +23,9 @@ use sha2::Digest as _;
 use tokio::sync::{Notify, watch};
 use crate::checkout::Checkout;
 use crate::mission::{ CANDIDATE_INDEX_INPUT, LOOP_FEEDBACK_INPUT, LOOP_ITEM_INPUT, LOOP_ROUND_INPUT, };
-use crate::model::{ AttentionItemView, AttentionRequest, CalendarSchedule, ClaimInput, CurrentHarnessView, DependencySpec, DesiredSubject, GateContext, GateSpec, LaunchSpec, LoopCandidateSelector, LoopExhaustionSpec, LoopSpec, MemberKind, MemberLifecycle, MemberSpec, MessageView, MetricSource, MissionInputKind, MissionRunRequest, MissionRunView, MissionSpec, MissionState, RestartIntensity, RestartType, StepRunView, StepSpec, SubscriptionSpec, UsedMissionSpec, WorkSelector, };
+use crate::model::{ AttentionItemView, AttentionRequest, CalendarSchedule, CurrentHarnessView, DependencySpec, DesiredSubject, GateContext, GateSpec, LaunchSpec, LoopCandidateSelector, LoopExhaustionSpec, LoopSpec, MemberKind, MemberSpec, MessageView, MetricSource, MissionInputKind, MissionRunRequest, MissionRunView, MissionSpec, MissionState, RestartIntensity, RestartType, StepRunView, StepSpec, SubscriptionSpec, UsedMissionSpec, WorkSelector};
+use fractal_wire::{ClaimInput};
+use fractal_light_node_core::custody::MemberLifecycle;
 use crate::resource::{ ObservationRequest, ObserverCondition, ProviderRateLimit, RegisteredResourceProvider, ResourceProvider, };
 use fractal_reconcile::reconcile::idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 use crate::model::FIRST_READINESS_FAULT_SCOPE;
@@ -201,7 +203,7 @@ let overdue = items[0].requested_at_unix_ms + THRESHOLD_MS;
 items[0].episode = "missing-claim".into();
 assert_eq!(check(&store, &items, overdue).unwrap().status, "pass");
 let unrelated = store
-    .append_claim(&crate::model::ClaimInput {
+    .append_claim(&fractal_wire::ClaimInput {
         subject: items[0].subject.clone(),
         kind: "operational.failure".into(),
         actor: Some("daemon/runtime".into()),

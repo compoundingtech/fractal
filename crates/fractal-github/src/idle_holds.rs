@@ -408,7 +408,7 @@ mod tests {
     }
 
     fn append(store: &Store, subject: &str, kind: &str, fields: Value) -> u128 {
-        let claim = store.append_claim(&crate::model::ClaimInput {
+        let claim = store.append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: None,

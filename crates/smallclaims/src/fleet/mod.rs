@@ -1,22 +1,20 @@
-//! Fleet membership: member keys, signed envelopes, the membership fold, the join handshake,
-//! founding and joining a fleet from `fleet.toml`, and the transports members reach each other by.
+//! Fleet membership: the membership fold, founding and joining a fleet from `fleet.toml`,
+//! and the transports members reach each other by. Pure signing and the bootstrap handshake
+//! live in `fractal_auth`.
 //!
 //! See `docs/fleet-join.md` for the design. A node without a pinned anchor key treats every
 //! writer as a legacy writer, so nothing here changes how a node that has not joined or
 //! migrated replicates.
 
-pub mod code;
 pub mod file;
-pub mod handshake;
 pub mod join;
-pub mod keys;
 pub mod membership;
 pub mod transport;
 pub mod view;
 
-pub use keys::{MemberKey, envelope_signature_message, envelope_signature_message_in, verify_signature};
+use fractal_auth::MemberKey;
 pub use membership::{FleetClaim, Incarnation, MemberState, Membership, Window};
-pub use view::{Acceptance, FleetView, MemberView, Refusal, Sender, accept};
+pub use view::{Acceptance, FleetView, MemberView, Refusal, accept};
 
 use std::path::Path;
 use std::sync::Arc;

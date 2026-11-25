@@ -526,10 +526,10 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     let state = state(root.path());
     // Admit the signer through a pinned fleet anchor, just as an authenticated joining peer
     // learns it. A bare transport copy is insufficient evidence of signature acceptance.
-    let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    let anchor = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     state.store.pin_fleet_anchor(anchor.public()).unwrap();
     state.store.set_member_key(Some(anchor.clone())).unwrap();
-    state.store.append_claim(&fractal_daemon::model::ClaimInput {
+    state.store.append_claim(&fractal_wire::ClaimInput {
         subject: "host/signing-node".into(), kind: "fleet.member-admitted".into(), actor: None,
         fields: serde_json::from_value(json!({ "fleet_id": FLEET, "member_key": anchor.public(), "via": "anchor", "mode": "listening" })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -1123,7 +1123,7 @@ async fn anonymous_pairing_advertisement_is_static_and_never_notes_presence() {
         if phase > 0 {
             state
                 .store
-                .append_claim(&fractal_daemon::model::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: format!("message/advertisement-{phase}"),
                     kind: "message.sent".into(),
                     actor: None,
@@ -1186,10 +1186,10 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
     use fractal_client::device::{KeyAlgorithm, SigningKey};
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    let anchor = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     state.store.pin_fleet_anchor(anchor.public()).unwrap();
     state.store.set_member_key(Some(anchor.clone())).unwrap();
-    state.store.append_claim(&fractal_daemon::model::ClaimInput {
+    state.store.append_claim(&fractal_wire::ClaimInput {
         subject: "host/signing-node".into(), kind: "fleet.member-admitted".into(), actor: None,
         fields: serde_json::from_value(json!({ "fleet_id": FLEET, "member_key": anchor.public(), "via": "anchor", "mode": "listening" })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -1498,7 +1498,7 @@ fn state_on(root: &Path, store: Store) -> AppState {
     store.bind_fleet(FLEET).unwrap();
     store
         .set_node_key(Arc::new(
-            smallclaims::fleet::MemberKey::generate().unwrap().0,
+            fractal_auth::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
     AppState {
@@ -1861,7 +1861,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
     let (written, _) = state
         .store
         .append_signed_claim(
-            &fractal_daemon::model::ClaimInput {
+            &fractal_wire::ClaimInput {
                 subject: message_subject("phone-message-send-7"),
                 kind: "message.sent".into(),
                 actor: Some(PERSON.into()),

@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 use crate::store::*;
-use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_signature};
+use fractal_auth::{MemberKey, envelope_signature_message, verify_signature};
+use crate::fleet::{MemberState};
 
 pub const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 

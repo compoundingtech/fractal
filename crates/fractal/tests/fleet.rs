@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use fractal_daemon::client::Client;
-use fractal_daemon::model::{ClaimInput, MessagePage, MessageView};
+use fractal_daemon::model::{ MessagePage, MessageView};
+use fractal_wire::{ClaimInput};
 
 fn st3() -> &'static str {
     test_env!("CARGO_BIN_EXE_fractal-fixture")
@@ -4831,11 +4832,11 @@ async fn send_fabric_delivers_to_a_trusted_fabric_peer_without_pairing() {
     assert_eq!(delivered.len(), 1, "{delivered:?}");
     let code = fs::read_to_string(&delivered[0]).unwrap();
     assert!(!sent.contains(code.trim()), "the code reached stdout");
-    let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim()).unwrap();
+    let decoded = fractal_auth::code::JoinCode::decode(code.trim()).unwrap();
     assert!(decoded.pairing.is_none());
     assert!(
         decoded.endpoints.iter().all(|endpoint| {
-            !matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. })
+            !matches!(endpoint, fractal_auth::code::CodeEndpoint::Fabric { .. })
         }),
         "without pairing, auto must not route the new machine through Fabric"
     );
@@ -4918,7 +4919,7 @@ async fn code_file_writes_a_private_file_without_fabric_pairing() {
         PERSON,
     ]);
     let code = fs::read_to_string(&path).expect("the code file exists");
-    assert!(fractal_daemon::fleet::code::JoinCode::decode(code.trim()).is_ok());
+    assert!(fractal_auth::code::JoinCode::decode(code.trim()).is_ok());
     assert!(!printed.contains(code.trim()), "the code reached stdout");
     assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(
@@ -4961,10 +4962,10 @@ async fn auto_invites_over_another_endpoint_when_fabric_pairing_fails() {
     assert!(output.status.success(), "{stderr}");
     assert!(stderr.contains("inviting over loopback instead"), "{stderr}");
     let code = fs::read_to_string(&path).unwrap();
-    let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim()).unwrap();
+    let decoded = fractal_auth::code::JoinCode::decode(code.trim()).unwrap();
     assert!(decoded.pairing.is_none());
     assert!(decoded.endpoints.iter().all(|endpoint| {
-        matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Loopback(_))
+        matches!(endpoint, fractal_auth::code::CodeEndpoint::Loopback(_))
     }));
     let mut states = invite_states(&a);
     states.sort();

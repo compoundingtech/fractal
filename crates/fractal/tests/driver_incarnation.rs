@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use fractal_daemon::api::AppState;
-use fractal_daemon::model::{ClaimInput, PlannerSpec};
+use fractal_daemon::model::{ PlannerSpec};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 

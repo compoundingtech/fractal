@@ -744,7 +744,7 @@ mod tests {
             ("runtime.observed", json!({"status":"running","runtime_id":"worker","incarnation_id":incarnation})),
             ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":incarnation})),
         ] {
-            state.store.append_claim(&crate::model::ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+            state.store.append_claim(&fractal_wire::ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
                 fields:serde_json::from_value(fields).unwrap(), evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
         }
     }
@@ -759,7 +759,7 @@ mod tests {
             receipt.owner_step = Some(owner.step.clone());
             receipt.owner_attempt = Some(owner.attempt);
         }
-        state.store.append_claim(&crate::model::ClaimInput { subject:agent.into(),
+        state.store.append_claim(&fractal_wire::ClaimInput { subject:agent.into(),
             kind:fractal_schema::invocation::KIND.into(), actor:None,
             fields:serde_json::from_value(serde_json::to_value(receipt).unwrap()).unwrap(),
             evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
@@ -1037,7 +1037,7 @@ mod tests {
             ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":"exact"})),
             (KIND, serde_json::to_value(receipt).unwrap()),
         ] {
-            state.store.append_claim(&crate::model::ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+            state.store.append_claim(&fractal_wire::ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
                 fields:serde_json::from_value(fields).unwrap(), evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
         }
         let agent_owner = state.store.shell_resource_agent_owner(agent).unwrap();

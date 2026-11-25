@@ -1,4 +1,5 @@
-use crate::model::{FractalError, evidence_contract::EvidenceContract};
+use crate::model::{ evidence_contract::EvidenceContract};
+use fractal_wire::{Error as FractalError};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 

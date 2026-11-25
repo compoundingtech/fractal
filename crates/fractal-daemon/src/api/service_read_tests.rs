@@ -4,7 +4,7 @@ use axum::{body::{Body, to_bytes}, http::{Request, StatusCode}};
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 use fractal_api_core::api::client_v0::{credential_digest, external_grants};
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 
 const TOKEN: &str = "private-service-read-fixture";
 const OWNER: &str = "person/owner";

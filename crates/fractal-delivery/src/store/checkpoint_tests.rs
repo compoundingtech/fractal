@@ -12,7 +12,7 @@ use proptest::prelude::*;
 
 #[test]
 fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
-    use crate::fleet::{MemberKey, envelope_signature_message, verify_signature};
+    use fractal_auth::{MemberKey, envelope_signature_message, verify_signature};
     use smallclaims::sqlite::WriterJob;
     use std::sync::atomic::Ordering;
     pub const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";

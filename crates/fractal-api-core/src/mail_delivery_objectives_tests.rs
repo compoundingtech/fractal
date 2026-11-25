@@ -1,5 +1,6 @@
 use super::*;
-use crate::model::{ClaimInput, IntentInput};
+use crate::model::{ IntentInput};
+use fractal_wire::{ClaimInput};
 use crate::DeliveryStore;
 
 fn declared(store: &Store) {

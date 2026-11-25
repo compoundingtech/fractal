@@ -167,7 +167,7 @@ fn state(root: &Path, node: &str) -> AppState {
     // Real pairing now enrolls a key; the member must hold its node authority to grant it.
     store
         .set_node_key(Arc::new(
-            smallclaims::fleet::MemberKey::generate().unwrap().0,
+            fractal_auth::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
     AppState {
@@ -330,7 +330,7 @@ async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_witho
     state
         .store
         .set_node_key(Arc::new(
-            smallclaims::fleet::MemberKey::generate().unwrap().0,
+            fractal_auth::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
     let trusted = member.path().join("trusted.sock");

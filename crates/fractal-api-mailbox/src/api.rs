@@ -62,7 +62,7 @@ pub use crate::store::agent_queue_values::{
 use crate::model::ClientReplicated;
 use crate::model::{
     ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView,
-    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
+    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest,
     ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer,
     ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest,
     DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord,
@@ -82,9 +82,9 @@ use crate::model::{
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
     RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
-    SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
-    WorkRequest, WorkRetryRequest, WorkWakeRequest,
-};
+    SessionLogChunk, SessionScreen, SessionSignalRequest, StatusResponse, StepRunView,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest};
+use fractal_wire::{ClaimInput, Error as FractalError};
 use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 use crate::delivery_presence;

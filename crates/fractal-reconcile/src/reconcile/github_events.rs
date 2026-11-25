@@ -206,7 +206,7 @@ pub fn view(event: &Event, item: &str, subject: &str, at: &str) -> Value {
 mod tests {
     use super::*;
 
-    fn event_claim(observer: &str, at: &str) -> crate::model::ClaimInput {
+    fn event_claim(observer: &str, at: &str) -> fractal_wire::ClaimInput {
         let subject = "github-event/github/acme/garden/issue/7/closed";
         let fields = BTreeMap::from([
             ("version".into(), json!(1)),
@@ -217,7 +217,7 @@ mod tests {
             ("detail".into(), json!({"state": "closed"})),
         ]);
         let key = observation_key(subject, &fields).unwrap();
-        crate::model::ClaimInput {
+        fractal_wire::ClaimInput {
             subject: subject.into(), kind: fractal_schema::github_plugin::EVENT.into(),
             actor: None, fields, evidence: Vec::new(), expected_subject: None,
             idempotency_key: Some(key),

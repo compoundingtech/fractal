@@ -2,11 +2,9 @@
 //! own claims, the signatures travel beside the envelopes that carry the claims, and a peer keeps
 //! only those that verify with a key the membership admits for that writer and that name a claim
 //! of that writer.
-use smallclaims::{
-    claim::ClaimInput,
-    fleet::{MemberKey, keys::claim_signature_message},
-    store::{Store, member_signatures::ClaimMemberSignature, runtime::Plain},
-};
+use fractal_auth::{MemberKey, claim_signature_message};
+use smallclaims::{ store::{Store, member_signatures::ClaimMemberSignature, runtime::Plain}};
+use fractal_wire::{ClaimInput};
 use std::{collections::BTreeMap, sync::Arc};
 
 const FLEET: &str = "sample-fleet";

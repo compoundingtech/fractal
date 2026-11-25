@@ -1,4 +1,4 @@
-use smallclaims::fleet::{MemberKey, envelope_signature_message};
+use fractal_auth::{MemberKey, envelope_signature_message};
 
 type RetainedReplicaRecord = (String, String, u64, String, Vec<u8>, Option<String>);
 

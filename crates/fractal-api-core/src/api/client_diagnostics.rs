@@ -1,5 +1,6 @@
 //! Paired-device diagnostics: no user content, arbitrary claims or raw crash dumps.
-use super::{ApiError, AppState, ClaimInput, client_now_ms, client_v0};
+use super::{ApiError, AppState, client_now_ms, client_v0};
+use fractal_wire::{ClaimInput};
 use axum::{Extension, Json, extract::State};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};

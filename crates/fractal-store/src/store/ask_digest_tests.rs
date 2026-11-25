@@ -1,5 +1,5 @@
 use super::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use crate::store::fleet_admission_tests::{fleet, key, sync};
 
 fn bind(store: &Store, member: &str, key: &str) {

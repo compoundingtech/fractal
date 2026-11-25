@@ -821,7 +821,7 @@ impl WriterConnection {
     pub fn write_background_before(
         &self,
         deadline_unix_ms: Option<u128>,
-    ) -> Result<WriterGuard<'_>, crate::error::Error> {
+    ) -> Result<WriterGuard<'_>, fractal_wire::Error> {
         self.lend_writer(writer_queue::LoanClass::Background, deadline_unix_ms)
     }
 
@@ -836,7 +836,7 @@ impl WriterConnection {
         &self,
         class: writer_queue::LoanClass,
         deadline_unix_ms: Option<u128>,
-    ) -> Result<WriterGuard<'_>, crate::error::Error> {
+    ) -> Result<WriterGuard<'_>, fractal_wire::Error> {
         crate::replication::check_receive_deadline(deadline_unix_ms)?;
         debug_assert_no_pinned_read();
         let wait = crate::profile::writer_waiting();
@@ -885,7 +885,7 @@ impl WriterConnection {
         }
         let connection = lent_here.recv().map_err(|_| {
             assert!(deadline_unix_ms.is_some(), "the writer thread lends its connection");
-            crate::error::Error::new("replication-overloaded", "the replication receive answer deadline elapsed before writer admission")
+            fractal_wire::Error::new("replication-overloaded", "the replication receive answer deadline elapsed before writer admission")
         })?;
         #[cfg(any(test, feature = "test-support"))]
         work::record_writer_loan();
@@ -3817,7 +3817,7 @@ mod read_cancellation_tests {
         budget.cancel();
         let result = tokio::time::timeout(Duration::from_secs(2), worker)
             .await.unwrap().unwrap();
-        assert_eq!(result.err().unwrap().downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+        assert_eq!(result.err().unwrap().downcast_ref::<fractal_wire::Error>().unwrap().code, "read-deadline");
         drop(held);
         assert!(pool.try_admit_read().is_some());
     }
@@ -3827,7 +3827,7 @@ mod read_cancellation_tests {
         let (_directory, pool) = pool();
         let before = pool.usage();
         let error = read_budget::with(Some(ReadBudget::new("/expired", Duration::ZERO)), || pool.try_get().map(|_| ())).unwrap_err();
-        assert_eq!(error.downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "read-deadline");
         let after = pool.usage();
         assert_eq!(after.idle, before.idle);
         assert_eq!(after.opened, before.opened);

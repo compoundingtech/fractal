@@ -345,7 +345,7 @@ fn custom_replicated_repair_refreshes_after_external_dirty_marker_conflict() {
     // Use the signed_pair admission pattern with a file-backed receiver so an
     // independent SQLite writer can leave a durable dirty marker there.
     let keys = (0..2)
-        .map(|_| Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
+        .map(|_| Arc::new(fractal_auth::MemberKey::generate().unwrap().0))
         .collect::<Vec<_>>();
     for (index, member) in [&source, &store].into_iter().enumerate() {
         member.bind_fleet(FLEET).unwrap();

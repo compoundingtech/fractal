@@ -13,7 +13,7 @@ agent "two" { workspace "/tmp"; command "true"; restart always; }
         let intent = crate::graph::parse_internal_intent(source, "PRIVATE-offset-fixture").unwrap();
         fixture.state.store.apply_internal(&intent, "offset-fixture").unwrap();
         let rejected = format!("agent/PRIVATE-{}", "x".repeat(256));
-        fixture.state.store.append_claim(&crate::model::ClaimInput {
+        fixture.state.store.append_claim(&fractal_wire::ClaimInput {
             subject: rejected.clone(), kind: "runtime.observed".into(), actor: None,
             fields: serde_json::from_value(json!({
                 "status": "running", "runtime_id": rejected, "incarnation_id": "one"

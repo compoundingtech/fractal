@@ -10,6 +10,7 @@ license = "MIT"
 test-support = ["fractal-secrets/test-support", "dep:parking_lot"]
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
 fractal-secrets = { path = "../fractal-secrets" }
 fractal-schema = { path = "../fractal-schema" }
 anyhow = "1"

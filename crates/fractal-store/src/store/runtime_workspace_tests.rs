@@ -1,5 +1,5 @@
 use super::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use crate::store::directive_notes::tests_shared_delivery::{FLEET, claim, enable, sync};
 use crate::store::fleet_admission_tests_shared_delivery::{fleet, key};
 

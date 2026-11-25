@@ -7,17 +7,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::fleet::transport::is_permitted_route_address;
+use fractal_auth::{is_permitted_route_address};
 pub use smallclaims::fleet::file::{FleetFile, FleetMode, FleetRemoval, PeerConfig};
 use crate::model::PlannerSpec;
 
 pub mod changes;
 pub mod model_return;
-mod light_node;
-pub use light_node::{
-    LIGHT_NODE_SESSION_PATH, LightNodeGrant, LightNodeOperation, LightNodeScope,
-    LightNodeSessionConfig,
-};
+use fractal_light_node_core::config::LightNodeSessionConfig;
 mod client;
 
 /// The per-host switch for seat lanes.

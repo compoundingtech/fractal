@@ -13,7 +13,7 @@ fn seed_identifier_agents(state: &AppState, published: bool, mixed: bool) -> (Ve
             .collect::<Vec<_>>()
     } else { Vec::new() };
     for id in rejected.iter().chain(&allowed) {
-        state.store.append_claim(&crate::model::ClaimInput {
+        state.store.append_claim(&fractal_wire::ClaimInput {
             subject: id.clone(), kind: "runtime.observed".into(), actor: None,
             fields: serde_json::from_value(json!({
                 "status": "running", "runtime_id": id, "incarnation_id": "one"

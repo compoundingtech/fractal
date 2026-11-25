@@ -12,7 +12,7 @@ use super::super::ApiError;
 static EXPORTS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
 fn reserve_from(pool: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit, ApiError> {
-    pool.clone().try_acquire_owned().map_err(|_| ApiError::bad(crate::model::FractalError::new(
+    pool.clone().try_acquire_owned().map_err(|_| ApiError::bad(fractal_wire::Error::new(
         "backup-busy", "another backup export is preparing or downloading; let it finish or cancel it",
     )))
 }

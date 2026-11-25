@@ -47,8 +47,8 @@ async fn issuer_operation_withdrawal_accepts_another_local_person() {
 pub(super) fn replicate(from: &AppState, to: &AppState) {
     const FLEET: &str = "549d4b9d-f23c-41e9-9e0b-15f13ab837e6";
     if from.store.member_key.read().unwrap().is_none() {
-        let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
-        let peer = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let anchor = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
+        let peer = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         for state in [from, to] {
             state.store.bind_fleet(FLEET).unwrap();
             state.store.pin_fleet_anchor(anchor.public()).unwrap();
@@ -60,16 +60,16 @@ pub(super) fn replicate(from: &AppState, to: &AppState) {
             Some(to.store.origin()), std::time::Duration::from_secs(600),
             &["fabric".into()], "person/alex", false,
         ).unwrap();
-        let code = smallclaims::fleet::code::JoinCode {
+        let code = fractal_auth::code::JoinCode {
             fleet_id: FLEET.parse().unwrap(),
             invite: hex::decode(invitation.invite).unwrap().try_into().unwrap(),
             token: invitation.token,
-            fingerprint: smallclaims::fleet::code::fingerprint(anchor.public()),
+            fingerprint: fractal_auth::code::fingerprint(anchor.public()),
             expires_at: invitation.expires_at_unix_ms / 1000,
             name: Some(to.store.origin().into()),
             migrate: false, endpoints: Vec::new(), pairing: None,
         };
-        let joiner = smallclaims::fleet::handshake::Joiner::start(
+        let joiner = fractal_auth::handshake::Joiner::start(
             &code, &peer, to.store.origin(), "listening", None, "test",
         ).unwrap();
         from.store.append_fleet_admission(joiner.request(), false, Some(0), None).unwrap();

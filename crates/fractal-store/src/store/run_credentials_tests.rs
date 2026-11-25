@@ -1,4 +1,5 @@
-use super::run_credentials::{RUN_CREDENTIAL_KIND, RunBinding};
+use super::run_credentials::RUN_CREDENTIAL_KIND;
+use fractal_light_node_core::authority::RunBinding;
 use super::*;
 
 fn running_step() -> (Store, StepRunView) {

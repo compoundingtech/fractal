@@ -2,7 +2,7 @@
 use crate::PersonWorkStore;
 use crate::TracePrincipalStore;
 use super::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use crate::model::PersonStepResponse;
 use rusqlite::StatementStatus;
 use fractal_missions::store::directive_notes::tests_shared_seats::*;

@@ -6,7 +6,7 @@ pub use crate::store::directive_notes::tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
 use crate::store::directive_notes::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use rusqlite::StatementStatus;
 
 pub fn sync(from: &Store, to: &Store) -> ReplicationAdmission {

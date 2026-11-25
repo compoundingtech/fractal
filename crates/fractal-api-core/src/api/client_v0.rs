@@ -3333,7 +3333,7 @@ mod pi_family_binding_tests {
         let owner = "agent/binding-test";
         let append = |incarnation: Option<&str>, source: Option<&str>, agent: &str| {
             if let Some(incarnation) = incarnation {
-                store.append_claim(&crate::model::ClaimInput {
+                store.append_claim(&fractal_wire::ClaimInput {
                     subject: owner.into(), kind: "runtime.observed".into(),
                     actor: Some("person/robin".into()),
                     fields: BTreeMap::from([
@@ -3343,7 +3343,7 @@ mod pi_family_binding_tests {
                     evidence: Vec::new(), expected_subject: None, idempotency_key: None,
                 }).unwrap();
             }
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: owner.into(),
                 kind: "harness.session-file".into(),
                 actor: Some("person/robin".into()),

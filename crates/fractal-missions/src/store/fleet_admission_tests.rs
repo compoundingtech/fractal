@@ -6,7 +6,8 @@ pub use crate::store::fleet_admission_tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
 use super::*;
-use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_signature};
+use fractal_auth::{MemberKey, envelope_signature_message, verify_signature};
+use crate::fleet::{MemberState};
 
 
 #[test]
@@ -179,7 +180,7 @@ fn append(store: &Store, subject: &str, at: u128, fields: Value) -> String {
 fn terminal_authority_ignores_idempotent_message_traffic_but_wakes_on_shared_conflict() {
     let store = Store::open_memory("owner").unwrap();
     let subject = "agent/terminal-message-traffic";
-    store.append_claim(&crate::model::ClaimInput {
+    store.append_claim(&fractal_wire::ClaimInput {
         subject: subject.into(), kind: "runtime.observed".into(),
         actor: Some("person/robin".into()),
         fields: serde_json::from_value(json!({
@@ -194,7 +195,7 @@ fn terminal_authority_ignores_idempotent_message_traffic_but_wakes_on_shared_con
     changes.borrow_and_update();
     for index in 0..100 {
         // The durable message.send path: a fresh message and fresh idempotency operation.
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: format!("message/traffic-{index}"), kind: "message.sent".into(),
             actor: Some("person/robin".into()),
             fields: serde_json::from_value(json!({
@@ -276,7 +277,7 @@ fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
 fn terminal_authority_operation_conflict_wakes_without_subject_claim_changes() {
     let store = Store::open_memory("owner").unwrap();
     let subject = "agent/terminal-operation";
-    store.append_claim(&crate::model::ClaimInput {
+    store.append_claim(&fractal_wire::ClaimInput {
         subject: subject.into(), kind: "runtime.observed".into(),
         actor: Some(subject.into()),
         fields: serde_json::from_value(json!({
@@ -308,7 +309,7 @@ fn terminal_authority_idle_subscription_skips_reads_and_delivers_changes() {
     store.set_write_clock_at(10).unwrap();
     let subject = "agent/terminal-idle";
     let observe = |incarnation: &str| {
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: "runtime.observed".into(),
             actor: Some(subject.into()),

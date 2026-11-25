@@ -1,6 +1,6 @@
 use super::*;
 use crate::claim::ReplicaBatch;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use crate::hash::{batch_header_hash, claim_hash};
 use crate::principal::{ClaimSignature, content_digest};
 use serde_json::json;

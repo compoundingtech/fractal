@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use crate::store::directive_notes::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use crate::model::PersonStepResponse;
 use rusqlite::StatementStatus;
 

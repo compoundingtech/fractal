@@ -3,18 +3,9 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
-use smallclaims::{
-    ClaimInput, ClaimRecord, Store,
-    fleet::MemberKey,
-    ivm::{
-        Views,
-        claim_source::{ClaimFact, ClaimSource},
-        install::{Installer, Limits, Mutation, Namespace, Operator, Outcome},
-        runtime::ViewRuntime,
-    },
-    replication::ReplicationInventory,
-    store::{Runtime, canonical, claim_from_row},
-};
+use fractal_auth::{MemberKey};
+use smallclaims::{ ClaimRecord, Store, ivm::{Views, claim_source::{ClaimFact, ClaimSource}, install::{Installer, Limits, Mutation, Namespace, Operator, Outcome}, runtime::ViewRuntime}, replication::ReplicationInventory, store::{Runtime, canonical, claim_from_row}};
+use fractal_wire::{ClaimInput};
 use std::{
     collections::BTreeMap,
     sync::{

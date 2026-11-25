@@ -61,8 +61,8 @@ pub(super) fn expand_tx(connection: &Connection, claim_id: &str) -> Result<bool>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claim::ClaimInput;
-    use crate::fleet::MemberKey;
+    use fractal_wire::ClaimInput;
+    use fractal_auth::{MemberKey};
 
     #[test]
     fn forgetting_a_compacted_claim_leaves_no_count_behind() {

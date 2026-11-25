@@ -1,7 +1,7 @@
 //! The part of `store::assistant_write_gate` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::{path::{Path, PathBuf}, sync::OnceLock, time::{Duration, Instant}};
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 pub use fractal_store::store::assistant_write_gate::*;
 pub use fractal_store::store::assistant_write_gate::{Gate, install};
 

@@ -157,9 +157,9 @@ impl ReadBudget {
     /// Scheduling and I/O waits spend the parent budget, not the CPU allowance. This child
     /// must stay on its creating thread; a missing clock or another worker refuses the read.
     #[track_caller]
-    pub fn child_work(&self, duration: Duration) -> Result<Self, crate::error::Error> {
+    pub fn child_work(&self, duration: Duration) -> Result<Self, fractal_wire::Error> {
         self.check()?;
-        let used = thread_cpu_time().ok_or_else(|| crate::error::Error::new(
+        let used = thread_cpu_time().ok_or_else(|| fractal_wire::Error::new(
             "read-deadline", "the worker CPU clock is unavailable",
         ))?;
         Ok(Self(Arc::new(State {
@@ -203,7 +203,7 @@ impl ReadBudget {
             || self.0.work.as_ref().is_some_and(WorkClock::expired)
     }
 
-    pub fn check(&self) -> Result<(), crate::error::Error> {
+    pub fn check(&self) -> Result<(), fractal_wire::Error> {
         if !self.expired() {
             return Ok(());
         }
@@ -216,7 +216,7 @@ impl ReadBudget {
                 self.0.work.as_ref().is_some_and(WorkClock::expired),
             );
         }
-        Err(crate::error::Error::new(
+        Err(fractal_wire::Error::new(
             "read-deadline",
             "the read exceeded its deadline or was cancelled",
         ))
@@ -341,7 +341,7 @@ pub fn with<T>(budget: Option<ReadBudget>, work: impl FnOnce() -> T) -> T {
     work()
 }
 
-pub fn check() -> Result<(), crate::error::Error> {
+pub fn check() -> Result<(), fractal_wire::Error> {
     current().map_or(Ok(()), |budget| budget.check())
 }
 
@@ -354,7 +354,7 @@ pub(crate) fn interrupted() -> bool {
 /// budget retain the ordinary blocking/poison recovery behavior.
 pub(crate) fn lock_sync<T>(
     mutex: &std::sync::Mutex<T>,
-) -> Result<std::sync::MutexGuard<'_, T>, crate::error::Error> {
+) -> Result<std::sync::MutexGuard<'_, T>, fractal_wire::Error> {
     let Some(budget) = current() else {
         return Ok(mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
     };
@@ -377,7 +377,7 @@ pub(crate) fn lock_sync<T>(
 /// and remaining deadline as reader admission. Mutex release or cancellation wakes the thread.
 pub(crate) fn lock<T>(
     mutex: &tokio::sync::Mutex<T>,
-) -> Result<tokio::sync::MutexGuard<'_, T>, crate::error::Error> {
+) -> Result<tokio::sync::MutexGuard<'_, T>, fractal_wire::Error> {
     struct WakeThread(std::thread::Thread);
     impl std::task::Wake for WakeThread {
         fn wake(self: Arc<Self>) {
@@ -508,7 +508,7 @@ mod tests {
                 check()?;
                 items += 1;
             }
-            Ok::<_, crate::error::Error>(())
+            Ok::<_, fractal_wire::Error>(())
         });
         assert_eq!(result.unwrap_err().code, "read-deadline");
         assert_eq!(items, 0);

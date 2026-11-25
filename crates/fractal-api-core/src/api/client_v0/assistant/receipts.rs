@@ -24,7 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use super::authorization::{OUTCOME, USED};
 use crate::api::ApiError;
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use crate::store::{Store, append_claim_tx};
 use smallclaims::store::latest_claim_id_tx;
 
@@ -81,7 +81,7 @@ impl From<ApiError> for AdmissionError {
     fn from(error: ApiError) -> Self { Self::Writer(error) }
 }
 
-fn read_ended(error: smallclaims::error::Error) -> AdmissionError {
+fn read_ended(error: fractal_wire::Error) -> AdmissionError {
     AdmissionError::ReadEnded(ApiError::bad(error))
 }
 

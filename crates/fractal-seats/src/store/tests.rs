@@ -470,7 +470,7 @@ proptest! {
         copies in 1usize..3,
     ) {
         let source = Store::open_memory("alder").unwrap();
-        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         source.bind_fleet(TEST_FLEET).unwrap();
         source.pin_fleet_anchor(key.public()).unwrap();
         source.set_member_key(Some(key.clone())).unwrap();

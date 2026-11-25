@@ -449,7 +449,7 @@ async fn a_refused_or_failed_send_leaves_no_file_and_a_repeat_heals_a_lost_one()
     assert_eq!(files_in(&state), 1, "the conflicting text left no file");
     // A signature that does not cover a long message is refused before anything is written.
     let legacy = {
-        let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+        let (key, _) = fractal_auth::MemberKey::generate().unwrap();
         let mut signature = smallclaims::principal::ClaimSignature::sign(
             &key,
             "",
@@ -582,7 +582,7 @@ fn a_device_signature_over_the_preview_hash_and_size_is_carried_and_judged_every
         idempotency_key: Some(key.into()),
     };
     let sign = |input: &ClaimInput, hash: &str, bytes: u64| {
-        let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+        let (key, _) = fractal_auth::MemberKey::generate().unwrap();
         let mut signature = ClaimSignature::sign(&key, "", "person/alex", None, vec![], client_now_ms() as u64);
         signature.format = Some(FIELDS_FORMAT.into());
         signature.signed_fields = SIGNED_LONG_MESSAGE_FIELDS.iter().map(|name| (*name).to_owned()).collect();
@@ -735,7 +735,7 @@ fn the_judge_and_the_reader_take_the_same_body_entry() {
         expected_subject: None,
         idempotency_key: Some("two-entries".into()),
     };
-    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let (key, _) = fractal_auth::MemberKey::generate().unwrap();
     let mut signature = ClaimSignature::sign(&key, "", "person/alex", None, vec![], client_now_ms() as u64);
     signature.format = Some(FIELDS_FORMAT.into());
     signature.signed_fields = SIGNED_LONG_MESSAGE_FIELDS.iter().map(|name| (*name).to_owned()).collect();

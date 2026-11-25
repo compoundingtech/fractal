@@ -533,7 +533,7 @@ fn report_denials(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str
         return;
     };
     for denial in denials {
-        let claim = crate::model::ClaimInput {
+        let claim = fractal_wire::ClaimInput {
             subject: subject.clone(),
             kind: "harness.diagnostic".into(),
             actor: Some(subject.clone()),
@@ -634,7 +634,7 @@ pub async fn publish_prompt_call(
     transition: u64,
     call: &str,
 ) -> bool {
-    let claim = crate::model::ClaimInput {
+    let claim = fractal_wire::ClaimInput {
         subject: subject.to_owned(),
         kind: "harness.diagnostic".into(),
         actor: Some(subject.to_owned()),
@@ -817,7 +817,7 @@ fn unbound(env: &dyn HookEnv, report: &mut dyn FnMut(Diagnostic), reason: &str) 
 
 /// Hand a harness telemetry claim to the daemon at `ST3_ENDPOINT` (else this user's configured
 /// socket), within [`crate::telemetry::HOOK_SUBMIT_TIMEOUT`].
-pub fn submit_telemetry(env: &dyn HookEnv, claim: &crate::model::ClaimInput) -> Result<()> {
+pub fn submit_telemetry(env: &dyn HookEnv, claim: &fractal_wire::ClaimInput) -> Result<()> {
     let endpoint = match env.var("ST3_ENDPOINT") {
         Some(endpoint) => crate::client::Endpoint::parse(endpoint)?,
         None => {
@@ -846,7 +846,7 @@ pub fn post_diagnostic(env: &dyn HookEnv, diagnostic: &Diagnostic) -> Result<()>
             crate::client::Endpoint::Unix(crate::config::Config::load_client_unvalidated(None)?.0.socket)
         }
     };
-    let claim = crate::model::ClaimInput {
+    let claim = fractal_wire::ClaimInput {
         subject: diagnostic.subject.clone(),
         kind: "harness.diagnostic".into(),
         actor: Some(diagnostic.subject.clone()),
@@ -1383,7 +1383,7 @@ mod tests {
         let seat = "agent/node.worker";
         let append = |kind: &str, fields: Value, key: Option<String>| {
             store
-                .append_claim(&crate::model::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     // The fixture's answer is a person's request, while driver observations
                     // remain authored by the seat. An agent answer needs delegation.
                     subject: seat.into(),

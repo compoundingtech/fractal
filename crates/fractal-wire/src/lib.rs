@@ -14,6 +14,9 @@
 //! message list should not thereby depend on the runner's mailbox I/O.
 //!
 //! - [`message`] — `message ls --json` and `message read --json`.
+//! - [`ClaimInput`] — owned claim payloads shared by graph-backed and lightweight runtimes.
+//! - [`Error`] — stable operation codes, messages, and structured details; storage conversion
+//!   remains with the runtime that owns the storage.
 //!
 //! # Readers are additive-tolerant on purpose
 //!
@@ -23,3 +26,9 @@
 //! reader — the exact failure this crate exists to prevent.
 
 pub mod message;
+
+pub mod claim;
+pub mod error;
+
+pub use claim::ClaimInput;
+pub use error::Error;

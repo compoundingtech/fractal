@@ -41,13 +41,14 @@ use crate::mission::{
     CANDIDATE_INDEX_INPUT, LOOP_FEEDBACK_INPUT, LOOP_ITEM_INPUT, LOOP_ROUND_INPUT,
 };
 use crate::model::{
-    AttentionItemView, AttentionRequest, CalendarSchedule, ClaimInput, CurrentHarnessView,
+    AttentionItemView, AttentionRequest, CalendarSchedule, CurrentHarnessView,
     DependencySpec, DesiredSubject, GateContext, GateSpec, LaunchSpec, LoopCandidateSelector,
-    LoopExhaustionSpec, LoopSpec, MemberKind, MemberLifecycle, MemberSpec, MessageView,
+    LoopExhaustionSpec, LoopSpec, MemberKind, MemberSpec, MessageView,
     MetricSource, MissionInputKind, MissionRunRequest, MissionRunView, MissionSpec, MissionState,
     RestartIntensity, RestartType, StepRunView, StepSpec, SubscriptionSpec, UsedMissionSpec,
-    WorkSelector, ObserverSpec,
-};
+    WorkSelector, ObserverSpec};
+use fractal_wire::{ClaimInput};
+use fractal_light_node_core::custody::MemberLifecycle;
 use crate::resource::{
     LocalObserverBudget, ObservationRequest, ObserverCondition, ProviderRateLimit,
     RegisteredResourceProvider, ResourceProvider, WorkflowRunLedger,
@@ -784,7 +785,7 @@ impl std::error::Error for LocalSessionUnavailable {}
 /// Resolve executor custody without consulting desired state, graph status, or a home session.
 pub fn local_session<R: RuntimeControl>(
     store: &Store, runtime: &R, subject: &str, expected: Option<&str>,
-) -> Result<crate::store::local_sessions::LocalSession> {
+) -> Result<fractal_light_node_core::custody::LocalSession> {
     let binding = store.local_session(subject)?.ok_or(LocalSessionUnavailable::Missing)?;
     anyhow::ensure!(expected.is_none_or(|id| id == binding.incarnation), LocalSessionUnavailable::Stale);
     let observed = if binding.terminal {
@@ -794,7 +795,7 @@ pub fn local_session<R: RuntimeControl>(
         found
     } else { runtime.observe_exec(&binding.runtime_id)? };
     if binding.terminal
-        && binding.custody == crate::store::local_sessions::SessionCustody::Owned
+        && binding.custody == fractal_light_node_core::custody::SessionCustody::Owned
         && let Some(observed) = observed.as_ref().filter(|o| o.status == "exited"
             && o.terminal && o.incarnation_id.as_deref() == Some(binding.native_incarnation.as_str()))
     {
@@ -843,7 +844,7 @@ pub fn stop_local_session_with_retirement_proof<R: RuntimeControl>(
 ) -> Result<bool> {
     if store.local_session_detached(subject, incarnation)? { return Ok(false); }
     let binding = local_session(store, runtime, subject, Some(incarnation))?;
-    if binding.custody == crate::store::local_sessions::SessionCustody::Borrowed {
+    if binding.custody == fractal_light_node_core::custody::SessionCustody::Borrowed {
         store.detach_local_session(subject, incarnation, operation)?;
         Ok(false)
     } else {
@@ -1679,7 +1680,7 @@ pub struct Reconciler<R = NativeRuntime> {
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
     host_observations: Arc<host_observations::HostObservations>,
-    home_session_journal: std::sync::OnceLock<fractal_peer::light_node::journal::Journal>,
+    home_session_journal: std::sync::OnceLock<fractal_light_node_core::journal::Journal>,
     shell_exec_watches: Mutex<BTreeSet<String>>,
     seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
@@ -8665,7 +8666,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && matches!(observed.status.as_str(), "exited" | "stopped"))
                 && let Some(binding) = self.store.local_session(subject)?.filter(|binding|
                     binding.incarnation == incarnation
-                    && binding.custody == crate::store::local_sessions::SessionCustody::Owned
+                    && binding.custody == fractal_light_node_core::custody::SessionCustody::Owned
                     && binding.runtime_id == runtime_id && binding.terminal == terminal
                     && binding.native_incarnation == incarnation)
             {
@@ -8735,7 +8736,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             );
             let local_owned = self.store.local_session(subject)?.is_some_and(|binding|
                 binding.incarnation == incarnation
-                && binding.custody == crate::store::local_sessions::SessionCustody::Owned
+                && binding.custody == fractal_light_node_core::custody::SessionCustody::Owned
                 && binding.runtime_id == runtime_id && binding.terminal == terminal
                 && binding.native_incarnation == incarnation);
             evidence.record(
@@ -9889,7 +9890,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         Ok(Some(_)) => {}
                         // A stopped seat must retain its hold if sealing cannot finish.
                         // A failed suspend receipt would release it to ordinary fresh launch.
-                        Ok(None) => return Err(crate::model::FractalError::new("driver-unsupported", "in-place suspension requires a portable native transcript").into()),
+                        Ok(None) => return Err(fractal_wire::Error::new("driver-unsupported", "in-place suspension requires a portable native transcript").into()),
                         Err(error) => return Err(error),
                     }
                 }
@@ -11695,11 +11696,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && o.incarnation_id.as_deref() == Some(binding.incarnation.as_str())
         });
         if running {
-            self.record_local_session(&crate::store::local_sessions::LocalSession {
+            self.record_local_session(&fractal_light_node_core::custody::LocalSession {
                 subject: subject.subject.clone(), runtime_id: member.runtime_id.clone(),
                 incarnation: incarnation.clone(), native_incarnation: binding.incarnation.clone(),
                 terminal: true, driver: member.driver.clone(), lifecycle: MemberLifecycle::TerminalBound,
-                custody: crate::store::local_sessions::SessionCustody::Borrowed,
+                custody: fractal_light_node_core::custody::SessionCustody::Borrowed,
                 start_operation: None, invocation: Some(incarnation.clone()),
             })?;
         }
@@ -11845,12 +11846,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             && let Some(incarnation) = observation.incarnation_id.as_deref()
             && member.lifecycle != MemberLifecycle::TerminalBound
         {
-            self.record_local_session(&crate::store::local_sessions::LocalSession {
+            self.record_local_session(&fractal_light_node_core::custody::LocalSession {
                 subject: subject.subject.clone(), runtime_id: member.runtime_id.clone(),
                 incarnation: incarnation.into(), native_incarnation: incarnation.into(),
                 terminal: member.terminal, driver: member.driver.clone(),
                 lifecycle: member.lifecycle.clone(),
-                custody: crate::store::local_sessions::SessionCustody::Owned,
+                custody: fractal_light_node_core::custody::SessionCustody::Owned,
                 start_operation: self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?,
                 invocation: None,
             })?;
@@ -14276,7 +14277,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn record_workspace_refusal(
         &self,
         subject: &str,
-        error: &crate::model::FractalError,
+        error: &fractal_wire::Error,
     ) -> Result<()> {
         self.record_diagnostic_once(subject, BTreeMap::from([
             ("severity".into(), Value::String("error".into())),
@@ -14432,10 +14433,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         loop_spec: &LoopSpec,
     ) -> Result<bool> {
         match self.evaluate_loop_step_inner(run, step, view, loop_spec) {
-            Err(error) if error.downcast_ref::<crate::model::FractalError>()
+            Err(error) if error.downcast_ref::<fractal_wire::Error>()
                 .is_some_and(|error| error.code == "mission-workspace-in-worktree") =>
             {
-                let refusal = error.downcast_ref::<crate::model::FractalError>()
+                let refusal = error.downcast_ref::<fractal_wire::Error>()
                     .expect("the workspace refusal was checked");
                 self.record_workspace_refusal(&view.subject, refusal)?;
                 Ok(self.store.set_step_state(&view.subject, "failed", Some(&refusal.to_string()))?)
@@ -16812,14 +16813,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         input: &BTreeMap<String, String>,
         idempotency_key: String,
         resource: Option<&crate::store::resource_membership::Membership>,
-    ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
+    ) -> std::result::Result<MissionRunView, fractal_wire::Error> {
         let inherited = if resource.is_none() {
             self.store.resource_context_for_run(&run.subject).map_err(smallclaims::error::typed)?
         } else { None };
         let context = resource.or(inherited.as_ref());
         let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
         if let Some(context) = context {
-            let grant = context.grant.as_ref().ok_or_else(|| crate::model::FractalError::new("resource-context", "inherited lane has no grant"))?;
+            let grant = context.grant.as_ref().ok_or_else(|| fractal_wire::Error::new("resource-context", "inherited lane has no grant"))?;
             self.store.attach_resource_child(grant, &context.request.owner, &child).map_err(smallclaims::error::typed)?;
         }
         let result = self.store.create_program_child_mission_run(
@@ -17457,7 +17458,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && current.owner_generation.as_deref() == Some(run.generation.as_str())
                 && current.owner_step.as_deref() != owner_step
             {
-                return Err(crate::model::FractalError::new(
+                return Err(fractal_wire::Error::new(
                     "duplicate-runtime-subject",
                     format!(
                         "mission run `{}` declares runtime `{}` in more than one mission or step",
@@ -18966,7 +18967,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_schedule_work_with_start(
         &self, schedule: &DesiredSubject,
         mut start: impl FnMut(&MissionRunRequest, Option<&MissionRunView>, &str, u64)
-            -> Result<MissionRunView, crate::model::FractalError>,
+            -> Result<MissionRunView, fractal_wire::Error>,
     ) -> Result<()> {
         self.store
             .owned_desired_guard(schedule)
@@ -19308,7 +19309,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_subscription_mission_with_start(
         &self, item: &DesiredSubject, held: &[crate::model::AttentionRequestView],
         mut start: impl FnMut(&MissionRunRequest, Option<&MissionRunView>, &str, &str, &str)
-            -> Result<MissionRunView, crate::model::FractalError>,
+            -> Result<MissionRunView, fractal_wire::Error>,
     ) -> Result<()> {
         let Some(spec) = crate::graph::subscription_spec(&item.desired) else {
             return Ok(());
@@ -22936,7 +22937,7 @@ fn step_path_of_subject(subject: &str) -> Option<&str> {
 /// Whether a mission run could not start only because this host lacks a claim that replication
 /// can still deliver, such as a mission revision, an owner run, or an input's claim published on
 /// another host, or because transient SQLite contention prevented the start.
-fn start_waits_for_replication(error: &crate::model::FractalError) -> bool {
+fn start_waits_for_replication(error: &fractal_wire::Error) -> bool {
     matches!(
         error.code,
         "missing-mission" | "missing-mission-run" | "missing-resource-input-version" | "internal"

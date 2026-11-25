@@ -211,7 +211,7 @@ fn reopening_retires_disposable_credit_tables_and_trigger_without_changing_claim
     }).unwrap().unwrap();
     let actor="agent/sample/usage-producer";
     store.set_usage_limits_writers(vec![actor.into()]).unwrap();
-    let claim=store.append_claim(&crate::model::ClaimInput{
+    let claim=store.append_claim(&fractal_wire::ClaimInput{
         subject:actor.into(),kind:"usage.limits.observed".into(),actor:Some(actor.into()),
         fields:std::collections::BTreeMap::from([("readings".into(),serde_json::json!([])),("credit_readings".into(),serde_json::json!([]))]),
         evidence:vec![],expected_subject:None,idempotency_key:None,
@@ -243,7 +243,7 @@ fn native_usage_source_fence_is_independent_of_optional_views_and_survives_reope
     assert_eq!(initial.1,0);
     let actor="agent/sample/usage-producer";
     store.set_usage_limits_writers(vec![actor.into()]).unwrap();
-    let claim=store.append_claim(&crate::model::ClaimInput{
+    let claim=store.append_claim(&fractal_wire::ClaimInput{
         subject:actor.into(),kind:"usage.limits.observed".into(),actor:Some(actor.into()),
         fields:std::collections::BTreeMap::from([
             ("readings".into(),serde_json::json!([])),

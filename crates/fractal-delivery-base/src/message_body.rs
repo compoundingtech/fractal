@@ -20,7 +20,8 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::model::{MessageAttachment, MessageView, FractalError};
+use crate::model::{MessageAttachment, MessageView};
+use fractal_wire::{Error as FractalError};
 
 /// The most a message may carry in its claim without a file.
 pub const INLINE_MAX_BYTES: usize = 8192;

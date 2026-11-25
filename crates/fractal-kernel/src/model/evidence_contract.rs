@@ -1,4 +1,5 @@
-use super::{FractalError, valid_word};
+use super::{ valid_word};
+use fractal_wire::{Error as FractalError};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 

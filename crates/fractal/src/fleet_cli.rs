@@ -463,10 +463,10 @@ async fn bootstrap_fabric_invite(
     adapter: Option<&std::path::Path>,
     created: &mut fractal_daemon::api::FleetInviteCreated,
 ) -> Result<()> {
-    let code = fractal_daemon::fleet::code::JoinCode::decode(&created.code)?;
+    let code = fractal_auth::code::JoinCode::decode(&created.code)?;
     if code.migrate
         || !code.endpoints.iter().any(|endpoint| {
-            matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. })
+            matches!(endpoint, fractal_auth::code::CodeEndpoint::Fabric { .. })
         })
     {
         return Ok(());
@@ -506,7 +506,7 @@ async fn bootstrap_fabric_invite(
     }
     let paired: PairedInvite =
         serde_json::from_slice(&output.stdout).context("decode the Fabric invitation helper")?;
-    let paired_code = fractal_daemon::fleet::code::JoinCode::decode(&paired.code)?;
+    let paired_code = fractal_auth::code::JoinCode::decode(&paired.code)?;
     anyhow::ensure!(
         paired_code.fleet_id == code.fleet_id && paired_code.invite == code.invite,
         "Fabric invitation helper returned another invitation"
@@ -772,7 +772,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             let state_identity =
                 lock_fleet_admission(&client, &config, use_services, "joins").await?;
             if config.store_dir.is_some() {
-                let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim())?;
+                let decoded = fractal_auth::code::JoinCode::decode(code.trim())?;
                 // Resolve saved admission before fresh-name precedence, just as join does.
                 let name = fractal_daemon::fleet::join::admission_name(
                     &config.state_dir, &decoded, args.name.as_deref(), &config.node,
@@ -1316,7 +1316,7 @@ pub(super) async fn run_fleet_transports(
                         .any(|transport| match transport.as_str() {
                             "loopback" => local.iter().any(std::net::IpAddr::is_loopback),
                             "tailscale" =>
-                                local.iter().any(fractal_daemon::fleet::transport::is_tailnet_address)
+                                local.iter().any(fractal_auth::is_tailnet_address)
                                     && resolve_tool(file.tailscale.as_deref(), "tailscale")
                                         .is_some(),
                             _ => false,

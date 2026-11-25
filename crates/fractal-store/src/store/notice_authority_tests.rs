@@ -1,5 +1,5 @@
 use super::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use crate::store::custom::RegistrationRequest;
 use crate::store::fleet_admission_tests::{append, fleet, key, sync};
 

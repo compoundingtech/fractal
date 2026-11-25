@@ -41,9 +41,7 @@ pub mod touched;
 /// Rolling latency windows for the daemon's targets: routes, statements, transactions, holds.
 pub mod windows;
 
-pub use claim::{
-    ClaimInput, ClaimRecord, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,
-    ReplicaEnvelopePayload, ReplicaEnvelopeSignature,
-};
-pub use error::Error;
+pub use claim::{ ClaimRecord, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,
+    ReplicaEnvelopePayload, ReplicaEnvelopeSignature};
+
 pub use store::{Runtime, Store};

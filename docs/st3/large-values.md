@@ -1227,20 +1227,23 @@ native/binary and dispatch-persistence fixtures, not the separate Phase 1
 local-authority inventory. The proposal helper supplied fingerprints and declaration metadata;
 acceptance preserves the inventory's existing `reviewed_base` and manual flows.
 All ten added declaration records retain `value_size_proven: false`.
+Standalone runtime packaging relocates the shared producers into the canonical core
+without changing their SQL fingerprints, occurrence order, TODOs or dispositions.
+The source identities below follow those new paths; their storage obligations remain.
 
-`fractal_peer::light_node::journal` owns schema `lv-hdeb9b3a5a824` and the
+`fractal_light_node_core::journal` owns schema `lv-hb651e3e2258f` and the
 following statement/sink identities:
 
-- `lv-h102052ca35fc`, `lv-h113edb40022a`, `lv-h191641c4d241`, `lv-h23bfa73b5860`,
-  `lv-h286b9d1c1c8b`, `lv-h3d6e4209c6eb`, `lv-h4a870d7bef9c`, `lv-h555cdce14fe8`,
-  `lv-h577b713b5a24`, `lv-h58e17ebf7853`, `lv-h682a40a9a666`, `lv-h72a762bf7354`,
-  `lv-h7726667ff8cd`, `lv-h77b56b17f8fc`, `lv-h7bc5ac937863`, `lv-h7f51b642f523`,
-  `lv-h806adaaf48a4`, `lv-h8764bd131643`, `lv-h8bd3c4b8c8b9`, `lv-h8eee3a85f96b`,
-  `lv-h920263c26897`, `lv-h92381651afd4`, `lv-h938942f23651`, `lv-h93c3cc2b150d`,
-  `lv-h9799d5cfd34a`, `lv-h9bef278ec2f7`, `lv-hbc80366c1c2b`, `lv-hbc8ed50798f2`,
-  `lv-hc5522da5d7ea`, `lv-hc5db8e607bbb`, `lv-hc882d2a1ceca`, `lv-hcdd54fc3ac96`,
-  `lv-hd2a6d3bd9e80`, `lv-hdd339b4e6193`, `lv-he362e06c6cb9`, `lv-he796ea71134f`,
-  `lv-hea174ad4467c`, `lv-hea697bc2d549`, `lv-hebcba1c5d265`.
+- `lv-h2391601c87e1`, `lv-hff334cc086b7`, `lv-h98d911e59ddd`, `lv-h0c354e9bd65d`,
+  `lv-h36e40a120922`, `lv-h57df94399c06`, `lv-h68bb2ccd681f`, `lv-h7bafe0b9c055`,
+  `lv-h0644ce0647c4`, `lv-h5aff456e16db`, `lv-hebbe80a974fe`, `lv-h83cb7157a22c`,
+  `lv-h08759c6c6b13`, `lv-hdd195a98f808`, `lv-he852c6bf12b2`, `lv-h55b89892ff45`,
+  `lv-he035ec15d99c`, `lv-h1d5e99516e01`, `lv-hc95c4fc5a0b1`, `lv-h2201fa3b5140`,
+  `lv-h56873a518070`, `lv-h2ca6e11a659d`, `lv-hb26ab5a96b81`, `lv-ha648babeeea9`,
+  `lv-h28b3e0ff2864`, `lv-h7b664055aa39`, `lv-h0d55bf1d3aa4`, `lv-h98f098b46edc`,
+  `lv-h186249844ad9`, `lv-hb316eeb67328`, `lv-h4300ed70dfd4`, `lv-hd31b9fadf192`,
+  `lv-h1850bdaea978`, `lv-h842f0066649c`, `lv-h062595b029a9`, `lv-h08518bfcae28`,
+  `lv-ha4d40edf11af`, `lv-h47bedd317fb9`, `lv-h1fb7b4d3125d`.
 
 The journal retains selection/grant and endpoint strings, command/receipt JSON,
 native retirement proofs, cancellation reasons, forwarded request/result JSON,
@@ -1257,23 +1260,23 @@ units/references for the complete column and key catalog. The statement sites'
 `bound-or-reference-values-and-reclamation` work must stage those exact bytes and
 certified cleanup keys without acknowledging a receipt, releasing a native
 finalization obligation or forgetting an immutable identity too early.
-`lv-h938942f23651` traces the schema variable; `lv-h191641c4d241` and
-`lv-h8eee3a85f96b` trace dynamic floor reads whose column selector is restricted
+`lv-hb26ab5a96b81` traces the schema variable; `lv-h98d911e59ddd` and
+`lv-h2201fa3b5140` trace dynamic floor reads whose column selector is restricted
 to the home/seat floor. Their unresolved-sink registration is conservative and
 does not constitute size approval.
 
-`fractal_peer::light_node::session` owns `lv-h2784ce849550`, and
-`fractal_peer::light_node::session_tests` owns `lv-h40707d5ec849`. These are
+`fractal_light_node_core::session` owns `lv-h7893a43c53a3`, and
+`fractal_light_node_core::session_tests` owns `lv-h2b3b02477b75`. These are
 lexically ambiguous `RunEffects::execute` calls, not direct SQLite statements.
 Their `trace-statement-and-value-representation` obligation follows the signed
 request and exact result through the real graph claim writer, preserving pinned
 authority, immutable request identity and retained-result replay. Registering
 the delegation here does not accept another producer's storage representation.
 
-`fractal_peer::light_node::journal_tests` owns `lv-h694feccb0766`,
-`lv-h8c2f07f2635e`, `lv-ha8f636967dd7`, `lv-hb1e17066eaea`,
-`lv-hb88d5c28fd9b`, `lv-hb9686663e41e`, `lv-hbe5466693d21`,
-`lv-hcd66212e35cf`, `lv-he07cde45bf1f` and `lv-hf320d659814b`.
+`fractal_light_node_core::journal_tests` owns `lv-heac8db6d76dd`,
+`lv-h60231a720985`, `lv-h8b174be7e79f`, `lv-hd1698ccbd75a`,
+`lv-hf9c7b20dd1f3`, `lv-h79329e28ce55`, `lv-h16754377790d`,
+`lv-h5cb44b49a2ac`, `lv-h8f52c2148eda` and `lv-hfdc73a7e5a6c`.
 These fixtures create a future-schema table and exercise committed entry
 fences, receipt ACKs and failing finalization-marker/release transactions.
 `fractal_reconcile::reconcile::home_session_tests` owns `lv-h40e04f0e7f4e`,
@@ -1332,7 +1335,7 @@ representation review follow the existing route-family inventory convention.
 
 `fractal_store::store::local_sessions` owns the native subject/incarnation keys,
 serialized custody/invocation metadata and detach/retirement receipt updates.
-`fractal_store::store::run_credentials::local` owns hashed credentials, exact
+`fractal_light_node_core::authority::local` owns hashed credentials, exact
 execution JSON, ordered authority changes, proposal tombstones and ACK floors.
 `fractal_store::store::run_credentials::assertions` owns home admission keys,
 closed-epoch fences and exact retry-response JSON. Their row-count limits and
@@ -1345,4 +1348,22 @@ fixtures retain their separate test-module ownership and concrete source-site
 registrations. A later representation change must preserve native-generation
 custody, borrowed detach, ordered revocation and exact effect/retry identity;
 it cannot discard an unacknowledged witness to reduce storage.
+
+### Standalone physical-runtime custody
+
+`fractal_light_node_core::custody` owns schema `lv-h3c23c0ba712a`, the additive
+unproven-retirement column `lv-h882f0e8d73bc`, and writes `lv-hdbc7a27c2329`,
+`lv-hede201226d04`, `lv-h5c791af4b869`, `lv-h8a25b5eed90b` and
+`lv-hdc9de3b1d6b7`. They retain exact native subject/incarnation metadata, borrowed
+detach identity and positive physical-retirement/finalization evidence in the
+standalone journal. No graph, shared Start reservation or historical custody is
+silently imported.
+
+Private provisioning bounds individual identities and retained row count, but does
+not certify encoded TEXT/index-key size, JSON representation, statement duration
+or reclamation cost. All three declaration records retain `value_size_proven: false`.
+The schema keeps `chunk-or-reference-variable-columns`; the other six templates
+keep `bound-or-reference-values-and-reclamation`. Any representation change must
+preserve historical ownership/escalation fences, logical borrowed detach, exact
+positive native closure and pending receipt finalization; absence is never proof.
 

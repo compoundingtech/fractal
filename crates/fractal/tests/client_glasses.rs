@@ -3,7 +3,8 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
-use fractal_daemon::{api::AppState, model::ClaimInput, store::Store};
+use fractal_daemon::{api::AppState, store::Store};
+use fractal_wire::{ClaimInput};
 use fractal_client::{
     Client, CollectionEvent, GlassBody, GlassDelete, GlassLayout, GlassPut, GlassTab,
 };
