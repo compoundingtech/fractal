@@ -157,7 +157,7 @@ fn desired_journal_rollover_bounds_deleted_keys_and_rebuilds_stale_rosters() {
     let stale = inputs.generation.unwrap();
     let initial = store.reconcile_input_work();
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hab0cd697de5c owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/first'", [],
+        /* sqlite-large-value: allow-for-now lv-h4a2b2bdd9146 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/first'", [],
     ).unwrap();
     const BATCH: usize = 128;
     for batch in 0..=CHANGED_SUBJECT_LIMIT / BATCH {
