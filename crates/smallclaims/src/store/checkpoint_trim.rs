@@ -854,7 +854,7 @@ impl Store {
                 .map_err(internal)?;
             transaction
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h0000000000000 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, detail, updated_at_unix_ms)
+                    /* sqlite-large-value: allow-for-now lv-h8e65016932fc owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, detail, updated_at_unix_ms)
                      VALUES (?1, ?2, 'trimming', ?3, ?4, ?5)",
                     params![
                         checkpoint,
