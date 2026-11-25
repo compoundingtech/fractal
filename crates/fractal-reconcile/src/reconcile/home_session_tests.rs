@@ -989,7 +989,7 @@ async fn native_ordinary_agents_hold_aggregate_physical_envelopes_without_graph_
     // This ordinary-agent fixture does not require a systemd user manager.
     // Observe actual whole-host usage without subtracting any lane cgroup usage
     // or crediting ARC: charging all used memory as outside is conservative.
-    fn outside() -> Option<fractal_runtime::host::HostMemoryObservation> {
+    fn outside(_policy: &fractal_runtime::resource_pressure::Policy) -> Option<fractal_runtime::host::HostMemoryObservation> {
         let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
         fractal_runtime::host::outside_memory(&meminfo, None, None, None)
     }
@@ -997,7 +997,7 @@ async fn native_ordinary_agents_hold_aggregate_physical_envelopes_without_graph_
     // policy that reserves at least two CPUs and leaves a two-core runner no lanes.
     let room = fractal_runtime::host::size()
         .expect("ordinary capacity fixture requires actual online CPUs and installed memory");
-    let observation = outside().unwrap_or_else(|| panic!(
+    let observation = outside(&pair.executor.seat_admission.finite_policy.psi_brake).unwrap_or_else(|| panic!(
         "ordinary capacity fixture requires actual host memory: room={room:?}; meminfo={:?}",
         std::fs::read_to_string("/proc/meminfo")));
     let available = room.memory.saturating_sub(observation.outside_bytes);
@@ -1023,9 +1023,9 @@ async fn native_ordinary_agents_hold_aggregate_physical_envelopes_without_graph_
     second.launch_member = second.member.clone();
     second.seal().unwrap();
     let first_fit = pair.executor.remote_seat_lane_fits("agent/example/worker", &first.member);
-    assert!(matches!(first_fit, Ok(true)), "first individual fit={first_fit:?}; {capacity}; now={:?}", outside());
+    assert!(matches!(first_fit, Ok(true)), "first individual fit={first_fit:?}; {capacity}; now={:?}", outside(&pair.executor.seat_admission.finite_policy.psi_brake));
     let second_fit = pair.executor.remote_seat_lane_fits("agent/example/second", &second.member);
-    assert!(matches!(second_fit, Ok(true)), "second individual fit={second_fit:?}; {capacity}; now={:?}", outside());
+    assert!(matches!(second_fit, Ok(true)), "second individual fit={second_fit:?}; {capacity}; now={:?}", outside(&pair.executor.seat_admission.finite_policy.psi_brake));
     let start = pair.home.enqueue(pair.draft("ordinary-first", Operation::Start { authorization: Box::new(first) })).unwrap();
     pair.connect();
     pair.settled(&start).await;
@@ -1033,12 +1033,12 @@ async fn native_ordinary_agents_hold_aggregate_physical_envelopes_without_graph_
     let incarnation = match &receipt {
         Ok(Some(Receipt { state: ReceiptState::Settled { outcome: Outcome::Started { incarnation } }, .. })) =>
             incarnation.clone(),
-        _ => panic!("first actual producer must start: receipt={receipt:?}; {capacity}; now={:?}", outside()),
+        _ => panic!("first actual producer must start: receipt={receipt:?}; {capacity}; now={:?}", outside(&pair.executor.seat_admission.finite_policy.psi_brake)),
     };
     assert_eq!(native_file(&pair.root.path().join("first-entered")).await, b"first");
     let aggregate_fit = pair.executor.remote_seat_lane_fits("agent/example/second", &second.member);
     assert!(matches!(aggregate_fit, Ok(false)),
-        "second must fail aggregate fit: fit={aggregate_fit:?}; {capacity}; now={:?}", outside());
+        "second must fail aggregate fit: fit={aggregate_fit:?}; {capacity}; now={:?}", outside(&pair.executor.seat_admission.finite_policy.psi_brake));
     let mut binding = pair.binding.clone();
     binding.subject = "agent/example/second".into();
     binding.runtime = "native-second".into();
@@ -1049,7 +1049,7 @@ async fn native_ordinary_agents_hold_aggregate_physical_envelopes_without_graph_
     assert!(matches!(&receipt,
         Ok(Some(Receipt { state: ReceiptState::Settled { outcome: Outcome::Refused { reason } }, .. }))
             if reason.contains("native agent lane does not fit the physical host envelope")),
-        "second actual Start must be refused for aggregate capacity: receipt={receipt:?}; {capacity}; now={:?}", outside());
+        "second actual Start must be refused for aggregate capacity: receipt={receipt:?}; {capacity}; now={:?}", outside(&pair.executor.seat_admission.finite_policy.psi_brake));
     assert!(!pair.root.path().join("forbidden-second").exists());
     assert!(!pair.runtime.snapshot_ptys().unwrap().iter().any(|entry| entry.runtime_id == "native-second"));
     pair.home.request_cancel(&start.execution_id, "capacity fixture cleanup").unwrap();

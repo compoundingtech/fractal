@@ -495,7 +495,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let finite = self.store.held_resource_membership_bytes(&self.host, candidate)?;
         // Same physical fit as ordinary fullnode seats: individual CPU envelope,
         // aggregate memory, outside memory, and both full/remaining burst reserve.
-        let outside = (host.outside)().context("outside-lane host observation unavailable")?.outside_bytes;
+        let outside = (host.outside)(&self.seat_admission.finite_policy.psi_brake).context("outside-lane host observation unavailable")?.outside_bytes;
         let free = host.room.memory.saturating_sub(held).saturating_sub(finite)
             .saturating_sub(outside).saturating_sub(reserve.kept);
         Ok(lane.cores <= host.room.cores && lane.memory <= host.room.memory.saturating_sub(reserve.full)
