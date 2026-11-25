@@ -3911,7 +3911,7 @@ mod tree_tests {
         let agent = &world.agents.items()[0];
         for doc in [
             agent_header(&world, agent, 160, "·"),
-            agent_details(&world, agent, 160, "·"),
+            agent_details(&world, agent, 160, "·", false),
             peek(&world, &agent.id, 160, "·"),
         ] {
             let shown = doc.lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");

@@ -7761,6 +7761,7 @@ mod tests {
         ui.frame.borrow_mut().panes.push(FramePane {
             key: format!("chat:{conversation}"), rect: Rect::new(0, 0, 40, 4),
             top: 0, total: 1, lines: Rc::new(Vec::new()),
+            copy_blocks: Vec::new(),
             entries: vec![(entry, 0)], images: Vec::new(), layer: 0,
         });
         ui.frame.borrow_mut().read_messages.insert("message/focus".into());

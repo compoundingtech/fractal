@@ -3766,14 +3766,12 @@ async fn keyed_note(node: &Node, text: &str, key: &str) -> String {
     claim["id"].as_str().unwrap().to_owned()
 }
 
-/// A release member upgrades in place, and this build empties its valid records' bytes while it
-/// keeps replicating with a release peer in both directions. Rolled back over those emptied
-/// records, the release still reads every note, answers a retried request with the same claim,
-/// writes its next sequence and exchanges with an upgraded member to equal digests. Upgraded
-/// again, this build empties the bytes the release wrote meanwhile.
+/// A release member upgrades in place, and this build empties its valid records' bytes while
+/// replicating with a release peer in both directions. The obsolete reader refuses the
+/// upgraded store without changing it; the current build recovers its history and replication.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
-async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_bytes() {
+async fn previous_release_replicates_over_emptied_valid_record_bytes_and_refuses_rollback() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -3824,13 +3822,34 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
         wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
     }
 
-    // Roll back over the emptied records.
+    // The privacy floor is one-way: rollback requires restoring a pre-upgrade backup.
     o.stop();
+    let database = o.state_dir().join("claims.sqlite3");
+    let storage_state = || {
+        let reader = rusqlite::Connection::open_with_flags(
+            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap();
+        let version: u32 = reader.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        let gone: u32 = reader.query_row(
+            "SELECT COUNT(*) FROM meta WHERE key='valid_records_gone' AND value='1'",
+            [], |row| row.get(0),
+        ).unwrap();
+        (version, gone)
+    };
+    let state_before = storage_state();
+    assert_eq!(state_before.0, fractal_schema::STORAGE_VERSION);
+    let file_before = fs::read(&database).unwrap();
     o.binary = old;
+    assert!(!o.start_with_schema_refusal(Some(fractal_schema::STORAGE_VERSION)).await,
+        "the previous reader must refuse the privacy-fenced store");
+    assert_eq!(storage_state(), state_before, "refusal preserves both the floor and records-gone marker");
+    assert_eq!(fs::read(&database).unwrap(), file_before, "refusal must not change the store file");
+
+    o.binary = PathBuf::from(st3());
     o.start().await;
     wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
     assert_eq!(keyed_note(&o, "o-keyed", "o-keyed-note").await, retried, "a retried request is answered with its claim");
-    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-1")] {
+    for (node, text) in [(&o, "o-recovered"), (&n, "n-1")] {
         node.note(text).await;
         expected.insert(format!("custom/fleet-test/{text}"));
     }
@@ -3847,16 +3866,9 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
         assert_eq!(status["invalid_records"], 0, "{status}");
         assert_eq!(status["unsigned_envelopes"], 0, "{status}");
     }
-    // The release stored bytes for what it admitted and wrote; upgraded again, this build
-    // empties those too.
-    assert!(valid_record_bytes(&o).1 > 0, "the rolled-back release kept the bytes it wrote");
-    o.stop();
-    o.binary = PathBuf::from(st3());
-    o.start().await;
-    wait_until("the re-upgraded member empties the bytes the release wrote", 60, || async {
+    wait_until("the recovered current member keeps valid record bytes empty", 60, || async {
         valid_record_bytes(&o).1 == 0
-    })
-    .await;
+    }).await;
     wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
 }
 
@@ -7632,7 +7644,7 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
     o.stop();
     let database = o.state_dir().join("claims.sqlite3");
-    assert_eq!(database_schema(&database), 23, "the current reader must advance the local floor");
+    assert_eq!(database_schema(&database), fractal_schema::STORAGE_VERSION, "the current reader must advance the local floor");
     let copy = root.path().join("release-export/claims.sqlite3");
     fs::create_dir_all(copy.parent().unwrap()).unwrap();
     rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -7646,10 +7658,10 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     let old_export = o.command(&[
         "backup", "create", release_of_upgraded.to_str().unwrap(), "--database", copy.to_str().unwrap(),
     ]).output().unwrap();
-    if release_schema < 23 {
+    if release_schema < fractal_schema::STORAGE_VERSION {
         assert!(
             !old_export.status.success(),
-            "a storage-{release_schema} reader opened the storage-23 database",
+            "a storage-{release_schema} reader opened the storage-{} database", fractal_schema::STORAGE_VERSION,
         );
     }
     let theirs = if old_export.status.success() {

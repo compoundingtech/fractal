@@ -1159,14 +1159,14 @@ impl Store {
         // after-steps. Finished history is never scanned for this fault.
         let source_filter = if subject.is_some() { "mission_runs.id=?2" } else { "?2 IS NULL" };
         let source_id = subject.map(|subject| subject.trim_start_matches("mission-run/"));
-        if let Some(source) = subject {
-            if let Some(run) = mission_run_header_tx(&connection, source.trim_start_matches("mission-run/")).optional()? {
-                smallclaims::touched::note_read(|| format!(
-                    "step-run/{}/{}",
-                    run.generation.trim_start_matches("run-generation/"),
-                    crate::mission::AFTER_RUN_STEP,
-                ));
-            }
+        if let Some(source) = subject
+            && let Some(run) = mission_run_header_tx(&connection, source.trim_start_matches("mission-run/")).optional()?
+        {
+            smallclaims::touched::note_read(|| format!(
+                "step-run/{}/{}",
+                run.generation.trim_start_matches("run-generation/"),
+                crate::mission::AFTER_RUN_STEP,
+            ));
         }
         let runs = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h17ae5bb9d200 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "SELECT mission_runs.id FROM mission_runs
