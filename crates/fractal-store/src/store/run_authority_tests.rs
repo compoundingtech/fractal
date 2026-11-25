@@ -247,6 +247,94 @@ fn cancel(store: &Store, actor: &MissionRunView, target: &MissionRunView, key: &
     store.apply_as(&intent, &preview.subject_tokens, key, Some(&actor.subject))
 }
 
+#[test]
+fn a_request_credential_can_cancel_its_own_run_without_rechecking_ended_steps() {
+    let _mode = hold_mode();
+    set_run_authority_mode(RunAuthorityMode::Enforce);
+    let store = Store::open_memory("node").unwrap();
+    // A credential binds identity, not authority: self-cancellation must declare its write.
+    publish_mission(&store, r#"version 2
+mission "self-cancel" state="ready" {
+  goal "Cancel this run."
+  authority { write "mission-run/*"; }
+  step "program" { agentless }
+}"#, "self-cancel");
+    let run = start(&store, "self-cancel", "credential-self-cancel", None).unwrap();
+    let step = &run.steps[0].subject;
+    store.set_step_run_state_for_tests(step, "working", 1);
+    let secret = store.issue_run_credential(step, 1, 60_000).unwrap();
+    let authenticated = store.run_binding(&secret).unwrap();
+
+    let outcome = run_credentials::request_context::with(Some(authenticated.clone()), || {
+        cancel(&store, &run, &run, "credential-cancellation")
+    }).unwrap();
+    assert!(outcome.changed);
+    assert_eq!(store.step_run(step).unwrap().unwrap().status, "cancelled");
+    assert_ne!(store.mission_run(&run.subject).unwrap().unwrap().phase, "normal");
+    assert!(!store.claims_for_subject_kind_at(step, "step-run.state", None, false, 10)
+        .unwrap().claims.is_empty());
+    assert!(store.run_binding(&secret).is_err());
+
+    // Authentication captured before cancellation must not admit a later writer.
+    let before = store.index().unwrap();
+    let error = run_credentials::request_context::with(Some(authenticated), || {
+        cancel(&store, &run, &run, "ended-credential-cancellation")
+    }).unwrap_err();
+    assert_eq!(error.code, "run-credential-ended");
+    assert_eq!(store.index().unwrap(), before);
+}
+
+#[test]
+fn an_ended_request_credential_cannot_begin_cancelling_its_run() {
+    let _mode = hold_mode();
+    set_run_authority_mode(RunAuthorityMode::Enforce);
+    let store = missions();
+    let run = start(&store, "land", "ended-before-cancellation", None).unwrap();
+    let step = &run.steps[0].subject;
+    store.set_step_run_state_for_tests(step, "working", 1);
+    let secret = store.issue_run_credential(step, 1, 60_000).unwrap();
+    let authenticated = store.run_binding(&secret).unwrap();
+    store.set_step_run_state_for_tests(step, "completed", 1);
+
+    let before = store.index().unwrap();
+    let error = run_credentials::request_context::with(Some(authenticated), || {
+        cancel(&store, &run, &run, "refused-cancellation")
+    }).unwrap_err();
+    assert_eq!(error.code, "run-credential-ended");
+    assert_eq!(store.index().unwrap(), before);
+    assert_eq!(store.step_run(step).unwrap().unwrap().status, "completed");
+    assert_eq!(store.mission_run(&run.subject).unwrap().unwrap().phase, "normal");
+}
+
+#[test]
+fn an_ended_request_credential_cannot_apply_a_declaration_without_run_mutations() {
+    let _mode = hold_mode();
+    set_run_authority_mode(RunAuthorityMode::Enforce);
+    let store = missions();
+    let run = start(&store, "land", "ended-before-declaration", None).unwrap();
+    let step = &run.steps[0].subject;
+    store.set_step_run_state_for_tests(step, "working", 1);
+    let secret = store.issue_run_credential(step, 1, 60_000).unwrap();
+    let authenticated = store.run_binding(&secret).unwrap();
+    let source = r#"version 2
+mission "late" state="ready" {
+  goal "Must not be published by an ended request."
+  step "program" { agentless }
+}"#;
+    let intent = crate::graph::parse_intent(source, "node").unwrap();
+    let preview = store.mission(&intent, IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    store.set_step_run_state_for_tests(step, "completed", 1);
+
+    let before = store.index().unwrap();
+    let error = run_credentials::request_context::with(Some(authenticated), || {
+        store.apply_as(&intent, &preview.subject_tokens, "refused-declaration", Some(&run.subject))
+    }).unwrap_err();
+    assert_eq!(error.code, "run-credential-ended");
+    assert_eq!(store.index().unwrap(), before);
+}
+
 /// A run touches only itself and the runs it started, transitively; a `write "mission-run/*"`
 /// grant reaches no sibling, parent or unrelated run.
 #[test]
