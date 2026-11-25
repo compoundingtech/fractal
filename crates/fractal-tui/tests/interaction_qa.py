@@ -112,8 +112,8 @@ def open_agent(session: str, name: str) -> str:
     send(session, "\r")
     opened = wait_screen(session, lambda value: PALETTE not in value and name.lower() in value.lower(),
                          f"{name}'s tab")
-    # Opening an agent attaches its terminal once the tab stays in front (unless this device
-    # chose Conversation first); Ctrl+\ is the conversation this script exercises.
+    # Opening an agent shows its conversation unless this device chose terminal-first;
+    # Ctrl+\ then c returns from an attached terminal to the conversation exercised here.
     attached = lambda value: "← Ctrl+\\" in value or "← Return · Ctrl+\\" in value
     time.sleep(1.0)
     if attached(screen(session)):

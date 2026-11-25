@@ -4,6 +4,7 @@
  * a structural match (types, consts, enums, required keys, patterns).
  */
 import { readFileSync } from 'node:fs'
+import type { ThreadTimelineEvent } from '@fractal/client'
 
 import { escapePointerToken, type TimePointer } from '../src/kit/time.ts'
 
@@ -112,6 +113,12 @@ export const makeInstantFinder = (defs: Record<string, Node>): InstantFinder => 
   /** Instants inside `value`, a value of schema definition `definition`, below `pointer`. */
   return (definition: string, value: unknown, pointer: string): TimePointer[] => {
     const out = new Map<string, TimePointer>()
+    // Thread events use canonical integer milliseconds but the generated wire schema does not
+    // annotate this field with x-st-codec. Keep the fixture-only codec tied to the client shape.
+    if (definition === 'ThreadTimelineEvent') {
+      const field = 'accepted_at_unix_ms' satisfies keyof ThreadTimelineEvent
+      return [{ pointer: `${pointer}/${field}`, codec: 'epoch-ms' }]
+    }
     walk({ $ref: `#/$defs/${definition}` }, value, pointer, out)
     return [...out.values()]
   }

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { initialFeedSync, type FeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { credentialExpiredMessage, observed, unavailable, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
+import { credentialExpiredMessage, credentialExpiredTitle, observed, unavailable, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 // Evaluate the real pane before mounting the workspace's lazy boundary.
 import './ConversationPane.tsx'
@@ -104,14 +104,53 @@ const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const retry = (within: ParentNode) => [...within.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === 'Retry')
 const transcript = () => host.querySelector('[data-testid="transcript-scroll"], [data-testid="transcript-unavailable"]')!
+it.each(['/', '/w/inbox', '/w/thread/example'])('offers ordinary pairing from %s even when reads and control grants are unknown', async path => {
+  const status = vi.fn(async () => ({ status: 'unpaired' as const }))
+  const start = vi.fn(async () => ({ requestId: 'request/shared', displayCode: 'ABC-123' }))
+  source = { ...source, pairing: { status, start, forget: vi.fn(async () => {}) },
+    grants: Atom.make({ actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted', unread: true }) }
+  window.history.replaceState(null, '', path)
+  registry.set(agents, unavailable({ reason: 'unauthorized', detail: 'Read access has not been granted' }))
+  await mount()
+  const control = host.querySelector('[data-testid="browser-pairing"]')!
+  expect(control.textContent).toContain('Pair this browser to request access.')
+  expect(control.textContent).not.toContain('can read')
+  expect(host.querySelectorAll('[data-testid="browser-pairing"]')).toHaveLength(1)
+  await act(async () => control.querySelector('button')!.click())
+  expect(host.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('ABC-123')
+  expect(start).toHaveBeenCalledOnce()
+})
+
+it('keeps the shared code mounted but hidden while Settings manages pairing, including a drawer breakpoint change', async () => {
+  const status = vi.fn(async () => ({ status: 'pending' as const, displayCode: 'PAIR-123' }))
+  source = { ...source, pairing: { status, start: vi.fn(async () => ({ requestId: 'request/shared', displayCode: 'PAIR-123' })), forget: vi.fn(async () => {}) } }
+  await mount()
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')!.click())
+  const controls = [...host.querySelectorAll('[data-testid="browser-pairing"]')]
+  expect(controls).toHaveLength(2)
+  expect(controls.filter(control => control.closest('[hidden]') === null)).toHaveLength(1)
+  expect(host.querySelector('[role="dialog"] [data-testid="pairing-code"]')?.textContent).toBe('PAIR-123')
+  expect(status).toHaveBeenCalledOnce()
+  await act(async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 440 })
+    window.dispatchEvent(new Event('resize'))
+  })
+  expect(host.querySelector('[role="dialog"][aria-label="Settings"]')).toBeNull()
+  const shared = host.querySelector('[data-testid="browser-pairing"]')!
+  expect(shared.closest('[hidden]')).toBeNull()
+  expect(shared.textContent).toContain('PAIR-123')
+  expect(status).toHaveBeenCalledOnce()
+})
+
 describe('RM1 workspace source states', () => {
-  it('replaces loading with a quiet credential-expired notice and no ineffective retry', async () => {
+  it('replaces loading with a quiet access-revoked notice and no ineffective retry', async () => {
     registry.set(agents, waiting)
     await mount()
     await act(async () => registry.set(agents, unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })))
     const notice = sidebar().querySelector('[data-wf-roster-reason="unauthorized"]')!
-    expect(notice.textContent).toBe("This browser's access to the daemon has expired or was revoked. Pair the device again.")
-    expect(notice.querySelector('[role="status"]')).not.toBeNull()
+    // Headline and sentence on their own lines, never one truncated row.
+    expect([...notice.querySelectorAll('p')].map(line => line.textContent)).toEqual([credentialExpiredTitle, credentialExpiredMessage])
+    expect(notice.getAttribute('role')).toBe('status')
     expect(notice.querySelector('[role="alert"]')).toBeNull()
     expect(sidebar().textContent).not.toContain('private diagnostic')
     expect(sidebar().querySelector('[data-system-state="loading"]')).toBeNull()
@@ -329,6 +368,46 @@ describe('RM1 workspace source states', () => {
     expect(transcript().textContent).not.toContain('Run running')
   })
 
+  it('shows an idle seat at rest, not working, while its transcript still holds an open run', async () => {
+    const idle: DecodedAgent = { ...agent, harness_state: Option.some('idle') }
+    registry.set(agents, observed({ value: [idle] }))
+    registry.set(agentsSync, liveSync<readonly DecodedAgent[]>([idle]))
+    await mount()
+    // The page's last Status is still `running`; only the seat's own report may claim a turn.
+    expect(transcript().textContent).not.toMatch(/Working|Run running/)
+    const rest = host.querySelector('[data-seat-at-rest="idle"]')
+    expect(rest?.textContent).toMatch(/Idle$/)
+    expect(host.textContent).not.toContain('Last seen')
+    expect(transcript().textContent).toContain('The retained answer remains readable.')
+    await act(async () => {
+      registry.set(agents, observed({ value: [agent] }))
+      registry.set(agentsSync, liveSync<readonly DecodedAgent[]>([agent]))
+    })
+    expect(host.querySelector('[data-seat-at-rest]')).toBeNull()
+    expect(transcript().textContent).toContain('Run running')
+  })
+
+  it('shows neither a working cue nor a resting word when the seat does not report its turn', async () => {
+    const unknown: DecodedAgent = { ...agent, harness_state: Option.none() }
+    registry.set(agents, observed({ value: [unknown] }))
+    registry.set(agentsSync, liveSync<readonly DecodedAgent[]>([unknown]))
+    await mount()
+    expect(transcript().textContent).not.toMatch(/Working|Run running/)
+    expect(host.querySelector('[data-seat-at-rest]')).toBeNull()
+    expect(host.textContent).not.toContain('Last seen')
+  })
+
+  it('names a revoked credential in the band with the pairing sentence and no Reconnect', async () => {
+    source = { ...source, credentialRevoked: Atom.make(true), reconnect: vi.fn() }
+    await act(async () => registry.set(gatewaySync, { status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: 120_000, issue: 'synthetic socket closed' } }, observedAt: 117_000 }))
+    await mount()
+    const band = host.querySelector('[data-connection-state="revoked"]')!
+    expect(band.querySelector('[role="status"]')?.textContent).toBe(credentialExpiredTitle)
+    expect(band.querySelector('[data-connection-detail]')?.textContent).toBe(credentialExpiredMessage)
+    expect(band.querySelector('button')).toBeNull()
+    expect(host.querySelector('[data-connection-state="reconnecting"]')).toBeNull()
+  })
+
   it('freezes the working cue on disconnect without requiring replacement feed values', async () => {
     await mount()
     const retainedAgents = registry.get(agents)
@@ -394,4 +473,20 @@ describe('RM1 workspace source states', () => {
     expect(roster().querySelector('[data-frozen="true"]')).toBeNull()
     expect(retry(sidebar())).toBeUndefined()
   })
+})
+
+it('isolates opened workspace panes when a fixture gets a fresh registry', async () => {
+  window.history.replaceState(null, '', '/w/agent/example?open=doc%2Ffixture-discussion%3Adetail')
+  await mount()
+  const views = () => host.querySelector('[aria-label="Workspace views"]')!
+  expect(views().textContent).toContain('Fixture-discussion')
+
+  await act(async () => root.unmount())
+  registry.dispose()
+  registry = AtomRegistry.make()
+  root = createRoot(host)
+  window.history.replaceState(null, '', '/w/agent/example')
+  await mount()
+  expect(host.querySelector('[data-testid="live-agent-workspace"]')).not.toBeNull()
+  expect(views()?.textContent ?? '').not.toContain('Fixture-discussion')
 })

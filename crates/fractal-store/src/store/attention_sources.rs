@@ -2,9 +2,11 @@
 //! Entries retain eventual rows, so clock admissions do not rerun source reducers.
 use super::*;
 
+type DiscussionContexts = BTreeMap<(String, String, String), Vec<serde_json::Map<String, Value>>>;
+
 #[derive(Clone)]
 struct SourceEntry {
-    rows: Vec<(AttentionItemView, u128)>,
+    rows: Vec<(AttentionItemView, u128, serde_json::Map<String, Value>)>,
     reads: BTreeSet<String>,
     refresh_at: Option<u128>,
 }
@@ -14,6 +16,8 @@ struct SourceEntry {
 #[derive(Clone, Default)]
 pub struct AttentionSourceSnapshot {
     pub items: Vec<AttentionItemView>,
+    /// Discussion context captured before projecting the responsible conversation agent.
+    pub contexts: DiscussionContexts,
     pub valid_until: Option<u128>,
     /// Actual subject reducer calls in this refresh, including empty results.
     pub refolded_subjects: usize,
@@ -124,6 +128,8 @@ impl Store {
                 snapshot.entries.remove(&key);
                 continue;
             }
+            let mut contexts = DiscussionContexts::new();
+            let mut context_reads = BTreeSet::new();
             let mut refresh_at = None;
             let (rows, mut reads) = smallclaims::touched::record(|| -> Result<Vec<AttentionItemView>> {
                 let mut rows = Vec::new();
@@ -142,11 +148,14 @@ impl Store {
                 {
                     rows.push(custom::attention_item(&serde_json::from_str(&body)?, at.parse().unwrap_or(0))?);
                 }
-                self.current_attention(rows, i64::MAX as u128)
+                self.current_attention_with_context(rows, i64::MAX as u128, |item| {
+                    retain_discussion_context(&connection, item, &mut contexts, &mut context_reads)
+                })
             });
             reads.insert(subject.clone());
+            reads.extend(context_reads);
             let rows = rows?;
-            let mut entry = source_entry(&connection, rows, reads)?;
+            let mut entry = source_entry(&connection, rows, contexts, reads)?;
             entry.refresh_at = refresh_at;
             snapshot.entries.insert(key, Arc::new(entry));
             snapshot.refolded_subjects += 1;
@@ -166,7 +175,7 @@ impl Store {
         let mut login_changed = full || run_change || declaration;
         if !login_changed && login_activity {
             login_changed = snapshot.entries.get("group:logins").is_some_and(|entry| {
-                entry.rows.iter().any(|(item, _)| changed.contains(&item.subject)
+                entry.rows.iter().any(|(item, _, _)| changed.contains(&item.subject)
                     || item.targets.iter().any(|seat| changed.contains(seat)))
             });
             if !login_changed {
@@ -200,6 +209,8 @@ impl Store {
             }
         }
         for group in groups {
+            let mut contexts = DiscussionContexts::new();
+            let mut context_reads = BTreeSet::new();
             let (rows, reads) = smallclaims::touched::record(|| -> Result<Vec<AttentionItemView>> {
                 let rows = match group {
                     "reviews" => self.mission_run_attention_items(None)?,
@@ -210,24 +221,30 @@ impl Store {
                         .filter(|item| item.person.starts_with("person/")).collect(),
                     _ => unreachable!(),
                 };
-                self.current_attention(rows, i64::MAX as u128)
+                self.current_attention_with_context(rows, i64::MAX as u128, |item| {
+                    retain_discussion_context(&connection, item, &mut contexts, &mut context_reads)
+                })
             });
             // Login candidate absence is invalidated by the changed seat's current login
             // state above. Retaining every candidate read would make an unrelated prompt
             // refold all login groups even when no login card exists.
-            let reads = if group == "logins" { BTreeSet::new() } else { reads };
-            snapshot.entries.insert(format!("group:{group}"), Arc::new(source_entry(&connection, rows?, reads)?));
+            let mut reads = if group == "logins" { BTreeSet::new() } else { reads };
+            reads.extend(context_reads);
+            snapshot.entries.insert(format!("group:{group}"), Arc::new(source_entry(&connection, rows?, contexts, reads)?));
             snapshot.refolded_groups += 1;
         }
         snapshot.items.clear();
+        snapshot.contexts.clear();
         snapshot.valid_until = None;
         for entry in snapshot.entries.values() {
             if let Some(due) = entry.refresh_at {
                 snapshot.valid_until = Some(snapshot.valid_until.map_or(due, |kept| kept.min(due)));
             }
-            for (item, starts_at) in &entry.rows {
+            for (item, starts_at, context) in &entry.rows {
                 if *starts_at <= now {
                     snapshot.items.push(item.clone());
+                    let key = (item.subject.clone(), item.person.clone(), item.episode.clone());
+                    snapshot.contexts.entry(key).or_default().push(context.clone());
                 } else {
                     snapshot.valid_until = Some(snapshot.valid_until.map_or(*starts_at, |due| due.min(*starts_at)));
                 }
@@ -241,6 +258,7 @@ impl Store {
 fn source_entry(
     connection: &Connection,
     rows: Vec<AttentionItemView>,
+    mut contexts: DiscussionContexts,
     mut reads: BTreeSet<String>,
 ) -> Result<SourceEntry> {
     let rows = rows.into_iter().map(|item| {
@@ -255,7 +273,27 @@ fn source_entry(
             person_work::request(connection, &item.subject)?.map_or(0, |ask| ask.accepted_at_unix_ms)
         } else { 0 };
         let starts_at = item.requested_at_unix_ms.max(accepted);
-        Ok((item, starts_at))
+        let key = (item.subject.clone(), item.person.clone(), item.episode.clone());
+        let context = contexts.get_mut(&key).and_then(Vec::pop)
+            .context("current attention discussion context is missing")?;
+        Ok((item, starts_at, context))
     }).collect::<Result<Vec<_>>>()?;
     Ok(SourceEntry { rows, reads, refresh_at: None })
+}
+
+fn retain_discussion_context(
+    connection: &Connection,
+    item: &AttentionItemView,
+    contexts: &mut DiscussionContexts,
+    reads: &mut BTreeSet<String>,
+) -> Result<()> {
+    // Preserve the original association: projection can replace it with a fallback.
+    if let Some(agent) = &item.conversation { reads.insert(agent.clone()); }
+    let context = super::super::attention::discussion_context_at(connection, item)?;
+    if let Some(agent) = context.get("start_recipient").and_then(|recipient| recipient["agent_id"].as_str()) {
+        reads.insert(agent.to_owned());
+    }
+    contexts.entry((item.subject.clone(), item.person.clone(), item.episode.clone()))
+        .or_default().push(context);
+    Ok(())
 }

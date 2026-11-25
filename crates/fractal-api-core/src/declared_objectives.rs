@@ -227,7 +227,7 @@ fn objective_series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds:
     match &objective.indicator {
         Indicator::Count(count) => {
             let claims = store.objective_series_claims(&[(&count.event, Some(&count.at))], &[&count.event], &count.subject_prefix, from, to).map_err(internal)?;
-            for claim in &claims {
+            for claim in claims.iter().filter(|claim| crate::api::records::generic_claim_visible(claim)) {
                 tracked.observe_count(count, claim, 0);
             }
             for event in tracked.events.values().filter(|event| !left_out(count, &event.fields)) {
@@ -242,7 +242,7 @@ fn objective_series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds:
                 events.push((expect.kind.as_str(), expect.at.as_deref()));
             }
             let claims = store.objective_series_claims(&events, &interval.kinds(), &interval.subject_prefix, from, to).map_err(internal)?;
-            for claim in &claims {
+            for claim in claims.iter().filter(|claim| crate::api::records::generic_claim_visible(claim)) {
                 tracked.observe(interval, claim);
             }
             for sample in tracked.samples.values() {

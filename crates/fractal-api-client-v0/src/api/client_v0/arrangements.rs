@@ -70,7 +70,9 @@ pub async fn edit(
         !subject.starts_with("attention/") && !subject.starts_with("session/external-")
     });
     let store = state.store.clone();
-    blocking_action(move || store.edit_arrangement(&input, &expected)).await
+    let session = session.clone();
+    blocking_api(move || threads::with_metadata_fence_authority(&store, &session, &expected,
+        |authority| store.edit_arrangement_with_authority(&input, &expected, authority))).await
 }
 
 #[derive(Deserialize)]
@@ -118,7 +120,9 @@ pub(super) async fn edit_memberships(
         !subject.starts_with("attention/") && !subject.starts_with("session/external-")
     });
     let store = state.store.clone();
-    blocking_action(move || store.edit_ordered_memberships(&input, &expected)).await
+    let session = session.clone();
+    blocking_api(move || threads::with_metadata_fence_authority(&store, &session, &expected,
+        |authority| store.edit_ordered_memberships_with_authority(&input, &expected, authority))).await
 }
 
 #[derive(Deserialize, Serialize)]

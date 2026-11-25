@@ -78,7 +78,7 @@ const colorTheme = stylex.createTheme(colorVars, {
   fg: '#27272a', fgMuted: '#66666e', fgSoft: 'rgba(39, 39, 42, 0.82)',
   sidebarFgMuted: '#626b77', border: '#e4e4e7', borderStrong: '#e4e4e7',
   glassFill: 'rgba(255, 255, 255, 0.85)', glassBorder: 'rgba(0, 0, 0, 0.06)',
-  primary: '#1b4ed8', primaryHover: '#1a46c2', onPrimary: '#ffffff',
+  primary: '#1b4ed8', primaryHover: '#1a46c2', onPrimary: '#ffffff', primaryFg: '#1b4ed8',
   running: '#2563eb', runningFg: '#1d4ed8', done: textVars.fgSoft, attention: '#b45309',
   danger: '#dc2626', dangerFg: '#b91c1c',
   diffAdded: textVars.fgMuted, diffRemoved: '#dc2626',
