@@ -102,7 +102,7 @@ describe('usage relay availability', () => {
     }),
   )
 
-  it.live('treats only quota 404 as unavailable, leaving other HTTP failures intact', () =>
+  it.live('treats 404 as unavailable, leaving other HTTP failures intact', () =>
     Effect.gen(function* () {
       const { source, setStatus } = yield* gateway
       setStatus(404)
@@ -119,7 +119,7 @@ describe('usage relay availability', () => {
       })
       expect(yield* Effect.result(source.history('claude/alpha'))).toMatchObject({
         _tag: 'Failure',
-        failure: { kind: 'http', reason: 'history returned HTTP 404' },
+        failure: { kind: 'unavailable', reason: 'history returned HTTP 404' },
       })
       for (const status of [401, 403, 500]) {
         setStatus(status)

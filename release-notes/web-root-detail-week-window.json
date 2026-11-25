@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read root spend in the web Details pane over the last 7 days instead of the last day.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of persisted state." },
+  "schema": { "status": "none", "detail": "No database, wire or client-v0 schema changes. The relay already accepted window=7d." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Live pages now ask GET /v1/client/usage/root-detail with window=7d instead of window=1d, and Details labels the spend as reported over 7 days. Servers without the relay are unaffected." },
+  "downtime": { "status": "none", "detail": "No startup work; the refresh cadence and read bounds are unchanged." },
+  "manual": { "status": "none", "detail": "No operator action." },
+  "recovery": { "status": "none", "detail": "Revert the commit; no persistent state changes." }
+}

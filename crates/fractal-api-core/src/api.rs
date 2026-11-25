@@ -749,6 +749,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/resources/by-request/{request_id}", get(resources::show_request))
         .route("/v1/internal/resources/by-request/{request_id}/cancel", post(resources::cancel_request))
         .route("/v1/internal/native/run-request/claim", post(run_requests::claim))
+        .route(run_requests::ACKNOWLEDGE_PATH, post(run_requests::acknowledge))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The web Usage pane marks the selected quota account with an accent bar, tint and bold name, distinct from the neutral keyboard focus ring, and names whose age each staleness line reports: the quota snapshot or the selected account's own reading.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of persisted state." },
+  "schema": { "status": "none", "detail": "No database, wire or client-v0 schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Web-only styling and wording; the same data and staleness rules apply." },
+  "downtime": { "status": "none", "detail": "No startup work." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Reverting the web build restores the previous styling and wording. No persistent state changes." }
+}

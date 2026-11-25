@@ -156,6 +156,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "host-local Unix-only forwarding requires an explicitly configured run-authority session and an admitted native credential, absent from generated full-node cost stores; run_requests guards exact bound requests and closed admission, while run_fence tests actual atomic writer admission and retry receipts; this local forwarding route's transport and home-writer cost is not measured by this JSON graph cost client",
     ),
     (
+        "POST /v1/internal/native/run-request/acknowledge",
+        "host-local Unix-only durable-consumer acknowledgment requires a configured authority session and the original admitted execution/request/result, absent from generated full-node cost stores; the real light-node program fixture covers explicit durable acceptance, changed-result refusal, duplicate ACK and capacity reclamation; transport and journal acknowledgment costs are not measured by this graph cost client",
+    ),
+    (
         "GET /v1/source-blobs/{hash}",
         "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
     ),
@@ -3180,6 +3184,7 @@ fn routes_in(router: &str) -> BTreeSet<String> {
             .expect("a .route call has a path and a handler");
         let path = match path_argument.trim() {
             "crate::peer::CLIENT_READ_FORWARD_PATH" => fractal_daemon::peer::CLIENT_READ_FORWARD_PATH,
+            "run_requests::ACKNOWLEDGE_PATH" => fractal_daemon::api::run_requests::ACKNOWLEDGE_PATH,
             literal if literal.starts_with('"') && literal.ends_with('"') => {
                 literal.trim_matches('"')
             }

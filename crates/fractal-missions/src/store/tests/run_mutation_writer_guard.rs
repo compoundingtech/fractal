@@ -119,10 +119,6 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [0, 0, 0, 0, 4],
         },
         Exception {
-            reason: "apply_as_impl raw publication branch is reachable only when intent.mission_runs is empty; run mutations use the all-runs wrapper",
-            counts: [0, 0, 1, 0, 0],
-        },
-        Exception {
             reason: "ingest_client_diagnostics, fleet_hears_seats metadata, set_otlp_export_cursor and flush_overdue_usage_rollups do not decide from projected run rows",
             counts: [0, 0, 4, 0, 0],
         },

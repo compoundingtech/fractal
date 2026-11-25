@@ -4729,8 +4729,7 @@ impl Store {
                 cache_local_apply_receipt_tx(transaction,response,local_receipt,idempotency_key)
             };
         if intent.mission_runs.is_empty() {
-            self.connection.batched(apply)
-                .map_err(|error| FractalError::new("internal", error))?
+            run_fence::execute(&self.graph, None, Some(run_fence::API_TURN_BUDGET), apply)
         } else {
             self.with_all_runs_fenced(apply)
         }

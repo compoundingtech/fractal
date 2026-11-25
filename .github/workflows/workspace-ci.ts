@@ -270,7 +270,7 @@ export const fullHistoryCheckoutSteps = (checkout: Record<string, unknown> = {},
   },
 ]
 
-/** The public, read-only effect-utils cache supplies genie and other pinned effect-utils packages. */
+/** Public, credential-free reads of effect-utils packages and the main-published PTY Ghostty outputs. */
 export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 
 /** Dev/test builds without debug information or incremental state, as on the fleet runners. */
