@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Publish durable owner audits for idle-residency wake and manual-precedence gates",
+  "replay": { "status": "changed", "detail": "Owner audit processing records accepted wake messages, automatic resume boundaries and explicitly covered intervals; gaps remain unknown." },
+  "schema": { "status": "changed", "detail": "Add replicated durable system-only residency.wake-audit, residency.resume-audit and residency.audit-coverage claims." },
+  "rules": { "status": "changed", "detail": "Lost-wake certification joins wake audits to successful resume completions inside covered windows. Manual suspension cause at either automatic resume boundary is directly visible as a precedence violation." },
+  "compatibility": { "status": "changed", "detail": "Readers must recognize the new replicated claim kinds before owner audit production is enabled through fleet feature admission." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout." },
+  "manual": { "status": "none", "detail": "Existing idle-residency policy configuration is unchanged; missing audit coverage never certifies a zero-violation window." },
+  "recovery": { "status": "changed", "detail": "Retain audit-capable readers and roll forward; the existing residency rollback contract does not promise downgrade after new replicated kinds are published. Turning policy off stops new sleeps without cancelling queued wakes." }
+}

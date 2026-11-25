@@ -67,7 +67,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v45.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v46.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -85,7 +85,7 @@ fn keyed_only(kind: &str) -> bool {
 #[test]
 fn the_current_corpus_matches_the_registry() {
     assert_eq!(
-        include_str!("../../../fixtures/convergence/claims-v45.json"),
+        include_str!("../../../fixtures/convergence/claims-v46.json"),
         serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
         "regenerate the active corpus with the owning fractal-schema claim_corpus example"
     );
@@ -1231,6 +1231,9 @@ impl World {
                 "residency.eligibility-outcome" => "eligibility",
                 "residency.unrouted" => "unrouted",
                 "residency.host-sample" => "host",
+                "residency.wake-audit" => "wake-audit",
+                "residency.resume-audit" => "resume-audit",
+                "residency.audit-coverage" => "audit-coverage",
                 _ => unreachable!(),
             };
             let id = self.fresh("residency");
@@ -1240,6 +1243,12 @@ impl World {
                 let value = match name.as_str() {
                     "resume_failed" | "useless" | "short_sleep" | "refused" => json!(0),
                     "memory_coverage" => json!("unavailable"),
+                    "phase" => json!("admitted"),
+                    "observed_at" | "covered_since" | "through_at" if suffix == "audit-coverage" => json!(0),
+                    "audit_ids" => json!([]),
+                    "audit_count" => json!(0),
+                    "audit_digest" => json!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+                    "audit_complete" => json!(true),
                     _ => self.value_of(field, index),
                 };
                 fields.insert(name.clone(), value);
@@ -2521,7 +2530,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v45.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v46.json"
         }))
         .unwrap(),
     )
