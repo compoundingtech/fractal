@@ -146,6 +146,48 @@ mod input_tests {
     use super::*;
 
     #[test]
+    fn objective_goal_declarations_retain_optional_properties_and_unsupported_errors() {
+        let source = r#"version 2
+objective "example/throughput" {
+  about "Completed items per hour"
+  indicator "count" {
+    subject-prefix "custom/example/item/"
+    event "custom.example.completed" at="completed_at"
+  }
+  window "1d"
+  target "per-hour" min=10 goal=20
+}
+"#;
+        let store = Store::open_memory("test").unwrap();
+        let intent = crate::graph::parse_intent(source, "test").unwrap();
+        let plan = store.mission(&intent, IntentInput { kdl: source.into(), source_name: None }).unwrap();
+        store.apply(&intent, &plan.subject_tokens, "goal-declaration").unwrap();
+        let declaration = store.declared_objectives().unwrap().remove(0);
+        assert_eq!(declaration.objective.unwrap().targets[0].goal, Some(20.0));
+        let body: String = store.connection.lock().unwrap().query_row(
+            "SELECT body FROM desired WHERE subject='objective/example/throughput'", [],
+            |row| row.get(0),
+        ).unwrap();
+        let mut canonical: Value = serde_json::from_str(&body).unwrap();
+        let target = canonical["children"].as_array_mut().unwrap().iter_mut()
+            .find(|node| node["name"] == "target").unwrap();
+        assert_eq!(target["properties"]["goal"], 20);
+        // Model the preceding reader's unsupported optional property path without changing
+        // the replicated claim vocabulary: retain the whole declaration and its parse error.
+        let properties = target["properties"].as_object_mut().unwrap();
+        let goal = properties.remove("goal").unwrap();
+        properties.insert("future-goal".into(), goal);
+        store.connection.write().execute(
+            "UPDATE desired SET body=?1 WHERE subject='objective/example/throughput'",
+            [canonical.to_string()],
+        ).unwrap();
+        let unsupported = store.declared_objectives().unwrap().remove(0);
+        assert_eq!(unsupported.subject, declaration.subject);
+        assert_eq!(unsupported.revision, declaration.revision);
+        assert!(unsupported.objective.unwrap_err().contains("future-goal"));
+    }
+
+    #[test]
     fn history_cuts_parse_only_changed_declarations() {
         let store = Store::open_memory("test").unwrap();
         {

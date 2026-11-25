@@ -152,6 +152,26 @@ objective "factory/work-throughput" {
     expect(render(flakes)).toContain('  indicator "count" {\n    subject-prefix "custom/factory/flake/"\n    event "custom.factory.flake" at="seen_at"\n  }\n  window "24h"\n  target "per-hour" max=0.5\n')
   })
 
+  it('preserves optional display goals in target units without changing the bound', () => {
+    expect(render({ ...throughput, targets: [{ stat: 'per-hour', min: 5, goal: 20 }] }))
+      .toContain('target "per-hour" goal=20 min=5')
+    expect(render({ ...throughput, targets: [{ stat: 'per-hour', max: 5, goal: 0 }] }))
+      .toContain('target "per-hour" goal=0 max=5')
+    expect(render({ ...runs, targets: [{ stat: 'p95', within: '10m', goal: 300_000 }] }))
+      .toContain('target "p95" goal=300000 within="10m"')
+    expect(Fractal.objective({ ...throughput, targets: [{ stat: 'per-hour', min: 5, goal: 5 }] }).targets[0]?.goal).toBe(5)
+    expect(Fractal.objective(throughput).targets[0]).not.toHaveProperty('goal')
+  })
+
+  it('rejects nonnumeric, nonfinite and worse-side display goals', () => {
+    for (const goal of [4, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => Fractal.objective({ ...throughput, targets: [{ stat: 'per-hour', min: 5, goal }] })).toThrow(/goal/u)
+    }
+    expect(() => Fractal.objective({ ...throughput, targets: [{ stat: 'per-hour', max: 5, goal: 6 }] })).toThrow(/goal/u)
+    expect(() => Fractal.objective({ ...runs, targets: [{ stat: 'p95', within: '10m', goal: 600_001 }] })).toThrow(/goal/u)
+    expect(() => render({ ...throughput, targets: [{ stat: 'per-hour', min: 5, goal: '20' } as never] })).toThrow(/goal/u)
+  })
+
   it('lowers one claim as the whole sample and an only per field', () => {
     expect(render(runs)).toBe(`version 2
 objective "acme/merge-latency" {

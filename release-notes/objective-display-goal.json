@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show optional authored objective goals alongside targets in Mac Signals",
+  "replay": {"status": "none", "detail": "Goals remain in authored declaration bodies and replay with those declarations. No claim history conversion or new replay cursor is required."},
+  "schema": {"status": "changed", "detail": "Optional numeric goal on each objective target and optional numeric goal on served SLO rows. No claim kind, corpus allocation, SQLite table, index or storage version changes."},
+  "rules": {"status": "changed", "detail": "A goal must be finite and on the better side of its target, allowing equality. Goals are display-only: verdicts, burn rates, budgets, alerts and attention are unchanged. Duration goals use milliseconds."},
+  "compatibility": {"status": "changed", "detail": "Declarations without goals retain their meaning. Older evaluators that do not support goal reject the declaration as unsupported and report no-data under the existing declaration compatibility contract. Upgrade evaluators before publishing goals. Older SLO readers ignore the optional row field; newer readers accept its absence."},
+  "downtime": {"status": "none", "detail": "No service interruption or offline migration is required."},
+  "manual": {"status": "none", "detail": "Goals are optional and no goal or policy is installed by default."},
+  "recovery": {"status": "none", "detail": "Rows recompute from existing evidence and authored declarations with unchanged recovery semantics."}
+}

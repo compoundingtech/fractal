@@ -237,17 +237,56 @@ final class SignalBoardTests: XCTestCase {
     XCTAssertEqual(row("database", status: "exhausted", tone: "yellow").tone, .yellow)
   }
 
+  func testGoalDecodesOnlyWhenServedAndLeavesTheTargetVerdictAlone() throws {
+    let data = Data(#"""
+      {"as_of_unix_ms":1800000000000,"rows":[
+        {"id":"fractal/flakes","kind":"objective","about":"Flakes","target":"≤ 3","current":"2","window":"24h","status":"met","tone":"green","explain":"","goal":1},
+        {"id":"fractal/ci-critical-path/p95","kind":"objective","about":"CI","target":"≤ 20m","current":"25m","window":"24h","status":"missed","tone":"red","explain":""}
+      ]}
+      """#.utf8)
+    let rows = try JSONDecoder().decode(SloList.self, from: data).rows.map(FractalAttentionAdapter.entry)
+    XCTAssertEqual(rows[0].goal, 1)
+    XCTAssertEqual(rows[0].tone, .green, "a missed goal is not a missed target")
+    XCTAssertNil(rows[1].goal)
+  }
+
+  func testTileShowsTargetAndGoalOnlyWhenTheWorstObjectiveDeclaresAGoal() {
+    let single = signal("flakes", in: SignalBoard(rows: [
+      row("fractal/flakes", current: "2 over 24h", target: "≤ 3", goal: 1),
+    ]))
+    XCTAssertEqual(single.value, "2")
+    XCTAssertEqual(single.goalDetail, "target ≤ 3 · goal 1")
+    XCTAssertEqual(single.subtitle, "fractal/flakes")
+
+    let counted = signal("merge-latency", in: SignalBoard(rows: [
+      row("fractal/merge-latency/p50", current: "1h"),
+      row("fractal/merge-latency/p95", status: "missed", current: "5h", target: "≤ 4h", goal: 3),
+    ]))
+    XCTAssertEqual(counted.value, "1/2")
+    XCTAssertEqual(counted.goalDetail, "5h · target ≤ 4h · goal 3", "a count leads with the worst reading")
+
+    let without = signal("merge-latency", in: SignalBoard(rows: [
+      row("fractal/merge-latency/p50", current: "1h", goal: 1),
+      row("fractal/merge-latency/p95", status: "missed", current: "5h", target: "≤ 4h"),
+    ]))
+    XCTAssertNil(without.goalDetail, "only the worst objective's goal reaches the tile")
+    XCTAssertEqual(without.subtitle, "fractal/merge-latency/p95")
+
+    let spend = signal("spend", in: SignalBoard(rows: [row("codex/weekly", kind: .budget, remaining: 63, goal: 50)]))
+    XCTAssertNil(spend.goalDetail, "budgets keep their used percentage line")
+  }
+
   private func signal(_ id: String, in board: SignalBoard) -> Signal {
     board.signals.first { $0.id == id }!
   }
 
   private func row(
     _ id: String, kind: SloEntry.Kind = .objective, status: String = "met", tone: String? = nil,
-    current: String = "measured", remaining: Double? = nil
+    current: String = "measured", remaining: Double? = nil, target: String = "", goal: Double? = nil
   ) -> SloEntry {
     SloEntry(
-      id: id, kind: kind, about: "", target: "", current: current, window: "24h", status: status,
+      id: id, kind: kind, about: "", target: target, current: current, window: "24h", status: status,
       explain: "", serverTone: tone, remainingPercent: remaining, measuredAt: nil, resetsAt: nil,
-      runsOutAt: nil)
+      runsOutAt: nil, goal: goal)
   }
 }

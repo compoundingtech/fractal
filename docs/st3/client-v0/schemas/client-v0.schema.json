@@ -1861,6 +1861,7 @@
         "account": { "type": "string", "description": "A budget's declared account." },
         "about": { "type": "string" },
         "target": { "type": "string" },
+        "goal": { "type": "number", "description": "An objective's declared numeric goal; absent for budgets and older daemons." },
         "current": { "type": "string" },
         "window": { "type": "string" },
         "remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100, "description": "What is left of the error budget or allowance; null when nothing was measured." },
