@@ -7366,6 +7366,116 @@ pub fn start_native_session_discovery(state: &AppState) {
 /// How long a legacy fresh or named-cut read waits for an event-driven publication.
 const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 
+#[derive(Default)]
+struct AgentRosterWakeWork {
+    claims: std::sync::atomic::AtomicU64,
+    local_observations: std::sync::atomic::AtomicU64,
+    metadata: std::sync::atomic::AtomicU64,
+    metadata_unchanged: std::sync::atomic::AtomicU64,
+    requests: std::sync::atomic::AtomicU64,
+    delivery: std::sync::atomic::AtomicU64,
+    relayed: std::sync::atomic::AtomicU64,
+    deadlines: std::sync::atomic::AtomicU64,
+    refreshes: std::sync::atomic::AtomicU64,
+}
+
+fn agent_roster_wake_work(store: &Store) -> Value {
+    use std::sync::atomic::Ordering::Relaxed;
+    let work = store.extension::<AgentRosterWakeWork>();
+    json!({
+        "claims":work.claims.load(Relaxed),
+        "local_observations":work.local_observations.load(Relaxed),
+        "metadata":work.metadata.load(Relaxed),
+        "metadata_unchanged":work.metadata_unchanged.load(Relaxed),
+        "requests":work.requests.load(Relaxed),
+        "delivery":work.delivery.load(Relaxed),
+        "relayed":work.relayed.load(Relaxed),
+        "deadlines":work.deadlines.load(Relaxed),
+        "refreshes":work.refreshes.load(Relaxed),
+    })
+}
+
+struct AgentRosterInputs {
+    _observers: [smallclaims::sqlite::CommitObserver; 2],
+    changed: tokio::sync::watch::Receiver<u64>,
+    metadata: tokio::sync::watch::Receiver<u64>,
+}
+
+/// Commit-driven roster inputs. Advance append cursors even for irrelevant subjects so unrelated
+/// activity is inspected once, never replayed from the last published graph cut.
+fn observe_agent_roster_inputs(
+    store: &Store,
+) -> anyhow::Result<AgentRosterInputs> {
+    let (source, changed) = tokio::sync::watch::channel(0_u64);
+    // Register while holding the writer loan: no commit can fall between the initial frontier
+    // and its subscription. This loan only reads; observer evaluation never takes another loan.
+    let connection = store.connection.write();
+    let frontiers = |connection: &rusqlite::Connection| -> rusqlite::Result<(u64, u64)> {
+        Ok((
+            connection.query_row("SELECT COALESCE(MAX(store_index),0) FROM claims", [], |row| row.get(0))?,
+            connection.query_row("SELECT COALESCE(MAX(id),0) FROM local_observations", [], |row| row.get(0))?,
+        ))
+    };
+    let previous = std::sync::Mutex::new(frontiers(&connection)?);
+    let appends = {
+        let work = store.extension::<AgentRosterWakeWork>();
+        store.connection.observe_tables(&["claims", "local_observations"], move |connection| {
+            let mut previous = previous.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let result = (|| -> anyhow::Result<bool> {
+                let next = frontiers(connection)?;
+                let mut relevant = next.0 < previous.0 || next.1 < previous.1;
+                if next.0 != previous.0 {
+                    let mut statement = connection.prepare_cached(
+                        "SELECT subject FROM claims WHERE store_index>?1 AND store_index<=?2",
+                    )?;
+                    for subject in statement.query_map(rusqlite::params![previous.0, next.0], |row| row.get::<_, String>(0))? {
+                        if crate::store::agent_card_input_subject(&subject?) {
+                            relevant = true;
+                            work.claims.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+                if next.1 != previous.1 {
+                    let mut statement = connection.prepare_cached(
+                        "SELECT subject FROM local_observations WHERE id>?1 AND id<=?2",
+                    )?;
+                    for subject in statement.query_map(rusqlite::params![previous.1, next.1], |row| row.get::<_, String>(0))? {
+                        // Include harness restamps: HeardSeats reads their freshness even when
+                        // they do not change a reduced card's status or usage.
+                        if crate::store::agent_card_input_subject(&subject?) {
+                            relevant = true;
+                            work.local_observations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+                *previous = next;
+                Ok(relevant)
+            })();
+            match result {
+                Ok(false) => {}
+                Ok(true) => { source.send_modify(|revision| *revision = revision.wrapping_add(1)); }
+                Err(error) => {
+                    // Do not acknowledge a frontier whose dependencies could not be read.
+                    eprintln!("st3: agents roster input classification failed: {error:#}");
+                    source.send_modify(|revision| *revision = revision.wrapping_add(1));
+                }
+            }
+        })
+    };
+    // Metadata has no committed-key feed. Keep it separate from known card inputs so the
+    // off-writer unchanged-publication proof can avoid a fold without guessing a key whitelist.
+    let (metadata_source, metadata) = tokio::sync::watch::channel(0_u64);
+    let work = store.extension::<AgentRosterWakeWork>();
+    let metadata_observer = store.connection.observe_tables(&["meta"], move |_| {
+        work.metadata.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metadata_source.send_modify(|revision| *revision = revision.wrapping_add(1));
+    });
+    drop(connection);
+    Ok(AgentRosterInputs { _observers: [appends, metadata_observer], changed, metadata })
+}
+
 /// Keep the complete agents roster published off the request path. As the daemon starts it
 /// folds every agent's refs and the cards the largest window shows, then the rest of the cards.
 /// A roster read that misses its exact cut serves the newest publication under
@@ -7375,20 +7485,21 @@ const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 pub fn start_agent_roster(state: &AppState) {
     crate::mail_delivery_objectives::start(state);
     crate::admission_objectives::start(state);
+    let mut inputs = match observe_agent_roster_inputs(&state.store) {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            eprintln!("st3: agents roster input subscription failed: {error:#}");
+            return;
+        }
+    };
     let Some(wake) = state.store.start_agent_roster_refresher() else {
         return;
     };
     let store = state.store.clone();
-    let mut changed = state.event_notify.subscribe();
     let mut delivery = delivery_presence::subscribe_semantic();
     let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
-    let inputs = {
-        let wake = Arc::clone(&wake);
-        store.connection.observe_tables(&["claims", "local_observations", "meta"], move |_| wake.notify_one())
-    };
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
         // Subscribe before the first fold so writes during materialization remain pending.
-        let _inputs = inputs;
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
@@ -7403,7 +7514,7 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            wait_for_agent_roster_change(&store, &wake, &mut changed, &mut delivery, &mut relayed, client_now_ms()).await;
+            wait_for_agent_roster_change(&store, &wake, &mut inputs, &mut delivery, &mut relayed, client_now_ms()).await;
         }
     }));
 }
@@ -7412,30 +7523,53 @@ pub fn start_agent_roster(state: &AppState) {
 async fn wait_for_agent_roster_change(
     store: &Store,
     wake: &tokio::sync::Notify,
-    changed: &mut tokio::sync::watch::Receiver<u64>,
+    inputs: &mut AgentRosterInputs,
     delivery: &mut tokio::sync::watch::Receiver<u64>,
     relayed: &mut tokio::sync::watch::Receiver<u64>,
     now_ms: u128,
 ) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let work = store.extension::<AgentRosterWakeWork>();
+    let clock_origin = tokio::time::Instant::now();
     loop {
         let deadline = (store.agents_publication_demand() && !store.agent_roster_refresh_failed())
             .then(|| store.agents_publication()
                 .and_then(|publication| publication.valid_until_unix_ms)).flatten();
         let clock = async {
             match deadline {
-                Some(at) => tokio::time::sleep(Duration::from_millis(
+                Some(at) => tokio::time::sleep_until(clock_origin + Duration::from_millis(
                     at.saturating_sub(now_ms).min(u128::from(u64::MAX)) as u64)).await,
                 None => std::future::pending::<()>().await,
             }
         };
         tokio::select! {
-            _ = wake.notified() => {},
-            _ = changed.changed() => {},
-            _ = delivery.changed() => {},
-            _ = relayed.changed() => {},
-            _ = clock => {},
+            _ = wake.notified() => { work.requests.fetch_add(1, Relaxed); },
+            _ = inputs.changed.changed() => {},
+            _ = inputs.metadata.changed() => {
+                // Only metadata commits take this proof. Delivery, relayed freshness, real
+                // evidence deadlines and explicit fresh/cut requests must still reach the owner.
+                if store.fractal.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                    match store.read_snapshot(|index| store.published_agent_roster_unchanged_through(index, false)) {
+                        Ok(true) => {
+                            work.metadata_unchanged.fetch_add(1, Relaxed);
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => eprintln!("st3: agents roster metadata proof failed: {error:#}"),
+                    }
+                }
+            },
+            _ = delivery.changed() => { work.delivery.fetch_add(1, Relaxed); },
+            _ = relayed.changed() => { work.relayed.fetch_add(1, Relaxed); },
+            _ = clock => { work.deadlines.fetch_add(1, Relaxed); },
         }
-        if store.agents_publication_demand() { return; }
+        if store.agents_publication_demand() {
+            // One refresh captures all inputs already committed, including another notification
+            // from this same transaction. Writes during materialization remain pending.
+            inputs.changed.borrow_and_update();
+            inputs.metadata.borrow_and_update();
+            return;
+        }
     }
 }
 
@@ -7468,6 +7602,7 @@ async fn refresh_agent_roster_admitted(
     if !first && !store.agents_publication_demand() {
         return Ok(Ok(()));
     }
+    store.extension::<AgentRosterWakeWork>().refreshes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut admission = store.admit_agent_resources("refresher").await;
     if !first {
         if !store.agents_publication_demand() {

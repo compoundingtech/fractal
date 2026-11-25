@@ -209,7 +209,13 @@ mod refusal_tests {
     }
 }
 
-type IncarnationStateClocks = HashMap<String, (&'static str, u64)>;
+/// Current-roster assessments and incarnation-agnostic message views have independent clocks.
+/// A successor replaces its predecessor; this is not an incarnation history.
+#[derive(Default)]
+struct IncarnationStateClocks {
+    current: Option<(String, &'static str, u64)>,
+    unfenced: Option<(&'static str, u64)>,
+}
 
 struct Presence {
     started: Instant,
@@ -950,9 +956,23 @@ pub fn assess_current_semantic(
 }
 
 /// Forget a recipient when it leaves the roster's eligible local delivery seats.
-/// This only releases projection bookkeeping; delivery evidence remains available.
+/// Release its projection and current-incarnation clock, not delivery evidence or the independent
+/// incarnation-agnostic clock used by message views.
 pub fn forget_current_semantic(recipient: &str) {
     presence().semantic_rows.lock().expect("presence semantic rows poisoned").remove(recipient);
+    let forget = |rows: &mut HashMap<String, IncarnationStateClocks>| {
+        if let Some(clocks) = rows.get_mut(recipient) {
+            clocks.current = None;
+            if clocks.unfenced.is_none() { rows.remove(recipient); }
+        }
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    uptime_pin::CLOCKS.with_borrow(|clocks| {
+        if let Some(clocks) = clocks {
+            forget(&mut clocks.lock().expect("test assessment clocks poisoned"));
+        }
+    });
+    if let Ok(mut rows) = presence().state_since.lock() { forget(&mut rows); }
 }
 
 
@@ -1079,17 +1099,30 @@ fn assess_selected_mode(
     (assessment, deadline)
 }
 
-/// When this incarnation's assessments entered `state`, restarting the clock when the state changes.
+/// When this assessment entered `state`. Keep only the current explicit incarnation and the
+/// independent incarnation-agnostic message-view clock; successor reads discard predecessor state.
 fn state_since(presence: &Presence, recipient: &str, incarnation: &str, state: &'static str) -> Option<u64> {
     let record = |rows: &mut HashMap<String, IncarnationStateClocks>| {
-        if !rows.contains_key(recipient) { rows.insert(recipient.into(), HashMap::new()); }
-        let incarnations = rows.get_mut(recipient).expect("inserted seat");
-        if !incarnations.contains_key(incarnation) {
-            incarnations.insert(incarnation.into(), (state, unix_ms()));
+        if !rows.contains_key(recipient) {
+            rows.insert(recipient.into(), IncarnationStateClocks::default());
         }
-        let row = incarnations.get_mut(incarnation).expect("inserted incarnation");
-        if row.0 != state { *row = (state, unix_ms()); }
-        row.1
+        let clocks = rows.get_mut(recipient).expect("inserted seat clocks");
+        if incarnation.is_empty() {
+            let clock = clocks.unfenced.get_or_insert_with(|| (state, unix_ms()));
+            if clock.0 != state { *clock = (state, unix_ms()); }
+            clock.1
+        } else {
+            let clock = clocks.current.get_or_insert_with(|| (incarnation.into(), state, unix_ms()));
+            if clock.0 != incarnation {
+                incarnation.clone_into(&mut clock.0);
+                clock.1 = state;
+                clock.2 = unix_ms();
+            } else if clock.1 != state {
+                clock.1 = state;
+                clock.2 = unix_ms();
+            }
+            clock.2
+        }
     };
     #[cfg(any(test, feature = "test-support"))]
     if let Some(since) = uptime_pin::CLOCKS.with_borrow(|clocks| clocks.as_ref()
@@ -1309,6 +1342,59 @@ mod semantic_tests {
         assert!(!presence().semantic_rows.lock().unwrap().contains_key(subject));
         assert_eq!(assess_current_semantic(subject, "omp", None).revision, 1);
         forget_current_semantic(subject);
+    }
+
+    #[test]
+    fn production_state_clocks_are_bounded_by_current_recipients_not_restart_history() {
+        // Do not pin uptime: this regression must exercise the process-wide production clocks.
+        let prefix = "agent/semantic/production-clock-retention-";
+        let message_subject = format!("{prefix}messages");
+        let message_since = state_since(presence(), &message_subject, "", "stale");
+        for recipient in 0..32 {
+            let subject = format!("{prefix}{recipient}");
+            for restart in 0..256 {
+                let incarnation = format!("restart-{restart}");
+                assess_current_semantic(&subject, "omp", Some(&incarnation));
+                // Incarnation-agnostic message reads must not replace the current roster clock.
+                assert_eq!(state_since(presence(), &message_subject, "", "stale"), message_since);
+                let clocks = presence().state_since.lock().unwrap();
+                let row = &clocks[&subject];
+                assert_eq!(row.current.as_ref().unwrap().0, incarnation);
+                assert!(row.unfenced.is_none());
+                assert_eq!(clocks.keys().filter(|id| id.starts_with(prefix)).count(), 2);
+            }
+            forget_current_semantic(&subject);
+            assert!(!presence().state_since.lock().unwrap().contains_key(&subject));
+            assert!(!presence().semantic_rows.lock().unwrap().contains_key(&subject));
+        }
+        // A live message-view clock belongs to delivery evidence, not roster membership.
+        assess_current_semantic(&message_subject, "omp", Some("current"));
+        forget_current_semantic(&message_subject);
+        let clocks = presence().state_since.lock().unwrap();
+        let row = &clocks[&message_subject];
+        assert!(row.current.is_none());
+        assert_eq!(row.unfenced, Some(("stale", message_since.unwrap())));
+        drop(clocks);
+        assert_eq!(state_since(presence(), &message_subject, "", "stale"), message_since);
+    }
+
+    #[test]
+    fn pinned_state_clocks_follow_the_same_current_incarnation_and_retirement_contract() {
+        let subject = "agent/semantic/pinned-clock-retention";
+        let _pin = uptime_pin::pin(STARTUP_GRACE * 2);
+        for restart in 0..256 {
+            let incarnation = format!("restart-{restart}");
+            assess_current_semantic(subject, "omp", Some(&incarnation));
+            uptime_pin::CLOCKS.with_borrow(|clocks| {
+                let clocks = clocks.as_ref().unwrap().lock().unwrap();
+                assert_eq!(clocks.len(), 1);
+                assert_eq!(clocks[subject].current.as_ref().unwrap().0, incarnation);
+            });
+        }
+        forget_current_semantic(subject);
+        uptime_pin::CLOCKS.with_borrow(|clocks| {
+            assert!(clocks.as_ref().unwrap().lock().unwrap().is_empty());
+        });
     }
 
     fn ready(subject: &str, driver: &str, channel_age: Option<u64>) {

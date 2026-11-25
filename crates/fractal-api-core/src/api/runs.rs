@@ -352,6 +352,7 @@ pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
     report["file_watch_work"] = crate::incremental::file_watch_work::snapshot();
     report["agent_roster_work"] = state.store.agent_roster_work();
     report["agent_roster_presentation_work"] = super::roster_presentation::work(&state.store);
+    report["agent_roster_wake_work"] = super::agent_roster_wake_work(&state.store);
     report["summary_work"] = state.store.summary_work();
     let attention = state.store.attention_list_folds();
     report["attention_work"] = json!({

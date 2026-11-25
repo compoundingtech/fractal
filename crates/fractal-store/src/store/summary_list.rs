@@ -48,6 +48,7 @@ pub struct SummaryWork {
     pub mission_subject_rebuilds: u64,
     pub agent_subject_rebuilds: u64,
     pub machine_subject_rebuilds: u64,
+    pub machine_membership_rebuilds: u64,
     pub attention_subject_rebuilds: u64,
 }
 
