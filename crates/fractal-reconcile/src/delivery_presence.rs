@@ -224,7 +224,7 @@ struct Presence {
     /// Attachment-push title streams waiting on a subject, one sender per watched subject.
     watchers: Mutex<HashMap<String, watch::Sender<u64>>>,
     semantic_watch: watch::Sender<u64>,
-    semantic_rows: Mutex<HashMap<String, Vec<SemanticRow>>>,
+    semantic_rows: Mutex<HashMap<String, SemanticRow>>,
     /// The title binding of each live stream that has been sent an attachment frame.
     pushed: Mutex<HashMap<String, crate::mailbox::Fence>>,
 }
@@ -922,24 +922,22 @@ pub fn assess_current_semantic(
     }
     let mut rows = presence().semantic_rows.lock().expect("presence semantic rows poisoned");
     if !rows.contains_key(recipient) {
-        rows.insert(recipient.to_owned(), Vec::new());
-    }
-    let rows = rows.get_mut(recipient).expect("inserted semantic subject");
-    let row = if let Some(index) = rows.iter().position(|row|
-        row.driver == driver && row.incarnation.as_deref() == incarnation)
-    {
-        &mut rows[index]
-    } else {
-        rows.push(SemanticRow {
+        rows.insert(recipient.to_owned(), SemanticRow {
             driver: driver.into(),
             incarnation: incarnation.map(str::to_owned),
             assessment: assessment.clone(),
             push,
             revision: 1,
         });
-        rows.last_mut().expect("inserted semantic assessment")
-    };
-    if row.assessment != assessment || row.push != push {
+    }
+    let row = rows.get_mut(recipient).expect("inserted semantic subject");
+    if row.driver != driver || row.incarnation.as_deref() != incarnation
+        || row.assessment != assessment || row.push != push
+    {
+        if row.driver != driver { driver.clone_into(&mut row.driver); }
+        if row.incarnation.as_deref() != incarnation {
+            row.incarnation = incarnation.map(str::to_owned);
+        }
         row.assessment = assessment.clone();
         row.push = push;
         row.revision = row.revision.wrapping_add(1);
@@ -949,6 +947,12 @@ pub fn assess_current_semantic(
             .as_nanos().div_ceil(1_000_000))
             .unwrap_or(u64::MAX)));
     SemanticAssessment { assessment, revision: row.revision, next_deadline_ms }
+}
+
+/// Forget a recipient when it leaves the roster's eligible local delivery seats.
+/// This only releases projection bookkeeping; delivery evidence remains available.
+pub fn forget_current_semantic(recipient: &str) {
+    presence().semantic_rows.lock().expect("presence semantic rows poisoned").remove(recipient);
 }
 
 
@@ -1279,6 +1283,33 @@ pub fn claude_channel_proof_pending(store: &crate::store::Store, subject: &str, 
 #[cfg(test)]
 mod semantic_tests {
     use super::*;
+
+    #[test]
+    fn restart_churn_replaces_semantic_rows_and_retirement_removes_them() {
+        let subject = "agent/semantic/restart-retirement";
+        let _pin = uptime_pin::pin(STARTUP_GRACE * 2);
+        let mut revision = None;
+        for restart in 0..256 {
+            let incarnation = format!("restart-{restart}");
+            let driver = if restart % 2 == 0 { "omp" } else { "claude" };
+            let current = assess_current_semantic(subject, driver, Some(&incarnation));
+            if let Some(previous) = revision {
+                assert_ne!(current.revision, previous);
+            }
+            revision = Some(current.revision);
+            assert_eq!(assess_current_semantic(subject, driver, Some(&incarnation)).revision,
+                current.revision);
+            let rows = presence().semantic_rows.lock().unwrap();
+            let row = rows.get(subject).unwrap();
+            assert_eq!(row.driver, driver);
+            assert_eq!(row.incarnation.as_deref(), Some(incarnation.as_str()));
+            assert_eq!(rows.keys().filter(|recipient| recipient.as_str() == subject).count(), 1);
+        }
+        forget_current_semantic(subject);
+        assert!(!presence().semantic_rows.lock().unwrap().contains_key(subject));
+        assert_eq!(assess_current_semantic(subject, "omp", None).revision, 1);
+        forget_current_semantic(subject);
+    }
 
     fn ready(subject: &str, driver: &str, channel_age: Option<u64>) {
         let fence = crate::mailbox::Fence::new(subject, "current", "delivery");
