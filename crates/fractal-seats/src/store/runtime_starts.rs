@@ -1004,7 +1004,7 @@ impl RuntimeStartsStore for Store {
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
             fractal_store::store::local_sessions::admit_capacity(tx, Some(id))?;
-            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h9cfcb3ca5088 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,body=json_set(body,'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','before-backend')) WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h9cfcb3ca5088 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,body=json_set(body,'$.custody_reserved',json('true'),'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','before-backend')) WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
@@ -1014,7 +1014,7 @@ impl RuntimeStartsStore for Store {
             fractal_store::store::local_sessions::admit_capacity(tx, Some(id))?;
             let changed = tx.execute(
                 /* sqlite-large-value: allow-for-now lv-h32881e5b0f45 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */
-                "UPDATE local_runtime_starts SET body=json_set(body,'$.backend_entry.phase','backend-entering')
+                "UPDATE local_runtime_starts SET body=json_set(body,'$.custody_reserved',json('true'),'$.backend_entry.phase','backend-entering')
                  WHERE id=?1 AND owner=?2 AND dispatched=1 AND finished=0 AND revoked_by IS NULL
                    AND json_extract(body,'$.backend_entry.version')=1
                    AND json_extract(body,'$.backend_entry.operation')=id
@@ -1400,6 +1400,25 @@ mod tests {
     use fractal_missions::MissionsStore;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+
+    #[test]
+    fn legacy_successful_starts_without_custody_do_not_exhaust_upgrade_capacity() {
+        let store = Store::open_memory("node").unwrap();
+        store.connection.write().execute_batch(
+            "WITH RECURSIVE starts(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM starts WHERE n<5000)
+             INSERT INTO local_runtime_starts
+                (id,subject,owner,body,finished,result,applied,dispatched,receipted)
+             SELECT 'legacy-'||n,'agent/legacy/'||n,'old-owner','{}',1,
+                '{\"verification\":\"operation-incarnation\",\"incarnation\":\"old-generation\"}',1,1,1
+             FROM starts").unwrap();
+        let custody_rows: u64 = store.readers.get().query_row(
+            "SELECT count(*) FROM local_session_custody", [], |row| row.get(0)).unwrap();
+        assert_eq!(custody_rows, 0);
+        let mut start = operation("after-upgrade", "agent/after-upgrade", None);
+        assert_eq!(store.admit_runtime_start(&mut start, 2).unwrap(), RuntimeStartAdmission::Admitted);
+        assert!(store.dispatch_runtime_start(&start.id, 2).unwrap());
+        store.enter_runtime_start_backend(&start.id, &start.owner).unwrap();
+    }
 
     #[test]
     fn custody_capacity_is_reserved_before_backend_entry() {

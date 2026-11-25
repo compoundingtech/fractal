@@ -79,6 +79,8 @@ fn retain_bound_start_reservations(connection: &Connection) -> Result<()> {
 /// Admit one unsettled custody slot under the exclusive writer, before native entry.
 /// Every start-operation kind must count its unsettled reservations here. Local
 /// dispatched producers reserve capacity until binding or proven producer closure.
+/// Completed legacy successful producers never reserved custody. Legacy unfinished
+/// or unverified producers remain conservative reservations until recovered.
 pub fn admit_capacity(connection: &Connection, operation: Option<&str>) -> Result<()> {
     // Backfill retained bindings before reclamation, including pre-marker starts.
     retain_bound_start_reservations(connection)?;
@@ -95,6 +97,8 @@ pub fn admit_capacity(connection: &Connection, operation: Option<&str>) -> Resul
           + (SELECT count(*) FROM local_runtime_starts AS starts
              WHERE dispatched=1 AND (?1 IS NULL OR id<>?1)
                AND json_extract(body,'$.custody_bound') IS NOT 1
+               AND (json_extract(body,'$.custody_reserved')=1 OR finished=0
+                    OR json_extract(result,'$.verification') IS NOT 'operation-incarnation')
                AND (finished=0 OR (cleanup_verified=0
                     AND json_extract(result,'$.producer_closed') IS NOT 1))
                AND NOT EXISTS(SELECT 1 FROM local_session_custody AS custody
@@ -242,6 +246,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_inflight_and_unverified_producers_still_reserve_capacity() {
+        for finished in [0, 1] {
+            let store = Store::open_memory("executor").unwrap();
+            store.connection.write().execute(
+                "WITH RECURSIVE starts(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM starts WHERE n<4096)
+                 INSERT INTO local_runtime_starts(id,subject,owner,body,finished,result,dispatched)
+                 SELECT 'inflight-'||n,'agent/inflight/'||n,'old-owner','{}',?1,
+                    '{\"verification\":\"launch-accepted-unverified\"}',1 FROM starts",
+                [finished]).unwrap();
+            let error = admit_capacity(&store.connection.write(), None).unwrap_err();
+            assert!(error.downcast_ref::<SessionCustodyCapacityReached>().is_some(),
+                "legacy unresolved producers must not lose their reservation on upgrade");
+        }
+    }
+
+    #[test]
     fn natural_exit_settlement_racing_stop_preserves_exact_retirement_proof() {
         let store = Store::open_memory("executor").unwrap();
         let binding = LocalSession {
@@ -293,7 +313,7 @@ mod tests {
             store.connection.write().execute(
                 "INSERT INTO local_runtime_starts
                     (id,subject,owner,body,finished,result,applied,dispatched,receipted)
-                 VALUES(?1,?2,'owner','{}',1,'{\"verification\":\"operation-incarnation\"}',1,1,1)",
+                 VALUES(?1,?2,'owner','{\"custody_reserved\":true}',1,'{\"verification\":\"operation-incarnation\"}',1,1,1)",
                 params![operation, binding.subject]).unwrap();
             binding.start_operation = Some(operation);
             store.bind_local_session(&binding).unwrap();
