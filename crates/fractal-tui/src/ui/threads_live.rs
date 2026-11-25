@@ -3520,6 +3520,7 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str, base: usize) -> Doc {
         lines: doc.lines,
         messages: Vec::new(),
         entries: doc.entries,
+        copy_blocks: doc.copy_blocks,
         targets,
     }
 }
