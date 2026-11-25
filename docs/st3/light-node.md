@@ -261,7 +261,8 @@ retained files are never permission-repaired or truncated. State and native root
 require physical absolute paths: every ancestor must be a real directory owned by
 the executing user or root; group/other writes are allowed only on sticky
 directories. Even owned ancestor symlink aliases are refused; provision the
-resolved physical path instead. State ancestry is checked before and after
+resolved physical path instead, without repeated/trailing separators or `.`/`..`
+components. State ancestry is checked before and after
 recursive creation, so a missing prefix beneath a sticky directory cannot redirect
 later journal, lock, socket or native opens into another user's mutable namespace.
 An exclusive directory process lock prevents a second agent from

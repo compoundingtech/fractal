@@ -392,6 +392,35 @@ mod unix {
     }
 
     #[test]
+    fn custody_rejects_final_alias_trailing_separator_and_dot_spellings() {
+        for suffix in ["/", "///", "/.", "/./"] {
+            for kind in ["state", "native", "pty"] {
+                let mut fixture = Fixture::new();
+                let parent = fixture.config_path.parent().unwrap().join("replaceable-target");
+                fs::create_dir(&parent).unwrap();
+                chmod(&parent, 0o777);
+                let leaf = parent.join("private");
+                fs::create_dir(&leaf).unwrap();
+                chmod(&leaf, 0o700);
+                let alias = fixture.config_path.parent().unwrap().join("alias");
+                symlink(&leaf, &alias).unwrap();
+                let mut spelling = alias.into_os_string();
+                spelling.push(suffix);
+                let spelling = PathBuf::from(spelling);
+                match kind {
+                    "state" => fixture.config.state_dir = spelling,
+                    "native" => fixture.config.native_state_dir = spelling,
+                    _ => fixture.config.pty_root = spelling,
+                }
+                fixture.startup_failure("custody directory requires physical path spelling");
+                assert_eq!(fs::read_dir(&leaf).unwrap().count(), 0);
+                assert_eq!(mode(&leaf), 0o700);
+                assert_eq!(mode(&parent), 0o777);
+            }
+        }
+    }
+
+    #[test]
     fn owned_sticky_ancestors_allow_new_private_state_and_existing_native_roots() {
         let mut fixture = Fixture::new();
         let sticky = fixture.config_path.parent().unwrap().join("sticky");

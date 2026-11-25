@@ -142,8 +142,14 @@ pub fn private_state_file(path: &Path) -> Result<File> {
 /// containing another user's mutable symlink or directory.
 #[cfg(unix)]
 fn require_trusted_ancestors(path: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
     ensure!(path.is_absolute(), "custody directory must be absolute");
+    // lstat("alias/") follows the alias, while Path::ancestors skips its lexical
+    // component. Reject ambiguous spellings rather than checking a different path.
+    let bytes = path.as_os_str().as_bytes();
+    ensure!(bytes == b"/" || bytes.split(|byte| *byte == b'/').skip(1)
+        .all(|part| !part.is_empty() && part != b"." && part != b".."),
+        "custody directory requires physical path spelling without repeated/trailing separators or dot components");
     let uid = effective_uid();
     for ancestor in path.ancestors().skip(1) {
         let metadata = match std::fs::symlink_metadata(ancestor) {
