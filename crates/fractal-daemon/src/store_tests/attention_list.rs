@@ -1228,7 +1228,7 @@ fn a_future_prompt_is_invalidated_by_runtime_stop_before_admission() {
     store.set_write_clock_at(admission).unwrap();
     {
         // Claim acceptance time alone does not date a prompt: its observed opening does.
-        let _clock = crate::store::work_summaries_ivm::tests_shared_seats::freeze(admission);
+        let _clock = fractal_store::store::work_summaries_ivm::tests_shared_seats::freeze(admission);
         store.append_claim(&input(seat, "harness.observed", Some(seat),
             json!({"state":"working","driver":"claude","incarnation_id":"one",
                 "blocked_on":"human","ask":"permission","reason":"Bash",
