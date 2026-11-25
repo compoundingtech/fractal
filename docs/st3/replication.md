@@ -154,7 +154,7 @@ it supplies no generation witness and cannot authorize a same-UID process.
 Unreadable same-UID processes, unknown ownership, exited or changed processes fail closed.
 A completed same-UID walk without any identity variable is a person.
 On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
-Failed inspection denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER`
+Failed inspection denies backup/proof exports, attributed internal routes, `LOCAL_PERSON_HEADER`
 sessions and actor/requester body impersonation; it does not deny every public request.
 The same macOS PID-reuse residual risk applies to this ancestry inspection.
 
@@ -165,8 +165,17 @@ Operator fleet routes retain their existing local authority boundary.
 
 
 Adapters that retain a departing member's transport must instead make their
-decision from one `GET /v1/internal/fleet/leave-state` response:
+decision from one `GET /v1/internal/fleet/leave-state` response.
 
+This read-only snapshot requires only local same-UID access, not an agent identity.
+An unreadable ancestor does not refuse this GET/HEAD read; person headers still require
+verified attribution, and identified agent/run callers remain excluded from internal
+routes. No service-manager environment exception or companion credential is needed.
+If the snapshot read fails (including HTTP 422), the Fabric adapter records an error
+status and tries again after its configured interval without contacting Fabric or
+changing existing grants. Grants therefore remain stale until a read succeeds.
+
+Snapshot shape:
 ```json
 {
   "fleet_id": "fleet-id",
@@ -225,6 +234,76 @@ leave list. Polling never imports claims, writes the journal, refreshes membersh
 selects a confirmer, starts grace, or changes transport policy. External adapters
 own transport-policy reconciliation; neither daemon nor worker reconciles Fabric
 runtime peers.
+
+## Store-scoped revision subscriptions
+
+Workers wait on the daemon's `POST /v1/internal/replication/revision` endpoint,
+or `/v1/internal/replication/shard/{shard}/revision` for a shard. Requests select
+`kind: "authority"` or `kind: "membership"` and provide `after: null` for an
+initial snapshot, then the previous cursor to wait for a change. A cursor contains
+an `epoch` and `generation`; authority snapshots also contain `authority_root`.
+A new daemon epoch returns immediately, including after a restart.
+
+Each store owns separate authority and membership observers. Registering a wait
+precedes checking its cursor, so a change during subscription cannot be lost.
+Authority roots are read against a stable revision before the snapshot is
+returned. The worker updates its root witness before waking peer dialers, and
+compares it locally with authenticated inbound exchange evidence. Unrelated
+notifications require neither an authority-guard request nor a membership read.
+Membership refreshes follow the membership subscription; direct leave and
+signature-protection decisions retain their explicit fresh-authority reads.
+
+Unsealed local batches are authority inputs: a local append wakes the snapshot
+that seals its envelope, rather than waiting for an envelope to already exist.
+Shard discovery separately waits at
+`POST /v1/internal/replication/shard/{shard}/peers/revision`, using a null initial
+cursor or its previous cursor as the body. Its cursor follows admitted
+`daemon.started` advertisements and fleet membership, not merely envelope receipt.
+Receipt before admission therefore cannot consume the only discovery wake.
+
+The performance report exposes `replication/authority-revision` and
+`replication/membership-revision` observer counts, `replication/authority-wait` and
+`replication/membership-wait` subscription work, `replication/authority-root-read`
+snapshot work, and `replication/membership-read` fleet-view work. Discovery exposes
+`replication/discovery-revision` and `replication/discovery-wait`.
+
+## Root-first peer exchanges
+
+Peers advertise `root-first-v1` in inventory capabilities. A root-only probe also
+carries `root-summary-v1`, distinguishing a deliberately omitted bucket list from
+an ordinary inventory. Matching peers exchange roots and control metadata without
+constructing or serializing the full bucket summary. A differing root answers with
+bucket proofs and a bounded listing of complete ranges, prioritizing ranges with
+live payloads over checkpoint-only ranges. Omitted probe proofs mean unknown
+ranges, not empty ones: the responder does not send speculative payloads.
+
+The initiator uses those listings to push the reverse difference in its second
+request, alongside its own bounded range listings; the second answer pulls the
+remaining envelopes. Thus gaps within already-shared live ranges converge in one
+compact round (two requests when they fit the existing bounds), even with
+unsettled checkpoint lineages. Larger differences rotate listings across rounds.
+Modern root-first exchanges, including empty stores with no buckets, never request
+a whole identity inventory. Compact answers carry `range-proofs-v1`, marking their
+bucket list as complete even when empty. This distinguishes an empty range answer
+from an ordinary empty complete-identity request, which still receives every
+identity, including tombstones. A root-summary marker instead means its absent
+ranges are unknown. The range-proofs marker describes the message, not a peer
+capability, and is interpreted only with root-first support.
+
+Advertising root-first support does not reinterpret an ordinary complete identity
+inventory as bucket proofs. Such requests still receive complete identity answers,
+and their known identities are not reoffered. Both compact and complete-inventory
+payload pages carry the writer signatures of the claims in their envelopes.
+
+An older peer that does not advertise `root-first-v1` receives a full-summary
+exchange before reconciliation continues. An older peer's ordinary request also
+keeps its existing full-summary response. This is protocol capability negotiation,
+not a fallback for local export failures. Mixed-version fleets do not require a
+simultaneous upgrade.
+
+The existing `/v1/performance` request work counts distinguish
+`replication/root-summary` from `replication/full-summary`, including difference
+exports in the latter.
 
 ## Sync invariants
 
@@ -577,6 +656,37 @@ decoded, the set takes roughly twice its payload, plus its structures. The compa
 millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
 stored-state reads and writes still grow with the envelope's claims and bytes.
 
+An out-of-order claim on an already prepared resource subject inserts only its immutable
+canonical sort key during admission. It marks preparation stale and queues the existing
+paged deferred fold instead of rebuilding the subject's entire history inside COMMIT.
+New arrivals reset a staged cursor only when their key is at or before its folded prefix;
+later keys preserve progress. A persisted round-robin cursor prevents restarted subjects
+from starving peers. After four prefix resets, the subject is prioritized for a complete
+paced rebuild; envelopes touching it wait retryably, without quarantine or receive errors.
+All claims in a held envelope wait together, including unrelated subjects in that envelope;
+other envelopes and peers remain eligible. Later envelopes touching the capped subject
+also wait for the prioritized rebuild, without a handler-error retry backoff.
+The cap clears only on complete publication, and emits one diagnostic per episode.
+Publication advances a persisted admission-wake generation in the same commit. A local
+commit observer schedules admission, repair and projection after the writer returns;
+held envelopes therefore resume even in a quiet fleet with no new receive or resend.
+The local worker also checks at startup, covering an interruption between publication and wake.
+If catch-up throttles projection after re-admission, the worker schedules a continuation at
+the throttle deadline even without new traffic. It releases the store while waiting and
+notifies readers only after projection succeeds; the catch-up throttle remains in force.
+Query-only readers
+use the canonical snapshot fold until publication; writer-context reads report
+`resource-preparation-not-caught-up` rather than doing that unbounded fallback.
+Envelope admission remains atomic, including its source rows and stale marker.
+The deferred worker publishes the complete observation only after its indexed walk finishes.
+Preparation cache version 2 adopts complete version-1 rows without a history rebuild;
+an older binary sees the version change and rebuilds before serving its readers.
+After a writer loan returns, the shared writer scheduler queues paced preparation loans,
+including work created by local commits. Foreground operations do not wait for an ever-growing
+queue to empty. On-disk stores also schedule persisted stale marks at startup, even without
+checkpointing or a new replication receive.
+
+
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
 envelope hash commits its original payload and chain metadata. Thus members holding the same
@@ -680,8 +790,7 @@ only when inventories and claim registries agree, no claims wait for a newer bui
 is current and local committed batches are sealed. Old peers omit `projection_digests`;
 exchanges then compare their unchanged six-table compatibility hash. Old peers cannot
 verify full projection coverage. Modern peers compare complete maps. The transactional digest machinery derives creation/change dates from claim facts.
-New writer connections must register the projection functions, including isolated
-checkpoint proof connections.
+New writer connections must register the projection functions.
 
 The indexed `resource_observations` projection participates in the complete shared table digest
 and canonical replay audit. The projection version identifying its layout is included in the
@@ -879,12 +988,38 @@ detects PID reuse on Linux; other platforms retain the runtime's PID-based token
 The check also detects a daemon-only upgrade while the reporting worker keeps running.
 
 A local graph change writes `replication.wake`. The worker watches only this file, not the SQLite files.
+Filesystem events are coalesced **before** shared fan-out to graph, messages-shard and
+membership followers: the leading wake is immediate, followed by at most one broadcast
+per second while events continue. The final event is retained for the trailing broadcast.
+Authority guard reads also have a one-second minimum gap, including re-entry caused by
+inbound or route notifications. A local wake is announced at most one second after its
+write. Scheduling delay can approach two seconds: the one-second pacer plus the existing
+one-second no-movement window, followed by the round's execution time. Movement still
+drains immediately and failure/overload scheduling is unchanged.
+`st.replication.wakes{stage="raw"}` counts filesystem events and `stage="paced"` counts
+shared broadcasts, exposing wake amplification separately from completed round rates.
 
 The worker coalesces wake bursts for one second, so new authority, such as a mission publish, reaches every peer within seconds. An exchange that stored new envelopes on either side runs again at once until a backlog drains. An exchange that stored nothing new waits for the next wake, even if it carried envelopes the other side already held.
 
-The worker also runs a 30-second anti-entropy exchange. A recent inbound exchange suppresses
-a redundant connection in the opposite direction; local graph changes still request a prompt
-push. Failed attempts back off exponentially from one second through minutes to one hour, with 20 percent
+The worker's anti-entropy interval starts at 30 seconds and doubles after consecutive
+`in_sync` rounds, up to 10 minutes, independently for each store, peer and shard dialer.
+Movement resets it and drains the backlog immediately. A local wake, a new inbound exchange
+from that peer, changed routes or local connectivity also resets the idle sequence.
+`ST3_REPLICATION_IDLE_MAX_MS` raises or lowers the ceiling (30,000–3,600,000 ms;
+default 600,000). `ST3_WORKER_INTERVAL_MS` retains its cap-only meaning and can shorten
+these waits. Worker status reports the next idle deadline; `st.replication.rounds` retains
+its `peer` and `outcome` labels for comparing `in_sync` and `moved` round rates.
+A remote-only change, or a change whose notification is missed, can now wait up to the
+idle maximum: 600 seconds by default, or 3,600 seconds when raised, versus 30 seconds
+previously. This increased anti-entropy latency is an accepted tradeoff for reducing idle I/O.
+On worker return the filesystem watcher is dropped and one final dirty generation is
+queued, covering kernel events that watcher retirement may discard before delivery.
+The pacer gets up to two seconds to drain that generation and generations already
+delivered by the watcher. If its backend retains a raw producer, timeout aborts the
+pacer and logs one warning, preserving the original worker error so supervision can restart it.
+A recent inbound exchange suppresses a redundant connection in the opposite direction;
+local graph changes still request a prompt push. Failed attempts back off exponentially
+from one second through minutes to one hour, with 20 percent
 jitter. Graph wakes do not reset failure backoff. An authenticated inbound request, a successful
 peer request, a change to the member's routes, or a local connectivity change interrupts it
 immediately, including activity received while an outbound request is still failing. Peer
@@ -971,7 +1106,7 @@ Local store operations run on blocking threads so their disk waits cannot block 
 New callers poll the identical signed body after authenticated overload, for at most 60 HTTP
 attempts or five minutes per logical request, whichever comes first. Exhausting this budget
 enters visible backoff for an alive peer. The compact algorithm has at most two logical signed
-exchange phases; overload polls are additional HTTP attempts inside each phase. Checkpoint manifest paging and local daemon operations keep their separate limits.
+exchange phases; overload polls are additional HTTP attempts inside each phase. Local daemon operations keep their separate limits.
 Ordinary successful exchange payloads, inventory proofs and the peer API version are unchanged.
 Older callers understand the existing signed non-success response envelope and safely retry
 with their existing failure policy; overload polling and the shorter alive-peer retry policy
@@ -1015,7 +1150,10 @@ When the claims differ and an exchange moved no envelopes, the dialing worker wa
 
 Between members that trim locally (`[trim] local`), the summary also carries `retired`: the same summary of the claim IDs the sender retired (`retired_claim_ids`, namespace 1 of the range index), sent only once that namespace has folded. A member that also trims locally compares it, and the walk descends the retired ranges beside the retained ones, in the same queries (`claim_range_query.retired`). A retired ID the peer lists and this member lacks is recorded as retired here when the answer arrives; nothing is fetched. So the set travels: a member never admits, asks for or serves a claim another member deleted, even when the claim comes from a member that still holds it or runs an older build. Recording one changes this member's retired digest, so an unfinished retired walk continues under the new pair. Ordinary members and older builds neither send nor read `retired`.
 
-Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
+Each member trims on its own, so two members' inventories can differ by payloadless tombstones
+and retired envelopes (listed as held without payload) for as long as one holds an envelope the
+other deleted. Ranges that differ only by such payloadless identities never settle by envelope
+transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
 exchanges list every differing range within the 512-identity listing. A store counts answers
@@ -1032,10 +1170,9 @@ only once every member runs this build: an older member answers this build's req
 its first differing ranges in order, and this build no longer falls back to a full inventory
 when that listing stops on tombstone ranges. The large answers also stop once every member runs
 this build. A pair of members with only tombstone differences reports no
-progress, so the worker rests rather than loops. Importing older or losing checkpoint lineages
-remains separate ([#1433](https://github.com/compoundingtech/fractal/issues/1433),
-[#1052](https://github.com/compoundingtech/fractal/issues/1052)); live-envelope convergence
-does not assert equal tombstone inventories.
+progress, so the worker rests rather than loops. No member imports another's tombstones: what
+one member deleted reaches the others as retired claim IDs (above), and live-envelope
+convergence does not assert equal tombstone inventories.
 
 `sync::worker::tests::checkpoint_tombstones_do_not_starve_later_live_ranges` proves later notes
 transfer in both directions behind differing tombstone ranges in one compact round, that no
@@ -1066,6 +1203,20 @@ Each receiver derives projections locally from the admitted claims.
 4. Reconciliation changes local runtimes from the last good graph.
 
 An unknown or invalid record stays in `replica_records`. It does not block a valid sibling or a later envelope.
+
+A valid record keeps its row (state, claim, position and repair link) but no bytes: its claim is
+in `claims`, its position in `claim_positions` and its signed encoding in the envelope's payload,
+and nothing reads a valid record's `raw` again. Admission and sealing store an empty `raw` for a
+valid record. After an upgrade the daemon empties the bytes older builds kept, a page per writer
+batch (at most 512 records read and 10 ms of updates before the commit, which can take longer
+while a WAL checkpoint runs), committing a cursor so a restart resumes, and then gives the freed
+pages back to the filesystem 128 at a time (`record_bytes.rs`). The cursor stays after the pass
+finishes, so each start reads only the records added since, and empties those an older build
+wrote with bytes after a rollback. Triggers on `replica_records` that fire on an update list every
+column but `raw`, so emptying the bytes queues no projection work. Only a record that was never
+admitted as valid keeps its bytes; a valid record a repair replaces, or one marked invalid with its
+envelope, keeps the empty `raw`. An older build runs the store unchanged: it finds every row it
+reads, and it writes the bytes of the records it admits itself.
 
 Admission commits once per pass over the pending envelopes, so one disk flush covers an exchange. Each envelope is admitted in its own savepoint, so an invalid one is rolled back and recorded alone.
 
@@ -1171,16 +1322,15 @@ and restart without requiring a full-store replay for the work action.
 The extension correction uses checkpoint rules v6 and a new shared projection compatibility
 identity. Mixed builds continue authority sync and defer incompatible graph comparisons. On
 upgrade, `work_extended_projection_rules=1` records a successful canonical rebuild of just the
-roots with retained extension claims; unresolved roots leave the migration pending. Existing v5
-certificates and tombstones remain historical authority, and their certified manifests can still
-be adopted. All checkpoint participants must use v6 before the next cut verifies.
+roots with retained extension claims; unresolved roots leave the migration pending. Existing
+tombstones remain historical authority.
 
 Scheduled occurrence deduplication uses checkpoint rules v7 and a new projection compatibility
 identity. Competing creation claims for one occurrence select one initial definition in canonical
 order, without combining steps from different child revisions. Upgrade rebuilds only run trees
-with multiple creation claims, once; ordinary run trees keep their projections. Historical
-checkpoint certificates remain authority, and mixed builds continue exchanging claim authority
-while deferring incompatible graph comparisons.
+with multiple creation claims, once; ordinary run trees keep their projections. Existing
+tombstones remain authority, and mixed builds continue exchanging claim authority while deferring
+incompatible graph comparisons.
 
 Incremental catch-up projection commits at most 128 newly admitted claims per transaction and
 returns the writer between chunks, so queued messages and lease renewals can run. Each commit
@@ -1315,16 +1465,16 @@ bound. The estimate divides the remaining envelopes by how fast that number shra
 10-second windows, so a peer that keeps writing lengthens it. It never divides by more than the
 rate envelopes arrive, and gives no estimate while either rate is unknown; the status shows that
 rate as `closing at`. That cap is a guard, not a proof: the number can also fall without a receipt,
-when a checkpoint drops envelopes or the comparison narrows, and when receipts coincide with such a
+when a trim drops envelopes or the comparison narrows, and when receipts coincide with such a
 drop the estimate can still be too short.
 A window in which the number did not shrink, or nothing arrived, leaves no forecast, and the status
 says `not catching up`; the next window then starts from its own rate rather than half of it. A gap
 of more than five minutes between measurements forgets both rates, and so does a change in what
-the count is compared against: the peer's advertised checkpoint, a change to this node's own
-inventory below its tail (which its checkpoints make), or a switch between range and full
-inventories. A peer on an older build advertises no checkpoint, and a narrowing within range
-comparison changes neither, so only the arrival cap guards those; a peer that starts advertising a
-checkpoint resets the window once. A measurement no exchange has renewed for 35 seconds is shown
+the count is compared against: the checkpoint an older peer that runs shared checkpoints
+advertises, a change to this node's own inventory below its tail (which its trims make), or a
+switch between range and full inventories. This build advertises no checkpoint, and a narrowing
+within range comparison changes neither, so only the arrival cap guards those; a peer that starts
+advertising a checkpoint resets the window once. A measurement no exchange has renewed for 35 seconds is shown
 as stale, with its counts and time but no rates or estimate; when nothing was missing, the status
 says so of the last measurement and when it was taken, rather than "caught up". Zero envelopes missing means nothing
 the peer listed is missing here, at arrival: admission, projection and visibility can lag behind
@@ -1496,7 +1646,7 @@ A peer on a build without the route answers 404 and is not compared.
 Some readers fold a subject's claims rather than read its newest one. A trim can keep every
 key's newest claim and still change what they answer, by dropping an older claim they fold: a
 dropped credential transition moves a seat's needs-login since (#4237). So the daemon's summary
-also covers the readers the checkpoint proof reads (`checkpoint_rules::subject_answers`):
+also covers the readers a trim's rules were audited against (`checkpoint_rules::subject_answers`):
 current harness, status history, actual state and source, incarnations and working since,
 reconcile decisions, usage, loop and timing. They run for every seat (`agent/*`) and step
 (`step-run/*`) whose newest claim is older than the cut. Each field is its own pseudo-kind,
@@ -1574,165 +1724,71 @@ The override is a `member.admission-override` claim on `host/<member>`. It names
 
 ## Checkpoints
 
-A checkpoint deletes replicated claims that no longer change any answer. Checkpoint
-`checkpoint/D` covers claims dated before the start of UTC day `D`, its cut, and becomes due at
-the start of day `D+2`. Each daemon does the checkpoint work that is due every ten minutes.
+Every member trims old replicated claims from its own copy, on its own: replication replicates a
+set, and members do not agree on checkpoints or wait for each other. Each day a member trims its
+due cut, `checkpoint/D`, which covers claims dated before the start of UTC day `D` and becomes due
+at the start of day `D+2`. The daemon does the work that is due every ten minutes, except while it
+is catching up with a peer. [Checkpoints and trimming](checkpoints.md) explains the rules, the
+guards and the trim, with worked examples.
 
-A checkpoint drops only claims of these kinds, and only when a later claim of the same slot that
-it keeps sets every field a reader takes from the dropped one:
+A cut drops only the kinds in `LOCAL_TRIM_KINDS`, each with a test that every reader answers the
+same from the full and the trimmed log: today `observer.observed`, `harness.observed` and
+`resource.observed`. It drops a claim only when a later claim of the same slot that it keeps sets
+every field a reader takes from the dropped one, and never drops a person's claim or a claim
+another claim cites. Mission run, step, membership and message claims are never dropped. The
+capture stages only what judging those kinds reads ([Checkpoint capture](checkpoint-capture.md)).
 
-- `harness.observed`, `harness.timeline`, `loop.state`, `observer.observed`,
-  `transport.observed`, `daemon.diagnostic` and `subscription.mission-deferred`;
-- `render.applied`, `runtime.readiness-deadline-reached`, and the runtime's own
-  `runtime.action.*` claims;
-- `harness.usage` snapshots. A response rollup series keeps the last snapshot of each UTC hour,
-  by the time its writer measured it, for seven days before the cut, and only its newest snapshot
-  before that. `fractal usage` stays exact to the hour for a period inside that window, a longer period
-  counts each series from its start, and a series' total never changes. A session's cumulative
-  reading keeps its newest and its largest; a context reading keeps its newest. Per-response
-  claims from older builds stay;
-- `harness.limits` readings, keeping each seat's newest and every reading within an hour of the
-  newest of its account group.
-
-[Retention](retention.md) lists every kind's class and the rules.
-
-Every model response also goes to OpenTelemetry when `[observations.otlp]` is set: an
-`st.usage.response` log with its agent, mission run, step, model, account, tokens and cost, and
-the counters `st_usage_tokens_total` and `st_usage_cost_microusd_total`, labelled only by
-driver, model, account and cost basis. That export is the history beyond the window.
-
-It never drops a claim a person wrote or a claim another claim cites as evidence. Mission run,
-step, membership and message claims are never dropped. Each node proves the drops before it agrees to
-them, and every node deletes the same ones:
-
-1. **Seal.** Each participant publishes `checkpoint.sealed`, naming the envelopes it holds from
-   before the cut. The participants are every writer the node has heard of, less those that left
-   the fleet and those a person excused.
-2. **Verify.** Once every participant has sealed the same envelopes and rules, each node plans
-   the drops from the claims of those envelopes, less repaired originals: whether a node holds a
-   repaired original depends on whether it admitted it before the repair arrived. It proves on a
-   copy of its store, cut down to those claims and the blobs they reference, that deleting them
-   changes neither the graph nor any reader's answer, then
-   publishes `checkpoint.verified` with the digests of the drops, the kept claims, the graph and
-   the answers. A node verifies a checkpoint once.
-3. **Trim.** When every participant verified the same digests, the checkpoint is stable. Each node
-   first records a tombstone for every envelope and claim it drops, then deletes them in chunks.
-   After a crash, the next pass finishes the trim. The tombstones stand in for the dropped
-   envelopes in the inventory. The authority digest does not change, and peers, including builds
-   without checkpoints, never send those envelopes again.
-
-[Checkpoints and trimming](checkpoints.md) explains the rules, with worked examples.
-
-A node that did not verify a stable checkpoint, such as one that joined later, adopts it. A peer
-lists the newest checkpoint it trimmed in its inventory. The node fetches the manifest of
-tombstones from that peer and checks the whole manifest against the verified drop digest before
-it stores anything. Then it trims to the same tombstones. Sync never fetches back what a
-checkpoint dropped.
-
-A participant that does not seal holds up every checkpoint, whether it is away or runs a build
-without checkpoints. Three days after a checkpoint became due, a participant asks a person in
-`fractal now` to bring the machine back or excuse it:
-
-```sh
-fractal replication checkpoint status                  # the newest stable checkpoint, and who sealed the next
-fractal replication checkpoint plan --cut 2026-09-27    # what it would drop here, proved on a copy
-fractal replication checkpoint excuse node-c --reason "away for a week" --as person/operator
+```toml
+[trim]
+local = true                 # the default; false turns trimming off on this member
+notify = "agent/alder.ops"   # optional
+daily_claims = 100000        # optional
 ```
 
-`plan` proves in the same scratch directory as the node's own checkpoint proofs, and one proof
-runs there at a time. While another proof runs, as one does right after the daemon starts, the
-daemon holds the plan for up to a minute, and Fractal asks again for up to four minutes more and
-prints that it is waiting. A proof still running after that is refused with
-`checkpoint-proof-in-progress` (HTTP 503); run the plan again shortly.
+The `[checkpoint]` section still loads but is ignored; the daemon logs "[checkpoint] is ignored:
+every member trims on its own ([trim])".
 
-An excusal fences nothing. What the excused writer wrote while away still replicates when it
-returns, and its next seal ends the excusal.
+There is no proof copy. A plan that would drop the newest claim of any subject and kind is refused
+before anything is recorded, and while deleting, every chunk compares the projection digests
+before and after and stops at the first change. Either stop marks the cut `graph-changed`, records a
+diagnostic, opens an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names,
+and halts trimming on that member until a person, or the `[trim] notify` agent (`--as agent/...`),
+runs:
 
-Excusing each side of a partition lets each side certify on its own. When they meet again, every
-node applies the same certificate: for one cut, the one with the most participants, and
-otherwise the newest. Adopting its manifest makes a node's tombstones exactly the manifest's. A
-claim that only the other side saw and dropped is then forgotten: no node holds it or its
-tombstone. Only a claim a rule may drop can be forgotten, one a kept claim replaces, so every
-answer stays the same, and the nodes still agree with each other. Person and mission claims are
-never dropped, so they are never forgotten. Issue #1052 tracks keeping those tombstones too.
+```sh
+fractal replication checkpoint resume --reason "TEXT"
+```
 
-When verifications differ, that checkpoint never becomes stable, and the next due checkpoint
-tries again. `status` names which digests differ for each participant. Seals that differ in
-`rules` mean the nodes run builds with different checkpoint rules; they wait until every
-participant runs the same rules.
+No other agent may: resuming past a stop is the safety decision. The stopped cut is set aside, the
+next day's cut goes on, and the resume ends the fault.
 
-If a trim finds that a deletion would change the graph, it rolls that deletion back and stops. It
-records a `checkpoint-trim-graph-changed` diagnostic, and the node seals nothing more until a
-person runs `fractal replication checkpoint resume --reason ...`.
+An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can
+still fetch and verify it; a dropped claim inside it loses only this member's own copies. Deleted
+identities go into the retired ledger (`retired_claim_ids`, `retired_envelopes`), which is the
+member's authority for what it deleted once its import of older checkpoint rows has finished:
+admission refuses a retired envelope or claim from any peer, whatever its build; the inventory
+lists a retired envelope as held without payload, so no peer sends it; and the member serves no
+retired envelope or claim. An identity enters the ledger only as it is deleted, in the deleting
+transaction, so a cut that stops before deleting retires nothing. The retired claim IDs travel to
+peers by claim-range walk, as "Protocol" describes; a peer records them as retired and never
+admits, asks for or serves them again.
 
-Checkpoints are on by default. `[checkpoint] enabled = false` in a node's config stops that node
-sealing. Every participant must seal, so this stops trimming for the whole fleet.
+A member deletes at most `[trim] daily_claims` claims a day (100,000 unless set). A cut that drops
+more stops at that count, stays `trimming`, and goes on the next day where it stopped; the next cut
+begins only after it finishes. The day's count is kept in `meta` (`local_trim_day`) in the
+deleting transaction, so a restart neither repeats nor exceeds it.
 
-`[trim] local = true` in a member's config makes that member trim on its own instead of by
-checkpoint agreement. It is off by default. The member then seals, verifies and applies no new
-checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
-had already committed still finishes; a checkpoint it was still recording stays recorded as it was
-and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
-members until a person excuses it.
+`[trim] notify = "agent/..."` also names the agent that receives a fault when the daily answers
+check finds this member and a peer answering differently; see
+[Answers across members](#answers-across-members).
 
-Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
-it captures the set before the cut, plans the drop with the same audited rules and guards a shared
-checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
-what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
-same operation, the same for every runtime reset and harness diagnostic (`LOCAL_TRIM_CONTEXT_KINDS`:
-the status-history rule judges a seat's harness observations with them, and keeps a transition a
-reset or a restored prompt depends on), the protections naming those claims, each writer's newest envelope, and the claims
-citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
-each cut first reads the claims that arrived since the last, in arrival order, committing each page
-with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and
-sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
-drop as a capture of the whole store. Only the kinds in
-`LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed`, `harness.observed` and `resource.observed`. Everything
-else is kept, as a protected claim is.
-An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
-fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
-raw record, signature and verdict rows; its stored position stays, as every position does), its ID goes into the retired ledger, and
-admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
-envelopes atomic. `resource.observed` keeps what its readers walk back through (rules version
-23), such as a pull request's observations back to the newest one outside "open and out of the
-merge queue", which the idle nudge walks to find when it left the queue; the test compares that
-walk, the folded state and the projection between the full and the trimmed log. `harness.observed`
-joined once its rule kept the credential report where a seat's needs-login run begins (rules
-version 24, see #4237). Two checks stand in for the
-proof. A plan that would drop the newest claim of any subject and kind is refused before anything
-is recorded. While deleting, every chunk compares the projection digests before and after and
-stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
-an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
-trim until `fractal replication checkpoint resume --reason TEXT` is run, by a person or, on
-such a member, by the `[trim] notify` agent (`--as agent/...`). No other agent may: resuming past a
-stop is the safety decision. The stopped cut is set aside and the next day's cut goes on, and the
-resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
-The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
-disk cannot hold.
-Deleting a cut walks only that cut's own tombstones, recorded after every earlier checkpoint's,
-and keeps its place in `meta` so a restart goes on from it; a cut that dropped nothing is trimmed
-at once. A member deletes at most `[trim] daily_claims` claims a day (100,000 unless set; about
-1.7 h of paced deletion on a 53 GB member). A cut that drops more stops at that count, stays
-`trimming`, and goes on the next day where it stopped; the next cut begins only after it finishes,
-with what the day has left, so a large first cut drains over several days instead of one long
-trim. The day's count is kept in `meta` (`local_trim_day`) in the deleting transaction, so a
-restart neither repeats nor exceeds it.
-
-On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
-what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
-the ledger once: an identity adoption withdrew, or that only a checkpoint that never committed
-recorded, was not a deletion and leaves it. From then on an identity enters the ledger only as it is
-deleted, in the deleting transaction, never when a cut records it: a cut that stops before trimming,
-or a chunk that rolls back, retires nothing a peer could learn. Admission then refuses a retired envelope or claim from
-any peer, whatever its build; the inventory lists a retired envelope as held without payload, so a
-peer never sends it; and the member serves no retired envelope or claim, even while a copy is still
-held. It still syncs everything else with every peer as before. Turning the setting off stops
-reading the ledger as the authority. The retired claim IDs travel between such members by claim-range walk, as
-"Protocol" describes.
-
-`[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
-finds this member and a peer answering differently; see [Answers across members](#answers-across-members).
+**Older members.** A member on an older build that still runs shared checkpoints counts this
+member as a participant, and this member never seals, so the older member's shared checkpoints
+stop becoming stable, as with any `[trim] local` member. A few days later it asks a person to
+excuse this member (`fractal replication checkpoint excuse` on that build) or to upgrade it. The
+`checkpoint.sealed`, `checkpoint.verified` and `checkpoint.excused` kinds stay registered and
+admitted, but no new ones are written. This build advertises no checkpoint in its inventory and
+has no checkpoint manifest route, so an older member adopts nothing from it.
 
 ## Recovery
 

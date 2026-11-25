@@ -3,6 +3,7 @@
 //! custody of every root through retirement.
 use super::*;
 use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+use super::host_executor::resource_commands as host_resources;
 
 use crate::model::RESOURCE_LANE_REQUEST_TAG as REQUEST_TAG;
 
@@ -52,7 +53,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             // An inherited root ends here; its owning program scope retains membership custody.
             return Ok(true);
         }
-        if !self.runtime.retire_resource_lane(&self.store, &request)? {
+        if !(host_resources::RetireCommand::Lane { request: &request })
+            .dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)? {
             // Unknown retirement retains custody; native events or explicit recovery wake it.
             return Ok(false);
         }
@@ -103,7 +105,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
             });
             if retained && active { continue; }
-            if self.runtime.retire_resource_lane(&self.store, &record.request)? {
+            if (host_resources::RetireCommand::Lane { request: &record.request })
+                .dispatch(&self.store, self.runtime.as_ref(), &self.host_observations)? {
                 self.incremental.touch(&crate::store::resource_membership::dependency(&record.request.host, &record.request.name));
                 self.incremental.touch("seat-admission");
                 self.signal_changed();
@@ -144,6 +147,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let policy = &self.seat_admission.finite_policy;
         let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, ..Fit::default() };
+        fit.recovery_capable = request.profile.as_ref().and_then(|key| policy.profiles.get(key))
+            .is_some_and(|seed| seed.recovery_capable);
+        if cfg!(target_os = "linux") {
+            smallclaims::touched::note_read(|| "host-lane-pressure".into());
+            let decision = self.seat_admission.pressure_decision();
+            fit.pressure_blocked = decision.blocked;
+            fit.pressure_reason = decision.reason;
+        }
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
         }
@@ -293,6 +304,51 @@ mod tests {
     use super::*;
     const GIB: u64 = 1 << 30;
 
+    /// Disk/ARC fit tests supply all host observations, including a real file-backed PSI reader.
+    /// Keep the directory alive for the test so sampling never reaches the actual host.
+    fn quiet_pressure<R: RuntimeControl>(reconciler: &Reconciler<R>) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroups = directory.path().join("cgroups");
+        let protected = cgroups.join("system.slice/fractal.service");
+        std::fs::create_dir_all(&protected).unwrap();
+        std::fs::create_dir_all(cgroups.join("app.slice")).unwrap();
+        std::fs::create_dir_all(cgroups.join("interactive.slice")).unwrap();
+        let placement = directory.path().join("cgroup");
+        let meminfo = directory.path().join("meminfo");
+        let quiet = "some avg10=0.00 avg60=0.00 avg300=0.00\nfull avg10=0.00 avg60=0.00 avg300=0.00\n";
+        for group in [protected, cgroups.join("system.slice"), cgroups.join("app.slice"),
+            cgroups.join("interactive.slice")] {
+            for name in ["memory.pressure", "io.pressure"] { std::fs::write(group.join(name), quiet).unwrap(); }
+        }
+        std::fs::write(&placement, "0::/system.slice/fractal.service\n").unwrap();
+        std::fs::write(&meminfo, "MemTotal: 134217728 kB\nMemAvailable: 125829120 kB\n").unwrap();
+        let policy = reconciler.seat_admission.finite_policy.psi_brake.clone();
+        *reconciler.seat_admission.pressure.lock().unwrap() =
+            Some(fractal_runtime::resource_pressure::Observer::with_paths(
+                policy, placement, cgroups, meminfo).unwrap());
+        assert!(!reconciler.seat_admission.sample_pressure().unwrap().blocked);
+        directory
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn admission_reads_cached_pressure_and_stopped_sampler_fails_closed() {
+        use fractal_runtime::resource_pressure::{ObservationCause, Reason};
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(crate::reconcile::tests::FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let fixtures = quiet_pressure(&reconciler);
+        fixtures.close().unwrap();
+        // Even with all kernel fixtures gone, admission must not sample.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(!reconciler.seat_admission.pressure_decision().blocked);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(reconciler.seat_admission.pressure_decision().reason,
+            Some(Reason::UnknownObservation { cause: ObservationCause::StaleDecision }));
+        assert!(reconciler.seat_admission.pressure_decision().blocked);
+    }
+
     fn test_fit() -> Fit {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 * GIB }), ..Fit::default() }
     }
@@ -334,7 +390,7 @@ mod tests {
         // Model authoritative custody written by a newer binary, without asking this binary
         // to admit an unsupported class. Preserve the exact persisted body through cleanup.
         store.connection.write().execute(
-            "UPDATE resource_memberships_v1 SET body=json_set(body,'$.request.class','recovery') WHERE id=?1",
+            "UPDATE resource_memberships_v1 SET body=json_set(body,'$.request.class','future-class') WHERE id=?1",
             [&future.id],
         ).unwrap();
         let body = || store.connection.write().query_row(
@@ -441,14 +497,11 @@ mod tests {
         request.profile = Some("unknown.workload".into());
         assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("unknown-profile"));
         request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB });
-        reconciler.resolve_resource_profile(&mut request).unwrap();
-        assert!(request.profile_estimate.as_ref().unwrap().seed_revision.is_none());
+        assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("unknown-profile"));
         let mut raw = profile_request();
         raw.profile = None;
         raw.capacity = request.capacity;
-        let original = raw.clone();
-        reconciler.resolve_resource_profile(&mut raw).unwrap();
-        assert_eq!(raw, original);
+        assert!(reconciler.resolve_resource_profile(&mut raw).unwrap_err().to_string().contains("raw-resource-declaration"));
     }
 
     #[test]
@@ -459,6 +512,7 @@ mod tests {
         let policy = fractal_runtime::host::FinitePolicy { heavy_io_slots: Some(0), ..Default::default() };
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "disabled".into(), name: "checks".into(), host: "node".into(), max_members: 1,
@@ -487,6 +541,7 @@ mod tests {
             .with_disk_probe(vec![], Arc::new(move |_| Ok(crate::disk::DiskSpace {
                 filesystem: 7, available: reading.load(Ordering::Relaxed), total: 200 * GIB,
             })));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "disk-wait".into(), name: "checks".into(), host: "node".into(), max_members: 1,
@@ -549,6 +604,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn exchange_stale_alert_names_local_and_transport_failures_without_timing_churn() {
+        use super::super::tests::FakeRuntime;
+        use smallclaims::replication::{
+            ReplicationCarrier, ReplicationExchangeFailure, ReplicationFailurePhase,
+        };
+        for (phase, code, expected) in [
+            (
+                ReplicationFailurePhase::LocalReceive,
+                "replication-operation-failed",
+                "last failures: local-receive replication-operation-failed on 2/2 peers",
+            ),
+            (
+                ReplicationFailurePhase::Dial,
+                "replication-connect-failed",
+                "last failures: dial replication-connect-failed on 2/2 peers",
+            ),
+        ] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            store.bind_fleet("fleet/stalled").unwrap();
+            let now = smallclaims::store::now_ms();
+            store.replication_worker_observed_for_test(Some(now.saturating_sub(120_000)), Some(now));
+            let mut failure = ReplicationExchangeFailure::from_error(
+                &anyhow::anyhow!("operation failed"),
+                phase,
+                std::time::Duration::from_secs(120),
+                None,
+            );
+            failure.code = code.into();
+            for peer in ["peer-a", "peer-b"] {
+                store.record_replication_exchange_transport(
+                    peer, false, now, ReplicationCarrier::Unknown, Some(&failure),
+                );
+            }
+            let reconciler = Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            reconciler.reconcile_replication_health().unwrap();
+            let raised = store
+                .pending_operational_failures(crate::reconcile::RECONCILER_ACTOR, "node")
+                .unwrap();
+            assert_eq!(raised.len(), 1);
+            assert!(raised[0].reason.contains(expected), "{}", raised[0].reason);
+            assert!(!raised[0].reason.contains("inspect fleet routes"));
+            let health = store.replication_health(true).unwrap();
+            let message = store.replication_health_message(health).unwrap();
+            failure.elapsed_ms += 777;
+            store.record_replication_exchange_transport(
+                "peer-a", false, now + 1, ReplicationCarrier::Unknown, Some(&failure),
+            );
+            assert_eq!(store.replication_health_message(health).unwrap(), message);
+            reconciler.reconcile_replication_health().unwrap();
+            let repeated = store
+                .pending_operational_failures(crate::reconcile::RECONCILER_ACTOR, "node")
+                .unwrap();
+            assert_eq!(repeated.len(), 1);
+            assert_eq!(repeated[0].request, raised[0].request);
+            assert_eq!(repeated[0].reason, raised[0].reason);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_logical_requests_use_native_custody_without_linux_lane_observation() {
@@ -587,6 +706,7 @@ mod tests {
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy))
             .with_disk_probe(vec![], Arc::new(|_| Ok(crate::disk::DiskSpace { filesystem: 7, available: 100, total: 200 })));
+        let _pressure = quiet_pressure(&reconciler);
         let candidate = LaneRequest {
             profile: None, profile_estimate: None, disk_path: None,
             id: "ci-check".into(), name: "ci".into(), host: "node".into(), max_members: 1,
@@ -627,6 +747,7 @@ mod tests {
         store.start_resource_authority("node", "epoch").unwrap();
         let mut reconciler = Reconciler::new(
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let _pressure = quiet_pressure(&reconciler);
         let room = host::for_lanes(Capacity { cores: 32, memory: 125 * GIB });
         reconciler.seat_admission.lanes = Some(seat_admission::LaneHost {
             room, outside, burst_lane: Some(seat_admission::BURST_LANE),
@@ -837,7 +958,7 @@ mod tests {
                 "inherited-exec" => r#"agentless
                     exec "payload" { command "true"; }"#.to_owned(),
                 "queued-exec" => r#"agentless
-                    lane "checks" host="node" max-members=1 coverage="logical" { capacity cores=1 memory="1G"; }
+                    lane "checks" host="node" max-members=1 profile="check.unit" coverage="logical"
                     exec "payload" { command "true"; }"#.to_owned(),
                 _ => unreachable!(),
             };
@@ -868,7 +989,7 @@ mod tests {
                 attempt: upstream.steps[0].attempt, invocation: None,
             };
             let parent = LaneRequest {
-                profile: None, profile_estimate: None, disk_path: None,
+                profile: Some("check.unit".into()), profile_estimate: None, disk_path: None,
                 id: "parent".into(), name: "checks".into(), host: "node".into(),
                 max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical,
                 admission_timeout_ms: None, owner: owner.clone(),
@@ -888,7 +1009,9 @@ mod tests {
             assert!(store.resource_context_for_run(&child.subject).unwrap().is_some());
             let reconciler = Reconciler::new(
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
-            );
+            ).with_finite_resources(Some(fractal_runtime::host::FinitePolicy {
+                profiles: BTreeMap::from([("check.unit".into(), profile_seed())]), ..Default::default()
+            }));
             // As in the program-host fault regression, prevent a JavaScript host from starting
             // without depending on installed runtimes, process scheduling, or wall-clock sleeps.
             let dir = tempfile::tempdir().unwrap();

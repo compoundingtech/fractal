@@ -150,14 +150,6 @@ impl Runtime for StageRuntime {
         Plain.plan_checkpoint_drops(sealed)
     }
 
-    fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        Plain.clear_checkpoint_projections(transaction)
-    }
-
-    fn replay_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        Plain.replay_checkpoint_projections(transaction)
-    }
-
     fn checkpoint_subject_answers(
         &self,
         connection: &Connection,
@@ -321,13 +313,21 @@ fn each_point_inside_the_loan_is_charged_to_its_own_stage() {
                     .unwrap();
             }
             "commit" => {
+                // The mutation dispatcher owns the native commit slot, so the pause
+                // subscribes through the shared resolution hub and lands in the commit
+                // stage instead of a replaced raw hook.
                 let firing = armed.clone();
-                store.connection.write().commit_hook(Some(move || {
-                    if firing.swap(false, Ordering::AcqRel) {
-                        std::thread::sleep(SLOW);
-                    }
-                    false
-                }));
+                crate::sqlite::observe_transaction_resolution(
+                    &store.connection.write(),
+                    move || {
+                        if firing.swap(false, Ordering::AcqRel) {
+                            std::thread::sleep(SLOW);
+                        }
+                        false
+                    },
+                    || {},
+                )
+                .unwrap();
             }
             "log" => runtime.replay.store(true, Ordering::Relaxed),
             _ => {}

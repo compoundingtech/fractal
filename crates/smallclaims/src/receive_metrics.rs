@@ -2,16 +2,81 @@
 //! Phase wall times contain nested costs; they must not be added to writer or shared time.
 
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
+
+const ENVELOPE_SIZE_SAMPLE_LIMIT: usize = 32;
+
+#[derive(Clone, Copy, Debug)]
+pub enum ExchangeClass { Empty, Nonempty }
+
+impl ExchangeClass {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::Empty => "empty", Self::Nonempty => "nonempty" }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Outcome { Ok, Deferred, Contended, Error }
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok", Self::Deferred => "deferred",
+            Self::Contended => "contended", Self::Error => "error",
+        }
+    }
+}
+
+struct Instruments {
+    receives: opentelemetry::metrics::Counter<u64>,
+    commits: opentelemetry::metrics::Counter<u64>,
+}
+
+impl Instruments {
+    fn new(meter: &opentelemetry::metrics::Meter) -> Self {
+        Self {
+            receives: meter.u64_counter("st.replication.receives").with_unit("{receive}").build(),
+            commits: meter.u64_counter("st.replication.receive.commits").with_unit("{commit}").build(),
+        }
+    }
+
+    fn record_summary(&self, class: ExchangeClass, outcome: Outcome, counters: &Counters) {
+        let attributes = [
+            opentelemetry::KeyValue::new("exchange_class", class.as_str()),
+            opentelemetry::KeyValue::new("outcome", outcome.as_str()),
+        ];
+        self.receives.add(1, &attributes);
+        self.commits.add(counters.commits, &attributes);
+    }
+}
+
+static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
+    Instruments::new(&opentelemetry::global::meter("smallclaims.replication.receive"))
+});
+
+/// Emit once from the same final snapshot as the structured receive summary. No peer,
+/// correlation ID, error code or projection stage becomes a metric label.
+pub fn record_summary(class: ExchangeClass, outcome: Outcome, counters: &Counters) {
+    METRICS.record_summary(class, outcome, counters);
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Counters {
     pub envelopes_admitted: usize,
+    /// Preparation attempts, including persisted backlog and retries, not unique envelopes.
+    pub envelopes_prepared: usize,
+    pub envelope_claims: usize,
+    pub envelope_payload_bytes: usize,
+    /// First bounded sample of decoded claims and wire bytes, in preparation order.
+    pub envelope_sizes: Vec<(usize, usize)>,
+    pub envelope_sizes_omitted: usize,
+    pub finalizer_time: [Duration; 5],
     pub admit_time: Duration,
     pub project_time: Duration,
     pub projection_chunks: u64,
     pub gate_wait: Duration,
+    pub projection_discovery_time: Duration,
     pub writer_wait: Duration,
     pub final_drain_count: u64,
     pub final_drain_time: Duration,
@@ -98,12 +163,50 @@ pub fn envelopes_admitted(count: usize) {
     record(|counters| counters.envelopes_admitted += count);
 }
 
+pub fn envelope_size(claims: usize, bytes: usize) {
+    record(|counters| {
+        counters.envelopes_prepared += 1;
+        counters.envelope_claims += claims;
+        counters.envelope_payload_bytes += bytes;
+        if counters.envelope_sizes.len() < ENVELOPE_SIZE_SAMPLE_LIMIT {
+            counters.envelope_sizes.push((claims, bytes));
+        } else {
+            counters.envelope_sizes_omitted += 1;
+        }
+    });
+}
+
+#[derive(Clone, Copy)]
+pub enum Finalizer {
+    Resources,
+    Custom,
+    Completion,
+    RunEta,
+    ClientMessages,
+}
+
+/// Attribute runtime finalization without changing its error or commit boundary.
+pub fn finalizer<T>(part: Finalizer, work: impl FnOnce() -> T) -> T {
+    if capture().is_none() {
+        return work();
+    }
+    let started = std::time::Instant::now();
+    let result = work();
+    record(|counters| counters.finalizer_time[part as usize] += started.elapsed());
+    result
+}
+
 pub fn projection_chunk() {
     record(|counters| counters.projection_chunks += 1);
 }
 
 pub fn projection_gate_wait(elapsed: Duration) {
     record(|counters| counters.gate_wait += elapsed);
+}
+
+/// Accumulate off-writer projection conflict discovery and verdict elapsed time.
+pub fn projection_discovery_time(elapsed: Duration) {
+    record(|counters| counters.projection_discovery_time += elapsed);
 }
 
 pub fn projection_writer_wait(elapsed: Duration) {
@@ -354,7 +457,113 @@ impl Drop for Timer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn receive_counter_totals_match_final_request_snapshots() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        let instruments = Instruments::new(&provider.meter("receive-test"));
+        let mut expected = std::collections::BTreeMap::new();
+        for class in [ExchangeClass::Empty, ExchangeClass::Nonempty] {
+            for outcome in [Outcome::Ok, Outcome::Deferred, Outcome::Contended, Outcome::Error] {
+                let mut commits = 0;
+                for count in [0, 2, 3] {
+                    let request = RequestMetrics::default();
+                    {
+                        let _request = request.enter();
+                        for _ in 0..count { commit(); }
+                    }
+                    let summary = request.snapshot();
+                    commits += summary.commits;
+                    instruments.record_summary(class, outcome, &summary);
+                }
+                expected.insert((class.as_str().to_owned(), outcome.as_str().to_owned()), commits);
+            }
+        }
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for metric in finished.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+        {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                panic!("receive metrics must be integer counters");
+            };
+            let mut series = 0;
+            for point in sum.data_points() {
+                let attributes: Vec<_> = point.attributes().collect();
+                assert_eq!(attributes.len(), 2);
+                let label = |name| attributes.iter().find(|attribute| attribute.key.as_str() == name)
+                    .unwrap().value.to_string();
+                let key = (label("exchange_class"), label("outcome"));
+                let value = if metric.name() == "st.replication.receives" { 3 } else { expected[&key] };
+                assert_eq!(point.value(), value);
+                series += 1;
+            }
+            assert_eq!(series, 8);
+            seen.insert(metric.name().to_owned());
+        }
+        assert_eq!(seen, std::collections::BTreeSet::from([
+            "st.replication.receives".to_owned(), "st.replication.receive.commits".to_owned(),
+        ]));
+    }
+
     use super::*;
+
+    #[test]
+    fn envelope_sizes_and_failed_finalizers_remain_request_local() {
+        let metrics = RequestMetrics::new("sizes".into());
+        {
+            let _scope = metrics.enter();
+            envelope_size(3, 1024);
+            envelope_size(7, 2048);
+            let failed: Result<(), &str> = finalizer(Finalizer::Resources, || Err("fixture"));
+            assert_eq!(failed, Err("fixture"));
+        }
+        envelope_size(99, 99);
+        let counters = metrics.snapshot();
+        assert_eq!(counters.envelope_sizes, [(3, 1024), (7, 2048)]);
+        assert!(counters.finalizer_time[Finalizer::Resources as usize] > Duration::ZERO);
+        assert_eq!(counters.finalizer_time[Finalizer::Custom as usize], Duration::ZERO);
+    }
+
+    #[test]
+    fn envelope_size_samples_are_bounded_without_losing_request_totals() {
+        let first = RequestMetrics::new("first".into());
+        let second = RequestMetrics::new("second".into());
+        let count = ENVELOPE_SIZE_SAMPLE_LIMIT * 3 + 5;
+        for claims in 1..=count {
+            // Re-entering the request models preparation across backlog batches and retries.
+            let _scope = first.enter();
+            envelope_size(claims, claims * 10);
+        }
+        {
+            let _first = first.enter();
+            let _second = second.enter();
+            envelope_size(7, 70);
+        }
+        envelope_size(99, 990);
+
+        let counters = first.snapshot();
+        let total_claims = count * (count + 1) / 2;
+        assert_eq!(counters.envelopes_prepared, count);
+        assert_eq!(counters.envelope_claims, total_claims);
+        assert_eq!(counters.envelope_payload_bytes, total_claims * 10);
+        assert_eq!(counters.envelope_sizes_omitted, count - ENVELOPE_SIZE_SAMPLE_LIMIT);
+        assert_eq!(
+            counters.envelope_sizes,
+            (1..=ENVELOPE_SIZE_SAMPLE_LIMIT).map(|claims| (claims, claims * 10)).collect::<Vec<_>>(),
+        );
+        let counters = second.snapshot();
+        assert_eq!(counters.envelopes_prepared, 1);
+        assert_eq!(counters.envelope_claims, 7);
+        assert_eq!(counters.envelope_payload_bytes, 70);
+        assert_eq!(counters.envelope_sizes, [(7, 70)]);
+        assert_eq!(counters.envelope_sizes_omitted, 0);
+    }
 
     #[test]
     fn captured_phase_crosses_threads_and_restores_after_unwind() {
@@ -468,26 +677,32 @@ mod tests {
             commit();
             projection_gate_wait(Duration::from_millis(2));
             projection_writer_wait(Duration::from_millis(3));
+            projection_discovery_time(Duration::from_millis(7));
             final_drain(Duration::from_millis(5));
             std::thread::spawn(|| {
                 commit();
                 rebuild_part(Duration::from_secs(1));
+                projection_discovery_time(Duration::from_secs(1));
             }).join().unwrap();
             {
                 let _inner = inner.enter();
                 projection_chunk();
                 envelopes_admitted(2);
                 contended();
+                projection_discovery_time(Duration::from_millis(11));
             }
             rebuild_part(Duration::from_millis(3));
+            projection_discovery_time(Duration::from_millis(13));
         }
         commit();
+        projection_discovery_time(Duration::from_secs(1));
         assert_eq!(outer.snapshot().commits, 1);
         assert_eq!(outer.snapshot().rebuild_part_count, 1);
         assert_eq!(outer.snapshot().rebuild_part_time, Duration::from_millis(3));
         assert_eq!(outer.snapshot().projection_chunks, 0);
         assert_eq!(outer.snapshot().gate_wait, Duration::from_millis(2));
         assert_eq!(outer.snapshot().writer_wait, Duration::from_millis(3));
+        assert_eq!(outer.snapshot().projection_discovery_time, Duration::from_millis(20));
         assert_eq!(outer.snapshot().final_drain_count, 1);
         assert_eq!(outer.snapshot().final_drain_time, Duration::from_millis(5));
         assert!(!outer.snapshot().contended);
@@ -495,6 +710,7 @@ mod tests {
         assert_eq!(inner.snapshot().projection_chunks, 1);
         assert!(inner.snapshot().contended);
         assert_eq!(inner.snapshot().commits, 0);
+        assert_eq!(inner.snapshot().projection_discovery_time, Duration::from_millis(11));
         assert_eq!(inner.snapshot().final_drain_count, 0);
     }
 }

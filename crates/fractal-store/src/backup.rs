@@ -1,7 +1,7 @@
 //! Versioned logical backups. Envelope payloads use the peer wire format unchanged.
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crate::message_body::BodyAttachment as _;
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, ShardDigest, TableDigest, VERSION,
     VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS, VERSION_WITH_SHARDS,
-    VERSION_WITH_QUARANTINE,
+    VERSION_WITH_QUARANTINE, VERSION_WITH_SIGNED_CLAIMS,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -64,6 +64,134 @@ pub async fn create(endpoint: &Endpoint, destination: &Path) -> Result<()> {
     .await??;
     temporary.persist_noclobber(destination)?;
     Ok(())
+}
+
+pub const DEFAULT_MAX_WAL_GROWTH: u64 = 4 * 1024 * 1024 * 1024;
+
+/// A receipt commits every stdout byte, including the archive's end record.
+#[derive(Debug, serde::Serialize)]
+pub struct StreamReceipt {
+    pub format: String,
+    pub version: u32,
+    pub records: u64,
+    pub sha256: String,
+    pub bytes: u64,
+    pub writer_id: String,
+    pub max_store_index: u64,
+    pub started_at: String,
+    pub finished_at: String,
+    pub peak_wal_growth: u64,
+    pub peak_wal_growth_by_file: BTreeMap<String, u64>,
+}
+
+struct CheckedOutput<W> {
+    output: W,
+    verifier: StreamVerifier,
+    hash: Sha256,
+    bytes: u64,
+    started_at: String,
+}
+
+impl<W> CheckedOutput<W> {
+    fn new(output: W) -> Self {
+        Self { output, verifier: StreamVerifier::default(), hash: Sha256::new(), bytes: 0,
+            started_at: chrono::Utc::now().to_rfc3339() }
+    }
+}
+
+impl<W: Write> CheckedOutput<W> {
+    fn finish(mut self) -> Result<StreamReceipt> {
+        let records = self.verifier.records;
+        let peak_wal_growth = self.verifier.peak_wal_growth;
+        let peak_wal_growth_by_file = std::mem::take(&mut self.verifier.peak_wal_growth_by_file);
+        let header = self.verifier.finish()?;
+        let source = header.source.context("backup source has no persisted local writer identity")?;
+        self.output.flush()?;
+        Ok(StreamReceipt {
+            format: header.format, version: header.version, records,
+            sha256: hex::encode(self.hash.finalize()), bytes: self.bytes,
+            writer_id: source.writer_id, max_store_index: source.max_store_index,
+            started_at: self.started_at, finished_at: chrono::Utc::now().to_rfc3339(),
+            peak_wal_growth, peak_wal_growth_by_file,
+        })
+    }
+}
+
+impl<W: Write> Write for CheckedOutput<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Self { output, verifier, hash, bytes: written, .. } = self;
+        verifier.push(bytes, |line| {
+            output.write_all(line)?;
+            hash.update(line);
+            *written += line.len() as u64;
+            Ok(())
+        }).map_err(std::io::Error::other)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.output.flush()
+    }
+}
+
+/// Direct HTTP export: no archive is staged by either endpoint.
+pub async fn create_stdout(endpoint: &Endpoint, max_wal_growth: u64) -> Result<StreamReceipt> {
+    use futures_util::StreamExt;
+    let (client, url) = match endpoint {
+        Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => (
+            reqwest::Client::builder()
+                .unix_socket(endpoint.unix_socket().expect("Unix endpoint").as_ref()).build()?,
+            "http://localhost/v1/backup".to_owned(),
+        ),
+        Endpoint::Http(base) => (reqwest::Client::new(), format!("{base}/v1/backup")),
+        Endpoint::Fabric(_) => anyhow::bail!("native Fabric endpoints do not support backups"),
+    };
+    let response = client.get(url)
+        .query(&[("stream", "true".to_owned()), ("max_wal_growth", max_wal_growth.to_string())])
+        .send().await?;
+    let status = response.status();
+    ensure!(status.is_success(), "backup export failed ({status}): {}", response.text().await?);
+    ensure!(
+        response.headers().get("x-fractal-backup-stream").is_some_and(|value| value == "1"),
+        "daemon does not support direct backup streaming; upgrade it before using stdout mode"
+    );
+    // Move blocking stdout writes off the async executor. The bounded queue couples
+    // network reads to the consumer without retaining an archive in memory.
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
+    let writer = tokio::task::spawn_blocking(move || {
+        let stdout = std::io::stdout();
+        let mut output = CheckedOutput::new(stdout.lock());
+        while let Some(bytes) = receiver.blocking_recv() {
+            output.write_all(&bytes)?;
+        }
+        output.finish()
+    });
+    let mut stream = response.bytes_stream();
+    let download = async {
+        while let Some(bytes) = stream.next().await {
+            let bytes = bytes?;
+            for offset in (0..bytes.len()).step_by(64 * 1024) {
+                let chunk = bytes.slice(offset..(offset + 64 * 1024).min(bytes.len()));
+                if sender.send(chunk).await.is_err() {
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        }
+        Ok(())
+    }.await;
+    drop(sender);
+    let receipt = writer.await??;
+    download?;
+    Ok(receipt)
+}
+
+/// Unlike file export, stdout export never migrates or repairs its offline input.
+pub fn create_stdout_from_database(database: &Path, state_root: &Path) -> Result<StreamReceipt> {
+    let store = Store::open_backup_read_only(database)?;
+    let stdout = std::io::stdout();
+    let mut output = CheckedOutput::new(stdout.lock());
+    store.write_backup_read_only(&mut output, Some(&crate::message_body::bodies(state_root)))?;
+    output.finish()
 }
 
 /// An offline export can migrate its input; callers must supply a private database copy.
@@ -161,9 +289,9 @@ fn check_header(header: &Header) -> Result<()> {
     // Builds before version 5 say only "unsupported claim backup format/version"; this one also
     // names what it found and what it restores.
     ensure!(
-        header.format == FORMAT && (VERSION..=VERSION_WITH_QUARANTINE).contains(&header.version),
+        header.format == FORMAT && (VERSION..=VERSION_WITH_SIGNED_CLAIMS).contains(&header.version),
         "unsupported claim backup format/version: {:?} version {}; this build restores {FORMAT:?} \
-         versions {VERSION} to {VERSION_WITH_QUARANTINE}",
+         versions {VERSION} to {VERSION_WITH_SIGNED_CLAIMS}",
         header.format,
         header.version
     );
@@ -217,23 +345,74 @@ fn check_shard_record(header: &Header, shard: &str) -> Result<()> {
 /// Check framing and completeness without admitting anything.
 pub fn verify_file(path: &Path) -> Result<Header> {
     let mut input = BufReader::new(fs::File::open(path)?);
-    let (first, bytes) = read_record(&mut input)?.context("empty backup")?;
-    let header = match first {
-        Record::Header(header) => header,
-        Record::Failure { code, message } => anyhow::bail!("backup export failed ({code}): {message}"),
-        _ => anyhow::bail!("backup must start with a header"),
-    };
-    check_header(&header)?;
-    let mut hash = Sha256::new();
-    hash.update(bytes);
-    let mut envelopes = 0;
-    let mut shard_envelopes = BTreeMap::<String, u64>::new();
-    loop {
-        let (record, bytes) = read_record(&mut input)?.context("backup has no end record")?;
+    let mut verifier = StreamVerifier::default();
+    while let Some((record, bytes)) = read_record(&mut input)? {
+        verifier.record(record, &bytes)?;
+    }
+    verifier.finish()
+}
+
+#[derive(Default)]
+struct StreamVerifier {
+    header: Option<Header>,
+    hash: Sha256,
+    envelopes: u64,
+    shard_envelopes: BTreeMap<String, u64>,
+    ended: bool,
+    pending: Vec<u8>,
+    records: u64,
+    peak_wal_growth: u64,
+    peak_wal_growth_by_file: BTreeMap<String, u64>,
+}
+
+impl StreamVerifier {
+    fn push(&mut self, mut bytes: &[u8], mut emit: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+        while !bytes.is_empty() {
+            let count = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |index| index + 1);
+            ensure!(self.pending.len() as u64 + count as u64 <= MAX_RECORD_BYTES, "oversized backup record");
+            self.pending.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.pending.last() == Some(&b'\n') {
+                let line = std::mem::take(&mut self.pending);
+                let record = serde_json::from_slice(&line).context("decode backup record")?;
+                self.record(record, &line)?;
+                emit(&line)?;
+                self.pending = line;
+                self.pending.clear();
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Header> {
+        ensure!(self.pending.is_empty(), "truncated backup record");
+        ensure!(self.ended, "backup has no end record");
+        self.header.context("empty backup")
+    }
+
+    fn record(&mut self, record: Record, bytes: &[u8]) -> Result<()> {
+        ensure!(!self.ended, "data follows the backup end record");
+        self.records += 1;
+        if self.header.is_none() {
+            let header = match record {
+                Record::Header(header) => header,
+                Record::Failure { code, message } => anyhow::bail!("backup export failed ({code}): {message}"),
+                _ => anyhow::bail!("backup must start with a header"),
+            };
+            check_header(&header)?;
+            self.header = Some(header);
+            self.hash.update(bytes);
+            return Ok(());
+        }
+        let header = self.header.as_ref().expect("header checked");
         match record {
             Record::Failure { code, message } => anyhow::bail!("backup export failed ({code}): {message}"),
-            Record::Envelope(_) => envelopes += 1,
+            Record::Envelope(_) => self.envelopes += 1,
             Record::Checkpoint(_) | Record::Signatures(_) => {}
+            Record::SignedEnvelopes(_) => ensure!(
+                header.version >= VERSION_WITH_SIGNED_CLAIMS,
+                "signed envelopes in an archive that does not declare them"
+            ),
             Record::MessageBody(body) => {
                 ensure!(
                     header.version >= VERSION_WITH_BODIES,
@@ -253,36 +432,39 @@ pub fn verify_file(path: &Path) -> Result<Header> {
                 );
             }
             Record::ShardEnvelope(record) => {
-                check_shard_record(&header, &record.shard)?;
-                *shard_envelopes.entry(record.shard).or_default() += 1;
+                check_shard_record(header, &record.shard)?;
+                *self.shard_envelopes.entry(record.shard).or_default() += 1;
             }
-            Record::ShardSignatures(record) => check_shard_record(&header, &record.shard)?,
-            Record::ShardLocal(page) => check_shard_record(&header, &page.shard)?,
+            Record::ShardSignatures(record) => check_shard_record(header, &record.shard)?,
+            Record::ShardLocal(page) => check_shard_record(header, &page.shard)?,
             Record::End {
                 envelopes: expected,
                 sha256,
             } => {
+                let end: serde_json::Value = serde_json::from_slice(bytes)?;
+                self.peak_wal_growth = end["data"]["peak_wal_growth"].as_u64().unwrap_or(0);
+                if let Some(peaks) = end["data"].get("peak_wal_growth_by_file") {
+                    self.peak_wal_growth_by_file = serde_json::from_value(peaks.clone())?;
+                }
                 ensure!(
-                    envelopes == expected && hex::encode(hash.finalize()) == sha256,
+                    self.envelopes == expected && hex::encode(self.hash.clone().finalize()) == sha256,
                     "backup checksum/count mismatch"
                 );
                 for (shard, digest) in &header.shards {
-                    let found = shard_envelopes.get(shard).copied().unwrap_or(0);
+                    let found = self.shard_envelopes.get(shard).copied().unwrap_or(0);
                     ensure!(
                         found == digest.envelope_count,
                         "backup shard {shard:?} holds {found} envelopes, not the {} its header lists",
                         digest.envelope_count
                     );
                 }
-                ensure!(
-                    read_record(&mut input)?.is_none(),
-                    "data follows the backup end record"
-                );
-                return Ok(header);
+                self.ended = true;
+                return Ok(());
             }
             Record::Header(_) => anyhow::bail!("duplicate backup header"),
         }
-        hash.update(bytes);
+        self.hash.update(bytes);
+        Ok(())
     }
 }
 
@@ -348,6 +530,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
     let mut shard_page = Vec::new();
     let mut checkpoint = None;
     let mut restored_bodies = Vec::new();
+    let mut signed_admitting = false;
     loop {
         let (record, bytes) = read_record(&mut input)?.context("backup ended during restore")?;
         match record {
@@ -368,6 +551,17 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
             }
             Record::Signatures(signatures) => {
                 store.receive_backup_signatures(&header, &signatures)?
+            }
+            Record::SignedEnvelopes(signed) => {
+                // Every envelope is in by now; admit them first, so their membership claims
+                // admit the signed claims' writers.
+                if !signed_admitting {
+                    store.receive_backup_page(&header, &page)?;
+                    page.clear();
+                    store.admit_restored_backlog()?;
+                    signed_admitting = true;
+                }
+                store.receive_backup_signed_envelopes(&header, &signed)?;
             }
             Record::Ledger(page) => store.receive_backup_ledger(&page)?,
             // `verify_file` admitted shard records only for a shard the header lists, which is
@@ -594,4 +788,44 @@ fn require_empty_database(connection: &rusqlite::Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stream_output_tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_and_invalid_records_never_reach_output() {
+        let mut output = CheckedOutput::new(Vec::new());
+        output.write_all(b"{\"record\":").unwrap();
+        assert!(output.output.is_empty());
+        assert!(output.write_all(b"invalid}\n").is_err());
+        assert!(output.output.is_empty());
+    }
+
+    #[test]
+    fn split_valid_records_emit_only_after_validation() {
+        let store = Store::open_memory("backup-output").unwrap();
+        let mut line = serde_json::to_vec(&Record::Header(store.backup_header().unwrap())).unwrap();
+        line.push(b'\n');
+        let mut output = CheckedOutput::new(Vec::new());
+        output.write_all(&line[..line.len() - 1]).unwrap();
+        assert!(output.output.is_empty());
+        output.write_all(&line[line.len() - 1..]).unwrap();
+        assert_eq!(output.output, line);
+        output.write_all(b"{\"record\":\"end\"").unwrap();
+        assert_eq!(output.output, line, "the truncated tail must remain private");
+        assert!(output.finish().is_err());
+    }
+
+    #[test]
+    fn a_checksum_failure_never_emits_the_end_record() {
+        let store = Store::open_memory("backup-output").unwrap();
+        let mut line = serde_json::to_vec(&Record::Header(store.backup_header().unwrap())).unwrap();
+        line.push(b'\n');
+        let mut output = CheckedOutput::new(Vec::new());
+        output.write_all(&line).unwrap();
+        assert!(output.write_all(b"{\"record\":\"end\",\"data\":{\"envelopes\":0,\"sha256\":\"wrong\"}}\n").is_err());
+        assert_eq!(output.output, line);
+    }
 }

@@ -98,6 +98,71 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Changed-key reconciliation inputs
+
+Inventory review: [reconciliation input maintenance](https://github.com/compoundingtech/fractal/pull/7062).
+The `fractal_store::store::attention_snapshot` maintainer owns
+`lv-hc01ae9454288`, `lv-h5210e0457dfb`, `lv-h8f9121f82761` and
+`lv-h17ae5bb9d200`: existing claim, desired-member and mission-deadline reads
+now choose a trusted optional subject predicate. They retain the existing inline
+claim bodies, declaration JSON and subject keys; no producer format or value
+limit changes. Trace the dynamic templates to those representations before
+replacing their variable-sized values or index keys.
+
+The `fractal_store::store::observer_reconcile_inputs` maintainer owns
+`lv-hd10d6847d3fd`, an integer-rowid probe reading one existing desired input row.
+Its execution sink remains conservatively inventoried despite the fixed query:
+trace the bound integer and returned subject to the existing subject-key
+representation rather than treating a single row as a byte-size proof.
+
+The source maintainers of `mail_delivery_objectives_tests`,
+`observer_mail_inputs_tests` and `observer_reconcile_inputs_tests` own their
+new fixture-only entries. These insert, mutate or delete invented desired,
+mail-ledger, replica-record and projection-marker values to prove changed-key
+routing, deletion safety and work counts. They do not add production writers.
+`observer_reconcile_inputs_tests` also owns journal-retention fixtures
+`lv-hab0cd697de5c`, `lv-h58a0560e9304`, `lv-h13caf0b5c1cf` and `lv-h403d3ff20c2a`.
+They create and delete synthetic desired keys beyond the retained journal limit,
+then prove that an evicted cursor rebuilds the small live roster. The claim ID,
+subject bindings and declaration bodies remain fixture-only inline values.
+Their inline test values preserve the existing storage contracts; representation
+work must keep equivalent authority/reset/deletion regressions when those
+contracts change. The inventory records identify each fixture statement and
+its concrete producer/cleanup category.
+
+### Roster paging and read-budget probe inventory repair
+
+The `fractal_api_core::api` maintainer owns `lv-hc92b1baa7e5f`; the
+`fractal_api_core::api::roster_assembly` maintainer owns `lv-h168a03df0009` and
+`lv-h540d1ea0b50f`; the `fractal_seats::store::seats` maintainer owns
+`lv-h25806c4c9d67`. These prepare the shared `AGENT_ROSTER_SUBJECT_PAGE_SQL`,
+which appends a bound `LIMIT ?4` to `RANGE_SUBJECTS`. The recursive range query
+seeks the claims subject index at the snapshot frontier and returns subject
+strings for warm, initial assembly, membership rebuild, and bounded publication
+pages. The row limit bounds page cardinality, not subject/key bytes. Existing
+inline subjects remain transitional debt: trace these dynamic SQL callers to
+the subject representation, then establish bounded physical subject/index units
+or references without changing membership or snapshot semantics.
+
+The surviving unpaged `RANGE_SUBJECTS` calls in `fractal_seats::store::seats`
+use their current source identities `lv-hb0a36171e464` and `lv-h19fe7faeaaf7`;
+the removed earlier call's `lv-hc5cb621b4eae` marker must not remain attached.
+
+The `fractal_store::store` maintainer owns `lv-hc80bf6e28816`, the subject-cache
+overflow probe. It binds integer frontiers and a row limit, reads only the
+store-index B-tree, and returns one integer count before any claim bodies are
+folded. Its unresolved bind sink is registered separately from the SQL template;
+the next representation review must preserve this bounded probe and connect the
+bind sink to that template, not infer that arbitrary claim values are bounded.
+
+The `fractal_api_core::api::tests::roster_fresh` maintainer owns
+`lv-ha365a159e859`. This test-only recursive query produces integers through
+100000 and one integer sum, with no external value input or writes. It
+deliberately exercises reader cancellation after clock expiry. Its conservative
+unresolved-query registration records this exact test flow, not permission for
+new production sinks; trace it to its fixed integer-only statement when refining
+the lexical catalog.
+
 ### Native fleet roll receipt source
 
 The `fractal_api_core::roll_completion` maintainer owns signed-reference schema
@@ -132,21 +197,25 @@ obligations from canonical signed inputs.
 The `fractal_store::store::shell_resources` maintainer owns the scrub exceptions
 reviewed in [#6747](https://github.com/compoundingtech/fractal/pull/6747):
 
-- `lv-h3c3043b9f6fc` declares the local completion table; its only key is the
+- `lv-hb88f17cedac9` declares the local completion table; its only key is the
   checked integer `complete=1`. The conservative catalog still makes no size proof.
-- `lv-h9abbf1dff207` rewrites historical `shell_resources_v1.body` JSON to remove
-  environments while preserving all other command/result fields. Those bodies
-  remain unbounded inline values; changing their representation requires the
-  owning producer's chunk/reference work, not changing this security scrub.
-- `lv-h017f6a53ca41` is the literal `VACUUM` reclamation sink. It binds no value,
-  but its physical cleanup cost covers the database. Trace that cost into the
-  bounded representation and reclamation work before removing the exception.
+- `lv-h3fe95fd4aec7` copies historical `shell_resources_v1.body` JSON without
+  environments, preserving all other command/result fields. Those bodies and
+  keys remain unbounded inline values; the table copy is still one transaction.
+  Changing that representation remains the owning producer's chunk/reference work.
+- `lv-h4929ecffa855` declares a transient free-list overwrite table;
+  `lv-hac7744f65d12` inserts zero blobs of `page_size - 100` bytes, with at most
+  128 rows per transaction/checkpoint. `lv-ha3413afc70ae` tracks that binding;
+  `lv-h7eba39ebc70f` drops the table under secure_delete. These temporary values
+  are bounded by SQLite page size; the conservative inventory retains exceptions.
+  This consumes old free pages before the table copy can reuse them. B-tree
+  bookkeeping can grow the file slightly; no startup VACUUM remains.
 - `lv-haceef5fded64` inserts the fixed completion key only after physical erasure.
   Keep its cleanup/transaction costs in the same producer's representation review.
 
-These registrations do not change the scrub or claim that its UPDATE or VACUUM
-has bounded work. A bounded body representation and keyed reclamation would be
-the structural improvement; this registration preserves current behavior.
+Building on [#6886](https://github.com/compoundingtech/fractal/pull/6886), cleanup
+work covers this table and the free list, not the entire live database. The
+unbounded shell-body representation and table-copy transaction remain debt.
 
 ### GitHub capture rebuildable projection
 
@@ -513,8 +582,10 @@ duplicate, malformed, orphaned or changed exceptions and altered column catalogs
 The guard compares exact template bytes and comment-free dynamic argument tokens;
 it does not infer receiver types or evaluate Rust/SQL.
 
-Explicit inline `#[cfg(test)]` items are excluded. Arbitrary cfg expressions are
-not evaluated; separate test-only source files and diagnostic strings may be
+Explicit inline `#[cfg(test)]` items and struct fields are excluded. A field's
+comma or enclosing brace ends its exclusion; it must not hide later production
+schema initialization. Arbitrary cfg expressions are not evaluated; separate
+test-only source files and diagnostic strings may be
 conservatively included. This makes the manifest a candidate source inventory,
 not a count of production writers. The column parser handles literal CREATE
 TABLE/INDEX lists and ALTER TABLE ADD COLUMN declarations, not an evaluated SQL grammar: generated table/column names,
@@ -773,54 +844,40 @@ maintainer retains `trace-statement-and-value-representation` responsibility for
 these bindings and returned identifiers; fewer candidates and indexed seeks do
 not establish encoded-size or execution-cost bounds.
 
-## Incremental observed credit heads
-
-`fractal_store::store::usage_credits` owns `lv-he501efb4d29a`,
-`lv-ha6f6e9f76f2b`, `lv-h974bed02ce8f`, `lv-hfa1f0cadbda8`,
-`lv-hf26ee56ee42a`, `lv-h8e8ca6ee8350`, `lv-hb2a7b858df59`,
-`lv-h032c204ec84f` and `lv-h6308405566ae`.
-The projection retains one inline credit JSON object and claim ID per
-provider/account/credit ID/writer. Heads compare absorbing state precedence
-(`redeemed` > `forfeited` > `available`/`unknown`), then exact seconds/nanoseconds
-and claim ID within a state class. SQL extracts the rank from retained JSON.
-The pending table contains newly admitted claim IDs, drained in their append or
-replication transaction independently of historical completeness.
-Append and replication leave an absent projection absent: authoritative claims
-arriving before initialization are included in the worker's initial target.
-
-Historical catch-up persists a singleton numeric claim-store-index cursor and
-target. Open only installs/resumes metadata for an already-present projection;
-an absent projection with empty writer configuration is left absent. Configuring
-writers or directly reading credits starts a background worker, never a synchronous
-historical fold. Each writer transaction visits at most 64 claim rows and commits
-its cursor with the absorbing upserts, releasing the writer between batches.
-No history-sized pending insertion or index build is required. Interrupted workers
-resume from the committed cursor. Queue ownership follows the resource-backfill
-lifecycle: dropping the store prevents another batch from retaining its writer.
-Read snapshots expose `catching_up`, `through_index` and `target_index` atomically
-with the heads; incremental writes never promote partial historical heads to complete.
-Legacy timestamp-only heads are repaired by the same bounded refold. Explicit
-rebuild removes obsolete heads and resets the durable cursor.
-
-There is no numeric retention limit for durable usage observations. Provider,
-account, credit ID, actor and claim ID TEXT keys and credit JSON remain
-variable-size values. Bounded claim batches prove neither a per-claim byte bound
-nor a bound on the number of retained heads. The owner must preserve exact
-ordering, resumability and writer-selectable evidence when moving these columns
-and queue reclamation to bounded/reference storage.
-
-The module's fixture-only reset/update sites are inventoried under
-`fractal_store::store::usage_credits::tests`. Regressions cover legacy recovery,
-pending catch-up, both delivery orders, replication, rebuild, configuration
-changes, interruption/reopen at several persisted cursors versus a full fold,
-and an incrementally appended claim while a historical worker is paused after
-commit. Preserve these scenarios when the representation changes.
+## Writer-scoped usage observations
 
 `fractal_store::store::limits` owns revised `lv-hc361226a445f` and
 `lv-he63d64cf72c5`. Quota reclamation now binds the writer subject as well as
 provider/account/reference/window, so an excluded writer cannot delete another
 writer's evidence. Existing inline keys remain; the owner must preserve this
 per-writer reclamation boundary in the eventual bounded representation.
+
+## Native spend source/mirror evidence
+
+`fractal_api_core::credit_objectives` reads durable `usage.limits.observed`
+claims through the existing indexed claim-page API, at most 64 new claims per
+evaluation. The bounded source delta contract admits at most 128 combined quota,
+credit and reset-period facts per claim. It introduces no SQLite table, index,
+inline payload column or new SQL write site. The direct metadata read selects only
+`ivm_event_state.database_id` and `ivm_source.epoch`; replacement invalidates the
+in-memory replay cursor rather than inheriting a previous database's coverage.
+The existing durable claims and indexed page storage sites remain inventoried
+under their existing owners; no additional large-value SQL exception is granted.
+
+The former latest-credit projection and its background writer are removed; their
+tables are rebuildable state, never historical disposition authority. Native
+spend preserves original accepted predecessor IDs, fixed source rosters and
+incarnations while replaying. Unknown, missing and incomplete sources never
+manufacture healthy coverage. Retained facts are variable-size values: a bounded
+delta count is not a total byte, history-cardinality or in-memory work proof.
+
+The retirement DDL is inventoried as `lv-he6df9d2caad3`, owned by
+`fractal_store::store::projectors`; it drops the obsolete trigger before its
+three local projection tables and never deletes durable claims. Historical
+fixture DDL is `lv-h1e32e6d704d1`, owned by
+`fractal_store::store::projectors_tests`. Its legacy variable-size columns exist
+only to exercise reopening an old database and claim/digest preservation; no
+new production inline-value population or value-size proof is introduced.
 
 ## Operation-conflict bounded refold (#9101)
 
@@ -1226,6 +1283,45 @@ kind changes. Missing-content fixture mutations retain person and attempt author
 oversized-opening coverage distinguishes verified owners from missing or foreign
 original authority and keeps the full Start boundary closed.
 
+### Escalation restart scheduling
+
+`fractal_store::store::escalation` owns the restart index writes
+`lv-h0003f1ad06a3` and `lv-ha65878244411`, and the clock projection schema
+`lv-h08c7d25eba0f`. The restart index stores only run and origin identifiers,
+never policy text, messages, or ask bodies. Its key is removed when the terminal
+ladder has no remaining deadline.
+
+The same maintainer owns registration write `lv-h799cf224d6de`, canonical
+creation-receipt lookup `lv-h1bb6598fab35`, and bootstrap completion marker
+`lv-hc79245b566e4`. Registration copies the run subject's identifier suffix and
+the first unrepaired canonical creation receipt's origin into the rebuildable
+run roster. It preserves receipt authority and schedules existing runs after a
+restart; run IDs and origin keys remain inline variable strings without a byte
+bound. The lookup's `LIMIT 1` bounds rows, not identifier size, and its dynamic
+`canonical_sql` sink must remain linked to the canonical ordering expansion.
+Registration must eventually use bounded physical identifiers/references with
+keyed reclamation while preserving original-creator authority. The meta write
+has fixed literal key/value strings and no external bind data; its transitional
+record tracks the once-only backfill and cleanup lifecycle rather than granting
+permission for arbitrary metadata values. The schema catalog includes
+`local_escalation_runs_v1(run_id TEXT PRIMARY KEY, origin TEXT NOT NULL)`;
+unchanged clock tables and index expressions retain their existing size debt.
+
+Clock metadata is rebuildable from canonical receipts: subject and claim IDs,
+canonical sortable key, normalized state, accepted time and explicit wait deadline.
+Change capture stores only local integer arrival indexes and drains transactionally.
+Each receipt changes at most its own and its next status's transition bit.
+The three indexed `LIMIT 1` clock lookups avoid history replay during evaluation.
+Startup backfills existing clock-bearing receipts once; explicit replay rebuilds
+the projection. Deletion and correction repair neighboring transition boundaries.
+These are work bounds, not byte-size proofs: variable identifiers and sortable
+keys remain inline. The owner's `chunk-or-reference-variable-columns`,
+`bound-or-reference-values-and-reclamation`, `prepare-body-and-predecessor-values`
+and `trace-statement-and-value-representation` obligations cover those values,
+one-time backfill/rebuild and reclamation. A reference conversion must preserve
+canonical episode identity, paused-clock anchors and terminal restart scheduling.
+The parent schema site is `lv-hc9d1b1deb0cb`.
+
 ### Shell request identity and cancellation (#6762)
 
 The `fractal_store::store::shell_resources` maintainer owns
@@ -1238,17 +1334,24 @@ reference or physically bound the complete execution values and keys, preserving
 request identity and cleanup semantics.
 
 The same maintainer owns cancellation schema `lv-h68c595b5ab84`, insertion
-`lv-hc433437e984c` and expiry `lv-h3ecd1f97c431`. These retain a derived
-UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp,
-so cancellation-before-submission is atomic with request lookup. The 36-character
-check and seven-day retention are not general encoded-size or statement-cost
-proofs: an expiry can delete an unbounded number of rows inside submission.
-Values remain inline to retain the existing cancellation authority transition.
+`lv-hd7eb21c24865` and expiry `lv-h77ddc7013964`. These retain a derived
+UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp.
+Immediate transactions serialize acceptance with cancellation; cancellation
+always records evidence for every resolved owner key, including when an execution
+already exists. Acceptance also checks sibling executions and cancellation state.
+Expiry reclaims at most 128 tombstones per submission; timestamp checks prevent
+unreclaimed expired rows from blocking acceptance. The 36-character check and
+seven-day retention are not general encoded-size or statement-cost proofs.
+Refreshing owners under the writer lock scans the indexed invocation-receipt
+interval since this incarnation's start: O(R), without a cap or truncation.
+Long-lived incarnations can therefore increase writer-lock time. The durable
+owner projection and canonical incarnation/request row are deferred to #7012:
+legacy cancel-only rows contain opaque owner hashes and require a versioned
+contract transition. Values remain inline to preserve cancellation authority.
 The schema's `chunk-or-reference-variable-columns` task covers the identifier
-and index representation; the insertion/expiry
-`bound-or-reference-values-and-reclamation` tasks must bound physical storage
-and incremental reclamation without weakening cancellation tombstones or replay.
-This review records transitional debt, not a permanent exemption or size proof.
+and index representation; insertion/expiry retain the
+`bound-or-reference-values-and-reclamation` obligation. This records transitional
+debt, not a permanent exemption or size proof.
 
 ### Durable phone service minutes
 
@@ -1267,3 +1370,174 @@ The first uses source/report strings as variable index keys; the second combines
 a numeric minute with a variable subject key. Both index existing canonical
 claims without adding authoritative tables. Any later reference conversion must
 preserve exact retry, conflict exclusion, minute range and replication semantics.
+
+### Background usage-period lookup
+
+`fractal_store::store::usage_period` owns `lv-h8c2a4192756e`,
+`lv-h3aca5e04dde4` and `lv-h2c8754e606af`. The rebuildable local lookup stores
+existing claim IDs, normalized cumulative-series JSON and padded observed-time
+TEXT, with series/time and time/series indexes. It deliberately does not copy
+claim bodies. Inline keys preserve exact historical identity and full-u64 time
+ordering while backfill visits at most 64 source rows per background loan.
+This bounds rows, not encoded key/body bytes or transaction duration. The
+maintainer retains the variable-column/index-key reference conversion and
+writer-side JSON preparation debt; any replacement must preserve canonical
+ties, deletion/update maintenance and the complete-before-read-switch cursor.
+
+`fractal_seats::store::usage_period` owns `lv-h65f06f9a314c`,
+`lv-h5dbb84e35027`, `lv-h003f0f479205`, `lv-h7186f3970656` and
+`lv-h336e19be1e61`. These readers bind reporting-window times and existing
+series keys, then load canonical claim bodies only for selected boundaries.
+The exact historical reader remains active until backfill completes. Values
+remain inline to preserve the existing billing fold and pending-local baseline
+semantics; the tracing TODO must retain those identities and tie-breaking when
+moving keys or bodies to references. No logical input cap or value-size proof
+is introduced by these exceptions.
+
+### Trim recording preserves ready publications (#6977)
+
+The `smallclaims::store::checkpoint_trim` maintainer retains
+`flow-h39d714b2bc13` for `trim_checkpoint_from`. Recording a cut now calls
+`replica_inventory_changed` rather than withdrawing claim projections: recording
+changes the replication ledger, while deletion and its graph-equivalence checks
+remain delegated to `finish_trim`. This changes the function's comment-free token
+fingerprint, so the flow record is refreshed from
+`python3 scripts/propose-sqlite-large-values`; the flow ID, owner, adjacent marker,
+disposition and `stage-generation-and-keyed-reclamation` obligation are unchanged.
+
+The producer still writes the exact checkpoint ID, drop digest, serialized
+tombstone counts and paged envelope/claim tombstones inline, preserving restart
+and certification semantics. Paging does not prove a physical value-size or
+reclamation-cost bound. The existing generation-staging and certified keyed
+reclamation work therefore remains necessary; this review neither removes the
+exception nor grants a wider exemption. No statement, column catalog or other
+flow record changes are accepted by this refresh.
+
+### Light-node observe/stop session custody (#7107)
+
+Inventory review: [authenticated session custody](https://github.com/compoundingtech/fractal/pull/7107).
+The owning maintainers are the producer modules listed below. These 60
+transitional site registrations cover Phase 2 peer/session custody and its
+native/binary and dispatch-persistence fixtures, not the separate Phase 1
+local-authority inventory. The proposal helper supplied fingerprints and declaration metadata;
+acceptance preserves the inventory's existing `reviewed_base` and manual flows.
+All ten added declaration records retain `value_size_proven: false`.
+
+`fractal_peer::light_node::journal` owns schema `lv-hdeb9b3a5a824` and the
+following statement/sink identities:
+
+- `lv-h102052ca35fc`, `lv-h113edb40022a`, `lv-h191641c4d241`, `lv-h23bfa73b5860`,
+  `lv-h286b9d1c1c8b`, `lv-h3d6e4209c6eb`, `lv-h4a870d7bef9c`, `lv-h555cdce14fe8`,
+  `lv-h577b713b5a24`, `lv-h58e17ebf7853`, `lv-h682a40a9a666`, `lv-h72a762bf7354`,
+  `lv-h7726667ff8cd`, `lv-h77b56b17f8fc`, `lv-h7bc5ac937863`, `lv-h7f51b642f523`,
+  `lv-h806adaaf48a4`, `lv-h8764bd131643`, `lv-h8bd3c4b8c8b9`, `lv-h8eee3a85f96b`,
+  `lv-h920263c26897`, `lv-h92381651afd4`, `lv-h938942f23651`, `lv-h93c3cc2b150d`,
+  `lv-h9799d5cfd34a`, `lv-h9bef278ec2f7`, `lv-hbc80366c1c2b`, `lv-hbc8ed50798f2`,
+  `lv-hc5522da5d7ea`, `lv-hc5db8e607bbb`, `lv-hc882d2a1ceca`, `lv-hcdd54fc3ac96`,
+  `lv-hd2a6d3bd9e80`, `lv-hdd339b4e6193`, `lv-he362e06c6cb9`, `lv-he796ea71134f`,
+  `lv-hea174ad4467c`, `lv-hea697bc2d549`, `lv-hebcba1c5d265`.
+
+The journal retains selection/grant and endpoint strings, command/receipt JSON,
+native retirement proofs, cancellation reasons, forwarded request/result JSON,
+execution bindings and immutable identity/digest keys inline. These values and
+their variable primary/unique keys preserve admission, duplicate detection,
+terminal-result custody and joint retirement floors across crashes. Keeping them
+in the authoritative SQLite transaction currently provides the atomic boundary;
+it does not qualify their physical representation. Payload and row admission
+limits are producer-specific logical limits, not a proof of encoded index-key,
+statement-duration or reclamation cost.
+
+The schema's `chunk-or-reference-variable-columns` work must choose physical
+units/references for the complete column and key catalog. The statement sites'
+`bound-or-reference-values-and-reclamation` work must stage those exact bytes and
+certified cleanup keys without acknowledging a receipt, releasing a native
+finalization obligation or forgetting an immutable identity too early.
+`lv-h938942f23651` traces the schema variable; `lv-h191641c4d241` and
+`lv-h8eee3a85f96b` trace dynamic floor reads whose column selector is restricted
+to the home/seat floor. Their unresolved-sink registration is conservative and
+does not constitute size approval.
+
+`fractal_peer::light_node::session` owns `lv-h2784ce849550`, and
+`fractal_peer::light_node::session_tests` owns `lv-h40707d5ec849`. These are
+lexically ambiguous `RunEffects::execute` calls, not direct SQLite statements.
+Their `trace-statement-and-value-representation` obligation follows the signed
+request and exact result through the real graph claim writer, preserving pinned
+authority, immutable request identity and retained-result replay. Registering
+the delegation here does not accept another producer's storage representation.
+
+`fractal_peer::light_node::journal_tests` owns `lv-h694feccb0766`,
+`lv-h8c2f07f2635e`, `lv-ha8f636967dd7`, `lv-hb1e17066eaea`,
+`lv-hb88d5c28fd9b`, `lv-hb9686663e41e`, `lv-hbe5466693d21`,
+`lv-hcd66212e35cf`, `lv-he07cde45bf1f` and `lv-hf320d659814b`.
+These fixtures create a future-schema table and exercise committed entry
+fences, receipt ACKs and failing finalization-marker/release transactions.
+`fractal_reconcile::reconcile::home_session_tests` owns `lv-h40e04f0e7f4e`,
+`lv-h49ca84a271f1`, `lv-h9089b8a75c90`, `lv-hd36c1be68e80` and
+`lv-he41d028a3d0c`: renamed graph tables fence accidental graph access, while
+SQLite triggers expose failure between real native closure and Store custody
+finalization. The owning maintainers must retain those exact failure boundaries
+when updating schema/value representation and cleanup; short fixture literals
+are not a permanent test exemption or a physical size proof.
+
+`fractal::light_node_tests` owns unresolved sink `lv-h76fffc4c4dab`.
+Its parameterized `VACUUM INTO` copies the fixture's complete graph into the
+home database, retaining physical/historical claim and index values rather than
+constructing a fake graph effect. The tracing obligation must account for the
+backup destination key and full copied representation while preserving exact
+history. This registration introduces no new size proof or general exemption
+for backup/import producers.
+
+The `fractal_reconcile::reconcile::program::tests` maintainer owns
+`lv-ha7ab904670ea` and `lv-hb943a6b8edb9`. The temporary trigger refuses exact
+`program.attempt.trace` or `step-run.state` claim inserts, then is dropped to
+exercise persistence-failure recovery without replacing the real writer.
+These Phase 2 dispatch-nonce fixtures retain the existing claim representation;
+the trigger's formatted kind is restricted to those two literals. The
+`prepare-body-and-predecessor-values` and
+`bound-or-reference-values-and-reclamation` obligations preserve exact claim
+and dispatch identities when changing writer preparation or cleanup. Temporary
+test DDL and fixed trigger literals do not prove a physical value-size bound.
+
+### Model-return admission ledger (#6803)
+
+The `fractal_store::store` schema identity is `lv-h25bdee44f9bb` after combining
+the model-return admission ledger, bounded local model-observation cache frontier
+index and the existing schema. The catalog is
+regenerated from the combined source using `scripts/propose-sqlite-large-values`,
+preserving existing declarations, reviewed metadata and flow records rather than
+replacing them with an older branch snapshot.
+
+The `fractal_store::store::model_return` maintainer owns `lv-h5004436e697c`.
+Durable admission evidence retains variable identifiers and serialized claim
+values inline. The schema retains `chunk-or-reference-variable-columns`; the
+sink retains `trace-statement-and-value-representation`. Neither the idle-only
+admission policy nor its restart-rate bound proves a physical SQLite value-size
+bound. Any later representation change must preserve episode, incarnation and
+declaration fencing and replay-safe admission identity.
+
+### Local session custody and run authority (#7104)
+
+The reviewed inventory adds 36 SQL/source sites and 13 table/index catalog records for
+the Phase 1 local custody and run-authority producers. These remain explicit
+transitional exceptions, not value-size or statement-cost proof.
+The additional `legacy_handler_guard_tests` included-source site scans the new
+`run_requests` route family for removed legacy handlers. It is source inspection,
+not a production SQLite producer or a value-size proof; its owner and unresolved
+representation review follow the existing route-family inventory convention.
+
+`fractal_store::store::local_sessions` owns the native subject/incarnation keys,
+serialized custody/invocation metadata and detach/retirement receipt updates.
+`fractal_store::store::run_credentials::local` owns hashed credentials, exact
+execution JSON, ordered authority changes, proposal tombstones and ACK floors.
+`fractal_store::store::run_credentials::assertions` owns home admission keys,
+closed-epoch fences and exact retry-response JSON. Their row-count limits and
+hashed credentials do not bound every inline TEXT key, JSON cell or reclamation
+statement. Schema sites retain `chunk-or-reference-variable-columns`; write and
+retirement sites retain `bound-or-reference-values-and-reclamation`.
+
+The actual SQLite graph-unavailable, credential-capacity and writer-fence
+fixtures retain their separate test-module ownership and concrete source-site
+registrations. A later representation change must preserve native-generation
+custody, borrowed detach, ordered revocation and exact effect/retry identity;
+it cannot discard an unacknowledged witness to reduce storage.
+

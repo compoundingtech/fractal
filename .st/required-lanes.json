@@ -583,6 +583,7 @@
         "docs/st3/client-v0",
         "docs/st3/invariants.md",
         "docs/st3/onboarding-guide.md",
+        "docs/st3/open-indexes.json",
         "docs/st3/operational-state/cli-commands.json",
         "docs/st3/schema.md",
         "examples/client-tui",
@@ -650,6 +651,7 @@
         "slo/fractal-ci.kdl",
         "slo/objectives.kdl",
         "vendor/libghostty-vt-sys",
+        "vendor/notify",
         "wit"
       ]
     },
@@ -766,6 +768,7 @@
         "crates/fractal-github",
         "crates/fractal-github-base",
         "crates/fractal-kernel",
+        "crates/fractal-mac-custody",
         "crates/fractal-migrate/Cargo.toml",
         "crates/fractal-mission-ui",
         "crates/fractal-missions",
@@ -862,6 +865,7 @@
         "slo/fractal-ci.kdl",
         "slo/objectives.kdl",
         "vendor/libghostty-vt-sys",
+        "vendor/notify",
         "wit"
       ]
     }

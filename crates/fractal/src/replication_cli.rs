@@ -138,6 +138,12 @@ pub(super) async fn run_replication(
                 timings.commits,
                 timings.commit_ms
             );
+            if let Some(fallbacks) = &status.stream_fallbacks {
+                println!("stream-fallbacks\t{}", render_stream_fallbacks(fallbacks));
+            }
+            if let Some(retention) = &status.retention {
+                print!("{}", render_retention(retention));
+            }
             print!(
                 "{}",
                 render_replication_peers(&status.peers, &status.graph_digest, now_ms())
@@ -293,56 +299,16 @@ pub(super) async fn run_replication(
             }
         }
         ReplicationCommand::Checkpoint {
-            command: CheckpointCommand::Plan { cut },
-        } => {
-            let request = fractal_daemon::store::CheckpointPlanRequest { day: cut };
-            let plan = checkpoint_plan_waiting_for_proof(client, &request).await?;
-            if json_output {
-                return print_value(&plan, true);
-            }
-            print!("{}", render_checkpoint_plan(&plan));
-            Ok(())
-        }
-        ReplicationCommand::Checkpoint {
-            command: CheckpointCommand::Status,
-        } => {
-            let status: fractal_daemon::store::CheckpointStatusView =
-                client.get("/v1/checkpoint/status").await?;
-            if json_output {
-                return print_value(&status, true);
-            }
-            print!("{}", render_checkpoint_status(&status));
-            Ok(())
-        }
-        ReplicationCommand::Checkpoint {
-            command:
-                CheckpointCommand::Excuse {
-                    writer,
-                    reason,
-                    actor,
-                },
-        } => {
-            let actor = fleet_person(actor, config)?;
-            let request = fractal_daemon::store::CheckpointExcuseRequest {
-                writer,
-                reason,
-                actor,
-            };
-            let claim: fractal_daemon::model::ClaimRecord =
-                client.post("/v1/checkpoint/excuse", &request).await?;
-            print_value(&claim, json_output)
-        }
-        ReplicationCommand::Checkpoint {
             command: CheckpointCommand::Resume { reason, actor },
         } => {
             let actor = fleet_person(actor, config)?;
             let request = fractal_daemon::store::CheckpointResumeRequest { reason, actor };
-            let status: fractal_daemon::store::CheckpointStatusView =
+            let status: fractal_daemon::store::TrimStatusView =
                 client.post("/v1/checkpoint/resume", &request).await?;
             if json_output {
                 return print_value(&status, true);
             }
-            print!("{}", render_checkpoint_status(&status));
+            print!("{}", render_trim_status(&status));
             Ok(())
         }
         ReplicationCommand::Signatures {
@@ -365,79 +331,164 @@ pub(super) async fn run_replication(
     }
 }
 
-/// How long `checkpoint plan` asks again while another checkpoint proof runs, as one does right
-/// after the daemon starts. The daemon waits up to a minute itself before it refuses a plan with
-/// `checkpoint-proof-in-progress`, so this adds a few minutes more.
-const CHECKPOINT_PLAN_PROOF_WAIT: Duration = Duration::from_secs(4 * 60);
-
-async fn checkpoint_plan_waiting_for_proof(
-    client: &Client,
-    request: &fractal_daemon::store::CheckpointPlanRequest,
-) -> Result<fractal_daemon::store::CheckpointPlanView> {
-    let started = std::time::Instant::now();
-    let mut announced = false;
-    loop {
-        match client.post("/v1/checkpoint/plan", request).await {
-            Err(error)
-                if fractal_daemon::client::api_error_code(&error) == Some("checkpoint-proof-in-progress")
-                    && started.elapsed() < CHECKPOINT_PLAN_PROOF_WAIT =>
-            {
-                if !announced {
-                    crate::stderr_message("st", format_args!("waiting for the running checkpoint proof to finish"));
-                    announced = true;
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            result => return result,
+/// Each retention pass on one line or two: what the checkpoint trim, the valid-record bytes pass,
+/// the settled judging prune and the legacy receipt cleanup have done, and the passes this build
+/// keeps off, with why (`docs/st3/retention.md`).
+fn render_retention(retention: &smallclaims::store::retention::RetentionStatus) -> String {
+    let count = |value: Option<u64>| value.map_or("?".to_owned(), |value| value.to_string());
+    let switch = |switch: &smallclaims::store::retention::PassSwitch| {
+        if switch.enabled {
+            "on".to_owned()
+        } else {
+            format!("off: {}", switch.off_because.as_deref().unwrap_or("no reason given"))
         }
+    };
+    let trim = &retention.trim;
+    let mut output = format!(
+        "retention-trim\t{} daily={} deleted-today={} newest-cut={} unfinished={}\n",
+        if trim.local { "on" } else { "off" },
+        trim.daily_claims,
+        trim.deleted_today,
+        trim.newest_cut.as_ref().map_or("none".to_owned(), |cut| format!(
+            "{} ({}, eligible envelopes={} claims={})",
+            cut.id,
+            cut.state,
+            count(cut.eligible_envelopes),
+            count(cut.eligible_claims)
+        )),
+        trim.unfinished_cut.as_deref().unwrap_or("none"),
+    );
+    if let Some(pass) = &trim.last_pass {
+        let name = |value: serde_json::Result<serde_json::Value>| {
+            value.ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_else(|| "?".to_owned())
+        };
+        output.push_str(&format!(
+            "retention-trim-last-pass\t{} stop={} trimmed={} deferred={} set-aside={} deleted envelopes={} claims={}\n",
+            name(serde_json::to_value(pass.outcome)),
+            name(serde_json::to_value(pass.stop)),
+            pass.trimmed_cuts,
+            pass.deferred_cuts,
+            pass.set_aside_cuts,
+            pass.deleted_envelopes,
+            pass.deleted_claims
+        ));
+    }
+    let since = &trim.since_start;
+    output.push_str(&format!(
+        "retention-trim-since-start\tpasses={} trimmed={} deferred={} set-aside={} deleted envelopes={} claims={}\n",
+        since.passes,
+        since.trimmed_cuts,
+        since.deferred_cuts,
+        since.set_aside_cuts,
+        since.deleted_envelopes,
+        since.deleted_claims
+    ));
+    let bytes = &retention.valid_record_bytes;
+    output.push_str(&format!(
+        "retention-valid-record-bytes\t{} cursor={}/{} since-start pages={} emptied={} bytes={}\n",
+        if bytes.done { "done" } else { "in progress" },
+        bytes.cursor_rowid,
+        bytes.newest_rowid,
+        bytes.since_start.pages,
+        bytes.since_start.emptied_records,
+        bytes.since_start.emptied_bytes
+    ));
+    let judging = &retention.settled_judging;
+    output.push_str(&format!(
+        "retention-settled-judging\t{} since-start pages={} examined={} deleted={}\n",
+        match judging.cursor.as_deref() {
+            None => "not started".to_owned(),
+            Some("done") => "done".to_owned(),
+            Some(claim) => format!("after {claim}"),
+        },
+        judging.since_start.pages,
+        judging.since_start.examined,
+        judging.since_start.deleted
+    ));
+    let receipts = &retention.legacy_receipts;
+    output.push_str(&format!(
+        "retention-legacy-receipts\t{} boundary={} oldest={} cleanup-since-start chunks={} examined={} deleted={} extended={}\n",
+        if receipts.pending { "pending" } else { "none left" },
+        receipts.boundary_rowid.map_or("none".to_owned(), |rowid| rowid.to_string()),
+        receipts.oldest_rowid.map_or("none".to_owned(), |rowid| rowid.to_string()),
+        receipts.since_start.chunks,
+        receipts.since_start.examined,
+        receipts.since_start.deleted,
+        receipts.since_start.extended
+    ));
+    output.push_str(&format!("retention-envelope-release\t{}\n", switch(&retention.envelope_release)));
+    output.push_str(&format!("retention-valid-record-deletion\t{}\n", switch(&retention.valid_record_deletion)));
+    output
+}
+
+#[test]
+fn replication_status_renders_each_retention_pass() {
+    use smallclaims::store::retention::{
+        JudgingRetention, PassSwitch, RetentionStatus, TrimCut, TrimOutcome, TrimPass, TrimRetention, TrimStop,
+    };
+    let retention = RetentionStatus {
+        trim: TrimRetention {
+            local: true,
+            daily_claims: 100_000,
+            newest_cut: Some(TrimCut {
+                id: "cut-1".into(),
+                state: "trimming".into(),
+                eligible_envelopes: Some(3),
+                eligible_claims: None,
+            }),
+            unfinished_cut: Some("cut-1".into()),
+            last_pass: Some(TrimPass {
+                at_unix_ms: 1,
+                stop: TrimStop::DailyCap,
+                outcome: TrimOutcome::Partial,
+                trimmed_cuts: 0,
+                deferred_cuts: 1,
+                set_aside_cuts: 0,
+                deleted_envelopes: 2,
+                deleted_claims: 5,
+            }),
+            ..TrimRetention::default()
+        },
+        settled_judging: JudgingRetention { cursor: Some("done".into()), ..JudgingRetention::default() },
+        envelope_release: PassSwitch { enabled: false, off_because: Some("not yet".into()) },
+        valid_record_deletion: PassSwitch { enabled: true, off_because: None },
+        ..RetentionStatus::default()
+    };
+    let rendered = render_retention(&retention);
+    for line in [
+        "retention-trim\ton daily=100000 deleted-today=0 newest-cut=cut-1 (trimming, eligible envelopes=3 claims=?) unfinished=cut-1\n",
+        "retention-trim-last-pass\tpartial stop=daily_cap trimmed=0 deferred=1 set-aside=0 deleted envelopes=2 claims=5\n",
+        "retention-valid-record-bytes\tin progress cursor=0/0",
+        "retention-settled-judging\tdone since-start",
+        "retention-legacy-receipts\tnone left boundary=none oldest=none",
+        "retention-envelope-release\toff: not yet\n",
+        "retention-valid-record-deletion\ton\n",
+    ] {
+        assert!(rendered.contains(line), "{line:?} missing from:\n{rendered}");
     }
 }
 
-fn render_checkpoint_plan(plan: &fractal_daemon::store::CheckpointPlanView) -> String {
-    let mut output = String::new();
-    let percent = |part: usize, whole: usize| {
-        if whole == 0 {
-            0.0
-        } else {
-            part as f64 * 100.0 / whole as f64
+/// What a member's trim is doing, after `replication checkpoint resume`.
+fn render_trim_status(status: &fractal_daemon::store::TrimStatusView) -> String {
+    let mut output = format!(
+        "TRIM  {} · {}\n",
+        status.node,
+        if status.trims { "on" } else { "off ([trim] local = false)" }
+    );
+    output.push_str(&format!(
+        "newest trimmed  {}\n",
+        status.trimmed.as_deref().unwrap_or("none")
+    ));
+    output.push_str(&format!(
+        "stopped         {}\n",
+        if status.halted { "yes, waiting for a person" } else { "no" }
+    ));
+    if let Some(worker) = &status.worker {
+        output.push_str(&format!("phase           {:?}\n", worker.phase));
+        if let Some(error) = &worker.error {
+            output.push_str(&format!("error           {error}\n"));
         }
-    };
-    output.push_str(&format!(
-        "CHECKPOINT  {} · dry run, nothing changed\n",
-        plan.checkpoint
-    ));
-    output.push_str(&format!(
-        "before the cut  {} envelopes · {} claims\n",
-        plan.sealed_envelopes, plan.sealed_claims
-    ));
-    output.push_str(&format!(
-        "would drop      {} envelopes · {} claims ({:.1}%)\n",
-        plan.dropped_envelopes,
-        plan.dropped_claims,
-        percent(plan.dropped_claims, plan.sealed_claims)
-    ));
-    for (kind, count) in &plan.by_kind {
-        output.push_str(&format!(
-            "  {kind}  {} of {}\n",
-            count.dropped, count.sealed
-        ));
     }
-    let proof = &plan.proof;
-    if proof.passed {
-        output.push_str(&format!(
-            "proof           passed · graph and {} subjects' readers unchanged\n",
-            proof.subjects
-        ));
-    } else {
-        output.push_str(&format!(
-            "proof           FAILED · a checkpoint would not verify: {}\n",
-            proof.mismatches.join(", ")
-        ));
-    }
-    output.push_str(&format!("rules-digest    {}\n", plan.rules_digest));
-    output.push_str(&format!("sealed-digest   {}\n", plan.sealed_digest));
-    output.push_str(&format!("drop-digest     {}\n", plan.drop_digest));
-    output.push_str(&format!("graph-digest    {}\n", proof.graph_digest));
     output
 }
 

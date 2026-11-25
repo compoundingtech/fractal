@@ -119,9 +119,15 @@ impl Cache {
         {
             // Refresh on use, including shell configuration changes and credentials exported
             // by shell startup files. Keep failures visible, rather than using stale secrets.
+            let result = capture();
+            if result.as_ref().is_err_and(fractal_runtime::is_shell_startup_timeout) {
+                // A scheduled launch retry must run the shell again, not replay a cached timeout.
+                self.captured = None;
+                return result;
+            }
             self.captured = Some((
                 Instant::now(),
-                capture().map_err(|error| format!("{error:#}")),
+                result.map_err(|error| format!("{error:#}")),
             ));
         }
         self.captured
@@ -239,7 +245,7 @@ pub fn snapshot_ready() -> Option<Result<Environment>> {
     if stale && !REFRESHING.swap(true, Ordering::AcqRel) {
         std::thread::spawn(|| {
             if let Err(error) = snapshot() {
-                eprintln!("st3: capturing the daemon environment: {error:#}");
+                eprintln!("fractal: capturing the daemon environment: {error:#}");
             }
             REFRESHING.store(false, Ordering::Release);
         });
@@ -320,7 +326,7 @@ fn link_small_crate(environment: &Environment, timeout: Duration) -> Result<(), 
     // The empty workspace keeps cargo from adopting a workspace above a temporary directory.
     write(
         "Cargo.toml",
-        "[package]\nname = \"st-doctor-link\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        "[package]\nname = \"fractal-doctor-link\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
     )?;
     write("src/main.rs", "fn main() {}\n")?;
     write(
@@ -450,6 +456,25 @@ mod tests {
             seconds: 10.0,
         }
         .into()
+    }
+
+    #[test]
+    fn timeout_retry_captures_again_without_waiting_for_cache_refresh() {
+        let mut cache = Cache::default();
+        let mut calls = 0;
+        let error = cache.get(|| {
+            calls += 1;
+            Err(slow().context("capture"))
+        }).unwrap_err();
+        assert!(fractal_runtime::is_shell_startup_timeout(&error));
+        assert!(cache.captured.is_none());
+        let environment = Environment::from([("PATH".into(), "/bin".into())]);
+        assert_eq!(cache.get(|| {
+            calls += 1;
+            Ok(environment.clone())
+        }).unwrap(), environment);
+        assert_eq!(calls, 2);
+        assert_eq!(cache.get(|| panic!("successful retry is cached")).unwrap(), environment);
     }
 
     #[test]

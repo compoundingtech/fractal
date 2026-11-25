@@ -2,7 +2,6 @@ use crate::AdhocWorkStore;
 use crate::MissionsStore;
 use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
-use crate::SeatsStoreCore;
 use super::*;
 use super::client_v0::{ClientSession, require_scope};
 
@@ -346,6 +345,15 @@ pub async fn wake_work(
             .message(&existing.subject)
             .map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::internal("the wake operation message is unavailable"))?;
+        return Ok(Json(message));
+    }
+    // A wake that went to the stream is no graph operation; its subject names it.
+    if let Some(message) = crate::store::messages_shard::message_view(
+        &state.store,
+        &crate::reconcile::work_wake_subject(&request.idempotency_key),
+    )
+    .map_err(ApiError::internal)?
+    {
         return Ok(Json(message));
     }
     if step.status != "ready" {

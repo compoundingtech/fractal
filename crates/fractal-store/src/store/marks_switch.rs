@@ -23,6 +23,9 @@
 //! and read by the writer in its own transaction ([`staged_switched_tx`]).
 use super::*;
 
+mod maintenance;
+pub use maintenance::Maintenance;
+
 /// The `daemon.started` feature every other member advertises before this one records marks: its
 /// message view and lists ask a seat's host for the seat's marks.
 pub const FEATURE: &str = "message_view_reads";
@@ -40,7 +43,7 @@ fn writer_seek(table: &str, column: &str) -> String {
 }
 
 /// Whether `member`'s newest own `daemon.started` at or after `start` advertises `feature`.
-fn advertises(connection: &Connection, member: &str, start: u64, feature: &str) -> Result<bool> {
+pub(super) fn advertises(connection: &Connection, member: &str, start: u64, feature: &str) -> Result<bool> {
     let advertised: Option<Option<bool>> = connection
         .query_row(/* sqlite-large-value: allow-for-now lv-h63037ed7cc0c owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT json_extract(claims.body,?4)=1
@@ -329,9 +332,8 @@ mod tests {
         statements.into_inner().unwrap()
     }
 
-    /// The daemon checks the barrier every minute, so a check reads indexes only: each writer
-    /// seek and each member's start is one indexed step, none scans a table, and the check runs
-    /// as many statements over a long history as over a short one.
+    /// A startup/parity check reads indexes only: each writer seek and each member's start is
+    /// one indexed step, independent of the length of the history.
     #[test]
     fn a_barrier_check_seeks_each_writer_and_never_scans_the_history() {
         let store = Store::open_memory("alder").unwrap();
@@ -362,5 +364,30 @@ mod tests {
                 .query_map([""], |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             assert!(plans.iter().all(|plan| plan.starts_with("SEARCH") && plan.contains("INDEX")), "{table}: {plans:?}");
         }
+    }
+
+    #[test]
+    fn reactive_membership_only_reevaluates_changed_requirements() {
+        let (store, peer) = fleet_of_two();
+        started_with(&peer, true, true);
+        sync(&peer, &store);
+        let mut maintenance = store.marks_switch_maintenance().unwrap();
+        maintenance.refresh(&store, &[]).unwrap();
+        assert!(store.marks_switched().unwrap() && store.staged_switched().unwrap());
+        let before = store.marks_switch_work()["member_reevaluations"].as_u64().unwrap();
+        let key = MemberKey::generate().unwrap().0;
+        claim(&store, "host/cedar", "fleet.member-admitted", None,
+            json!({"fleet_id": FLEET, "member_key": key.public(), "via": "invite", "sponsor": "host/alder", "mode": "listening"}));
+        store.replication_snapshot().unwrap();
+        maintenance.refresh(&store, &[]).unwrap();
+        assert!(!store.marks_switched().unwrap());
+        assert_eq!(store.marks_switch_work()["member_reevaluations"], before + 1);
+        claim(&store, "host/cedar", "fleet.member-removed", None,
+            json!({"member_key": key.public(), "high_water": 0, "reason": "test"}));
+        store.replication_snapshot().unwrap();
+        maintenance.refresh(&store, &[]).unwrap();
+        assert_eq!(store.marks_switch_work()["member_reevaluations"], before + 1,
+            "removal drops cedar without rereading birch");
+        assert!(store.marks_switched().unwrap());
     }
 }

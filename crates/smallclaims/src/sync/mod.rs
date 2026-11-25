@@ -21,6 +21,7 @@ use sha2::{Digest as _, Sha256};
 use crate::fleet::{MemberKey, Sender, verify_signature};
 
 mod backend;
+pub mod revision;
 pub mod telemetry;
 mod worker;
 
@@ -40,6 +41,25 @@ pub(crate) fn worker_timer_cap() -> Option<std::time::Duration> {
     })
 }
 
+/// `ST3_REPLICATION_IDLE_MAX_MS`, read once: raise or lower the idle polling ceiling.
+/// Starts at 30 seconds, doubles to 10 minutes by default, and is bounded to 30s..=1h.
+/// `ST3_WORKER_INTERVAL_MS` still caps the resulting timer when set.
+pub(crate) fn replication_idle_max() -> std::time::Duration {
+    static MAX: std::sync::LazyLock<std::time::Duration> = std::sync::LazyLock::new(|| {
+        replication_idle_max_from(std::env::var("ST3_REPLICATION_IDLE_MAX_MS").ok().as_deref())
+    });
+    *MAX
+}
+
+pub(crate) fn replication_idle_max_from(value: Option<&str>) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        value
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(600_000)
+            .clamp(30_000, 3_600_000),
+    )
+}
+
 /// `default`, or `cap` when that is shorter.
 pub(crate) fn capped(
     default: std::time::Duration,
@@ -51,9 +71,6 @@ pub(crate) fn capped(
 const PROTOCOL: &str = "st3-replication-v1";
 pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 
-/// A page of a checkpoint's manifest, for a node that adopts a checkpoint it did not take part
-/// in. Older builds neither serve nor call it.
-pub const CHECKPOINT_PATH: &str = "/v1/peer/checkpoint";
 /// Where a member asks another for its answers per claim kind; see `crate::answers`.
 pub const ANSWERS_PATH: &str = "/v1/peer/answers";
 pub const JOIN_PATH: &str = "/v1/fleet/join";
@@ -80,10 +97,6 @@ const HEADER_ALIASES: [(&str, &str); 7] = [
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 const MEMBER_SIGNATURE_DOMAIN: &str = "st3-member-v1";
 pub const MAX_EXCHANGE_BYTES: usize = 64 * 1024 * 1024;
-
-/// The largest whole manifest the worker hands the daemon to adopt. A manifest lists every
-/// tombstone so far, about 400 bytes each.
-pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024 * 1024;
 
 /// The HTTP content coding for large exchange bodies: zlib-wrapped deflate. A requester asks
 /// for it with `Accept-Encoding`, and a peer says with the same header in its answer that it

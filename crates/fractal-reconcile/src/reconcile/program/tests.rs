@@ -1,3 +1,5 @@
+use crate::SeatsStore;
+
 use super::*;
 
 fn engine(dir: &Path) -> Arc<ProgramEngine> {
@@ -35,6 +37,34 @@ fn replay_returns_this_attempts_results_in_order() {
     );
     // A retried attempt never replays the first attempt, whose revert undid its merge.
     assert_eq!(engine.journal(step, 2).unwrap(), vec![json!({"key": "merge", "_tag": "Success", "value": {"commit": "c2"}})]);
+}
+
+#[test]
+fn completed_result_selects_only_the_exact_program_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let step = "step-run/generation/program";
+    let hash = "a".repeat(64);
+    entry(&engine, step, "inner", "completed", 1, json!({"not": "the return"}));
+    assert_eq!(completed_result(&engine.store, step, 1, &hash).unwrap(), None);
+    entry(&engine, step, RESULT_KEY, "completed", 1, json!({"summary": "real output"}));
+    assert_eq!(completed_result(&engine.store, step, 1, &hash).unwrap(), Some(json!({"summary": "real output"})));
+    assert_eq!(completed_result(&engine.store, step, 2, &hash).unwrap(), None);
+    assert_eq!(completed_result(&engine.store, step, 1, &"b".repeat(64)).unwrap(), None);
+    entry(&engine, step, RESULT_KEY, "failed", 2, json!({"_tag": "ChildFailed"}));
+    assert_eq!(completed_result(&engine.store, step, 2, &hash).unwrap(), None);
+}
+
+#[test]
+fn completed_result_preserves_null_and_pages_past_inner_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let step = "step-run/generation/program";
+    entry(&engine, step, RESULT_KEY, "completed", 1, Value::Null);
+    for n in 0..=JOURNAL_PAGE {
+        entry(&engine, step, &format!("inner-{n}"), "completed", 1, json!(n));
+    }
+    assert_eq!(completed_result(&engine.store, step, 1, &"a".repeat(64)).unwrap(), Some(Value::Null));
 }
 
 #[test]
@@ -105,7 +135,10 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new(),
+    let execution = engine.execution(crate::store::run_credentials::RunBinding {
+        run: dispatch.run.clone(), step_run: dispatch.step.clone(), attempt: dispatch.attempt,
+    }, 1, None);
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, execution, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
@@ -147,7 +180,10 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new(),
+    let execution = engine.execution(crate::store::run_credentials::RunBinding {
+        run: step.run.clone(), step_run: step.subject.clone(), attempt: 1,
+    }, 1, None);
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, execution, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]) });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
@@ -268,6 +304,9 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
             program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
+        execution: engine.execution(crate::store::run_credentials::RunBinding {
+            run: run.subject.clone(), step_run: step.clone(), attempt,
+        }, generation, None),
         generation, requests: BTreeMap::new(),
         _trace: crate::otel::AttemptTrace::start("st.program.attempt", Vec::new(), &[]),
     });
@@ -296,7 +335,7 @@ fn host_ending_survives_outcome_and_requires_each_exact_termination_acknowledgem
     for (attempt, generation) in [(2, 1), (2, 2)] {
         running_attempt(&engine, &run, attempt, generation);
         engine.handle(&message("ending", attempt), generation).unwrap();
-        assert!(engine.end(step, attempt, generation, None, false).is_some());
+        assert!(engine.end(step, attempt, generation, None, false).unwrap().is_some());
     }
     engine.handle(&message("cancelled", 1), 2).unwrap();
     assert_eq!(engine.lock().terminating.len(), 3);
@@ -393,7 +432,7 @@ fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
     let step = &unrelated.steps[0].subject;
     running_attempt(&engine, &unrelated, 1, 1);
     engine.handle(&json!({"t": "ending", "step": step, "attempt": 1}), 1).unwrap();
-    assert!(engine.end(step, 1, 1, None, false).is_some());
+    assert!(engine.end(step, 1, 1, None, false).unwrap().is_some());
     assert!(engine.fence_left_effects(&replacement).unwrap());
     assert!(!engine.fence_left_effects(&unrelated).unwrap());
     engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 1).unwrap();
@@ -539,6 +578,25 @@ fn resource_protocol_preserves_native_identity_and_exact_cancellation() {
 }
 
 #[test]
+fn native_turn_protocol_preserves_payload_and_exact_cancellation() {
+    let payload = json!({"agent": "agent/worker", "instructions": "do the work", "context": "{}"});
+    for cancelled in [false, true] {
+        let message = json!({
+            "t": if cancelled { "resource-cancel" } else { "resource" },
+            "operation": "agent.turn", "payload": payload,
+        });
+        match wait("step-run/generation/turn", 2, "agent.turn/work", &message).unwrap() {
+            Wait::Resource { operation, payload: actual, cancelled: actual_cancelled } => {
+                assert_eq!(operation, "agent.turn");
+                assert_eq!(actual, payload);
+                assert_eq!(actual_cancelled, cancelled);
+            }
+            other => panic!("native turn request changed kind: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_replayed_grant_still_visits_native_authority_and_cancellation_wins_the_reply_race() {
     let dir = tempfile::tempdir().unwrap();
     let engine = engine(dir.path());
@@ -662,4 +720,532 @@ fn frozen_resource_exec(timed_out_drain: bool) {
     let mut host = engine.lock().host.take().unwrap();
     let _ = host.child.kill();
     host.child.wait().unwrap();
+}
+
+#[test]
+fn await_pr_protocol_validates_repo_number_and_head() {
+    let valid = json!({"t":"await-pr","repo":"Acme/Garden","pr":12,"head":"pinned"});
+    assert!(matches!(wait("step-run/generation/work", 1, "await-outcome", &valid).unwrap(),
+        Wait::AwaitPr { repo, pr: 12, head } if repo == "acme/garden" && head == "pinned"));
+    for (name, invalid) in [
+        ("repo", json!("acme/garden/extra")), ("repo", json!("acme/garden#12")),
+        ("pr", json!(0)), ("pr", json!(1.5)), ("pr", json!(9_007_199_254_740_992_u64)),
+        ("head", json!(" ")),
+    ] {
+        let mut message = valid.clone();
+        message[name] = invalid;
+        assert!(wait("step-run/generation/work", 1, "await-outcome", &message).is_err(), "{message}");
+    }
+}
+
+#[test]
+fn completed_await_pr_replay_never_registers_a_watch() {
+    use crate::watches::ProgramPrWatchesStore as _;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "await-pr-replay");
+    running_attempt(&engine, &run, 1, 7);
+    let step = &run.steps[0].subject;
+    entry(&engine, step, "await-outcome", "completed", 1,
+        json!({"outcome":"merged","mergeCommit":"merge"}));
+    let before = journal_claims(&engine, step);
+    engine.handle(&json!({
+        "t":"await-pr","step":step,"attempt":1,"seq":10,"key":"await-outcome",
+        "repo":"acme/garden","pr":12,"head":"head",
+    }), 7).unwrap();
+    assert!(engine.requests(&run.subject).is_empty());
+    assert!(engine.store.program_pr_watches().unwrap().is_empty());
+    assert_eq!(journal_claims(&engine, step), before);
+}
+
+#[test]
+fn resumed_await_pr_adopts_registration_and_releases_it_on_completion_or_attempt_departure() {
+    use crate::watches::ProgramPrWatchesStore as _;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "await-pr-adoption");
+    running_attempt(&engine, &run, 1, 7);
+    let step = &run.steps[0].subject;
+    let message = json!({
+        "t":"await-pr","step":step,"attempt":1,"seq":10,"key":"await-outcome",
+        "repo":"acme/garden","pr":12,"head":"head",
+    });
+    engine.handle(&message, 7).unwrap();
+    let request = engine.requests(&run.subject).pop().unwrap();
+    let subject = await_pr::subject(&request);
+    let original = engine.register_pr(&request, &subject, json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
+    assert_eq!(engine.store.program_pr_watches().unwrap(), vec![original.clone()]);
+    assert!(engine.journal(step, 1).unwrap().is_empty(), "registration is not an outcome");
+    running_attempt(&engine, &run, 1, 8);
+    engine.handle(&message, 8).unwrap();
+    let resumed = engine.requests(&run.subject).pop().unwrap();
+    assert_eq!(await_pr::subject(&resumed), subject);
+    let before = journal_claims(&engine, step);
+    assert_eq!(engine.register_pr(&resumed, &subject, json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap(), original);
+    assert_eq!(journal_claims(&engine, step), before, "adoption does not reset the time baseline");
+    engine.resolve(&resumed, &subject, json!({"_tag":"Success","value":{"outcome":"merged","mergeCommit":"merge"}})).unwrap();
+    assert!(engine.store.program_pr_watches().unwrap().is_empty());
+
+    let mut second = message;
+    second["key"] = json!("await-outcome#2");
+    engine.handle(&second, 8).unwrap();
+    let request = engine.requests(&run.subject).pop().unwrap();
+    let subject = await_pr::subject(&request);
+    engine.register_pr(&request, &subject, json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
+    assert_eq!(engine.store.program_pr_watches().unwrap().len(), 1);
+    engine.store.set_step_run_state_for_tests(step, "working", 2);
+    assert!(engine.store.program_pr_watches().unwrap().is_empty(), "departed attempts retain no observer");
+    engine.cancel_waits(step, 1, "attempt superseded").unwrap();
+}
+
+#[test]
+fn native_pr_registration_retains_the_standing_observer_without_a_seat_subscription() {
+    use crate::reconcile::{NativeRuntime, Reconciler};
+    use crate::watches::WatchesStore as _;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "await-pr-observer");
+    running_attempt(&engine, &run, 1, 7);
+    engine.handle(&json!({
+        "t":"await-pr","step":run.steps[0].subject,"attempt":1,"seq":1,"key":"await-outcome",
+        "repo":"acme/garden","pr":12,"head":"head",
+    }), 7).unwrap();
+    let request = engine.requests(&run.subject).pop().unwrap();
+    engine.register_pr(&request, &await_pr::subject(&request), json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
+    let runtime = Arc::new(NativeRuntime::new(dir.path(), None, Path::new("unused-pty")));
+    let reconciler = Reconciler::new(engine.store.clone(), runtime, "node".into(), Arc::new(tokio::sync::Notify::new()));
+    reconciler.reconcile_github_watches(&engine.store.github_watch_declarations().unwrap()).unwrap();
+    let declarations = engine.store.github_watch_declarations().unwrap();
+    assert!(declarations.iter().all(|desired| desired.kind != "subscription"), "a native wait is not a seat watch");
+    let observer = declarations.iter().find(|desired| desired.subject == "observer/github/acme/garden").unwrap();
+    assert!(!crate::graph::observer_spec(&observer.desired).unwrap().stopped);
+    engine.store.set_step_run_state_for_tests(&request.step, "cancelled", 1);
+    reconciler.reconcile_github_watches(&declarations).unwrap();
+    let declarations = engine.store.github_watch_declarations().unwrap();
+    let observer = declarations.iter().find(|desired| desired.subject == "observer/github/acme/garden").unwrap();
+    assert!(crate::graph::observer_spec(&observer.desired).unwrap().stopped);
+}
+
+fn observe_program_pr(engine: &ProgramEngine, mut pulls: Value) {
+    use crate::watches::ProgramPrWatchesStore as _;
+    let targets = await_pr::targets(engine.store.program_pr_watches().unwrap(), "acme/garden").unwrap();
+    for pull in pulls.as_array_mut().unwrap() {
+        if let Some(target) = targets.iter().find(|target| pull["number"].as_u64() == Some(target.pr)) {
+            pull["await_pr_observation"] = json!({
+                "registrations":target.registrations,"head":pull["head_sha"],
+                "merged":pull["merged"],"merge_commit_sha":pull["merge_commit_sha"],
+            });
+        }
+    }
+    observe_program_pr_facts(engine, &json!({"repository_id":7,"pull_requests":pulls,"await_prs_not_found":[]}));
+}
+
+fn observe_program_pr_facts(engine: &ProgramEngine, facts: &Value) {
+    use crate::watches::WatchesStore as _;
+    let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+    engine.store.ensure_watch_observer(&thread).unwrap();
+    let revision = engine.store.selected_desired_revision(&thread.observer()).unwrap().unwrap();
+    engine.store.record_resource_observation(
+        &thread.observer(), &revision, None, &thread.resource(), None,
+        facts,
+        smallclaims::store::now_ms() + 60_000, &[], None,
+    ).unwrap();
+}
+
+fn record_program_repo_missing(engine: &ProgramEngine, evidence: Vec<String>) {
+    use crate::watches::WatchesStore as _;
+    let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+    engine.store.ensure_watch_observer(&thread).unwrap();
+    engine.store.append_claim(&ClaimInput {
+        subject: thread.observer(), kind: "observer.state".into(), actor: None,
+        fields: BTreeMap::from([
+            ("state".into(), json!("unreachable")),
+            ("error_code".into(), json!("github-repository-not-found")),
+            ("reason".into(), json!("GitHub repository returned HTTP 404")),
+        ]),
+        evidence, expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+#[test]
+fn native_await_pr_resolves_observed_merge_and_journals_the_caller_key() {
+    use crate::watches::ProgramPrWatchesStore as _;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "await-pr-merge");
+    running_attempt(&engine, &run, 1, 7);
+    observe_program_pr(&engine, json!([{
+        "number":12,"state":"open","head_sha":"head","head":"head","merged":false,
+    }]));
+    engine.handle(&json!({
+        "t":"await-pr","step":run.steps[0].subject,"attempt":1,"seq":1,"key":"await-outcome",
+        "repo":"acme/garden","pr":12,"head":"head",
+    }), 7).unwrap();
+    let request = engine.requests(&run.subject).pop().unwrap();
+    let (pending, reads) = smallclaims::touched::record(|| await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head"));
+    assert!(!pending.unwrap());
+    assert!(reads.contains("actual:resource/github/acme/garden/pull-request/12"));
+    assert_eq!(engine.store.program_pr_watches().unwrap().len(), 1);
+    observe_program_pr(&engine, json!([{
+        "number":12,"state":"closed","head_sha":"head","head":"head","merged":true,"merge_commit_sha":"merge",
+    }]));
+    assert!(await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head").unwrap());
+    assert_eq!(engine.journal(&request.step, 1).unwrap(), vec![json!({
+        "key":"await-outcome","_tag":"Success","value":{"outcome":"merged","mergeCommit":"merge"},
+    })]);
+    assert!(engine.store.program_pr_watches().unwrap().is_empty());
+}
+
+#[test]
+fn native_await_pr_returns_typed_unknown_repository_and_pull_request_errors() {
+    use crate::watches::ProgramPrWatchesStore as _;
+    for known_repo in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        let run = scoped_run(&engine, if known_repo { "unknown-pr" } else { "unknown-repo" });
+        running_attempt(&engine, &run, 1, 7);
+        if known_repo {
+            observe_program_pr(&engine, json!([]));
+        }
+        if !known_repo {
+            record_program_repo_missing(&engine, Vec::new());
+        }
+        engine.handle(&json!({
+            "t":"await-pr","step":run.steps[0].subject,"attempt":1,"seq":1,"key":"await-outcome",
+            "repo":"acme/garden","pr":12,"head":"head",
+        }), 7).unwrap();
+        let request = engine.requests(&run.subject).pop().unwrap();
+        let (pending, reads) = smallclaims::touched::record(|| await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head"));
+        assert!(!pending.unwrap(), "pre-registration failures and incremental absence cannot settle a new wait");
+        assert!(reads.contains("actual:resource/github/acme/garden"));
+        assert!(reads.contains("observer/github/acme/garden"));
+        let registrations = engine.store.program_pr_watches().unwrap();
+        let token = registrations[0]["registration"].as_str().unwrap();
+        if known_repo {
+            observe_program_pr_facts(&engine, &json!({
+                "repository_id":7,"pull_requests":[],
+                "await_prs_not_found":[{"pr":12,"registrations":[token]}],
+            }));
+        } else {
+            record_program_repo_missing(&engine, vec![token.to_owned()]);
+        }
+        assert!(await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head").unwrap());
+        let journal = engine.journal(&request.step, 1).unwrap();
+        assert_eq!(journal[0]["_tag"], "Failure");
+        assert_eq!(journal[0]["error"]["_tag"], "AwaitPrFailed");
+        assert_eq!(journal[0]["error"]["code"], if known_repo { "unknown-pr" } else { "unknown-repo" });
+        assert_eq!(journal[0]["error"]["repo"], "acme/garden");
+        assert_eq!(journal[0]["error"]["pr"], 12);
+    }
+}
+
+#[test]
+fn native_await_pr_resolves_only_observed_queue_exit_or_changed_head() {
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+    }
+    for moved in [false, true] {
+        smallclaims::store::set_thread_clock(Some(1_900_000_000_000));
+        let _reset = ResetClock;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        let run = scoped_run(&engine, if moved { "head-moved" } else { "queue-exit" });
+        running_attempt(&engine, &run, 1, 7);
+        observe_program_pr(&engine, json!([{
+            "number":12,"state":"open","head_sha":"head","head":"head","merged":false,"merge_queue":null,
+        }]));
+        engine.handle(&json!({
+            "t":"await-pr","step":run.steps[0].subject,"attempt":1,"seq":1,"key":"await-outcome",
+            "repo":"acme/garden","pr":12,"head":"head",
+        }), 7).unwrap();
+        let request = engine.requests(&run.subject).pop().unwrap();
+        assert!(!await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head").unwrap(),
+            "not yet queued is not a dequeue");
+        smallclaims::store::set_thread_clock(Some(1_900_000_001_000));
+        observe_program_pr(&engine, json!([{
+            "number":12,"state":"open","head_sha":"head","head":"head","merged":false,
+            "merge_queue":{"state":"queued","position":1},
+        }]));
+        assert!(!await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head").unwrap());
+        smallclaims::store::set_thread_clock(Some(1_900_000_002_000));
+        observe_program_pr(&engine, json!([{
+            "number":12,"state":"open","head_sha":if moved { "new" } else { "head" },
+            "head":if moved { "new" } else { "head" },"merged":false,"merge_queue":null,
+        }]));
+        assert!(await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head").unwrap());
+        let journal = engine.journal(&request.step, 1).unwrap();
+        assert_eq!(journal[0]["value"], json!({
+            "outcome":"dequeued","reason":if moved { "head-changed" } else { "merge-queue-exit" },
+        }));
+    }
+}
+
+#[test]
+fn a_new_wait_does_not_treat_an_older_observed_head_as_head_movement() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "await-pr-stale-head");
+    running_attempt(&engine, &run, 1, 7);
+    observe_program_pr_facts(&engine, &json!({
+        "repository_id":7,"await_prs_not_found":[],"pull_requests":[{
+            "number":12,"state":"open","head_sha":"old","head":"old","merged":false,
+            "await_pr_observation":{
+                "registrations":["another-registration"],"head":"old","merged":false,"merge_commit_sha":null,
+            },
+        }],
+    }));
+    engine.handle(&json!({
+        "t":"await-pr","step":run.steps[0].subject,"attempt":1,"seq":1,"key":"await-outcome",
+        "repo":"acme/garden","pr":12,"head":"requested",
+    }), 7).unwrap();
+    let request = engine.requests(&run.subject).pop().unwrap();
+    assert!(!await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "requested").unwrap(),
+        "the standing observer's pre-registration head is not movement");
+    observe_program_pr(&engine, json!([{
+        "number":12,"state":"open","head_sha":"requested","head":"requested","merged":false,
+    }]));
+    assert!(!await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "requested").unwrap(),
+        "a fresh acquisition of the requested head keeps waiting");
+    assert!(engine.journal(&request.step, 1).unwrap().is_empty());
+    observe_program_pr(&engine, json!([{
+        "number":12,"state":"open","head_sha":"later","head":"later","merged":false,
+    }]));
+    assert!(await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "requested").unwrap());
+    assert_eq!(engine.journal(&request.step, 1).unwrap()[0]["value"],
+        json!({"outcome":"dequeued","reason":"head-changed"}));
+}
+
+// A real source SQLite issuer and home admission, with ACK delivery controlled by the test.
+// No issuer responses are scripted: tombstones, admission backpressure and credentials all
+// come from the durable authority implementation.
+struct JournalRunAuthority {
+    local: Mutex<rusqlite::Connection>,
+    home: Arc<Store>,
+    host_key: smallclaims::fleet::MemberKey,
+    revoked: mpsc::Sender<()>,
+}
+
+impl JournalRunAuthority {
+    fn binding(&self, execution: &ProgramExecution) -> crate::store::run_credentials::ExecutionBinding {
+        use sha2::Digest;
+        let revision = serde_json::to_vec(&json!({
+            "home": "node", "host": "execution-host", "epoch": 1,
+            "run": execution.run, "runtime": execution.runtime, "incarnation": execution.incarnation,
+        })).unwrap();
+        crate::store::run_credentials::ExecutionBinding {
+            version: 1, home: "node".into(), host: "execution-host".into(), epoch: 1,
+            subject: execution.run.step_run.clone(), runtime: execution.runtime.clone(),
+            incarnation: execution.incarnation.clone(),
+            authorization_revision: format!("{:x}", sha2::Sha256::digest(revision)),
+            run: Some(execution.run.clone()),
+        }
+    }
+
+    fn acknowledge(&self) {
+        use crate::store::run_credentials::local;
+        let mut connection = self.local.lock().unwrap();
+        let changes = local::pending_changes(&connection, 1).unwrap();
+        for change in &changes {
+            if change.revoked {
+                self.home.revoke_run_execution(&change.binding).unwrap();
+            } else {
+                self.home.admit_run_execution(&change.binding, self.host_key.public()).unwrap();
+            }
+        }
+        if let Some(last) = changes.last() {
+            let tx = connection.transaction().unwrap();
+            local::acknowledge_changes_tx(&tx, 1, last.sequence).unwrap();
+            tx.commit().unwrap();
+        }
+    }
+}
+
+impl RunAuthority for JournalRunAuthority {
+    fn issue(&self, execution: &ProgramExecution, lifetime_ms: u64) -> Result<String> {
+        use crate::store::run_credentials::local;
+        anyhow::ensure!(self.home.admit_program_attempt(&execution.run.step_run, execution.run.attempt)? == execution.run);
+        let binding = self.binding(execution);
+        let mut connection = self.local.lock().unwrap();
+        let tx = connection.transaction()?;
+        let issued = if local::offer_execution_tx(&tx, &binding)? {
+            local::issue_local_credential_tx(&tx, &binding, lifetime_ms, 1_000)
+        } else {
+            Err(crate::model::FractalError::new("local-authority-backpressure", "awaiting prior revocation ACK"))
+        };
+        // A backpressure response must still commit its proposal/admission for home delivery.
+        tx.commit()?;
+        Ok(issued?)
+    }
+
+    fn revoke(&self, execution: &ProgramExecution) -> Result<()> {
+        let binding = self.binding(execution);
+        let mut connection = self.local.lock().unwrap();
+        let tx = connection.transaction()?;
+        crate::store::run_credentials::local::revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision)?;
+        tx.commit()?;
+        let _ = self.revoked.send(());
+        Ok(())
+    }
+}
+
+struct AuthorityFixture {
+    engine: Arc<ProgramEngine>,
+    authority: Arc<JournalRunAuthority>,
+    dispatch: Dispatch,
+    _dir: tempfile::TempDir,
+    revoked: mpsc::Receiver<()>,
+}
+
+impl AuthorityFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path());
+        let step = engine.store.start_program_step_for_tests();
+        let hash = engine.store.put_blob(br#"
+export default {
+  [Symbol.for('fractal.program.v1')]: async (ctx) => {
+    if (!ctx.payload.finishGate) await new Promise(() => {})
+    const fs = await import('node:fs/promises')
+    for (;;) {
+      try { await fs.access(ctx.payload.finishGate); break }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+    }
+    return { _tag: 'Success', value: true }
+  },
+}
+"#).unwrap();
+        let local = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::run_credentials::local::initialize_local_authority(&local).unwrap();
+        engine.store.install_run_epoch("execution-host", 1).unwrap();
+        let (revoked, receiver) = mpsc::channel();
+        let authority = Arc::new(JournalRunAuthority {
+            local: Mutex::new(local), home: engine.store.clone(),
+            host_key: smallclaims::fleet::MemberKey::generate().unwrap().0,
+            revoked,
+        });
+        engine.install_run_authority(authority.clone()).unwrap();
+        let dispatch = Dispatch {
+            step: step.subject, attempt: 1, run: step.run,
+            program: ProgramSpec { bundle: "/fixture.mjs".into(), bundle_hash: hash, stalled_after_ms: None },
+            payload: BTreeMap::new(), env: BTreeMap::new(), cwd: dir.path().to_string_lossy().into_owned(),
+        };
+        Self { engine, authority, dispatch, _dir: dir, revoked: receiver }
+    }
+
+    fn waiting(&self) -> ProgramExecution {
+        self.engine.lock().authority_waits[&self.dispatch.step].execution.clone()
+    }
+
+    fn dispatch(&self) -> Result<Dispatched> {
+        self.engine.dispatch(self.dispatch.clone())
+    }
+
+    fn reject_claim(&self, kind: &str) {
+        assert!(["program.attempt.trace", "step-run.state"].contains(&kind));
+        self.engine.store.connection.write().execute_batch(&format!(
+            /* sqlite-large-value: allow-for-now lv-ha7ab904670ea owner=fractal_reconcile::reconcile::program::tests TODO=prepare-body-and-predecessor-values */ "CREATE TEMP TRIGGER reject_program_persistence BEFORE INSERT ON claims
+             WHEN NEW.kind='{kind}' BEGIN SELECT RAISE(ABORT, 'program persistence refused'); END;"
+        )).unwrap();
+    }
+
+    fn allow_claims(&self) {
+        self.engine.store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hb943a6b8edb9 owner=fractal_reconcile::reconcile::program::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_program_persistence").unwrap();
+    }
+}
+
+impl Drop for AuthorityFixture {
+    fn drop(&mut self) {
+        let host = {
+            let mut inner = self.engine.lock();
+            inner.running.clear();
+            inner.authority_waits.clear();
+            inner.host.take()
+        };
+        if let Some(mut host) = host {
+            let _ = host.child.kill();
+            let _ = host.child.wait();
+        }
+    }
+}
+
+#[test]
+fn an_authority_ack_retry_keeps_its_identity_but_a_failed_trace_issuance_does_not() {
+    use crate::store::run_credentials::local;
+    let fixture = AuthorityFixture::new();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    let first = fixture.waiting();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    assert_eq!(fixture.waiting(), first);
+    assert_eq!(local::pending_changes(&fixture.authority.local.lock().unwrap(), 1).unwrap().len(), 1);
+    fixture.authority.acknowledge();
+    fixture.reject_claim("program.attempt.trace");
+    assert!(fixture.dispatch().is_err(), "the real trace INSERT must fail after issuance");
+    assert!(fixture.engine.lock().authority_waits.is_empty());
+    assert!(fixture.engine.lock().running.is_empty());
+    assert!(local::require_execution(&fixture.authority.local.lock().unwrap(), &fixture.authority.binding(&first)).is_err());
+    fixture.allow_claims();
+
+    // The graph attempt and Bun host are unchanged; the revoked revision must not be reused.
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    let resumed = fixture.waiting();
+    assert_eq!(resumed.run, first.run);
+    assert_ne!(resumed.incarnation, first.incarnation);
+    fixture.authority.acknowledge(); // the failed issuance's revocation
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    assert_eq!(fixture.waiting(), resumed);
+    fixture.authority.acknowledge(); // the fresh issuance's admission
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::Started);
+    let inner = fixture.engine.lock();
+    let running = &inner.running[&fixture.dispatch.step];
+    assert_eq!(running.execution, resumed);
+    assert_eq!(running.generation, 1);
+}
+
+#[test]
+fn a_failed_terminal_write_resumes_with_new_authority_on_the_same_host_and_attempt() {
+    use crate::store::run_credentials::local;
+    let mut fixture = AuthorityFixture::new();
+    let gate = fixture._dir.path().join("finish-gate");
+    fixture.dispatch.payload.insert("finishGate".into(), gate.to_string_lossy().into_owned());
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    let first = fixture.waiting();
+    fixture.authority.acknowledge();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::Started);
+    let credential = fixture.engine.lock().running[&fixture.dispatch.step].dispatch.env[
+        crate::store::run_credentials::RUN_CREDENTIAL_ENV
+    ].clone();
+    fixture.reject_claim("step-run.state");
+    std::fs::write(&gate, b"finish").unwrap();
+    fixture.revoked.recv().unwrap();
+    // Revocation commits in end(), before settle() attempts its real terminal INSERT.
+    while !fixture.engine.lock().ended.is_empty() {
+        std::thread::yield_now();
+    }
+    assert_eq!(completed_result(&fixture.engine.store, &fixture.dispatch.step, 1,
+        &fixture.dispatch.program.bundle_hash).unwrap(), Some(json!(true)));
+    assert_eq!(fixture.engine.store.step_run(&fixture.dispatch.step).unwrap().unwrap().status, "working");
+    assert!(local::local_binding(&fixture.authority.local.lock().unwrap(), &credential, 1_000).is_err());
+    fixture.allow_claims();
+    std::fs::remove_file(gate).unwrap();
+
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    let resumed = fixture.waiting();
+    assert_eq!(resumed.run, first.run);
+    assert_ne!(resumed.incarnation, first.incarnation);
+    fixture.authority.acknowledge();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
+    assert_eq!(fixture.waiting(), resumed);
+    fixture.authority.acknowledge();
+    assert_eq!(fixture.dispatch().unwrap(), Dispatched::Started);
+    let inner = fixture.engine.lock();
+    let running = &inner.running[&fixture.dispatch.step];
+    assert_eq!(running.generation, 1);
+    assert_eq!(running.execution, resumed);
+    let credential = &running.dispatch.env[crate::store::run_credentials::RUN_CREDENTIAL_ENV];
+    assert_eq!(local::local_binding(&fixture.authority.local.lock().unwrap(), credential, 1_000).unwrap(),
+        fixture.authority.binding(&resumed));
 }

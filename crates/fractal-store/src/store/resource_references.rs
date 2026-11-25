@@ -271,6 +271,7 @@ pub(crate) fn backfill_step(
     jobs.send(WriterJob::Batched {
         run,
         profile: None,
+        charged: None,
         wait: None,
         holder: smallclaims::windows::holds::Holder::current(),
         enqueued: std::time::Instant::now(),

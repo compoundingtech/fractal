@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Avoid building five native attach indexes over claim history at store startup; attach lookups reuse the existing kind index",
+  "replay": {"status": "none", "detail": "No claim replay or authority changes."},
+  "schema": {"status": "none", "detail": "Store opening no longer creates the five native_attach_* indexes on claims. Existing indexes are left in place; kind-filtered attach lookups reuse existing claim indexes with JSON residual filters. No tables, schema versions or stored data change."},
+  "rules": {"status": "none", "detail": "No rules or digest changes; no coordinated upgrade required."},
+  "compatibility": {"status": "none", "detail": "Native attach admission and existing stores remain compatible."},
+  "downtime": {"status": "none", "detail": "Avoids five full claim-history index builds during startup."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No new rollback restrictions; existing attach indexes are not dropped."}
+}

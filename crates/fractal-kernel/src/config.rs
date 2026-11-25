@@ -12,6 +12,12 @@ pub use smallclaims::fleet::file::{FleetFile, FleetMode, FleetRemoval, PeerConfi
 use crate::model::PlannerSpec;
 
 pub mod changes;
+pub mod model_return;
+mod light_node;
+pub use light_node::{
+    LIGHT_NODE_SESSION_PATH, LightNodeGrant, LightNodeOperation, LightNodeScope,
+    LightNodeSessionConfig,
+};
 mod client;
 
 /// The per-host switch for seat lanes.
@@ -123,6 +129,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub peer_listen_allow_plain_http: bool,
     pub peers: Vec<PeerConfig>,
+    /// Opt-in Phase 2 execution session; absent leaves full-node services unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_node_session: Option<LightNodeSessionConfig>,
     /// Default harness configuration for new planning sessions only.
     pub planner: PlannerSpec,
     /// The local observation log of this node.
@@ -153,6 +162,9 @@ pub struct Config {
     /// when it differs from the default.
     #[serde(skip_serializing_if = "TrimConfig::is_default")]
     pub trim: TrimConfig,
+    /// How this member keeps its own store. Defaults unless set.
+    #[serde(skip_serializing_if = "StoreConfig::is_default")]
+    pub store: StoreConfig,
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
@@ -162,6 +174,9 @@ pub struct Config {
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
+    /// Automatic, idle-only return from positively classified transient model fallback.
+    #[serde(skip_serializing_if = "model_return::Config::is_default")]
+    pub model_return: model_return::Config,
     /// What a write outside a mission run's authority does. Written only when it differs from
     /// the default.
     #[serde(skip_serializing_if = "ProgramsConfig::is_default")]
@@ -344,9 +359,9 @@ pub fn validate_token_file_metadata(metadata: &fs::Metadata, effective_uid: u32)
     Ok(())
 }
 
-/// Whether this node takes part in checkpoints. A node that does not never seals, and every
-/// participant must seal, so turning it off anywhere stops trimming for the whole fleet: the
-/// kill switch while checkpoints roll out.
+/// `[checkpoint]`, from builds that trimmed by fleet checkpoint agreement. Members no longer agree
+/// on checkpoints: each trims on its own (`[trim]`). The section still loads, so a config written
+/// for an older build starts this one, and the daemon says once at start that it is ignored.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CheckpointConfig {
@@ -365,15 +380,67 @@ impl CheckpointConfig {
     }
 }
 
-/// `[trim]`: `local = true` makes this member trim on its own, without checkpoint agreement. It
-/// then seals, verifies and adopts no checkpoint, and finishes only a trim it had already
-/// committed. Every participant must seal a checkpoint, so the old checkpoints stop on the
-/// other members until a person excuses this one. Off by default; nothing changes unless a
-/// member opts in. `notify` names the agent that receives a fault when the daily answers check
-/// finds this member and a peer answering differently; without it the fleet's fault agent does.
-/// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
-/// that drops more goes on the next day where it stopped.
+/// `[store]`: `blob_move_after` is how long after this member first runs a build that keeps blob
+/// bytes in their own file it starts moving them there, as a number followed by `s`, `m`, `h` or
+/// `d` (`3d` unless set). Until then a rollback to the previous release finds every byte where it
+/// looks; the first move takes the store to a storage version that release refuses until
+/// `fractal store restore-blob-bytes` copies them back, so lengthen it to keep that rollback open
+/// longer.
+/// `valid_record_delete_after` is the same for deleting the valid replica records this member
+/// holds once it runs a build that keeps none (`3d` unless set): until then a rollback finds every
+/// record it reads, and the first deletion moves the store to a storage version that release
+/// refuses.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_move_after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_record_delete_after: Option<String>,
+}
+
+impl StoreConfig {
+    pub const DEFAULT_BLOB_MOVE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
+    pub const DEFAULT_VALID_RECORD_DELETE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// How long after this member first runs the build it starts moving blob bytes.
+    pub fn blob_move_after_ms(&self) -> Result<u64> {
+        self.blob_move_after.as_deref().map_or(
+            Ok(Self::DEFAULT_BLOB_MOVE_AFTER_MS),
+            |value| parse_duration_ms(value, "store.blob_move_after"),
+        )
+    }
+
+    /// How long after this member first runs the build it starts deleting valid records.
+    pub fn valid_record_delete_after_ms(&self) -> Result<u64> {
+        self.valid_record_delete_after.as_deref().map_or(
+            Ok(Self::DEFAULT_VALID_RECORD_DELETE_AFTER_MS),
+            |value| parse_duration_ms(value, "store.valid_record_delete_after"),
+        )
+    }
+}
+
+/// `[trim]`: every member trims on its own, with no agreement with any other member: it plans
+/// each day's cut with the audited rules and deletes what they drop. Its retired claim IDs
+/// travel to the peers that trim too, which then never admit, ask for or serve those claims; a
+/// copy a peer already holds stays until its own trim drops it. `local = false` turns trimming off on
+/// this member; it is on by default. `notify` names the agent that receives a fault when the
+/// daily answers check finds this member and a peer answering differently; without it the
+/// fleet's fault agent does. `daily_claims` is the most claims a trim deletes per UTC day
+/// (100,000 unless set). The available budget advances evenly from midnight, plus one
+/// ten-minute worker interval's burst; a larger cut resumes in later steps and days.
+/// With `mail = true`, a member that trims also retires closed agent and daemon graph mail a week after it closes, at
+/// its own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
+/// set, until the owner decides whether it becomes the default (Factory's decision of
+/// 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person mail where it
+/// is on). `replay_safe_receipts` is how long a replay-safe response receipt (a lease renewal,
+/// which a retry simply repeats) is kept: `1h` unless set, and `0` keeps them for the seven days
+/// every other receipt is kept. It applies to every member, trimming or not.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
@@ -381,6 +448,16 @@ pub struct TrimConfig {
     pub notify: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_claims: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_safe_receipts: Option<String>,
+}
+
+impl Default for TrimConfig {
+    fn default() -> Self {
+        Self { local: true, notify: None, daily_claims: None, mail: None, replay_safe_receipts: None }
+    }
 }
 
 impl TrimConfig {
@@ -388,7 +465,24 @@ impl TrimConfig {
         self == &Self::default()
     }
 
+    /// Whether this member retires closed graph mail: only one that trims locally and sets
+    /// `mail = true`.
+    pub fn retires_mail(&self) -> bool {
+        self.local && self.mail == Some(true)
+    }
+
+    /// How long replay-safe receipts are kept, in milliseconds; 0 when they are kept as long as
+    /// every other receipt.
+    pub fn replay_safe_receipt_window_ms(&self) -> Result<u64> {
+        match self.replay_safe_receipts.as_deref().map(str::trim) {
+            None => Ok(60 * 60 * 1_000),
+            Some("0") => Ok(0),
+            Some(value) => parse_duration_ms(value, "trim.replay_safe_receipts"),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
+        self.replay_safe_receipt_window_ms()?;
         anyhow::ensure!(
             self.notify.as_deref().is_none_or(|agent| {
                 agent.starts_with("agent/")
@@ -784,20 +878,21 @@ pub fn reload_daemon_limits() -> Option<Result<LimitsConfig>> {
     Some(read_limits(path.as_deref()))
 }
 
-/// Read both policies once on the existing two-minute reload loop, outside database work.
-pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig, AsksConfig)>> {
+/// Read daemon policies once on the existing two-minute reload loop, outside database work.
+pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig, AsksConfig, model_return::Config)>> {
     let path = DAEMON_CONFIG.get()?;
     Some(read_daemon_policies(path.as_deref()))
 }
 
-fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig, AsksConfig)> {
+fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig, AsksConfig, model_return::Config)> {
     let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
     anyhow::ensure!(selected.exists(), "st config {} is missing", selected.display());
     let config = Config::load_unvalidated(Some(&selected))?;
     config.limits.validate()?;
     config.reconcile.validate()?;
     config.asks.validate()?;
-    Ok((config.limits, config.reconcile, config.asks))
+    config.model_return.validate()?;
+    Ok((config.limits, config.reconcile, config.asks, config.model_return))
 }
 
 /// `[limits]` from a config file that must exist: a file that is missing for a moment must not
@@ -959,6 +1054,7 @@ impl Default for Config {
             work_root: None,
             peer_listen_allow_plain_http: false,
             peers: Vec::new(),
+            light_node_session: None,
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
             readiness_slo: None,
@@ -969,9 +1065,11 @@ impl Default for Config {
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
+            store: StoreConfig::default(),
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
+            model_return: model_return::Config::default(),
             programs: ProgramsConfig::default(),
             asks: AsksConfig::default(),
             codex_work_without_asking: None,
@@ -1213,10 +1311,17 @@ impl Config {
                 .map_err(|error| anyhow::anyhow!("inbox_fallback_agent: {}", error.message))?;
             anyhow::ensure!(subject.family == "agent", "inbox_fallback_agent must name an agent");
         }
+        if let Some(session) = &self.light_node_session {
+            session.validate_for(&self.node)?;
+            anyhow::ensure!(self.fleet_id.is_some() && self.shared_secret_file.is_some()
+                && self.fleet.is_some(),
+                "light-node session needs the admitted local fleet signing identity");
+        }
         if let Some(usage_limits) = &self.usage_limits {
             usage_limits.validate()?;
         }
         if let Some(resources) = &self.finite_resources {
+            resources.psi_brake.validate().context("finite_resources.psiBrake")?;
             for (key, seed) in &resources.profiles {
                 fractal_runtime::validate_profile_key(key)?;
                 seed.validate().with_context(|| format!("finite_resources.profiles.{key}"))?;
@@ -1240,6 +1345,7 @@ impl Config {
             );
         }
         self.reconcile.validate()?;
+        self.model_return.validate()?;
         self.asks.validate()?;
         self.github.validate()?;
         anyhow::ensure!(
@@ -1305,6 +1411,8 @@ impl Config {
         }
         self.limits.validate()?;
         self.trim.validate()?;
+        self.store.valid_record_delete_after_ms()?;
+        self.store.blob_move_after_ms()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")
@@ -1714,6 +1822,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn config_loaders_reject_unresolved_relative_pressure_exclusions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let config = super::Config {
+            state_dir: directory.path().join("state"),
+            finite_resources: Some(fractal_runtime::host::FinitePolicy {
+                psi_brake: fractal_runtime::resource_pressure::Policy {
+                    protected_cgroups: vec!["/user.slice".into()],
+                    job_parent_cgroups: vec!["gate.slice".into()],
+                    excluded_cgroups: Vec::new(),
+                    ..fractal_runtime::resource_pressure::Policy::default()
+                },
+                ..fractal_runtime::host::FinitePolicy::default()
+            }),
+            ..super::Config::default()
+        };
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let error = super::Config::load(Some(&path)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("finite_resources.psiBrake"), "{message}");
+        assert!(message.contains("manager-qualified protected roots"), "{message}");
+        let error = super::Config::load_with_fleet(Some(&path)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("finite_resources.psiBrake"), "{message}");
+        assert!(message.contains("manager-qualified protected roots"), "{message}");
+    }
+
     /// Explicit acceptance probe for a managed, rendered daemon configuration; never starts it.
     #[test]
     #[ignore = "requires FRACTAL_RENDERED_CONFIG pointing to a rendered host configuration"]
@@ -2065,7 +2201,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
-        let (_, mut effective, _) = read_daemon_policies(Some(&path)).unwrap();
+        let (_, mut effective, _, _) = read_daemon_policies(Some(&path)).unwrap();
         assert_eq!(effective.max_passes_per_minute, None);
         assert_eq!(effective.max_passes_per_minute_or(DEFAULT_MAX_PASSES_PER_MINUTE), 30);
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=60\n").unwrap();
@@ -2374,7 +2510,7 @@ sekrets_profile = "nathan/daemon-gh"
             "[reconcile\n",
         ] {
             fs::write(&path, bad).unwrap();
-            if let Ok((_, reconcile, _)) = read_daemon_policies(Some(&path)) {
+            if let Ok((_, reconcile, _, _)) = read_daemon_policies(Some(&path)) {
                 effective = reconcile.idle_residency().unwrap();
                 panic!("invalid policy was accepted: {bad}; settings: {effective:?}");
             }
@@ -2439,31 +2575,62 @@ sekrets_profile = "nathan/daemon-gh"
     }
 
     #[test]
-    fn checkpoints_are_on_unless_disabled_and_absent_from_a_written_default_config() {
+    fn an_older_builds_checkpoint_section_still_loads_and_a_default_config_never_names_it() {
         let config = Config::default();
-        assert!(config.checkpoint.enabled);
         // An older build refuses unknown sections, so a default config never names it.
         assert!(!toml::to_string(&config).unwrap().contains("checkpoint"));
-        let config: Config = toml::from_str("").unwrap();
-        assert!(config.checkpoint.enabled);
         let config: Config = toml::from_str("[checkpoint]\nenabled = false\n").unwrap();
         assert!(!config.checkpoint.enabled);
-        assert!(toml::to_string(&config).unwrap().contains("[checkpoint]"));
         assert!(toml::from_str::<Config>("[checkpoint]\nenabled = true\nlag = 3\n").is_err());
     }
 
     #[test]
-    fn local_trim_is_off_unless_chosen_and_absent_from_a_written_default_config() {
+    fn replay_safe_receipts_last_an_hour_unless_set_and_zero_keeps_them_a_week() {
         let config = Config::default();
-        assert!(!config.trim.local);
+        assert_eq!(config.trim.replay_safe_receipt_window_ms().unwrap(), 3_600_000);
+        // The default is not written, so an older build reading this config never meets the key.
+        assert!(!toml::to_string(&config).unwrap().contains("replay_safe_receipts"));
+        let set: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"6h\"\n").unwrap();
+        assert_eq!(set.trim.replay_safe_receipt_window_ms().unwrap(), 6 * 3_600_000);
+        let off: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"0\"\n").unwrap();
+        assert_eq!(off.trim.replay_safe_receipt_window_ms().unwrap(), 0);
+        let bad = TrimConfig { replay_safe_receipts: Some("soon".into()), ..TrimConfig::default() };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn blob_bytes_move_three_days_after_upgrading_unless_set() {
+        let config = Config::default();
+        assert_eq!(config.store.blob_move_after_ms().unwrap(), 3 * 24 * 60 * 60 * 1000);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[store]"));
+        let config: Config = toml::from_str("[store]\nblob_move_after = \"12h\"\n").unwrap();
+        assert_eq!(config.store.blob_move_after_ms().unwrap(), 12 * 60 * 60 * 1000);
+        assert!(toml::to_string(&config).unwrap().contains("[store]"));
+        let wrong: Config = toml::from_str("[store]\nblob_move_after = \"soon\"\n").unwrap();
+        assert!(wrong.validate().is_err());
+    }
+
+    #[test]
+    fn trim_is_on_unless_turned_off_and_absent_from_a_written_default_config() {
+        let config = Config::default();
+        assert!(config.trim.local);
         // An older build refuses unknown sections, so a default config never names it.
         assert!(!toml::to_string(&config).unwrap().contains("[trim]"));
+        let config: Config = toml::from_str("[trim]\nlocal = false\n").unwrap();
+        assert!(!config.trim.local);
+        assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         let config: Config = toml::from_str("[trim]\nlocal = true\n").unwrap();
         assert!(config.trim.local);
-        assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(!config.trim.retires_mail(), "retiring closed mail is off unless set");
+        let retiring: Config = toml::from_str("[trim]\nlocal = true\nmail = true\n").unwrap();
+        assert!(retiring.trim.retires_mail());
+        let kept: Config = toml::from_str("[trim]\nlocal = true\nmail = false\n").unwrap();
+        assert!(!kept.trim.retires_mail());
+        assert!(!TrimConfig { local: false, mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 

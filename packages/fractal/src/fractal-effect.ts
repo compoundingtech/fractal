@@ -1,10 +1,10 @@
 /**
  * The authoring namespace of `fractal/effect`: everything `Fractal` in `fractal` holds, with the
- * program forms of `mission` and `step` and the program calls `ask`, `run`, `review`, `command`,
+ * program forms of `mission` and `step` and the program calls `ask`, `awaitPr`, `run`, `review`, `command`,
  * `env`, `cwd` and `Worker`.
  */
 export * from './fractal.ts'
-export { ask, command, cwd, env, mission, review, run, step, Worker } from './program.ts'
+export { ask, awaitPr, command, cwd, env, mission, resourceInput, review, run, step, turn, seatTurn, Worker, WorkerReport, SeatTurnContext, TurnProduct, type TurnOptions } from './program.ts'
 export { resources } from './resources.ts'
 export { StepExecution, StepExecutionUsage } from './step-execution.ts'
 export {

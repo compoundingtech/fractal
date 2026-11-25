@@ -46,6 +46,10 @@ def change_identity(repository, event_name, event, source):
         # Queue batches can contain other changes. This is the entry identity; the source
         # and tree always name the complete effective checkout, never its author's head.
         return f'github:{repository}#{match[1]}'
+    if event_name == 'push':
+        if event.get('after') != source:
+            raise ValueError('mismatched push identity')
+        return f'github:{repository}@{source}'
     if event_name == 'workflow_dispatch':
         return f'github:{repository}@{source}'
     raise ValueError('unsupported workflow event')

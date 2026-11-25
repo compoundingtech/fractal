@@ -63,8 +63,8 @@ fn an_agent_card_build_does_not_hold_other_read_snapshots_at_the_cache_lock() {
     assert_eq!(resumed, published.unwrap());
 }
 
-/// A heartbeat moves no card, so heartbeat-only local deltas keep pinning the same roster
-/// rows; an agent timeline row is the local delta a card reads.
+/// Every append changes the raw token, but a read-only heartbeat pin reuses the same rows
+/// without invoking the card builder.
 #[test]
 fn heartbeat_local_deltas_pin_the_same_roster_rows() {
     let store = roster_cache_store();
@@ -78,6 +78,7 @@ fn heartbeat_local_deltas_pin_the_same_roster_rows() {
         .unwrap()
         .unwrap();
     for n in 0..8 {
+        let before = roster_local_frontier(&store.readers.get(), index).unwrap();
         let response = store.append_claim(&local_observation_for_test(
             "harness.observed",
             json!({"state":"idle", "driver":"codex", "incarnation_id":"amber-1",
@@ -89,10 +90,11 @@ fn heartbeat_local_deltas_pin_the_same_roster_rows() {
             index,
             "a local observation keeps the graph cut"
         );
+        assert!(roster_local_frontier(&store.readers.get(), index).unwrap() > before);
         let hit = store
             .agent_resources_cached_at(index, false, None)
             .unwrap()
-            .expect("a heartbeat moves no card, so the pinned rows still answer");
+            .expect("a read-only heartbeat hit must reuse the pinned rows");
         assert!(Arc::ptr_eq(&hit, &pinned), "heartbeat deltas must reuse the roster rows");
     }
     assert_eq!(store.agent_resources_builds_for_test(), 1);
@@ -116,6 +118,98 @@ fn heartbeat_local_deltas_pin_the_same_roster_rows() {
     );
     assert_eq!(store.agent_resources_builds_for_test(), 2);
 }
+
+#[test]
+fn same_model_local_usage_refresh_invalidates_only_its_agent_card() {
+    for semantics in ["context_occupancy", "session_cumulative"] {
+        let store = roster_cache_store();
+        let agent = "agent/node.amber";
+        let mut observation = local_observation_for_test("harness.usage", json!({
+            "driver": "omp", "incarnation_id": "amber-1", "semantics": semantics,
+            "model": "gpt-6.1", "context_used_percent": 10
+        }));
+        store.append_latest_observation(&observation, 1_900_000_000_000).unwrap();
+        let index = store.index().unwrap();
+        let card = json!({"id": agent, "live_model": "gpt-6.1"});
+        store.cached_agent_resources(index, false, |_| Ok(vec![card.clone()])).unwrap();
+        store.cached_exact_agent_resources(index, false, agent, |_| Ok(vec![card.clone()])).unwrap();
+        let pinned = store.agent_resources_cached_at(index, false, None).unwrap().unwrap();
+        let exact = store.exact_agent_resources_cached_at(index, false, agent).unwrap().unwrap();
+        store.append_claim(&local_observation_for_test("harness.observed", json!({
+            "state":"idle", "driver":"codex", "incarnation_id":"amber-1",
+            "observed_at_ms":300_001
+        }))).unwrap();
+        assert!(Arc::ptr_eq(&pinned, &store.agent_resources_cached_at(index, false, None).unwrap().unwrap()));
+        assert!(Arc::ptr_eq(&exact, &store.exact_agent_resources_cached_at(index, false, agent).unwrap().unwrap()));
+        observation.fields.insert("observed_at_unix_ms".into(), json!(1_900_000_000_001_u64));
+        let (held, _) = store.append_latest_observation(&observation, 1_900_000_000_001).unwrap();
+        assert!(local_observation_position(&held).is_some());
+        assert_eq!(store.index().unwrap(), index, "same-model held usage keeps the graph cut");
+        assert!(store.agent_resources_cached_at(index, false, None).unwrap().is_none());
+        assert!(store.exact_agent_resources_cached_at(index, false, agent).unwrap().is_none());
+        let refreshed = json!({"id": agent, "live_model": "gpt-6.1", "observed_at_unix_ms":1_900_000_000_001_u64});
+        let rebuild = |changed: Option<(&BTreeSet<String>, &[Value])>| {
+            let (subjects, _) = changed.expect("usage refresh must incrementally refold the card");
+            assert_eq!(subjects, &BTreeSet::from([agent.to_owned()]));
+            Ok(vec![refreshed.clone()])
+        };
+        store.cached_agent_resources(index, false, rebuild).unwrap();
+        store.cached_exact_agent_resources(index, false, agent, rebuild).unwrap();
+        assert_ne!(*store.agent_resources_cached_at(index, false, None).unwrap().unwrap(), *pinned);
+        assert_ne!(*store.exact_agent_resources_cached_at(index, false, agent).unwrap().unwrap(), *exact);
+    }
+}
+
+#[test]
+fn read_only_roster_delta_caps_the_rowid_span() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("graph.db"), "node").unwrap();
+    let connection = store.readers.get();
+    assert!(roster_local_unchanged(&connection, 0, 0, 0).unwrap());
+    assert!(roster_local_unchanged(&connection, 0, 256, 0).unwrap());
+    assert!(!roster_local_unchanged(&connection, 0, 257, 0).unwrap());
+    assert!(!roster_local_unchanged(&connection, 1, 0, 0).unwrap());
+}
+
+#[test]
+fn repeated_usage_clearing_pending_slot_invalidates_roster_below_another_subjects_max() {
+    let store = roster_cache_store();
+    let agent = "agent/node.amber";
+    let published = local_observation_for_test("harness.usage", json!({
+        "driver": "omp", "incarnation_id": "amber-1", "semantics": "context_occupancy",
+        "model": "gpt-6.1", "context_used_percent": 10
+    }));
+    store.append_latest_observation(&published, 1_900_000_000_000).unwrap();
+    let mut pending = published.clone();
+    pending.fields.insert("context_used_percent".into(), json!(11));
+    store.append_latest_observation(&pending, 1_900_000_000_001).unwrap();
+    let mut other = local_timeline_observation_for_test();
+    other.subject = "agent/node.other".into();
+    store.append_local_observations_for_test(&[other]);
+    let index = store.index().unwrap();
+    let frontier = roster_local_frontier(&store.readers.get(), index).unwrap();
+    let card = json!({"id": agent, "name": "amber"});
+    store.cached_agent_resources(index, false, |_| Ok(vec![card.clone()])).unwrap();
+    store.cached_exact_agent_resources(index, false, agent, |_| Ok(vec![card.clone()])).unwrap();
+    let (repeat, _) = store.append_latest_observation(&published, 1_900_000_000_002).unwrap();
+    assert!(local_observation_position(&repeat).is_some());
+    assert_eq!(store.index().unwrap(), index, "repeat clears the slot without a graph claim");
+    let pending_id: Option<u64> = store.readers.get().query_row(
+        "SELECT pending_local_id FROM local_latest_slots WHERE subject=?1 AND kind='harness.usage'",
+        [agent], |row| row.get(0),
+    ).unwrap();
+    assert!(pending_id.is_none(), "the published reading supersedes the pending reading");
+    assert!(roster_local_frontier(&store.readers.get(), index).unwrap() > frontier);
+    assert!(store.agent_resources_cached_at(index, false, None).unwrap().is_none());
+    assert!(store.exact_agent_resources_cached_at(index, false, agent).unwrap().is_none());
+    let rebuild = |changed: Option<(&BTreeSet<String>, &[Value])>| {
+        assert_eq!(changed.unwrap().0, &BTreeSet::from([agent.to_owned()]));
+        Ok(vec![card.clone()])
+    };
+    store.cached_agent_resources(index, false, rebuild).unwrap();
+    store.cached_exact_agent_resources(index, false, agent, rebuild).unwrap();
+}
+
 
 /// A page that already covered every agent at the cut upgrades to the complete window by
 /// reusing the pinned rows: no clone, no sort, no build.
@@ -235,7 +329,8 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
                 .unwrap();
         }
     };
-    insert_newer(4_000, 500, 200);
+    insert_newer(0, 500, 200);
+    insert_newer(4_000, 0, 0);
 
     let frontier = |at: u64| {
         store
@@ -244,34 +339,32 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
             .query_row(/* sqlite-large-value: allow-for-now lv-h6ce4203ee173 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [at], |row| row.get::<_, u64>(0))
             .unwrap()
     };
-    assert_eq!(
-        frontier(cut),
-        relevant_id,
-        "an old cut sees exactly its newest agent timeline row"
-    );
+    assert!(frontier(cut) > relevant_id, "any append changes even an old-cut token");
     let usage_frontier = store
         .readers
         .get()
         .query_row(
-            "SELECT id FROM local_observations WHERE subject='agent/node.amber'
-                 AND kind='harness.timeline' ORDER BY id DESC LIMIT 1",
+            "SELECT MAX(id) FROM local_observations",
             [],
             |row| row.get::<_, u64>(0),
         )
         .unwrap();
-    assert_eq!(
-        frontier(later),
-        usage_frontier,
-        "the later cut sees the newest agent timeline row, of any entry type"
-    );
+    assert_eq!(frontier(cut), usage_frontier);
+    assert_eq!(frontier(later), usage_frontier, "the token is independent of graph cut");
 
     let plan = query_plan(&store, ROSTER_LOCAL_FRONTIER, params![cut]);
-    assert!(
-        plan.iter()
-            .any(|step| step.contains("local_observations_roster_frontier_index")),
-        "{plan:?}"
-    );
+    assert!(plan.iter().any(|step| step.contains("SEARCH local_observations")), "{plan:?}");
     assert!(plan.iter().all(|step| !step.contains("TEMP B-TREE")), "{plan:?}");
+    assert!(plan.iter().all(|step| !step.contains("SCAN local_observations")), "{plan:?}");
+    let delta_plan = query_plan(&store, ROSTER_LOCAL_CHANGED_SUBJECTS, params![0, 100, cut]);
+    println!("roster frontier plan: {plan:?}; append delta plan: {delta_plan:?}");
+    assert!(delta_plan.iter().any(|step|
+        step.contains("SEARCH local_observations USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)")),
+        "{delta_plan:?}");
+    assert!(
+        delta_plan.iter().all(|step| !step.contains("SCAN local_observations") && !step.contains("SCAN o")),
+        "{delta_plan:?}"
+    );
 
     let pre_followup = "SELECT COALESCE((SELECT id FROM local_observations
              WHERE after_store_index<=?1 ORDER BY id DESC LIMIT 1), 0)";
@@ -283,11 +376,28 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         drop(connection);
         smallclaims::sqlite::work::total().vm_steps - before
     };
+    let delta_steps = || {
+        let local = frontier(cut);
+        let connection = store.connection.lock().unwrap();
+        let run = || {
+            let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbcbc0ab76ff4 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_CHANGED_SUBJECTS).unwrap();
+            statement.query_map(params![local - 1, local, later], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(run().is_empty());
+        let before = smallclaims::sqlite::work::total().vm_steps;
+        assert!(run().is_empty());
+        smallclaims::sqlite::work::total().vm_steps - before
+    };
+    let delta_before = delta_steps();
     let old_before = vm_steps(pre_followup, cut);
     let new_before = vm_steps(ROSTER_LOCAL_FRONTIER, cut);
     insert_newer(4_000, 0, 0);
     let old_after = vm_steps(pre_followup, cut);
     let new_after = vm_steps(ROSTER_LOCAL_FRONTIER, cut);
+    let delta_after = delta_steps();
+    println!("bounded local delta: history=4700..8700 vm_before={delta_before} vm_after={delta_after}");
+    assert_eq!(delta_before, delta_after, "a fixed append interval costs O(new rows), not history");
     println!(
         "roster frontier fixture: heartbeats=4000..8000 irrelevant_timeline=500 \
              agent_usage_timeline=200 vm_old_cut_before={old_before} \
@@ -304,7 +414,7 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
     );
     assert!(
         new_before < old_before,
-        "the frontier index bounds the old-cut lookup"
+        "the rowid endpoint bounds the old-cut token read"
     );
 }
 
@@ -659,7 +769,7 @@ resource "refresh/file" { kind "filesystem.file" }
 observer "refresh/file" {
   resource "resource/refresh/file"
   provider "local.file"
-  locator "/tmp/st3-refresh-test"
+  locator "/tmp/fractal-refresh-test"
   field "status"
 }
 "#;
@@ -718,7 +828,7 @@ resource "fenced/file" { kind "filesystem.file" }
 observer "fenced/file" {
   resource "resource/fenced/file"
   provider "local.file"
-  locator "/tmp/st3-fenced-file"
+  locator "/tmp/fractal-fenced-file"
   field "status"
 }
 "#, "node", "fenced-run").unwrap();
@@ -798,7 +908,7 @@ resource "quiet/file" { kind "filesystem.file" }
 observer "quiet/file" {
   resource "resource/quiet/file"
   provider "local.file"
-  locator "/tmp/st3-quiet-file"
+  locator "/tmp/fractal-quiet-file"
   field "status"
 }
 "#;
@@ -845,7 +955,7 @@ resource "manual/file" { kind "filesystem.file" }
 observer "manual/file" {
   resource "resource/manual/file"
   provider "local.file"
-  locator "/tmp/st3-manual-file"
+  locator "/tmp/fractal-manual-file"
   field "status"
 }
 "#;
@@ -889,7 +999,7 @@ resource "ordered/file" { kind "filesystem.file" }
 observer "ordered/file" {
   resource "resource/ordered/file"
   provider "local.file"
-  locator "/tmp/st3-ordered-file"
+  locator "/tmp/fractal-ordered-file"
   field "status"
 }
 "#;

@@ -22,6 +22,33 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 const PROTOCOL = 2;
+type FallbackErrorFacts = { [key: string]: string | number | boolean | undefined };
+/** Only public event facts cross the local channel. Rust owns classification and persistence. */
+const fallbackErrorFacts = (event: Record<string, unknown>): FallbackErrorFacts => {
+  const facts: FallbackErrorFacts = {};
+  const redact = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const bounded = value.slice(0, 16_384);
+    const clean = bounded
+      .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+      .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+      .replace(/((?:api[_ -]?key|token|secret|password|authorization)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1[redacted]")
+      .replace(/https?:\/\/[^\s]+/gi, "[url]")
+      .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[redacted]");
+    if (value.length > 200) facts.truncated = true;
+    if (clean !== bounded) facts.redacted = true;
+    return clean.slice(0, 200);
+  };
+  for (const key of ["reason", "classification", "failureKind", "errorMessage", "errorCode", "code", "errorName", "name", "provider"]) {
+    const value = redact(event[key]);
+    if (value !== undefined) facts[key] = value;
+  }
+  for (const key of ["status", "statusCode", "errorStatus"]) {
+    const value = event[key];
+    if (typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) facts[key] = value;
+  }
+  return facts;
+};
 
 // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 // Inline because this asset is embedded and published as a standalone file.
@@ -117,6 +144,8 @@ type Stash = {
   questionSession?: string;
   /** Retain even closed entries: pipe writes are not persistence acknowledgements. */
   questions?: Map<string, ObservedQuestion>;
+  /** One sanitized native episode retained until the channel can replay it. */
+  modelFallback?: { session: string; sourceEvent: string; episodeEvent: string; from: string; to: string; errorFacts: FallbackErrorFacts[] };
   // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
   restoringAsk?: {
     toolCallId: string;
@@ -753,6 +782,7 @@ export default function (pi: ExtensionAPI) {
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
           send({ type: "ready", inputAcceptanceClock: true, ...sessionBinding });
+          observeModelSelection(ctx, undefined, true);
           // The driver requires ready before accepting observations. Replay before other
           // producers; each retained close follows its original open with the same identity.
           if (state.webAnswers) {
@@ -1103,7 +1133,7 @@ export default function (pi: ExtensionAPI) {
 
   // An idle send's promise owns the entire run. Its matching user message_start is
   // the earlier, truthful admission receipt; never serialize that run behind itself.
-  let pendingAdmission: { content: string; accept: () => void } | undefined;
+  let pendingAdmission: { content: string; accept: () => void; mismatched?: boolean } | undefined;
 
   // omp injects one queued steer per boundary (its default steering mode is `one-at-a-time`). A
   // second steer released at the same boundary waited through the next model turn and then
@@ -1131,17 +1161,31 @@ export default function (pi: ExtensionAPI) {
       if (first.ctx.isIdle()) {
         let accept!: () => void;
         const started = new Promise<void>((resolve) => { accept = resolve; });
-        const pending = { content, accept };
+        let correlated = false;
+        let reported = false;
+        const pending = { content, accept: () => { correlated = true; accept(); }, mismatched: false };
+        const reportFallback = (reason: "content-mismatch" | "no-message-start" | "timeout") => {
+          if (correlated || reported) return;
+          reported = true;
+          first.reply({ type: "admission_fallback", reason, meta: first.meta });
+        };
+        // Observation only: this never releases admission or changes the run/watchdog timeout.
+        const correlationTimer = setTimeout(() => reportFallback("timeout"), 30_000);
+        correlationTimer.unref?.();
         pendingAdmission = pending;
         try {
           // Content transformed by OMP cannot match our event; in that case admission
           // retains the old await-run behavior rather than inventing a receipt.
-          const run = Promise.resolve(pi.sendUserMessage(content)).catch((error: unknown) => {
+          const run = Promise.resolve(pi.sendUserMessage(content)).then(() => {
+            reportFallback(pending.mismatched ? "content-mismatch" : "no-message-start");
+          }).catch((error: unknown) => {
+            reportFallback(pending.mismatched ? "content-mismatch" : "no-message-start");
             console.error("OMP mailbox run failed:", error);
             throw error;
           });
           await Promise.race([run, started]);
         } finally {
+          clearTimeout(correlationTimer);
           if (pendingAdmission === pending) pendingAdmission = undefined;
         }
       } else {
@@ -1524,6 +1568,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       jobContext = ctx;
+      if (event !== "retry_fallback_applied") observeModelSelection(ctx);
       return await handler(payload, ctx);
     } catch (error) {
       if (managed && event === "tool_call") {
@@ -1534,6 +1579,57 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // Native model_change IDs survive reconnects and redelivery. A manual change, including a
+  // change away and back to the same model, gets another ID and fences the previous cause.
+  let modelSelectionChild: childProcess.ChildProcess | undefined;
+  let modelSelectionKey: string | undefined;
+  function observeModelSelection(ctx: ExtensionContext, fallback?: unknown, force = false) {
+    if (!managed) return;
+    try {
+      const session = ctx.sessionManager.getSessionId();
+      const branch = ctx.sessionManager.getBranch();
+      const change = branch.findLast((entry) => entry.type === "model_change") as
+        { id?: unknown; model?: unknown; resolvedModelIsFallback?: unknown } | undefined;
+      const source = typeof change?.id === "string" ? change.id : `unobserved-${ctx.sessionManager.getLeafId() ?? "root"}`;
+      const model = typeof change?.model === "string" ? change.model : ctx.model?.id;
+      const previous = state.modelFallback;
+      const previousIndex = previous ? branch.findIndex((entry) => entry.id === previous.sourceEvent) : -1;
+      if (previous && (previous.session !== session || previousIndex < 0 ||
+        branch.some((entry, index) => index > previousIndex && entry.type === "model_change" &&
+          (!("resolvedModelIsFallback" in entry) || entry.resolvedModelIsFallback !== true) &&
+          !(fallback && entry.id === source)))) {
+        state.modelFallback = undefined;
+      }
+      if (!session || typeof model !== "string") return;
+      const event = fallback && typeof fallback === "object" ? fallback as Record<string, unknown> : undefined;
+      const applied = typeof change?.id === "string" &&
+        typeof event?.to === "string" && typeof event.from === "string";
+      if (applied) {
+        const prior = state.modelFallback;
+        const facts = prior?.errorFacts ?? [];
+        if (prior?.sourceEvent !== source) {
+          if (facts.length < 16) facts.push(fallbackErrorFacts(event));
+          else facts[15] = { truncated: true };
+        }
+        state.modelFallback = { session, sourceEvent: source,
+          episodeEvent: prior?.episodeEvent ?? source,
+          from: prior?.from ?? event.from as string, to: model, errorFacts: facts };
+      }
+      const key = JSON.stringify([session, source]);
+      const changed = force || modelSelectionChild !== state.child || modelSelectionKey !== key;
+      if (changed) {
+        sendFrame({ type: "model_fallback", session, sourceEvent: source, observation: "selected", to: model });
+        if (state.child && !state.child.stdin?.destroyed) {
+          modelSelectionChild = state.child;
+          modelSelectionKey = key;
+        }
+      }
+      if (state.modelFallback?.sourceEvent === source && (applied || changed)) {
+        sendFrame({ type: "model_fallback", observation: "applied", ...state.modelFallback });
+      }
+    } catch { /* A disappearing native session withholds evidence, never stops a turn. */ }
+  }
+  onWidened("retry_fallback_applied", (event, ctx) => observeModelSelection(ctx, event));
   onWidened("message_start", async (event) => {
     if (!event || typeof event !== "object" || !("message" in event)) return;
     const message = event.message;
@@ -1544,6 +1640,7 @@ export default function (pi: ExtensionAPI) {
         part && typeof part === "object" && "type" in part && part.type === "text" &&
         "text" in part && typeof part.text === "string" ? [part.text] : []).join("\n") : undefined;
     if (text === pendingAdmission.content) pendingAdmission.accept();
+    else pendingAdmission.mismatched = true;
   });
 
   // Registered only now that every helper above is initialized: a use-before-declaration in this

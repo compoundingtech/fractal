@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Optional agent-card mailbox fault reads retain their own wall backstop inside longer roster and request budgets. A stalled fault query preserves the last known fault or reports unknown without discarding current card fields. Roster reconciliation regressions now use canonical qualified subjects and the registered work lease field.",
+  "replay": {"status": "none", "detail": "No persisted projection change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No authority or membership policy change."},
+  "compatibility": {"status": "none", "detail": "No wire change. Enclosing deadlines may shorten but cannot extend optional fault reads."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

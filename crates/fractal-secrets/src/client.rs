@@ -621,12 +621,22 @@ impl Client {
     /// Read the validated wire envelope, retaining snapshot metadata for JSON automation.
     pub async fn get_envelope(&self, path: &str) -> Result<serde_json::Value> {
         self.request_decoded::<(), serde_json::Value>(
-            "GET", path, None, decode_api_envelope,
+            "GET", path, None, decode_api_envelope, None,
         ).await
     }
 
     pub async fn post<I: Serialize, O: DeserializeOwned>(&self, path: &str, body: &I) -> Result<O> {
         self.request("POST", path, Some(body)).await
+    }
+
+    /// Carry a local replication receive deadline without changing the exchange body.
+    pub async fn post_receive_before<I: Serialize, O: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &I,
+        deadline_unix_ms: Option<u128>,
+    ) -> Result<O> {
+        self.request_decoded("POST", path, Some(body), decode_api_response, deadline_unix_ms).await
     }
 
     /// Verify one GO from the local replica; this request must never use HTTP or sync.
@@ -702,7 +712,7 @@ impl Client {
         path: &str,
         body: Option<&I>,
     ) -> Result<O> {
-        self.request_decoded(method, path, body, decode_api_response).await
+        self.request_decoded(method, path, body, decode_api_response, None).await
     }
 
     async fn request_decoded<I: Serialize, O>(
@@ -711,6 +721,7 @@ impl Client {
         path: &str,
         body: Option<&I>,
         decode: fn(&[u8]) -> Result<O>,
+        receive_deadline_unix_ms: Option<u128>,
     ) -> Result<O> {
         if matches!(self.endpoint, Endpoint::Fabric(_)) {
             FabricEndpoint::validate_path(path)?;
@@ -730,7 +741,7 @@ impl Client {
         let result = loop {
             attempts += 1;
             let attempt_started = tokio::time::Instant::now();
-            let error = match self.request_once(method, path, &bytes).await {
+            let error = match self.request_once(method, path, &bytes, receive_deadline_unix_ms).await {
                 Ok(response) => {
                     if let Some(retry) = &self.follow_retry {
                         retry.lock().expect("follow retry lock").unreachable_since = None;
@@ -827,7 +838,13 @@ impl Client {
         result
     }
 
-    async fn request_once(&self, method: &str, path: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+    async fn request_once(
+        &self,
+        method: &str,
+        path: &str,
+        bytes: &[u8],
+        receive_deadline_unix_ms: Option<u128>,
+    ) -> Result<Vec<u8>> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.follow_test {
             let reply = {
@@ -868,7 +885,10 @@ impl Client {
                     bytes,
                     self.deadlines.connect,
                     deadline,
-                    RequestAuthority::LocalPerson(self.person.as_deref()),
+                    UnixRequestOptions::LocalPerson {
+                        person: self.person.as_deref(),
+                        receive_deadline_unix_ms,
+                    },
                 )
                 .await?
             }
@@ -890,7 +910,7 @@ impl Client {
                     bytes,
                     self.deadlines.connect,
                     deadline,
-                    RequestAuthority::FabricBearer(credential.as_ref()),
+                    UnixRequestOptions::FabricBearer(credential.as_ref()),
                 )
                 .await?
             }
@@ -904,6 +924,9 @@ impl Client {
                 }
                 .header("content-type", "application/json")
                 .header("connection", "close");
+                if let Some(deadline) = receive_deadline_unix_ms {
+                    request = request.header("x-fractal-receive-deadline-unix-ms", deadline.to_string());
+                }
                 request = fractal_client::propagation::inject_http(request);
                 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
                 if let Some(person) = self.person.as_deref() {
@@ -1420,9 +1443,12 @@ where
     Ok(())
 }
 
-/// A tunneled request cannot claim the Unix socket's local-person authority.
-enum RequestAuthority<'a> {
-    LocalPerson(Option<&'a str>),
+/// A tunneled request cannot claim local-person authority or carry a local receive deadline.
+enum UnixRequestOptions<'a> {
+    LocalPerson {
+        person: Option<&'a str>,
+        receive_deadline_unix_ms: Option<u128>,
+    },
     FabricBearer(Option<&'a reqwest::header::HeaderValue>),
 }
 
@@ -1433,13 +1459,15 @@ async fn unix_request(
     body: &[u8],
     connect_deadline: Duration,
     deadline: Duration,
-    authority: RequestAuthority<'_>,
+    options: UnixRequestOptions<'_>,
 ) -> Result<Vec<u8>> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let (person, authorization) = match authority {
-        RequestAuthority::LocalPerson(person) => (person, None),
-        RequestAuthority::FabricBearer(credential) => (None, credential),
+    let (person, authorization, receive_deadline_unix_ms) = match options {
+        UnixRequestOptions::LocalPerson { person, receive_deadline_unix_ms } => {
+            (person, None, receive_deadline_unix_ms)
+        }
+        UnixRequestOptions::FabricBearer(credential) => (None, credential, None),
     };
 
     let started = tokio::time::Instant::now();
@@ -1464,6 +1492,11 @@ async fn unix_request(
         if let Some(authorization) = authorization {
             request.extend_from_slice(b"Authorization: ");
             request.extend_from_slice(authorization.as_bytes());
+            request.extend_from_slice(b"\r\n");
+        }
+        if let Some(deadline) = receive_deadline_unix_ms {
+            request.extend_from_slice(b"x-fractal-receive-deadline-unix-ms: ");
+            request.extend_from_slice(deadline.to_string().as_bytes());
             request.extend_from_slice(b"\r\n");
         }
         fractal_client::propagation::inject_current_context(|key, value| {
@@ -1538,9 +1571,14 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
         // This is a reactive subscription, cancelled by its caller, not a finite HTTP read.
         return Duration::MAX;
     }
+    if path.starts_with("/v1/internal/replication/")
+        && path.split('?').next().is_some_and(|path| path.ends_with("/revision"))
+    {
+        // Store revision waits are caller-cancelled subscriptions, not periodic reads.
+        return Duration::MAX;
+    }
     if path.starts_with("/v1/internal/replication/export")
         || path.starts_with("/v1/internal/replication/receive")
-        || path.starts_with("/v1/internal/replication/checkpoint")
         || path.starts_with(CLIENT_READ_FORWARD_PATH)
     {
         // A forwarded client read is bounded by the relay's own per-hop timeouts.
@@ -1548,10 +1586,6 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     } else if path == "/v1/doctor" || path.starts_with("/v1/doctor?") {
         // Mirror the server's bulk read budget in read_deadline.rs.
         deadlines.bulk
-    } else if path.starts_with("/v1/checkpoint/plan") || path.starts_with("/v1/checkpoint/status")
-    {
-        // A dry run copies the store and replays it twice; status reads what is sealed.
-        Duration::from_secs(30 * 60)
     } else if (path.starts_with("/v1/events?") || path.starts_with("/v1/events/page?"))
         && path.contains("wait=true")
     {
@@ -1773,6 +1807,11 @@ impl fmt::Display for DaemonDeadline {
 
 impl std::error::Error for DaemonDeadline {}
 
+/// Whether the daemon accepted a request but exceeded the client's response ceiling.
+pub fn daemon_deadline_exceeded(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.downcast_ref::<DaemonDeadline>().is_some())
+}
+
 /// A message send st never answered, so it may or may not have been sent. The same request with
 /// the same key sends it at most once.
 #[derive(Debug)]
@@ -1803,10 +1842,7 @@ impl std::error::Error for MessageSendUnconfirmed {}
 /// Whether an API call failed because the daemon did not answer: it was unreachable, or it took
 /// the request and ran out of time. A refusal is an answer.
 pub fn daemon_did_not_answer(error: &anyhow::Error) -> bool {
-    daemon_unreachable(error).is_some()
-        || error
-            .chain()
-            .any(|cause| cause.downcast_ref::<DaemonDeadline>().is_some())
+    daemon_unreachable(error).is_some() || daemon_deadline_exceeded(error)
 }
 
 fn decode_chunked(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -1898,6 +1934,86 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 mod tests {
     use super::*;
 
+    async fn answer_receive_deadline_request<S>(mut stream: S, expected: Option<u128>)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(stream.read_u8().await.unwrap());
+        }
+        let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+        assert!(headers.starts_with("post /v1/internal/replication/receive http/1.1\r\n"));
+        let deadline = headers.lines()
+            .filter_map(|line| line.strip_prefix("x-fractal-receive-deadline-unix-ms: "))
+            .collect::<Vec<_>>();
+        let expected = expected.map(|value| value.to_string());
+        assert_eq!(deadline, expected.as_deref().into_iter().collect::<Vec<_>>());
+        let length = headers.lines().find_map(|line| line.strip_prefix("content-length: "))
+            .unwrap().parse::<usize>().unwrap();
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!({"exchange": "unchanged"}));
+        let body = br#"{"api_version":"fractal.v1","value":{"accepted":true}}"#;
+        stream.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len(),
+        ).as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+    }
+
+    async fn exercise_receive_deadline_posts(client: Client) {
+        let path = "/v1/internal/replication/receive";
+        let body = json!({"exchange": "unchanged"});
+        for deadline in [None, Some(u128::MAX)] {
+            let response: Value = client.post_receive_before(path, &body, deadline).await.unwrap();
+            assert_eq!(response, json!({"accepted": true}));
+        }
+        let response: Value = client.post(path, &body).await.unwrap();
+        assert_eq!(response, json!({"accepted": true}));
+    }
+
+    #[tokio::test]
+    async fn unix_receive_deadline_header_is_optional_and_per_call() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("receive.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            for expected in [None, Some(u128::MAX), None] {
+                let (stream, _) = listener.accept().await.unwrap();
+                answer_receive_deadline_request(stream, expected).await;
+            }
+        });
+        exercise_receive_deadline_posts(Client::unix(socket)).await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_receive_deadline_header_is_optional_and_per_call() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+        let server = tokio::spawn(async move {
+            for expected in [None, Some(u128::MAX), None] {
+                let (stream, _) = listener.accept().await.unwrap();
+                answer_receive_deadline_request(stream, expected).await;
+            }
+        });
+        exercise_receive_deadline_posts(client).await;
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn daemon_ceiling_predicate_uses_the_typed_error_chain() {
+        let error = deadline_error("local", "response", Duration::from_secs(1))
+            .context("receive failed");
+        assert!(daemon_deadline_exceeded(&error));
+        assert!(daemon_did_not_answer(&error));
+        assert!(!daemon_deadline_exceeded(&anyhow::anyhow!("{error}")));
+        assert!(!daemon_deadline_exceeded(&connect_deadline_error("local", Duration::from_secs(1))));
+        assert!(!daemon_deadline_exceeded(&api_error(503, br#"{"code":"replication-overloaded","message":"busy"}"#)));
+    }
+
     #[test]
     fn a_unix_run_client_names_exactly_one_mission_run() {
         let client = Client::unix_run("/tmp/socket", "mission-run/0123abcd").unwrap();
@@ -1966,7 +2082,7 @@ mod tests {
         let bytes = unix_request(
             &socket, "GET", "/v1/client/capabilities", &[],
             Duration::from_secs(1), Duration::from_secs(1),
-            RequestAuthority::FabricBearer(Some(&credential)),
+            UnixRequestOptions::FabricBearer(Some(&credential)),
         ).await.unwrap();
         assert_eq!(decode_api_response::<Value>(&bytes).unwrap(), json!({"accepted": true}));
         server.await.unwrap();
@@ -2288,6 +2404,13 @@ mod tests {
     #[test]
     fn request_classes_have_distinct_bounded_deadlines() {
         let deadlines = ClientDeadlines::default();
+        for path in [
+            "/v1/internal/replication/revision",
+            "/v1/internal/replication/shard/messages/revision",
+            "/v1/internal/replication/shard/messages/peers/revision",
+        ] {
+            assert_eq!(request_deadline(path, deadlines), Duration::MAX);
+        }
         assert_eq!(
             request_deadline("/v1/status", deadlines),
             deadlines.request

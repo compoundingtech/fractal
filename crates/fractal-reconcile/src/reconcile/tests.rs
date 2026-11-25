@@ -1,5 +1,12 @@
     #![cfg_attr(not(test), allow(unused, dead_code))]
     mod agent_review_loop_branches;
+    mod restart_preparation;
+    #[cfg(test)]
+    mod file_watch_scope;
+    #[cfg(test)]
+    mod host_observations;
+    mod environment_capture;
+    mod capture_restart;
 
 mod native_effect_convergence {
     use super::*;
@@ -441,12 +448,31 @@ mission "example/report" state="ready" {
                     "path":transcript,
                 })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
             let runtime = Arc::new(FakeRuntime::default());
+            if case == "exact" {
+                for index in 0..128 {
+                    let other = format!("agent/example/other-{index}");
+                    store.append_claim(&ClaimInput { subject:other.clone(), kind:"harness.invocation".into(),
+                        actor:None, fields:serde_json::from_value(serde_json::json!({
+                            "invocation_id":format!("invocation/other-{index}"),
+                            "operation_id":format!("other-{index}"), "agent":other,
+                            "phase":"started", "incarnation":"other-incarnation"
+                        })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+                }
+            }
             let mut reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
             reconciler.driver_state_dir = root.path().join("drivers");
             let status = match case { "running" => "running", "vanished" => "vanished", _ => "stopped" };
             // Exercise the actual observation writer, including its unchanged-observation retry.
-            for _ in 0..2 {
+            let member_receipts = store.claims_for(subject, Some("harness.invocation")).unwrap().len();
+            store.take_invocation_receipt_read_work();
+            for pass in 0..2 {
                 reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+                let (rows, vm) = store.take_invocation_receipt_read_work();
+                if pass == 0 && status != "running" {
+                    assert_eq!(rows, member_receipts as u64, "{case}: one subject-only reconstruction");
+                } else {
+                    assert_eq!((rows, vm), (0, 0), "{case}: unchanged observation must not reload receipts");
+                }
             }
             let claims = store.claims_for(subject, Some("harness.invocation-artifact")).unwrap();
             let captured = claims.iter().filter(|claim| claim.body["fields"]["status"] == "retained").collect::<Vec<_>>();
@@ -600,10 +626,12 @@ mission "example/report" state="ready" {
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
+    mod stream_work_wakes;
     mod ref_watch_tests;
     mod revision_seat_tests;
     mod rollout_tests;
     mod run_report_tests;
+    mod escalation;
     mod start_spacing_loop;
     mod start_preemption;
     mod seat_admission_queue;
@@ -612,6 +640,7 @@ mission "example/report" state="ready" {
     mod program_faults;
     mod program_children;
     mod native_retry;
+    mod step_execution_phases;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -1090,37 +1119,6 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_running_pty_with_a_dead_pid_is_observed_as_vanished() {
-        let observation = fractal_runtime::PtyObservation {
-            name: "stale-worker".into(),
-            status: "running".into(),
-            exit_code: None,
-            pid: Some(i32::MAX as u32),
-            created_at: Some("2026-09-22T12:00:00.000Z".into()),
-            display_name: None,
-            tags: BTreeMap::new(),
-        };
-
-        assert_eq!(observed_pty_status(&observation), "vanished");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_running_pty_with_a_live_pid_remains_running() {
-        let observation = fractal_runtime::PtyObservation {
-            name: "live-worker".into(),
-            status: "running".into(),
-            exit_code: None,
-            pid: Some(std::process::id()),
-            created_at: Some("2026-09-22T12:00:00.000Z".into()),
-            display_name: None,
-            tags: BTreeMap::new(),
-        };
-
-        assert_eq!(observed_pty_status(&observation), "running");
-    }
 
     /// The exec a hook waits for, and what happens right after that exec is next observed.
     type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
@@ -1130,14 +1128,25 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
+        observation_paths: Option<Vec<PathBuf>>,
+        physical_exec_observations: AtomicUsize,
+        capture_timeouts: Mutex<(u32, u32)>,
+        capture_error: Mutex<Option<String>>,
+        start_closure_unavailable: AtomicBool,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         /// Runs once, right after the named exec is next observed: its process ends just then.
         after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
+        exec_started: Mutex<HashMap<(String, String), u128>>,
+        exec_payloads: Mutex<HashMap<(String, String), fractal_runtime::payload_receipt::PayloadState>>,
         resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
         resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        resource_ignore_terminate: Mutex<bool>,
+        resource_ignore_kill: Mutex<bool>,
+        resource_retirement_pending: Mutex<usize>,
+        resource_retirement_calls: AtomicUsize,
         before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
@@ -1389,7 +1398,7 @@ mission "exit-evidence" state="ready" {
         };
         reconciler.reconcile_stop(
             &stopped,
-            Some(&HashMap::from([(member.runtime_id.clone(), replacement)])),
+            Some(&HashMap::from([(member.runtime_id.as_str(), &replacement)])),
         ).unwrap();
         let replacement = store.latest_actual_value(&subject.subject).unwrap().unwrap();
         assert!(actual_field(&replacement, "exit_evidence").is_none_or(Value::is_null));
@@ -1558,20 +1567,36 @@ mission "retained-reason" state="ready" {
     fn released_shell_fixture(expire_owner: bool) -> (
         tempfile::TempDir, Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>,
     ) {
+        released_shell_fixture_owned(expire_owner, expire_owner)
+    }
+
+    fn released_shell_fixture_owned(expire_owner: bool, owned: bool) -> (
+        tempfile::TempDir, Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>,
+    ) {
         use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
         use crate::store::shell_resources::{Command, PayloadResult};
         let root = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open_memory("node").unwrap());
+        let store = Arc::new(Store::open(&root.path().join("shell.db"), "node").unwrap());
         let runtime = Arc::new(FakeRuntime::default());
-        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let policy = fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("check.unit".into(), fractal_runtime::ResourceProfileSeed {
+                cores: 1, memory: 256 * 1024 * 1024, memory_high: None,
+                learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly, recovery_capable: false,
+                source: Some("declared".into()), reason: Some("shell outcome fixture".into()), disk: None, io: None,
+            })]),
+            ..Default::default()
+        };
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy));
         reconciler.driver_state_dir = root.path().join("drivers");
         reconciler.ensure_resource_authority().unwrap();
-        let owner = if expire_owner {
+        let owner = if owned {
             let blob = store.put_blob(b"export default {}").unwrap();
             apply_source(&store, &format!(r#"version 2
 mission "shell-owner" state="ready" {{
   goal "Retain shell outcome when its owner ends."
   step "work" {{ program "/unused.mjs" sha256="{blob}" }}
+  step "other" {{ program "/unused.mjs" sha256="{blob}" }}
 }}"#), "shell-owner-source");
             let run = store.create_mission_run(&crate::model::MissionRunRequest {
                 mission: "shell-owner".into(), revision: None, workspace: root.path().display().to_string(),
@@ -1583,19 +1608,21 @@ mission "shell-owner" state="ready" {{
         } else {
             Owner { run: "shell:outcome".into(), step: "shell:outcome".into(), attempt: 1, invocation: None }
         };
-        let lane = LaneRequest {
+        let mut lane = LaneRequest {
             id: "shell:outcome".into(), name: "checks".into(), host: "node".into(), max_members: 1,
-            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
+            capacity: None,
             coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
-            profile: None, profile_estimate: None, disk_path: None,
+            profile: Some("check.unit".into()), profile_estimate: None, disk_path: None,
         };
-        let now = u64::try_from(now_ms()).unwrap();
+        // Released shells retain the execution host's accepted profile snapshot on recovery.
+        reconciler.resolve_resource_profile(&mut lane).unwrap();
+        let now = u64::try_from(now_ms()).unwrap() - 10_000;
         let mut execution = store.submit_shell_resource(Command {
             id: "outcome".into(), request_id: None, lane: lane.clone(), argv: vec!["true".into()],
             cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
         }, now).unwrap();
-        let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }), ..Fit::default() };
+        let fit = Fit { room: lane.capacity, ..Fit::default() };
         let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit, now).unwrap() else {
             panic!("fixture was not admitted");
         };
@@ -1618,11 +1645,260 @@ mission "shell-owner" state="ready" {{
             head_start: Some("abc123".into()), head_end: Some("def456".into()),
             clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
             wall_duration_ms: 1234, memory_peak_bytes: None,
+            ..PayloadResult::default()
         }).unwrap()).unwrap();
         if expire_owner {
             store.set_step_state(&lane.owner.step, "failed", Some("owner ended while shell was live")).unwrap();
         }
         (root, store, runtime, reconciler)
+    }
+    fn assert_run_cancellation_stops_owned_shell(auto_failure: bool) {
+        let (_root, store, runtime, reconciler) = released_shell_fixture_owned(auto_failure, true);
+        let execution = store.shell_resource("outcome").unwrap();
+        let owner = execution.command.lane.owner;
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        *runtime.resource_ignore_terminate.lock().unwrap() = true;
+        if !auto_failure {
+            store.request_mission_run_cancellation(&owner.run, "operator cancelled").unwrap();
+        }
+        let run = store.mission_run(&owner.run).unwrap().unwrap();
+        let mission = store.mission_spec("shell-owner", Some(&run.revision)).unwrap();
+        reconciler.evaluate_active_mission_run(&run, mission).unwrap();
+        let run = store.mission_run(&owner.run).unwrap().unwrap();
+        assert_eq!(run.phase, if auto_failure { "cleanup-failed" } else { "cleanup-cancelled" });
+        assert!(run.steps.iter().any(|step| step.status == "cancelled"));
+
+        // Keep the ordinary success path inside its cleanup budget.
+        let reconciler = reconciler.with_cleanup_deadline(Duration::from_secs(60));
+        reconciler.reconcile_mission_run_cleanup(&run).unwrap();
+        assert!(store.shell_resource("outcome").unwrap().cancel);
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(*runtime.stops.lock().unwrap(), vec!["outcome".to_owned()]);
+        assert!(runtime.kills.lock().unwrap().is_empty());
+        reconciler.reconcile_mission_run_cleanup(&run).unwrap();
+        assert_eq!(store.mission_run(&owner.run).unwrap().unwrap().status, "running");
+        reconciler.reconcile_shell_resources().unwrap();
+        assert!(runtime.kills.lock().unwrap().is_empty(), "must honor the grace period");
+
+        // Move the persisted elapsed-clock cancellation offset behind the deadline.
+        // The fixture's release is ten seconds old; no wall-clock sleeps are needed.
+        let mut execution = store.shell_resource("outcome").unwrap();
+        execution.cancellation_started_at = Some(execution.cancellation_started_at.unwrap() - 5_000);
+        store.update_shell_resource(&execution).unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(*runtime.kills.lock().unwrap(), vec!["outcome".to_owned()]);
+        make_shell_retirement_due(&store);
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "cancelled");
+        reconciler.reconcile_mission_run_cleanup(&run).unwrap();
+        let run = store.mission_run(&owner.run).unwrap().unwrap();
+        assert_eq!(run.phase, "terminal");
+        assert_eq!(run.status, if auto_failure { "failed" } else { "cancelled" });
+    }
+
+    #[test]
+    fn run_cancel_terminates_owned_shell_then_escalates_and_waits_for_receipt() {
+        assert_run_cancellation_stops_owned_shell(false);
+    }
+
+    #[test]
+    fn step_failure_auto_cancel_terminates_owned_shell_then_escalates_and_waits_for_receipt() {
+        assert_run_cancellation_stops_owned_shell(true);
+    }
+
+
+    fn make_shell_retirement_due(store: &Store) {
+        let mut execution = store.shell_resource("outcome").unwrap();
+        execution.retirement_retry_at_unix_ms = Some(0);
+        store.update_shell_resource(&execution).unwrap();
+    }
+
+    #[test]
+    fn shell_pending_retirement_rearms_each_unfinished_attempt() {
+        let (root, store, runtime, reconciler) = released_shell_fixture(false);
+        *runtime.resource_retirement_pending.lock().unwrap() = 2;
+        reconciler.reconcile_shell_resources().unwrap();
+        let first = store.shell_resource("outcome").unwrap();
+        assert_eq!(first.state, "finishing");
+        assert_eq!(first.retirement_retry_delay_ms, 1_000);
+        assert!(first.retirement_retry_at_unix_ms.unwrap() > u64::try_from(now_ms()).unwrap());
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(runtime.resource_retirement_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(store.shell_resource("outcome").unwrap().revision, first.revision);
+
+        drop(reconciler);
+        drop(store);
+        let store = Arc::new(Store::open(&root.path().join("shell.db"), "node").unwrap());
+        assert_eq!(store.shell_resource("outcome").unwrap().retirement_retry_at_unix_ms, first.retirement_retry_at_unix_ms);
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.driver_state_dir = root.path().join("drivers");
+
+        // The pending result has no native event. Its persisted deadline alone
+        // causes another attempt, which must in turn persist a new deadline.
+        make_shell_retirement_due(&store);
+        reconciler.reconcile_shell_resources().unwrap();
+        let second = store.shell_resource("outcome").unwrap();
+        assert_eq!(runtime.resource_retirement_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(second.retirement_retry_delay_ms, 2_000);
+        assert!(second.retirement_retry_at_unix_ms.unwrap() > u64::try_from(now_ms()).unwrap());
+        make_shell_retirement_due(&store);
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(runtime.resource_retirement_calls.load(Ordering::Relaxed), 3);
+        assert_one_shell_outcome(&store, "completed");
+    }
+
+    #[test]
+    fn shell_stuck_generation_is_killed_once_and_rechecked_with_capped_backoff() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        *runtime.resource_ignore_terminate.lock().unwrap() = true;
+        *runtime.resource_ignore_kill.lock().unwrap() = true;
+        store.cancel_shell_resource("outcome").unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let mut execution = store.shell_resource("outcome").unwrap();
+        execution.cancellation_started_at = Some(execution.cancellation_started_at.unwrap() - 5_000);
+        store.update_shell_resource(&execution).unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let first = store.shell_resource("outcome").unwrap();
+        assert_eq!(first.cancellation_kill_generation.as_deref(), Some("outcome-generation"));
+        assert_eq!(first.retirement_retry_delay_ms, 1_000);
+        let mut first = first;
+        first.retirement_retry_at_unix_ms = Some(u64::try_from(now_ms()).unwrap() + 300_000);
+        store.update_shell_resource(&first).unwrap();
+        let first = store.shell_resource("outcome").unwrap();
+        for _ in 0..100 { reconciler.reconcile_shell_resources().unwrap(); }
+        assert_eq!(store.shell_resource("outcome").unwrap().revision, first.revision);
+        assert_eq!(runtime.kills.lock().unwrap().len(), 1);
+        for expected in [2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 300_000, 300_000] {
+            make_shell_retirement_due(&store);
+            reconciler.reconcile_shell_resources().unwrap();
+            let execution = store.shell_resource("outcome").unwrap();
+            assert_eq!(execution.retirement_retry_delay_ms, expected);
+            assert!(execution.retirement_retry_at_unix_ms.unwrap() > u64::try_from(now_ms()).unwrap());
+            assert_eq!(runtime.kills.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn shell_cleanup_deadline_retains_custody_for_stuck_process_or_missing_observation() {
+        for missing_observation in [false, true] {
+            let (_root, store, runtime, reconciler) = released_shell_fixture_owned(false, true);
+            let owner = store.shell_resource("outcome").unwrap().command.lane.owner;
+            runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+            *runtime.resource_ignore_terminate.lock().unwrap() = true;
+            *runtime.resource_ignore_kill.lock().unwrap() = true;
+            store.request_mission_run_cancellation(&owner.run, "operator cancelled").unwrap();
+            reconciler.reconcile_shell_resources().unwrap();
+            let mut execution = store.shell_resource("outcome").unwrap();
+            execution.cancellation_started_at = Some(execution.cancellation_started_at.unwrap() - 5_000);
+            store.update_shell_resource(&execution).unwrap();
+            reconciler.reconcile_shell_resources().unwrap();
+            assert_eq!(runtime.kills.lock().unwrap().len(), 1);
+            if missing_observation {
+                runtime.execs.lock().unwrap().remove("outcome");
+                reconciler.reconcile_shell_resources().unwrap();
+            }
+            store.set_mission_run_state(&owner.run, "running", "cleanup-cancelled", None).unwrap();
+            let run = store.mission_run(&owner.run).unwrap().unwrap();
+            let reconciler = reconciler.with_cleanup_deadline(Duration::ZERO);
+            reconciler.reconcile_mission_run_cleanup(&run).unwrap();
+            let terminal = store.mission_run(&owner.run).unwrap().unwrap();
+            assert_eq!(terminal.phase, "terminal");
+            let state = store.latest_claim(&owner.run, Some("mission-run.state")).unwrap().unwrap();
+            assert!(state.body["fields"]["reason"].as_str().unwrap().contains("execution custody unconfirmed: outcome"));
+            let retained = store.shell_resource("outcome").unwrap();
+            assert!(retained.ended_at.is_none());
+            assert!(retained.receipt_subject.is_none());
+            let member = store.resource_membership_record(&retained.command.lane.id, &owner).unwrap();
+            assert!(member.roots.iter().any(|root| root.runtime_id == "outcome" && root.execution_ended_at.is_none()));
+
+            // A later native observation can still retire this terminal run's execution.
+            runtime.execs.lock().unwrap().insert("outcome".into(), RuntimeObservation {
+                runtime_id: "outcome".into(), terminal: false, status: "exited".into(),
+                exit_code: Some(37), incarnation_id: Some("outcome-generation".into()),
+            });
+            make_shell_retirement_due(&store);
+            reconciler.reconcile_shell_resources().unwrap();
+            assert_one_shell_outcome(&store, "cancelled");
+        }
+    }
+
+    #[test]
+    fn shell_cancel_restart_preserves_cancellation_and_finishes_receipt() {
+        let (root, store, runtime, reconciler) = released_shell_fixture_owned(false, true);
+        let owner = store.shell_resource("outcome").unwrap().command.lane.owner;
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        *runtime.resource_ignore_terminate.lock().unwrap() = true;
+        store.request_mission_run_cancellation(&owner.run, "operator cancelled").unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let before = store.shell_resource("outcome").unwrap().cancellation_started_at.unwrap();
+        drop(reconciler);
+        drop(store);
+        let store = Arc::new(Store::open(&root.path().join("shell.db"), "node").unwrap());
+        assert_eq!(store.shell_resource("outcome").unwrap().cancellation_started_at, Some(before));
+        *runtime.resource_ignore_terminate.lock().unwrap() = false;
+        *runtime.before_resource_recovery.lock().unwrap() = Some(Box::new(move |store| {
+            let execution = store.shell_resource("outcome").unwrap();
+            assert!(execution.cancel);
+            assert_eq!(execution.cancellation_started_at, Some(before));
+            assert!(execution.result.is_some(), "recovery must preserve evidence before retirement");
+        }));
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = root.path().join("drivers");
+        recovered.reconcile_shell_resources().unwrap();
+        assert_eq!(store.shell_resource("outcome").unwrap().cancellation_started_at, Some(before));
+        recovered.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "cancelled");
+        store.set_mission_run_state(&owner.run, "running", "cleanup-cancelled", None).unwrap();
+        recovered.reconcile_mission_run_cleanup(&store.mission_run(&owner.run).unwrap().unwrap()).unwrap();
+        assert_eq!(store.mission_run(&owner.run).unwrap().unwrap().phase, "terminal");
+    }
+
+    #[test]
+    fn cancelled_step_runtime_receives_terminate_and_kill_before_cleanup_finishes() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        apply_source(&store, r#"version 2
+mission "cancel-driver" state="ready" {
+  goal "Stop a cancelled step's own driver."
+  step "work" {
+    agentless
+    exec "worker" { command "sleep 60"; restart "never"; shutdown-timeout "1ms" }
+    gate "wait" { document "doc/release" }
+  }
+}"#, "cancel-driver-source");
+        let run = store.create_mission_run(&MissionRunRequest {
+            mission: "cancel-driver".into(), revision: None,
+            workspace: workspace.path().display().to_string(), requester: Some("person/test".into()),
+            mode: None, inputs: BTreeMap::new(), idempotency_key: "cancel-driver".into(),
+        }).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        for _ in 0..8 { reconciler.reconcile_once().unwrap(); }
+        let member = runtime.started_members.lock().unwrap().iter()
+            .find(|member| member.kind == MemberKind::Exec).unwrap().clone();
+        let observation = RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: false, status: "running".into(),
+            exit_code: None, incarnation_id: Some("step-generation".into()),
+        };
+        runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), observation.clone());
+        reconciler.reconcile_once().unwrap();
+        store.request_mission_run_cancellation(&run.id, "operator cancelled").unwrap();
+        for _ in 0..4 { reconciler.reconcile_once().unwrap(); }
+        assert!(runtime.stops.lock().unwrap().contains(&member.runtime_id));
+        let desired = store.desired_subjects_for_owner_run(&run.subject).unwrap().into_iter()
+            .find(|subject| subject.kind == "stop").unwrap();
+        let requests = store.observations_for(&desired.subject, "runtime.action.requested").unwrap();
+        assert!(requests.iter().any(|request| request.body["fields"]["action"] == "terminate"));
+        // Match the existing stop deadline test: allow the positive shutdown
+        // budget to expire, then reconcile kill separately from exit observation.
+        std::thread::sleep(Duration::from_millis(2));
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.kills.lock().unwrap().contains(&member.runtime_id));
+        runtime.execs.lock().unwrap().get_mut(&member.runtime_id).unwrap().status = "exited".into();
+        for _ in 0..8 { reconciler.reconcile_once().unwrap(); }
+        let current = store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!((current.status.as_str(), current.phase.as_str()), ("cancelled", "terminal"));
     }
 
     fn assert_one_shell_outcome(store: &Store, state: &str) {
@@ -1655,18 +1931,17 @@ mission "shell-owner" state="ready" {{
     }
 
     #[tokio::test]
-    async fn ended_shell_owner_finalizes_refusal_with_payload_observations_exactly_once() {
+    async fn ended_shell_owner_finalizes_cancellation_with_payload_observations_exactly_once() {
         let (_root, store, runtime, reconciler) = released_shell_fixture(true);
         runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
         reconciler.reconcile_shell_resources().unwrap();
-        assert_eq!(store.shell_resource("outcome").unwrap().state, "failing");
+        assert!(store.shell_resource("outcome").unwrap().cancel);
         assert!(store.shell_resource("outcome").unwrap().cancellation_started_at.is_some());
         assert_eq!(*runtime.stops.lock().unwrap(), vec!["outcome".to_owned()]);
         tokio::task::yield_now().await;
         reconciler.reconcile_shell_resources().unwrap();
         reconciler.reconcile_shell_resources().unwrap();
-        assert_one_shell_outcome(&store, "refused");
-        assert!(store.shell_resource("outcome").unwrap().reason.contains("owner"));
+        assert_one_shell_outcome(&store, "cancelled");
         assert!(runtime.started_members.lock().unwrap().is_empty());
     }
 
@@ -1704,6 +1979,7 @@ mission "shell-owner" state="ready" {{
                 head_start: Some("abc123".into()), head_end: Some("def456".into()),
                 clean_start: Some(true), clean_end: Some(false),
                 exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None,
+                ..PayloadResult::default()
             }).unwrap()).unwrap();
             fs::rename(temporary, path).unwrap();
         }));
@@ -1757,6 +2033,24 @@ mission "shell-owner" state="ready" {{
     }
 
     impl RuntimeControl for FakeRuntime {
+        fn observation_paths(&self) -> Option<&[PathBuf]> {
+            self.observation_paths.as_deref()
+        }
+        fn launch_contract(&self, store: &Store, desired: &DesiredSubject, launch: &MemberSpec) -> Result<crate::launch_contract::Contract> {
+            let mut capture = self.capture_timeouts.lock().unwrap();
+            capture.1 += 1;
+            if let Some(error) = self.capture_error.lock().unwrap().as_ref() {
+                anyhow::bail!("{error}");
+            }
+            if capture.0 > 0 {
+                capture.0 -= 1;
+                return Err(fractal_runtime::ShellStartupTimeout {
+                    shell: "example-shell".into(), seconds: 10.0,
+                }.into());
+            }
+            crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true)
+                .map(|(contract, _)| contract)
+        }
         fn recover_resource_lanes(&self, store: &Store, host: &str, _now: u64) -> Result<usize> {
             if let Some(before) = self.before_resource_recovery.lock().unwrap().take() { before(store); }
             for execution in store.shell_resources(host, true)? {
@@ -1767,6 +2061,9 @@ mission "shell-owner" state="ready" {{
             Ok(0)
         }
         fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+            self.resource_retirement_calls.fetch_add(1, Ordering::Relaxed);
+            let mut pending = self.resource_retirement_pending.lock().unwrap();
+            if *pending > 0 { *pending -= 1; return Ok(false); }
             Ok(true)
         }
         fn watch_resource_exec(&self, id: &str, generation: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
@@ -1787,8 +2084,9 @@ mission "shell-owner" state="ready" {{
             let mut execs = self.execs.lock().unwrap();
             let observation = execs.get_mut(id).context("fake shell missing")?;
             anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
-            observation.status = "exited".into();
             self.stops.lock().unwrap().push(id.into());
+            if *self.resource_ignore_terminate.lock().unwrap() { return Ok(()); }
+            observation.status = "exited".into();
             drop(execs);
             let wake = self.resource_exit_watches.lock().unwrap().remove(id);
             if let Some(publish) = self.resource_exit_publication.lock().unwrap().take() {
@@ -1797,6 +2095,15 @@ mission "shell-owner" state="ready" {{
                     if let Some(wake) = wake { wake(); }
                 });
             } else if let Some(wake) = wake { wake(); }
+            Ok(())
+        }
+        fn kill_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+            let mut execs = self.execs.lock().unwrap();
+            let observation = execs.get_mut(id).context("fake shell missing")?;
+            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
+            self.kills.lock().unwrap().push(id.into());
+            if *self.resource_ignore_kill.lock().unwrap() { return Ok(()); }
+            observation.status = "exited".into();
             Ok(())
         }
         fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
@@ -1864,6 +2171,9 @@ mission "shell-owner" state="ready" {{
                 .get(&(id.into(), incarnation.into())).cloned())
         }
         fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
+            if self.start_closure_unavailable.load(Ordering::Acquire) {
+                return Ok(false);
+            }
             if member
                 .driver
                 .as_deref()
@@ -1905,7 +2215,14 @@ mission "shell-owner" state="ready" {{
             }
             Ok(self.ptys.lock().unwrap().clone())
         }
+        fn exec_started_at(&self, runtime_id: &str, incarnation: &str) -> Result<Option<u128>> {
+            Ok(self.exec_started.lock().unwrap().get(&(runtime_id.into(), incarnation.into())).copied())
+        }
+        fn exec_payload_state(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+            Ok(self.exec_payloads.lock().unwrap().get(&(runtime_id.into(), incarnation.into())).copied())
+        }
         fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
+            self.physical_exec_observations.fetch_add(1, Ordering::Relaxed);
             if let Some(before) = self.before_observe_exec.lock().unwrap().take() {
                 before();
             }
@@ -2395,6 +2712,37 @@ mission "shell-owner" state="ready" {{
         tokio::time::timeout(Duration::from_secs(10), notify.notified())
             .await
             .expect("a long gate still gets a pass every minute");
+    }
+
+    #[test]
+    fn a_missing_field_observation_does_not_read_the_declaration_or_arm_a_poll() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nexec \"node/probe\" { workspace \"/tmp\"; command \"true\"; restart never }",
+            "missing-observation-definition",
+        );
+        let reconciler = Reconciler::new(
+            store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        let stage = GateContext {
+            subject: "step-run/garden/wait".into(), name: "wait".into(),
+            started_at_unix_ms: 0, attempt: 1, run: "mission-run/garden".into(),
+            generation: "run-generation/garden".into(), eval: false,
+        };
+        let gate = GateSpec::Field {
+            name: "exited".into(), path: "exit_code".into(),
+            subject: "exec/node/probe".into(), operator: "is".into(), value: serde_json::json!(0),
+        };
+        let ((outcome, due), reads) = smallclaims::touched::record(|| {
+            smallclaims::touched::record_due(|| reconciler.evaluate_gate(&stage, &gate))
+        });
+        assert!(matches!(outcome.unwrap(), GateOutcome::Pending));
+        assert!(reads.contains("actual:exec/node/probe"));
+        assert!(!reads.contains("exec/node/probe"), "{reads:?}");
+        assert_eq!(due, None);
+        assert!(reconciler.gate_poll_runtimes.lock().unwrap().is_empty());
+        assert!(!reconciler.gate_poll_armed.load(Ordering::Acquire));
     }
 
     /// A field gate on a GitHub item reads `state` and `facts.state` alike, whether its subject
@@ -3633,16 +3981,97 @@ version 2
         assert_eq!(ready.attempt, before.attempt, "the step is not reset");
     }
 
+    #[test]
+    fn mission_read_reconstruction_is_scoped_to_the_changed_run() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, r#"
+version 2
+resource "elsewhere" { kind "custom.st3.document-source" }
+mission "counted" state="ready" {
+  goal "Wait for an explicitly named seat."
+  concurrent-runs
+  step "work" { assigned-to "agent/absent" }
+}
+"#, "counted-mission");
+        let create = |key: &str| store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "counted".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let first = create("first-counted-run");
+        let second = create("second-counted-run");
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).skipping_unneeded(true);
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        // Drain preceding self-writes before attributing an individual commit.
+        for _ in 0..MISSION_READS_CONTINUATIONS {
+            if !reconciler.evaluate_changed_mission_runs().unwrap().1 { break; }
+        }
+        assert!(!reconciler.evaluate_changed_mission_runs().unwrap().1);
+        let count = || store.mission_read_work()["reconstructions"].as_u64().unwrap();
+        let before = count();
+        observe_state(&store, "resource/elsewhere", "resumed", "unrelated-counted-change");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+        assert_eq!(count() - before, 0, "unrelated commits reconstruct no missions");
+
+        // This is the same seat the runs read for eligibility and actual state, but
+        // neither query consumes harness reports. Re-stamping it changes no input.
+        store.append_claim(&ClaimInput {
+            subject: "agent/absent".into(), kind: "harness.observed".into(),
+            actor: Some("agent/absent".into()),
+            fields: BTreeMap::from([("state".into(), Value::String("working".into()))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some("heartbeat-counted".into()),
+        }).unwrap();
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+        assert_eq!(count() - before, 0, "unconsumed heartbeat inputs reconstruct no missions");
+
+        store.set_mission_run_state(&first.id, "running", "normal", None).unwrap();
+        let before = count();
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap().0, 1);
+        assert_eq!(count() - before, 1, "one changed run has one full reconstruction");
+        assert_eq!(store.mission_run(&second.id).unwrap().unwrap().steps[0].status, "blocked");
+    }
+
+    #[tokio::test]
+    async fn the_mission_follower_pins_its_cursor_before_dispatching_launch_work() {
+        let store = smallclaims::sqlite::with_write_limit_for_test(1, ||
+            Arc::new(Store::open_memory("node").unwrap()));
+        let (store, reconciler, _) = run_paused_on_its_allocation(store);
+        let starting_at = reconciler.incremental.watermark();
+        assert!(starting_at.is_some());
+        assert!(reconciler.mission_reads_cursor.lock().unwrap().is_none());
+        let _held = store.connection.admit_write().await;
+        let mut follower = Box::pin(reconciler.clone().follow_mission_reads());
+        // Holding the only admission permit makes the first dispatch yield
+        // deterministically, before launch work can advance the pass feed.
+        assert!(futures_util::poll!(&mut follower).is_pending());
+        assert_eq!(*reconciler.mission_reads_cursor.lock().unwrap(), starting_at);
+    }
+
     #[tokio::test]
     async fn the_post_commit_feed_wakes_the_runs_a_change_touched() {
         // On disk, so this test's reads wait for the follower's writes rather than fail.
         let root = tempfile::tempdir().unwrap();
-        let (store, reconciler, run) = run_paused_on_its_allocation(Arc::new(
-            Store::open(&root.path().join("store.sqlite"), "node").unwrap(),
-        ));
+        let store = Arc::new(Store::open(&root.path().join("store.sqlite"), "node").unwrap());
+        apply_source(&store, r#"
+version 2
+agent "launch" { workspace "/tmp"; command "true"; restart "never" }
+"#, "launch-alongside-mission");
+        let (store, reconciler, run) = run_paused_on_its_allocation(store);
         let before = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
         let follower = tokio::spawn(reconciler.clone().follow_mission_reads());
         observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
+        // Force scoped launch work on the first follower iteration, rather than
+        // depending on when its executable identity measurement completes. That
+        // work observes the shared pass feed before the mission follower reads it.
+        reconciler.file_changes.select_launch(&reconciler.incremental, "agent/launch");
         // What a write through the API does after it commits.
         reconciler.event_notify.send_modify(|generation| *generation += 1);
         // The step is agentless, so the follower's next evaluation admits it and completes it:
@@ -7763,6 +8192,29 @@ agent "import/omp/fixture" {{
         assert!(!FileWatch::relevant(&read, target, directory, None));
     }
 
+    #[test]
+    fn file_gate_watchers_create_only_missing_ancestors() {
+        let directory = Path::new("/watched");
+        let target = Path::new("/watched/missing/nested/gate");
+        for path in ["/", "/watched", "/watched/unrelated"] {
+            let event = notify::Event::new(notify::EventKind::Create(
+                notify::event::CreateKind::Folder)).add_path(path.into());
+            assert!(!FileWatch::relevant(&event, target, directory, None), "{path}");
+        }
+        for path in ["/watched/missing", "/watched/missing/nested", "/watched/missing/nested/gate"] {
+            let event = notify::Event::new(notify::EventKind::Create(
+                notify::event::CreateKind::Any)).add_path(path.into());
+            assert!(FileWatch::relevant(&event, target, directory, None), "{path}");
+        }
+        for kind in [
+            notify::EventKind::Remove(notify::event::RemoveKind::Folder),
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(notify::event::RenameMode::Any)),
+        ] {
+            let event = notify::Event::new(kind).add_path(directory.into());
+            assert!(FileWatch::relevant(&event, target, directory, None));
+        }
+    }
+
     #[tokio::test]
     async fn file_gate_watchers_ignore_reads_and_unrelated_mutations() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -7777,6 +8229,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_observation(&subject).unwrap();
         // Publishing the initial file.observed claim signals a graph change. Consume
         // that known wake before asserting that subsequent reads stay quiet.
@@ -7802,6 +8255,163 @@ agent "import/omp/fixture" {{
         tokio::time::timeout(Duration::from_secs(5), notify.notified())
             .await
             .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn cached_file_observation_retains_scoped_mission_dependency() {
+        use futures_util::FutureExt as _;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate.txt");
+        std::fs::write(&path, "ready").unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let reconciler = Reconciler::new(
+            store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert!(reconciler.file_observations.lock().unwrap().contains_key(&subject));
+        let ((), reads) = smallclaims::touched::record(|| {
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert!(reconciler.subject_value(&subject).unwrap().is_some());
+        });
+        assert!(reads.contains(&subject), "cached observations still read the external input");
+        assert!(reads.contains(&format!("actual:{subject}")));
+        reconciler.incremental.evaluated("mission-run/file-reader", reads, None);
+        reconciler.incremental.evaluated(
+            "mission-run/unrelated", BTreeSet::from(["file/unrelated".into()]), None,
+        );
+        let global = Notify::new();
+        reconciler.file_changes.invalidate(&reconciler.incremental, &subject, false, &global);
+        assert!(global.notified().now_or_never().is_none());
+        assert!(reconciler.file_changes.notify.notified().now_or_never().is_some());
+        assert_eq!(
+            *reconciler.file_changes.runs.lock().unwrap(),
+            BTreeSet::from(["mission-run/file-reader".into()]),
+        );
+    }
+
+    fn observed_measurement(path: &Path) -> fractal_drivers::harness_admission::IdentityMeasurement {
+        let measurement = std::cell::RefCell::new(None);
+        fractal_drivers::harness_admission::executable_identity_ready_observed(
+            path, &|_| unreachable!(), &|_| Ok(()),
+            &|identity| { *measurement.borrow_mut() = Some(identity.clone()); }).unwrap();
+        measurement.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn identity_completion_selects_only_exact_pending_dependents() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::write(&first, "first identity").unwrap();
+        std::fs::write(&second, "second identity").unwrap();
+        let first = observed_measurement(&first);
+        let second = observed_measurement(&second);
+        assert_ne!(first, second);
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        for (subject, measurement) in [("first", &first), ("shared", &first), ("second", &second)] {
+            reconciler.file_changes.pending_measurements.lock().unwrap().insert(subject.into(),
+                PendingLaunchMeasurements { dependencies: BTreeSet::from([measurement.clone()]), completed: false });
+            reconciler.incremental.evaluated(&format!("launch-inputs:{subject}"),
+                BTreeSet::from([format!("launch-identity/{subject}")]), None);
+        }
+        reconciler.file_changes.measurement_completed(&reconciler.incremental, &first);
+        assert_eq!(*reconciler.file_changes.launches.lock().unwrap(),
+            BTreeSet::from(["first".into(), "shared".into()]));
+        assert!(reconciler.incremental.needs("launch-inputs:first", now_ms()));
+        assert!(reconciler.incremental.needs("launch-inputs:shared", now_ms()));
+        assert!(!reconciler.incremental.needs("launch-inputs:second", now_ms()));
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("identity completion must notify scoped work"),
+        }
+        tokio::select! {
+            biased;
+            _ = reconciler.notify.notified() => panic!("identity completion must not notify a global pass"),
+            _ = std::future::ready(()) => {},
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_completion_before_reader_registration_requeues_after_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("binary");
+        std::fs::write(&binary, "identity").unwrap();
+        let measurement = observed_measurement(&binary);
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        reconciler.file_changes.pending_measurements.lock().unwrap().insert("selected".into(),
+            PendingLaunchMeasurements { dependencies: BTreeSet::from([measurement.clone()]), completed: false });
+        // Finish the background operation before evaluated() has registered any readers.
+        reconciler.file_changes.measurement_completed(&reconciler.incremental, &measurement);
+        reconciler.file_changes.launches.lock().unwrap().clear();
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("early completion must retain a scoped wake"),
+        }
+        reconciler.incremental.evaluated("launch-inputs:selected",
+            BTreeSet::from(["launch-identity/selected".into()]), None);
+        assert!(!reconciler.incremental.needs("launch-inputs:selected", now_ms()));
+        reconciler.file_changes.registered_launch_measurements(&reconciler.incremental, "selected", true, false);
+        assert!(reconciler.incremental.needs("launch-inputs:selected", now_ms()));
+        assert_eq!(*reconciler.file_changes.launches.lock().unwrap(), BTreeSet::from(["selected".into()]));
+        tokio::select! {
+            biased;
+            _ = reconciler.file_changes.notify.notified() => {},
+            _ = std::future::ready(()) => panic!("registration must restore the scoped wake"),
+        }
+    }
+
+    #[test]
+    fn overlapping_launch_registration_keeps_ownership_until_read_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let desired = crate::graph::parse_test_intent(&format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}",
+            root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        let first = AtomicBool::new(true);
+        let member = desired.member.clone().unwrap();
+        crate::contract::install(&store, Box::new({
+            let entered = entered.clone();
+            let resume = resume.clone();
+            move |_| {
+                if first.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    entered.wait();
+                    resume.wait();
+                }
+                Ok(member.clone())
+            }
+        }));
+        let scoped_started = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let full_pass = scope.spawn(|| reconciler.watch_launch_inputs(&desired));
+            entered.wait(); // The first evaluation owns a map entry but has not registered reads.
+            let scoped = scope.spawn(|| {
+                scoped_started.wait();
+                reconciler.watch_launch_inputs(&desired)
+            });
+            scoped_started.wait();
+            // Deterministically exercise admission while the first evaluation is in capture.
+            // Without this gate, a scoped evaluation can replace/remove its pending map entry.
+            let protected = matches!(
+                reconciler.file_changes.launch_input_registration.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock),
+            );
+            resume.wait();
+            let _ = full_pass.join().unwrap();
+            let _ = scoped.join().unwrap();
+            assert!(protected, "overlapping capture must not acquire registration ownership");
+        });
+        // Both evaluations have finished; no registration guard is retained by pending work.
+        assert!(reconciler.file_changes.launch_input_registration.try_lock().is_ok());
+        assert!(!reconciler.incremental.reads_of(&format!("launch-inputs:{}", desired.subject)).is_empty());
     }
 
     #[test]
@@ -7912,7 +8522,7 @@ agent "import/omp/fixture" {{
                 Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
             let result = fractal_drivers::harness_admission::executable_identity_ready_observed(
                 &provider, &|_| unreachable!(), &|path| reconciler.ensure_file_watch(
-                    &format!("launch-input/{}", path.display()), path));
+                    &format!("launch-input/{}", path.display()), path), &|_| {});
             assert_eq!(result.is_ok(), retarget);
             if retarget { assert!(reconciler.file_watchers.lock().unwrap().contains_key(
                 &format!("launch-input/{}", target.display()))); }
@@ -7932,21 +8542,32 @@ agent "import/omp/fixture" {{
 
     #[tokio::test]
     async fn launch_input_watchers_follow_recursive_rules_and_missing_inputs() {
+        use futures_util::FutureExt as _;
         let root = tempfile::tempdir().unwrap();
         let notify = Arc::new(Notify::new());
         let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
             Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+        let scoped_notify = &reconciler.file_changes.notify;
         let rules = root.path().join("rules");
         let missing = root.path().join("missing.md");
         for path in [&rules, &missing] {
             reconciler.ensure_file_watch(&format!("launch-input/{}", path.display()), path).unwrap();
         }
+        reconciler.incremental.evaluated("launch-inputs:test", BTreeSet::from([
+            format!("launch-input/{}", rules.display()), format!("launch-input/{}", missing.display()),
+            "old".into(), "second".into(),
+        ]), None);
         std::fs::create_dir_all(rules.join("nested")).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
+        assert!(reconciler.file_changes.launches.lock().unwrap().contains("test"));
+        assert!(notify.notified().now_or_never().is_none(),
+            "launch input creation must not wake the common reconciliation loop");
         reconciler.ensure_file_watch(&format!("launch-input/{}", rules.display()), &rules).unwrap();
         for path in [rules.join("nested/new.md"), missing] {
             std::fs::write(path, "new instruction").unwrap();
-            tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
+            assert!(notify.notified().now_or_never().is_none(),
+                "launch input mutation must not wake the common reconciliation loop");
         }
         reconciler.ensure_file_watch("old", &rules.join("old")).unwrap();
         for key in ["second", "old"] {
@@ -7954,10 +8575,10 @@ agent "import/omp/fixture" {{
             std::fs::create_dir(&rules).unwrap();
             let path = rules.join(key);
             while key == "old" && !reconciler.file_watchers.lock().unwrap()["old"].dirty.load(Ordering::Acquire) {
-                tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), scoped_notify.notified()).await.unwrap();
             }
             reconciler.ensure_file_watch(key, &path).unwrap(); // Acquire before releasing the old lease.
-            while tokio::time::timeout(Duration::from_millis(50), notify.notified()).await.is_ok() {}
+            while tokio::time::timeout(Duration::from_millis(50), scoped_notify.notified()).await.is_ok() {}
             reconciler.incremental.evaluated("replacement", BTreeSet::from([key.into()]), None);
             std::fs::write(&path, "new inode").unwrap();
             // An earlier logical callback can wake us before this dependency is touched.
@@ -7980,6 +8601,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         for parent in [root.path().join("outer"), root.path().join("outer/inner")] {
             std::fs::write(parent.parent().unwrap().join("unrelated.txt"), "ignore").unwrap();
@@ -8085,6 +8707,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from(["file/node:gate".into()]), None);
         reconciler.ensure_file_watch("file/node:gate", &first).unwrap();
         reconciler.ensure_file_watch("file/node:gate", &second).unwrap();
         std::fs::write(&first, "old target changed").unwrap();
@@ -8116,6 +8739,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         std::fs::write(actual.join("unrelated"), "ignore").unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
@@ -8157,6 +8781,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
+        reconciler.incremental.evaluated("watch-test", BTreeSet::from([subject.clone()]), None);
         reconciler.ensure_file_watch(&subject, &path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
         std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();
@@ -8362,10 +8987,10 @@ agent "import/omp/fixture" {{
             .unwrap();
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
-        assert!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        assert_eq!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap(), RequestedRestart::Handled);
         // A later pass finds the request completed: nothing to retire, retry or raise again, and
         // the member pass goes on as usual.
-        assert!(!reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap());
+        assert_eq!(reconciler.reconcile_requested_restart(&desired, &member, None, None).unwrap(), RequestedRestart::Continue);
         let retirements = store.claims_for(&seat, Some("runtime.reconcile-decision")).unwrap().into_iter()
             .filter(|claim| claim.body["fields"]["decision"] == "restart-retired-obsolete-request")
             .count();
@@ -8662,15 +9287,38 @@ mission "task" state="ready" {{
             runtime.clone(),
             "node".into(),
             Arc::new(Notify::new()),
-        );
-        for _ in 0..3 {
+        ).skipping_unneeded(true);
+        let interleave = |pass| {
+            reconciler.record_once(
+                "agent/node.seat",
+                "harness.diagnostic",
+                BTreeMap::from([
+                    ("code".into(), Value::String("provider-fixture".into())),
+                    ("severity".into(), Value::String("warning".into())),
+                    ("reason".into(), Value::String(format!("provider diagnostic {pass}"))),
+                ]),
+            ).unwrap();
+        };
+        for pass in 0..3 {
+            interleave(pass);
             reconciler.reconcile_once().unwrap();
         }
-        let reason = store
-            .member_reconcile_fault("agent/node.seat", None)
+        assert!(store.member_reconcile_fault("agent/node.seat", None).unwrap().is_none());
+        let diagnostic = store
+            .observations_for("agent/node.seat", "harness.diagnostic")
             .unwrap()
-            .expect("the render failure is recorded on the seat");
-        assert!(reason.contains("tracked file"), "{reason}");
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body["fields"]["code"] == "render-blocked")
+            .expect("the render failure is visible as a diagnostic");
+        assert_eq!(diagnostic.body["fields"]["status"], "warning");
+        assert_eq!(diagnostic.body["fields"]["severity"], "warning");
+        assert_eq!(store.claims_for("agent/node.seat", Some("harness.diagnostic"))
+            .unwrap().iter().filter(|claim| claim.body["fields"]["code"] == "render-blocked").count(),
+            1, "interleaved diagnostics must not duplicate a steady blocker");
+        assert!(diagnostic.body["fields"]["reason"].as_str().unwrap().contains("tracked file"));
+        assert!(reconciler.incremental.needs("member:agent/node.seat", now_ms()),
+            "a preparation-blocked member must not be marked clean");
         assert!(
             !store
                 .work_wake_messages_for_reconcile("agent/node.seat")
@@ -8690,16 +9338,13 @@ mission "task" state="ready" {{
                     .to_owned()
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            decisions,
-            ["member-fault"],
-            "one fault, never a false recovery"
-        );
+        assert!(decisions.is_empty(), "a live seat has neither a member fault nor a false recovery");
 
         // The seat exits. Its render still fails, so it is observed but not started again.
         runtime.ptys.lock().unwrap()[0].status = "exited".into();
         reconciler.reconcile_once().unwrap();
         assert!(runtime.starts.lock().unwrap().is_empty());
+        assert!(store.member_reconcile_fault("agent/node.seat", None).unwrap().is_some());
         assert_eq!(
             store
                 .latest_actual_value("agent/node.seat")
@@ -8707,6 +9352,101 @@ mission "task" state="ready" {{
                 .and_then(|actual| actual_field(&actual, "status").cloned()),
             Some(Value::String("exited".into()))
         );
+        // Unblocking preparation changes only the filesystem, not the desired declaration.
+        // The failed evaluation must remain selected for the very next incremental pass.
+        assert!(crate::test_support::git()
+            .args(["rm", "--cached", ".claude/settings.local.json"])
+            .current_dir(workspace.path())
+            .status().unwrap().success());
+        runtime.ptys.lock().unwrap()[0].status = "running".into();
+        reconciler.reconcile_once().unwrap();
+        assert!(store.member_reconcile_fault("agent/node.seat", None).unwrap().is_none());
+        let resolved = store.observations_for("agent/node.seat", "harness.diagnostic")
+            .unwrap().into_iter().rev()
+            .find(|claim| claim.body["fields"]["code"] == "render-blocked").unwrap();
+        assert_eq!(resolved.body["fields"]["status"], "resolved");
+        assert_eq!(fs::read_to_string(workspace.path().join(".claude/settings.local.json")).unwrap(), "changed");
+        assert!(runtime.starts.lock().unwrap().is_empty());
+        for pass in 3..6 {
+            interleave(pass);
+            reconciler.reconcile_once().unwrap();
+        }
+        let diagnostics = store.claims_for("agent/node.seat", Some("harness.diagnostic"))
+            .unwrap().into_iter()
+            .filter(|claim| claim.body["fields"]["code"] == "render-blocked")
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 2, "one blocker and one resolution, regardless of other codes");
+        assert_eq!(diagnostics.iter().filter(|claim| claim.body["fields"]["status"] == "warning").count(), 1);
+        assert_eq!(diagnostics.iter().filter(|claim| claim.body["fields"]["status"] == "resolved").count(), 1);
+        assert!(diagnostics.iter().all(|claim| claim.body["fields"]["severity"] == "warning"));
+    }
+
+    #[test]
+    fn a_retained_render_lease_timeout_only_faults_an_absent_seat() {
+        for running in [true, false] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let workspace = tempfile::tempdir().unwrap();
+            apply_source(&store, &format!(r#"version 2
+agent "seat" {{ workspace {:?}; command "true" }}
+mission "task" state="ready" {{
+  goal "Give the seat work."
+  step "work" {{ assigned-to "agent/node.seat"; goal "Do the work." }}
+}}
+"#, workspace.path().display().to_string()), "lease-timeout");
+            let run_scratch = tempfile::tempdir().unwrap();
+            store.create_mission_run(&MissionRunRequest {
+                mission: "task".into(),
+                revision: None,
+                workspace: run_scratch.path().to_string_lossy().into_owned(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "lease-timeout-run".into(),
+            }).unwrap();
+            let member = store.desired_subjects().unwrap().into_iter()
+                .find(|subject| subject.subject == "agent/node.seat")
+                .and_then(|subject| subject.member).unwrap();
+            let runtime = Arc::new(FakeRuntime::default());
+            if running {
+                runtime.ptys.lock().unwrap().push(running_observation(&member, "one"));
+                mark_harness_ready(&store, "agent/node.seat", &member, "pi", "one");
+            }
+            let reconciler = Reconciler::new(
+                store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+            ).skipping_unneeded(true);
+            // Seed the existing retained-render-failure lane with the real admission error.
+            // No process or wall-clock timeout is needed to test how members consume it.
+            let timeout = fractal_runtime::store_worktree_lease::LeaseAdmissionTimeout {
+                owner: workspace.path().to_path_buf(),
+                timeout: Duration::from_secs(5),
+            }.to_string();
+            reconciler.render_failures.lock().unwrap()
+                .insert("agent/node.seat".into(), timeout.clone());
+            reconciler.incremental.take_full_pass("member", now_ms());
+            reconciler.incremental.evaluated("render", BTreeSet::new(), None);
+            reconciler.incremental.evaluated(
+                "member:agent/node.seat", BTreeSet::new(), Some(u128::MAX),
+            );
+            reconciler.reconcile_once().unwrap();
+            assert!(runtime.starts.lock().unwrap().is_empty());
+            assert!(runtime.stops.lock().unwrap().is_empty());
+            let fault = store.member_reconcile_fault("agent/node.seat", None).unwrap();
+            if running {
+                assert!(fault.is_none(), "a live seat must not inherit its render timeout");
+                assert!(!store.work_wake_messages_for_reconcile("agent/node.seat")
+                    .unwrap().is_empty(), "the incumbent still receives its ready work");
+                let diagnostic = store.observations_for("agent/node.seat", "harness.diagnostic")
+                    .unwrap().into_iter().rev()
+                    .find(|claim| claim.body["fields"]["code"] == "render-blocked").unwrap();
+                assert_eq!(diagnostic.subject, "agent/node.seat");
+                assert_eq!(diagnostic.body["fields"]["status"], "warning");
+                assert_eq!(diagnostic.body["fields"]["reason"], timeout);
+            } else {
+                assert_eq!(fault.as_deref(), Some(timeout.as_str()));
+                assert!(store.work_wake_messages_for_reconcile("agent/node.seat")
+                    .unwrap().is_empty());
+            }
+        }
     }
 
     /// Declaring a member that would render different bytes to a file another member already
@@ -11441,10 +12181,31 @@ agent "example/relaunch" { workspace "/tmp"; harness "codex" {}; env { REVISION 
         reconciler.reconcile_once().unwrap();
         assert_eq!(store.observations_for("agent/example/relaunch", "runtime.observed").unwrap()
             .iter().filter(|claim| claim.store_index > finished_cut).count(), 0, "ready clear must remain stable");
-        let replacement_observations = store.observations_for("agent/example/relaunch", "runtime.observed")
-            .unwrap().into_iter().filter(|claim| claim.store_index > replacement_cut).count();
-        assert_eq!(replacement_observations, 4,
-            "cutover, starting, new running, and ready clear; no per-pass claims");
+        // A verified physical launch is already running at completion: it must not
+        // emit an artificial starting claim, nor clear the restart before readiness.
+        let replacement_observations: Vec<_> = store
+            .observations_for("agent/example/relaunch", "runtime.observed")
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.store_index > replacement_cut)
+            .map(|claim| {
+                let fields = &claim.body["fields"];
+                (
+                    fields["status"].clone(),
+                    fields["incarnation_id"].clone(),
+                    fields["restarting_from"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            replacement_observations,
+            vec![
+                (serde_json::json!("running"), serde_json::json!(old), serde_json::json!(old)),
+                (serde_json::json!("running"), serde_json::json!(new), serde_json::json!(old)),
+                (serde_json::json!("running"), serde_json::json!(new), Value::Null),
+            ],
+            "exactly cutover, verified running replacement, and ready clear; no per-pass claims"
+        );
 
         // An explicit stop during a later cutover ends the replacement interval.
         apply_source(&store, source, "relaunch-back");
@@ -11822,16 +12583,19 @@ agent "worker" {
     #[test]
     fn codex_short_lived_exits_stop_relaunching() {
         let store = Arc::new(Store::open_memory("node").unwrap());
+        // This test exercises restart intensity, not activation of the shared repository.
+        // Give it an independent workspace so concurrent tests cannot hold its lease.
+        let workspace = tempfile::tempdir().unwrap();
         apply_source(
             &store,
-            r#"
+            &format!(r#"
 version 2
-agent "worker" {
-  workspace "."
+agent "worker" {{
+  workspace {:?}
   restart "always"
-  harness "codex" {}
-}
-"#,
+  harness "codex" {{}}
+}}
+"#, workspace.path()),
             "codex-short-lived-exits",
         );
         let runtime = Arc::new(FakeRuntime::default());
@@ -11853,6 +12617,11 @@ agent "worker" {
             reconciler.reconcile_once().unwrap();
         }
         assert_eq!(runtime.starts.lock().unwrap().len(), 3);
+        assert_eq!(
+            store.member_reconcile_fault("agent/node.worker", None).unwrap(),
+            None,
+            "workspace admission must not interfere with crash-loop decisions"
+        );
         let decision = store
             .latest_claim("agent/node.worker", Some("runtime.reconcile-decision"))
             .unwrap()
@@ -12084,26 +12853,29 @@ agent "worker" {
     #[test]
     fn delay_restart_intensity_waits_for_the_sliding_window() {
         let store = Arc::new(Store::open_memory("node").unwrap());
-        let source = r#"
+        // Restart policy must not contend for the shared checkout's activation lease.
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(r#"
             version 2
 
-              agent "worker" {
+              agent "worker" {{
+                workspace "{}"
                 command "true"
                 restart "always"
-                restart {
+                restart {{
                   attempts 1
                   interval "60s"
                   mode "delay"
-                }
-              }
+                }}
+              }}
 
-        "#;
-        let intent = parse_intent(source, "node").unwrap();
+        "#, workspace.path().display());
+        let intent = parse_intent(&source, "node").unwrap();
         let mission = store
             .mission(
                 &intent,
                 crate::model::IntentInput {
-                    kdl: source.into(),
+                    kdl: source,
                     source_name: None,
                 },
             )
@@ -12119,6 +12891,7 @@ agent "worker" {
             Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.starts.lock().unwrap().len(), 1);
         runtime.ptys.lock().unwrap().push(RuntimeObservation {
             runtime_id: "node.worker".into(),
             terminal: true,
@@ -12139,6 +12912,7 @@ agent "worker" {
                 .and_then(Value::as_str),
             Some("wait")
         );
+        assert!(store.member_reconcile_fault("agent/node.worker", None).unwrap().is_none());
     }
 
     #[test]
@@ -12271,6 +13045,32 @@ agent "worker" {
     }
 
     #[test]
+    fn a_declared_checkout_below_a_symlinked_parent_starts_with_one_lease() {
+        let root = crate::test_support::canonical_tempdir();
+        let repository = crate::checkout::test_support::repository(root.path());
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let workspace = alias.join("new/worker");
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; checkout {:?} base=\"origin/main\" branch=\"symlink-worker\"; command \"true\"; restart \"never\" }}",
+            workspace.to_str().unwrap(), repository.to_str().unwrap()), "symlinked-checkout");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(std::fs::canonicalize(&workspace).unwrap(), real.join("new/worker"));
+        assert_eq!(runtime.starts.lock().unwrap().len(), 1,
+            "render/start must reuse admission acquired before the checkout existed");
+        assert!(!store.observations_for("agent/node.worker", "runtime.action.succeeded").unwrap().is_empty());
+        assert!(crate::checkout::activation_lease(&workspace, &repository).is_ok(),
+            "the completed pass must release its shared lease");
+    }
+
+    #[test]
     fn a_top_level_checkout_leaves_after_stop_and_workspace_observations_do_not_repeat() {
         let root = crate::test_support::canonical_tempdir();
         let repository = crate::checkout::test_support::repository(root.path());
@@ -12360,8 +13160,9 @@ agent "worker" {
             Arc::new(Notify::new()),
         );
         let workspace = root.path().join("new");
+        let lease = checkout.activation_lease(&workspace).unwrap();
         let failure = reconciler
-            .create_checkout("agent/node.worker", &checkout, &workspace)
+            .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
             .unwrap()
             .unwrap();
         assert!(failure.contains(existing.to_str().unwrap()), "{failure}");
@@ -12370,7 +13171,7 @@ agent "worker" {
         checkout.remove(&existing).unwrap();
         assert_eq!(
             reconciler
-                .create_checkout("agent/node.worker", &checkout, &workspace)
+                .create_checkout("agent/node.worker", &checkout, &workspace, &lease)
                 .unwrap(),
             Some(failure)
         );
@@ -12380,7 +13181,7 @@ agent "worker" {
         };
         assert!(
             reconciler
-                .create_checkout("agent/node.worker", &revised, &workspace)
+                .create_checkout("agent/node.worker", &revised, &workspace, &lease)
                 .unwrap()
                 .is_none()
         );
@@ -23533,9 +24334,9 @@ agent "example.reviewer" { workspace "/tmp"; command "true" }"#,
     }
 
     /// A seat's watch wakes it once for each comment and review anyone else posts, once for each
-    /// move of the required checks into pass or fail on the current head, and a last time when
-    /// the pull request merges, which ends that watch only. The baseline and a repeated
-    /// observation wake nobody.
+    /// distinct terminal required-check result on the current head, and a last time when the
+    /// pull request merges, which ends that watch only. The baseline, a repeated observation
+    /// and an identical recurring result without a numeric execution identity wake nobody.
     #[test]
     fn a_watch_wakes_once_per_comment_review_and_check_move_and_ends_on_merge() {
         let fixture = WatchFixture::new();
@@ -23583,8 +24384,9 @@ agent "example.reviewer" { workspace "/tmp"; command "true" }"#,
             "@moss requested changes on acme/garden#12"
         );
 
-        // The required checks fail, are rerun, and fail again on the same head: two wakes. A new
-        // head wakes while pending, then again when its required checks pass.
+        // No execution identities are supplied: fail -> pending -> the same failure at this
+        // head is the documented no-run-ID recurrence limitation, not a distinguishable rerun.
+        // A new head wakes while pending, then again when its required checks pass.
         let checks = |head: &str, state: &str| {
             serde_json::json!({"repository_id": 7, "pull_requests": [watched_pull(12, serde_json::json!({
                 "new": false, "head": head,
@@ -23604,7 +24406,6 @@ agent "example.reviewer" { workspace "/tmp"; command "true" }"#,
         assert_eq!(
             wakes[3..],
             [
-                "Required checks failed on acme/garden#12",
                 "Required checks failed on acme/garden#12",
                 "Pull request changed on acme/garden#12",
                 "Required checks passed on acme/garden#12",
@@ -24765,6 +25566,7 @@ observer "repo" {
                 fields: BTreeSet::from(["issues".into(), "pull_requests".into()]),
                 cursor: None, previous_facts: None, every_ms: Some(0), refresh: false,
                 webhook_covered: false, workflow_runs: None, github_capture: None,
+                await_prs: Vec::new(),
             };
             let unavailable = observe(request.clone(), &base).await.unwrap();
             store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
@@ -28857,7 +29659,25 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 ("running".into(), Some(format!("{name}-one")))
             );
         }
-        assert_eq!(latest_runtime(&store, "vanished").0, "starting");
+        // The replacement's verified launch is running, but its driver is not
+        // ready yet. Use its durable incarnation instead of inventing a second one.
+        let replacement = store
+            .observations_for("agent/node.vanished", "runtime.action.succeeded")
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body.pointer("/fields/action") == Some(&serde_json::json!("start")))
+            .unwrap();
+        let replacement_incarnation = replacement.body["fields"]["incarnation_id"]
+            .as_str()
+            .unwrap();
+        assert_ne!(replacement_incarnation, "vanished-one");
+        assert_eq!(
+            latest_runtime(&store, "vanished"),
+            ("running".into(), Some(replacement_incarnation.into()))
+        );
+        assert!(!store.current_harness("agent/node.vanished").unwrap()
+            .is_some_and(|harness| harness.incarnation_id == replacement_incarnation && harness.is_ready()));
 
         // The starting seat's driver reports ready after the restart; no seat is left waiting.
         store
@@ -28868,21 +29688,21 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             ))
             .unwrap();
         runtime.ptys.lock().unwrap().push(RuntimeObservation {
-            incarnation_id: Some("vanished-two".into()),
+            incarnation_id: Some(replacement_incarnation.into()),
             ..pty("vanished")
         });
         store
             .append_claim(&harness_claim(
                 "agent/node.vanished",
                 "ready",
-                "vanished-two",
+                replacement_incarnation,
             ))
             .unwrap();
         reconciler.reconcile_once().unwrap();
         for (name, incarnation) in [
             ("running", "running-one"),
             ("starting", "starting-one"),
-            ("vanished", "vanished-two"),
+            ("vanished", replacement_incarnation),
         ] {
             let harness = store
                 .current_harness(&format!("agent/node.{name}"))
@@ -29644,6 +30464,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .find(|subject| subject.subject == "agent/node.worker")
             .unwrap();
         let member = desired.member.as_ref().unwrap().clone();
+        mark_harness_ready(&store, &desired.subject, &member, "omp", "worker-one");
         let notify = Arc::new(Notify::new());
         let reconciler = Reconciler::new(
             store.clone(),
@@ -29664,6 +30485,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("model".into(), Value::String(model.into())),
                         ("semantics".into(), Value::String("context_occupancy".into())),
                         ("incarnation_id".into(), Value::String("worker-one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -29720,14 +30542,21 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         report("gpt-6.1-sol", "drift-usage-fallback-again");
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         let first = drift().expect("drift fault raised again");
-        let since = first.detail.rsplit("[drift-since-ms:").next().unwrap().split(']').next().unwrap().to_owned();
-        // The live model moves to another undeclared model while drifted: the fault names
-        // the new model and keeps its `since`, and the next pass is quiet again.
+        let first_since = crate::store::model_drift::ModelDrift::parse(&first.detail).unwrap().since_ms;
+        // A different model pair starts a new fenced drift clock; it must not borrow
+        // the prior fallback pair's elapsed duration.
         report("gpt-6-luna", "drift-usage-second-rung");
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         let moved = drift().expect("drift fault follows the live model");
         assert!(moved.detail.contains("running on gpt-6-luna"), "{}", moved.detail);
-        assert!(moved.detail.contains(&format!("[drift-since-ms:{since}]")), "{}", moved.detail);
+        let moved_since = store.model_drift_since(
+            &desired.subject, "worker-one", "anthropic/claude-opus-5-5", "gpt-6-luna",
+        ).unwrap().expect("the new model pair has a fenced clock");
+        assert!(moved_since >= first_since);
+        assert_eq!(store.model_drift_since(
+            &desired.subject, "worker-one", "anthropic/claude-opus-5-5", "gpt-6.1-sol",
+        ).unwrap(), None);
+        assert!(moved.detail.contains(&format!("[drift-since-ms:{moved_since}]")), "{}", moved.detail);
         assert!(woke());
         reconciler.reconcile_model_drift(&desired, "worker-one").unwrap();
         assert_eq!(drift().unwrap().detail, moved.detail);
@@ -29753,9 +30582,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         // previous incarnation's readings never count for it.
         reconciler.reconcile_model_drift(&desired, "worker-two").unwrap();
         assert!(drift().is_none());
-        assert_eq!(store.latest_usage_model("agent/node.worker", "worker-two").unwrap(), None);
+        assert_eq!(store.latest_usage_model_observation("agent/node.worker", "worker-two").unwrap(), None);
         assert_eq!(
-            store.latest_usage_model("agent/node.worker", "worker-one").unwrap().as_deref(),
+            store.latest_usage_model_observation("agent/node.worker", "worker-one").unwrap().as_ref().map(|observation| observation.model.as_str()),
             Some("gpt-6.1-sol")
         );
         drop(member);
@@ -29801,6 +30630,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("semantics".into(), Value::String(semantics.into())),
                         ("total_tokens".into(), Value::from(1)),
                         ("incarnation_id".into(), Value::String("one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -29822,7 +30652,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         reconciler.reconcile_model_drift(&desired("agent/node.parent"), "one").unwrap();
         assert!(drift("agent/node.parent").is_none());
         assert_eq!(
-            store.latest_usage_model("agent/node.parent", "one").unwrap().as_deref(),
+            store.latest_usage_model_observation("agent/node.parent", "one").unwrap().as_ref().map(|observation| observation.model.as_str()),
             Some("claude-opus-5-5")
         );
         // A declared Claude alias matches its family's full API ID, and only that family.
@@ -29873,6 +30703,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("model".into(), Value::String(model.into())),
                         ("semantics".into(), Value::String("context_occupancy".into())),
                         ("incarnation_id".into(), Value::String("one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -30164,7 +30995,7 @@ mission "wake" state="ready" {
         let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), notify.clone());
         let before = store.index().unwrap();
         reconciler
-            .reconcile_work_messages(&desired.subject, "worker-one", None)
+            .reconcile_work_messages(&desired.subject, "worker-one", None, RequestedRestart::Continue)
             .unwrap();
         assert_eq!(store.index().unwrap(), before);
         assert_eq!(
@@ -30180,8 +31011,9 @@ mission "wake" state="ready" {
             .latest_claim(&wake.subject, Some("message.sent"))
             .unwrap()
             .unwrap();
-        let evidence = work_wake_attempt_evidence(&store, &[(now_ms(), &wake)]).unwrap();
+        let (evidence, stream) = work_wake_attempt_evidence(&store, &[(now_ms(), &wake)]).unwrap();
         assert_eq!(evidence, vec![sent_claim.id]);
+        assert!(stream.is_empty());
         store
             .append_claim(&ClaimInput {
                 subject: desired.subject,
@@ -31866,7 +32698,7 @@ mission "context" state="ready" {
         ordinary.fresh_context = false;
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "old", &ordinary, &member)
+                .prepare_fresh_context(SEAT, "old", &ordinary, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert!(runtime.stops.lock().unwrap().is_empty());
@@ -31877,14 +32709,14 @@ mission "context" state="ready" {
             .insert("st3.fresh_context".into(), "true".into());
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &ordinary, &seat_member)
+                .prepare_fresh_context(SEAT, "old", &ordinary, &seat_member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
 
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &step, &member)
+                .prepare_fresh_context(SEAT, "old", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
@@ -31894,7 +32726,7 @@ mission "context" state="ready" {
         );
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "new", &step, &member)
+                .prepare_fresh_context(SEAT, "new", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(
@@ -32051,13 +32883,13 @@ mission "seat-context" state="ready" {
         assert!(!store.fresh_context_ready(&step, SEAT, "old").unwrap());
         assert!(
             !reconciler
-                .prepare_fresh_context(SEAT, "old", &step, &member)
+                .prepare_fresh_context(SEAT, "old", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
         assert!(
             reconciler
-                .prepare_fresh_context(SEAT, "new", &step, &member)
+                .prepare_fresh_context(SEAT, "new", &step, &member, RequestedRestart::Continue)
                 .unwrap()
         );
         assert!(store.fresh_context_ready(&step, SEAT, "new").unwrap());
@@ -32703,12 +33535,12 @@ mission "queued" state="ready" {
         };
         observe("working");
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         assert!(faults().is_empty(), "do not interrupt a working turn");
         observe("idle");
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         let first = faults();
         assert_eq!(first.len(), 1);
@@ -32718,7 +33550,7 @@ mission "queued" state="ready" {
         );
         assert_eq!(first[0].body["evidence"], serde_json::json!([sent.id]));
         seat.reconciler
-            .reconcile_work_messages(SEAT, "seat-one", None)
+            .reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue)
             .unwrap();
         assert_eq!(faults().len(), 1, "one diagnostic per readiness episode");
         assert_eq!(
@@ -32757,20 +33589,20 @@ mission "queued" state="ready" {
             .into_iter().filter(|claim| claim.body["fields"]["code"] == "work-wake-exhausted").collect::<Vec<_>>();
         failure("old-seat", step.readiness_epoch);
         failure("seat-one", step.readiness_epoch + 1);
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert!(faults().is_empty());
         let current = failure("seat-one", step.readiness_epoch);
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         let raised = faults();
         assert_eq!(raised.len(), 1);
         assert!(raised[0].body["fields"]["reason"].as_str().unwrap().contains("Operation not permitted"));
         assert!(raised[0].body["evidence"].as_array().unwrap().contains(&serde_json::json!(current.id)));
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert_eq!(faults().len(), 1);
         assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), 1);
         assert_eq!(seat.store.step_run(&subject).unwrap().unwrap().status, "ready");
         seat.work(&subject, "claim", "socket-fixed-claim").unwrap();
-        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None, RequestedRestart::Continue).unwrap();
         assert_eq!(faults().len(), 1, "a successful claim must not raise another fault");
     }
 
@@ -33020,7 +33852,7 @@ mission "queued" state="ready" {
                 member.tags.insert("st3.fresh_context".into(), "true".into());
             }
             seat.move_run(&third.subject, "top", None, "person/operator", "context-top").unwrap();
-            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
+            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member), RequestedRestart::Continue).unwrap();
             assert!(!seat.woken().contains(&SeatQueueFixture::step(&third, "work")));
             assert!(seat.reconciler.runtime.stops.lock().unwrap().is_empty());
             assert!(seat.store.observations_for(SEAT, "runtime.action.requested").unwrap().is_empty());
@@ -33028,7 +33860,7 @@ mission "queued" state="ready" {
             seat.work(&held, "complete", "context-complete").unwrap();
             seat.reconciler.reconcile_once().unwrap();
             assert_eq!(seat.store.step_run(&held).unwrap().unwrap().status, "completed");
-            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member)).unwrap();
+            seat.reconciler.reconcile_work_messages(SEAT, "seat-one", Some(&member), RequestedRestart::Continue).unwrap();
             assert_eq!(seat.reconciler.runtime.stops.lock().unwrap().len(), 1);
             assert!(seat.store.step_run(&SeatQueueFixture::step(&second, "work")).unwrap().is_some());
         }

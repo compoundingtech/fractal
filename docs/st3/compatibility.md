@@ -325,8 +325,11 @@ unchanged, and a claim-scoped dictionary preserves legacy-only evidence.
 Collisions, changed/missing targets and missing canonical authority fail closed.
 
 The default writer may move to version 21 only in a later release whose N-1
-published binary already contains this reader arm. Do not manually change
-`user_version` to activate it on a fleet store. The v21 fixture explicitly
+published binary already contains this reader arm. `user_version` is a reader
+fence only. The reference writer runs on a store fenced at 21 or later only when
+its own activation flag, `meta.claim_signature_reference_writer = '1'`, is set
+by that release. A later format's fence (23, say) therefore does not switch it
+on. Do not manually change `user_version` or the flag on a fleet store. The v21 fixture explicitly
 exercises the later cutover, not a deployment-ready operator activation path.
 Within that format, conversion runs after authorization bootstrap, at most
 64 rows per writer loan with durable cursors and a 10 ms cooperative budget
@@ -343,6 +346,42 @@ No automatic VACUUM, checkpoint, or production-store rewrite is part of this
 reader-first release. Default v20 stores retain N-1 rollback compatibility.
 Once a later release activates v21, roll back only to a published binary with
 this v21 reader, never by decrementing `user_version`.
+
+### Reader-first compacted claim signatures (version 26)
+
+This release reads **version 26** stores and still writes version 20 claim
+signatures. No writer compacts yet, so nothing changes on a store this release
+opens. In version 26, a settled claim drops its `claim_signature_candidates` row,
+and with it, through the existing trigger, its `claim_signature_sources` row. It
+keeps everything else:
+- its `claim_signatures` facade, as inline text;
+- its `claim_signature_counts` row, at 1;
+- its verdict, its nonce use and its dependency links.
+
+A counted claim without candidate rows is therefore compacted. Readers take its
+facade as its single candidate wherever they read candidates:
+- the paced fold and recursive judgment;
+- `revoked_before`, so a compacted revocation still revokes its key, and a
+  compacted grant still delegates;
+- the full recheck.
+
+Requeue, replay detection and serving are unchanged: they read dependency links,
+nonce uses and the facade, which all stay. Before a new candidate is written for a
+compacted claim, the facade is restored as a candidate. Its source is the claim's
+batch origin, which wrote the single candidate. So an exact duplicate still adds
+no state, and a second candidate is judged beside the first.
+
+A settled claim here has one candidate; a fold that is complete, clean, notified
+and not held; a nonce use, so its signature verified on the claim; no queued or
+fresh entry; and no requeue cursor still ahead of it.
+
+`user_version` 26 is a reader fence only, and it also carries version 25's
+meaning (blob bytes in the blob file), which this release reads. Versions 23 and
+24 are skipped and never used: builds from #6894 on open them unchecked.
+The compaction writer ships in a later release whose N-1 published binary
+contains this reader, and it turns on through its own meta flag, never through
+the version number. Once a store is at 26, roll back only to a published binary
+with this reader, never by decrementing `user_version`.
 
 ### Additive assistant admission index
 

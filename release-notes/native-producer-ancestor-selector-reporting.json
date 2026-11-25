@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Report native objective ancestor bindings immediately without retiring sibling episodes",
+  "replay": {"status": "none", "detail": "Retained objective evidence and replay behavior are unchanged."},
+  "schema": {"status": "none", "detail": "No persistent schema or retained metadata changes."},
+  "rules": {"status": "none", "detail": "Native producer reports use full objective evaluation when a declaration selects a strict ancestor of the producer scope. Burning and met mail rows update ancestor-bound fault episodes immediately while other producers' episodes retain their own evidence."},
+  "compatibility": {"status": "none", "detail": "Existing native selectors, including agents bindings over agents/mail-delivery, require no declaration changes. Exact and descendant selectors retain scoped evaluation. No wire or client changes."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal daemon upgrade."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Unknown source evidence continues to preserve open episodes. Reverting requires no data migration."}
+}

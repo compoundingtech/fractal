@@ -88,15 +88,24 @@ pub fn deliver_tx(
         let subject = format!("message/workflow-failure-{}", &key[..20]);
         let mut content = serde_json::to_value(&failure).map_err(internal)?;
         content["priority"] = Value::String("P0".into());
-        append_claim_tx(transaction, origin, &subject, "message.sent", None,
-            &json!({"fields": {
+        // Through the outbox: its route can't be read inside this batch.
+        fractal_store::store::message_routing::queue_tx(transaction, &ClaimInput {
+            subject: subject.clone(),
+            kind: "message.sent".into(),
+            actor: None,
+            fields: serde_json::from_value(json!({
                 "from": format!("daemon/{origin}"),
                 "to": recipient,
                 "title": format!("P0: main {} failed: {} run {}/{}", failure.failed(), failure.repository, failure.run_id, failure.run_attempt),
                 "content": serde_json::to_string(&content).map_err(internal)?,
                 "status": "sent",
                 "tags": ["P0", "github-workflow-failure", subscription, resource],
-            }, "evidence": [record.id]}), &[], Some(&batches.for_kind(transaction, origin, "message.sent")?)).map_err(claim_append_error)?;
+            }))
+            .map_err(internal)?,
+            evidence: vec![record.id],
+            expected_subject: None,
+            idempotency_key: None,
+        })?;
         messages.push(subject);
     }
     Ok(messages)

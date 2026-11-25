@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declare GitHub author cohorts once for native rolling and civil-day objectives",
+  "replay": {"status": "none", "detail": "Existing authored objective bodies retain repeated author-login children and their declaration revisions. Canonical GitHub facts and bounded projection replay are unchanged; no history conversion or new replay cursor is required."},
+  "schema": {"status": "none", "detail": "Declaration grammar extension only. No claim kind/field, registry digest, generated docs/st3/schema.md entry, SQLite table/index/user_version, or include_str lane input changes. The existing desired body stores the selector. Corpus allocation remains v43, owned by the coordinated corpus slice; this change allocates no version."},
+  "rules": {"status": "changed", "detail": "Optional authorLogins emits canonical sorted unique lowercase author-login children. Omission retains all-author semantics. Known nonmatching authors are excluded from native rolling-hour counts, fourteen civil-day bars and final-ready latency. Missing author evidence, conflicting canonical images and incomplete roster coverage remain unknown, never zero."},
+  "compatibility": {"status": "changed", "detail": "N-1 evaluators without the selector grammar reject selected declarations and report no-data rather than silently evaluating all authors. Existing declarations without selectors preserve meaning. Publish selected declarations only to upgraded evaluators; shared measurement row fields and GitHub capture wire records are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption or offline migration is required by this declaration/evaluation change."},
+  "manual": {"status": "changed", "detail": "Cohort membership belongs in the owning objective declaration, not dashboard consumers. No private cohort, observer, acquisition activation or target is installed by default."},
+  "recovery": {"status": "none", "detail": "Measurements recompute from canonical facts and authored selector policy. Corrections, retractions and coverage gaps retain existing recovery semantics."}
+}

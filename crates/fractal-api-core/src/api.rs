@@ -30,6 +30,8 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
+mod roster_assembly;
+mod roster_presentation;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -197,6 +199,7 @@ pub mod messages;
 pub mod operations;
 pub mod records;
 mod write_principal;
+pub mod run_requests;
 mod native_delivery;
 pub mod replication;
 mod replication_replay;
@@ -521,7 +524,7 @@ impl ApiError {
             "identity-unknown" | "lane-not-found" | "not-found" | "thread-unavailable" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
-            | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
+            | "backup-busy" | "replication-overloaded" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
@@ -639,6 +642,81 @@ async fn test_record_message_mark(
     Ok(Json(receipt))
 }
 
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestMailRetirement {
+    now_ms: u64,
+}
+
+/// Test support: retire closed graph mail as the daemon's hourly pass would at `now_ms`, so a
+/// test need not wait a week or an hour.
+#[cfg(feature = "test-support")]
+async fn test_retire_closed_mail(
+    State(state): State<AppState>,
+    Json(request): Json<TestMailRetirement>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let (threads, claims) = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, usize)> {
+        // The signed-claim forget backstop reads the store clock, not the planner's argument.
+        // Advance this worker's simulation clock too, without changing concurrent daemon writes.
+        struct RetirementClock;
+        impl Drop for RetirementClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = RetirementClock;
+        smallclaims::store::set_thread_clock(Some(u128::from(request.now_ms)));
+        let (mut threads, mut claims) = (0, 0);
+        loop {
+            let step = store.retire_closed_mail_step(request.now_ms)?;
+            threads += step.threads;
+            claims += step.claims;
+            if !step.more {
+                return Ok((threads, claims));
+            }
+        }
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    signal_visible_change(&state);
+    Ok(Json(json!({"threads": threads, "claims": claims})))
+}
+
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestBlobMove {
+    now_ms: u64,
+    move_after_ms: u64,
+}
+
+/// Test support: move blob bytes into the blob file as the daemon's hourly pass would at
+/// `now_ms`, so a test need not wait three days or an hour.
+#[cfg(feature = "test-support")]
+async fn test_move_blob_bytes(
+    State(state): State<AppState>,
+    Json(request): Json<TestBlobMove>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let (rows, bytes, waiting) = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, u64, bool)> {
+        let (mut rows, mut bytes) = (0, 0);
+        loop {
+            let step = store.move_blob_bytes_step(request.now_ms, request.move_after_ms, std::time::Duration::from_millis(40))?;
+            rows += step.rows;
+            bytes += step.bytes;
+            if !step.more {
+                return Ok((rows, bytes, step.waiting));
+            }
+        }
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    signal_visible_change(&state);
+    Ok(Json(json!({"rows": rows, "bytes": bytes, "waiting": waiting})))
+}
+
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
@@ -669,6 +747,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/resources/{id}/member-scope", get(resources::member_scope))
         .route("/v1/internal/resources/by-request/{request_id}", get(resources::show_request))
         .route("/v1/internal/resources/by-request/{request_id}/cancel", post(resources::cancel_request))
+        .route("/v1/internal/native/run-request/claim", post(run_requests::claim))
+        .route(run_requests::ACKNOWLEDGE_PATH, post(run_requests::acknowledge))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -911,15 +991,16 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/replication/records/{*record}", get(replication::replication_record))
         .route("/v1/replication/repair", post(replication::repair_replication_record))
         .route("/v1/replication/replay", post(replication_replay::replay).layer(Extension(transport)))
-        .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
-        .route("/v1/checkpoint/status", get(replication::checkpoint_status))
-        .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
         .route("/v1/signatures/resume", post(replication::signature_resume))
         .route("/v1/faults/dismiss", post(records::dismiss_fault))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/revision",
+            post(replication::replication_revision),
         )
         .route(
             "/v1/internal/replication/receive",
@@ -934,14 +1015,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication_worker_status),
         )
         .route(
-            "/v1/internal/replication/checkpoint",
-            post(replication::replication_checkpoint_manifest),
-        )
-        .route(
-            "/v1/internal/replication/checkpoint-need",
-            post(replication::replication_checkpoint_need),
-        )
-        .route(
             "/v1/internal/replication/answers",
             post(replication::replication_answers),
         )
@@ -952,11 +1025,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
-        )
-        .route(
-            "/v1/internal/replication/checkpoint-adopt",
-            post(replication::replication_checkpoint_adopt)
-                .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
@@ -997,8 +1065,16 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::shard_replication_peers),
         )
         .route(
+            "/v1/internal/replication/shard/{shard}/peers/revision",
+            post(replication::shard_replication_peers_revision),
+        )
+        .route(
             "/v1/internal/replication/shard/{shard}/export",
             post(replication::shard_replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/revision",
+            post(replication::shard_replication_revision),
         )
         .route(
             "/v1/internal/replication/shard/{shard}/receive",
@@ -1127,7 +1203,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/test/messages-shard/copy", post(replication::test_shard_copy))
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
-        .route("/v1/internal/test/message-marks", post(test_record_message_mark));
+        .route("/v1/internal/test/message-marks", post(test_record_message_mark))
+        .route("/v1/internal/test/mail-retirement", post(test_retire_closed_mail))
+        .route("/v1/internal/test/blob-move", post(test_move_blob_bytes));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -3294,9 +3372,8 @@ pub fn client_agent_resources_cached(
     }))
 }
 
-/// Run a roster fold that neither a request nor a snapshot encloses in a snapshot of its own,
-/// as the refresher's is. Its card-fault capture is then bounded by its CPU work clock, not by
-/// the 25 ms wall bound a scheduling pause on a loaded host can spend.
+/// Run a roster fold not enclosed by a request or snapshot in a snapshot of its own.
+/// Background refreshes supply a wall budget; direct folds retain the card CPU budget.
 fn pinned_unless_enclosed<T>(store: &Store, fold: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     if smallclaims::read_budget::current().is_some() || store.readers.has_pinned_reader() {
         return fold();
@@ -3607,6 +3684,18 @@ fn overlay_agent_resources_at(
             };
             let reported = item["harness_state"].as_str().map(str::to_owned);
             item["observation"] = json!(observation);
+            if let Some(drift) = item.get_mut("model_drift") {
+                let observed_at = drift["observed_at"].as_str().map(snapshot_time_ms);
+                if drift["state"] != "unknown"
+                    && observed_at.is_none_or(|at| at > now || now - at > HARNESS_OBSERVATION_FRESHNESS.as_millis())
+                {
+                    drift["state"] = json!("stale");
+                }
+                drift["drift_age_seconds"] = if drift["state"] == "drifted" {
+                    json!(drift["drift_since"].as_str().map(snapshot_time_ms)
+                        .map(|since| now.saturating_sub(since) / 1000))
+                } else { Value::Null };
+            }
             // A turn can run for hours without a new harness claim, so only a claim that says the
             // seat is waiting for input lapses; a `working` one stays until the harness says otherwise.
             if observation == "stale" && matches!(item["harness_state"].as_str(), Some("ready" | "idle")) {
@@ -3668,13 +3757,26 @@ impl HeardSeats {
 // than only when a new claim invalidates the fold. Expiry changes no durable fact.
 const DECLARATION_RESTART_PRESENTATION_MS: u128 = 120_000;
 
+fn declaration_restart_expired(item: &Value, now: u128) -> bool {
+    item["state"] == "restarting"
+        && item["_restart_until_unix_ms"].as_u64().is_none_or(|deadline| now >= u128::from(deadline))
+}
+
+fn agent_state_after_restart(item: &Value, now: u128) -> Option<&str> {
+    if declaration_restart_expired(item, now)
+        && let Some(previous) = item["_restart_underlying_state"].as_str() {
+        Some(previous)
+    } else {
+        item["state"].as_str()
+    }
+}
+
 fn overlay_declaration_restart(item: &mut Value, now: u128) {
+    let expired = declaration_restart_expired(item, now);
     let fields = item.as_object_mut().expect("agent card");
     let previous = fields.remove("_restart_underlying_state");
-    let deadline = fields.remove("_restart_until_unix_ms").and_then(|value| value.as_u64());
-    if fields.get("state").and_then(Value::as_str) == Some("restarting")
-        && deadline.is_none_or(|deadline| now >= u128::from(deadline))
-        && let Some(previous) = previous
+    fields.remove("_restart_until_unix_ms");
+    if expired && let Some(previous) = previous
     {
         fields.insert("state".into(), previous);
     }
@@ -4309,10 +4411,35 @@ fn client_agent_cards_presented(
             // card's incarnation (never response spend, which includes subagents), or null when it reported none. Hoisted out of the card
             // literal: the literal already nests at the macro recursion limit. A step script
             // reads what a one-shot reviewer actually ran on even after it exits.
-            let live_model: Option<String> = match incarnation_id.as_deref() {
-                Some(incarnation) => store.latest_usage_model(&subject.subject, incarnation)?,
+            let model_observation = match incarnation_id.as_deref() {
+                Some(incarnation) => store.latest_usage_model_observation(&subject.subject, incarnation)?,
                 None => None,
             };
+            let declared_model = subject.desired.as_ref()
+                .and_then(crate::store::model_drift::declared_harness_model);
+            let model_state = crate::store::model_drift::model_drift_state(
+                declared_model, model_observation.as_ref(), client_now_ms(),
+                HARNESS_OBSERVATION_FRESHNESS.as_millis(),
+            );
+            let drift_since = match (incarnation_id.as_deref(), declared_model, model_observation.as_ref()) {
+                (Some(incarnation), Some(declared), Some(observation))
+                    if model_state == crate::store::model_drift::ModelDriftState::Drifted => {
+                    store.model_drift_since(&subject.subject, incarnation, declared, &observation.model)?
+                }
+                _ => None,
+            };
+            let fallback = match (incarnation_id.as_deref(), model_observation.as_ref()) {
+                (Some(incarnation), Some(observation))
+                    if model_state == crate::store::model_drift::ModelDriftState::Drifted =>
+                {
+                    store.latest_model_fallback(&subject.subject, incarnation)?.filter(|fallback|
+                        observation.observed_at_ms.is_some_and(|at| at >= fallback.observed_at_ms)
+                        && crate::pricing::declared_model_matches(&fallback.to, &observation.model) == Some(true))
+                }
+                _ => None,
+            };
+            let return_attempts = incarnation_id.as_deref().map(|incarnation|
+                store.model_return_attempt_count(&subject.subject, incarnation)).transpose()?;
             let mut value = json!({
                 "id": subject.subject,
                 "kind": "agent",
@@ -4381,7 +4508,16 @@ fn client_agent_cards_presented(
                 "due_at": residency.due_at_unix_ms.map(client_timestamp),
                 "refusal_reason": residency.refusal_reason,
             });
-            value["live_model"] = live_model.map_or(Value::Null, Value::String);
+            value["live_model"] = json!(model_observation.as_ref().map(|observation| &observation.model));
+            value["declared_model"] = json!(declared_model);
+            value["model_drift"] = json!({
+                "state": model_state,
+                "drift_since": drift_since.map(client_timestamp),
+                "drift_age_seconds": drift_since.map(|since| client_now_ms().saturating_sub(since) / 1000),
+                "observed_at": model_observation.as_ref().and_then(|observation| observation.observed_at_ms).map(client_timestamp),
+                "fallback_reason": fallback.as_ref().map(|fallback| &fallback.cause),
+                "return_attempts": return_attempts,
+            });
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
                 value["declared_admission"] = serde_json::to_value(admission)?;
             }
@@ -4410,6 +4546,7 @@ fn client_agent_cards_presented(
             Ok((name, value))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    store.count_agent_roster_enrichment(agents.len());
     agents.sort_by(|(left_name, left), (right_name, right)| {
         left_name
             .cmp(right_name)
@@ -5688,6 +5825,11 @@ fn message_delivery_for(
         return Ok(delivery);
     };
     let runtime = runtime.body.get("fields").unwrap_or(&runtime.body);
+    if matches!(runtime.get("status").and_then(Value::as_str), Some("stopped" | "exited" | "absent")) {
+        delivery["state"] = json!("waiting");
+        delivery["reason"] = json!("recipient stopped; queued message will be delivered when it starts");
+        return Ok(delivery);
+    }
     if runtime.get("status").and_then(Value::as_str) != Some("running") { return Ok(delivery); }
     let Some(incarnation) = runtime.get("incarnation_id").and_then(Value::as_str) else {
         return Ok(delivery);
@@ -6501,49 +6643,58 @@ fn agent_roster_cut_not_ready(wanted: u64) -> ApiError {
 /// How many agents one short snapshot reduces while the refresher warms the roster.
 const AGENT_ROSTER_WARM_CHUNK: usize = 250;
 
+/// Scheduling and I/O waits count too: card CPU limits alone do not release a WAL reader.
+const AGENT_ROSTER_SNAPSHOT_BUDGET: Duration = Duration::from_secs(2);
+
+fn agent_roster_snapshot<T>(
+    store: &Store,
+    fold: impl FnOnce(u64) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let budget = smallclaims::read_budget::current().map_or_else(
+        || smallclaims::read_budget::ReadBudget::new("roster/refresh", AGENT_ROSTER_SNAPSHOT_BUDGET),
+        |parent| parent.child(AGENT_ROSTER_SNAPSHOT_BUDGET),
+    );
+    smallclaims::read_budget::with(Some(budget), || store.read_snapshot(|index| {
+        smallclaims::read_budget::check()?;
+        let result = fold(index)?;
+        smallclaims::read_budget::check()?;
+        Ok(result)
+    }))
+}
+
 /// Reduce every agent's current-view and card status in short snapshots of at most
 /// [`AGENT_ROSTER_WARM_CHUNK`] agents. These per-agent reductions stay cached until a claim
 /// they depend on arrives, so the folds that follow at one cut read them instead of the log.
 fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
-    let subjects = store.read_snapshot(|index| {
-        let connection = store.readers.get();
-        crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
-            Ok(connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2154055540e0 owner=fractal_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
-                .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?)
-        })
-    })?;
-    for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
-        let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
-        store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
-        }))?;
+    let mut lower = "agent/".to_owned();
+    loop {
+        let names = agent_roster_snapshot(store, |index| {
+            let connection = store.readers.get();
+            let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc92b1baa7e5f owner=fractal_api_core::api TODO=trace-statement-and-value-representation */ &crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+                .query_map(rusqlite::params![index, lower, "agent0", AGENT_ROSTER_WARM_CHUNK],
+                    |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false)?;
+            Ok(names)
+        })?;
+        let Some(last) = names.last() else { break; };
+        lower = format!("{last}\0");
+        if names.len() < AGENT_ROSTER_WARM_CHUNK { break; }
     }
     Ok(())
 }
 
-/// How many times a refresh folds the roster in chunks before it gives up on a roster that
-/// keeps changing in ways it cannot follow card by card.
-const AGENT_ROSTER_ASSEMBLY_ROUNDS: usize = 3;
-
-/// Publish the complete roster at a new cut, never folding more than
-/// [`AGENT_ROSTER_WARM_CHUNK`] cards in one snapshot. A snapshot completes the roster only once
-/// the newest rows say which cards changed and at most that many are changed or missing.
-/// Otherwise the cards fold in chunks, each at its own cut, refolding the already folded cards
-/// whose claims changed, and completion is tried again. Readers keep the previous complete
-/// roster meanwhile, with its own cut and publication time; if it cannot be assembled, the
-/// refresh fails and is tried again on the next request.
+/// Publish a complete roster, retaining completed keyset/delta pages across cancellation.
+/// Each short snapshot has its own deadline; the pass budget bounds total background work.
 pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
     let generation = store.agents_publication_build()?;
     let Some(CapturedPresentedAgents { source, subagents, now }) =
         refresh_agent_roster_source(store, history)? else { return Ok(()); };
-    let valid_until = source.valid_until_ms.map_or(now.saturating_add(1000),
-        |deadline| deadline.min(now.saturating_add(1000)));
-    let mut rows = (*source.rows).clone();
-    overlay_agent_resources_at(store, &mut rows, &client_timestamp(u128::from(now)),
-        u128::from(now), Some(subagents))?;
-    store.publish_presented_agents(generation, source, now, Some(valid_until), rows)
+    let (rows, presentation_deadline) =
+        roster_presentation::present(store, &source.rows, subagents, u128::from(now))?;
+    let valid_until = source.valid_until_ms.into_iter()
+        .chain(presentation_deadline.map(|at| at.min(u128::from(u64::MAX)) as u64)).min();
+    store.publish_presented_agents(generation, source, now, valid_until, rows)
 }
 
 struct CapturedPresentedAgents {
@@ -6564,46 +6715,39 @@ fn capture_presented_agents(store: &Store, index: u64) -> anyhow::Result<Capture
 fn refresh_agent_roster_source(
     store: &Store, history: bool,
 ) -> anyhow::Result<Option<CapturedPresentedAgents>> {
-    store.begin_agent_roster_fault_retries(history);
-    let (current, captured) = store.read_snapshot(|index| {
-        let current = store.agent_roster_current(index, history)?;
-        let captured = if current && !history { Some(capture_presented_agents(store, index)?) } else { None };
-        Ok((current, captured))
-    })?;
-    if current { return Ok(captured); }
-    let complete = |store: &Store| store.read_snapshot(|index| {
-        if let Some(reason) =
-            store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)?
-        {
-            return Ok((Some(reason), None));
+    let budget = smallclaims::read_budget::current().map_or_else(
+        || smallclaims::read_budget::ReadBudget::new_quiet("roster/refresh-pass", Duration::from_secs(10)),
+        |parent| parent.child(Duration::from_secs(10)),
+    );
+    smallclaims::read_budget::with(Some(budget), || {
+        if roster_assembly::active(store, history) {
+            return roster_assembly::resume(store, history);
         }
-        client_agent_resources_cached(store, history, index)?;
-        let captured = if history { None } else { Some(capture_presented_agents(store, index)?) };
-        Ok((None, captured))
-    });
-    for _ in 0..AGENT_ROSTER_ASSEMBLY_ROUNDS {
-        let (reason, captured) = complete(store)?;
-        let Some(reason) = reason else {
-            return Ok(captured);
-        };
-        store.note_agent_roster_chunked(&reason);
-        let order = store.read_snapshot(|index| {
-            Ok(client_agent_page_refs(store, history, index)?.iter()
-                .filter_map(|reference| reference["id"].as_str().map(str::to_owned))
-                .collect::<Vec<_>>())
-        })?;
-        for chunk in order.chunks(AGENT_ROSTER_WARM_CHUNK) {
-            let chunk = chunk.iter().cloned().collect::<BTreeSet<_>>();
-            store.read_snapshot(|index| {
-                client_agent_cards_selected(store, history, index, &chunk, true).map(drop)
-            })?;
+        store.begin_agent_roster_fault_retries(history);
+        let complete = agent_roster_snapshot(store, |index| {
+            if store.agent_roster_current(index, history)? {
+                return Ok((None, if history { None } else { Some(capture_presented_agents(store, index)?) }));
+            }
+            if let Some(reason) = store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)? {
+                return Ok((Some(reason), None));
+            }
+            client_agent_resources_cached(store, history, index)?;
+            Ok((None, if history { None } else { Some(capture_presented_agents(store, index)?) }))
+        });
+        match complete {
+            Ok((None, captured)) => Ok(captured),
+            Ok((Some(reason), _)) => {
+                store.note_agent_roster_chunked(&reason);
+                roster_assembly::start(store, history);
+                roster_assembly::resume(store, history)
+            }
+            Err(error) => {
+                // Do not keep retrying an indivisible membership/completion scan.
+                roster_assembly::start(store, history);
+                Err(error)
+            }
         }
-    }
-    let (reason, captured) = complete(store)?;
-    if reason.is_none() {
-        return Ok(captured);
-    }
-    anyhow::bail!("the agents roster kept changing in ways no short fold can follow; keeping the previous one")
+    })
 }
 
 /// Every current agent's refs, and the cards of as many as the largest window or page shows.
@@ -7096,10 +7240,11 @@ where
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let context = crate::task_cpu::capture();
     tokio::task::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     }).await.map_err(ApiError::internal)
 }
 
@@ -7112,6 +7257,7 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     #[cfg(any(test, feature = "test-support"))]
     let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
@@ -7120,7 +7266,7 @@ where
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
@@ -7136,11 +7282,12 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     crate::api::read_deadline::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
@@ -7158,11 +7305,12 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    let context = crate::task_cpu::capture();
     crate::api::read_deadline::spawn_blocking(move || {
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
-        crate::performance::with_charged(cpu_kind, operation)
+        context.run(|| crate::performance::with_charged(cpu_kind, operation))
     })
     .await
     .map_err(ApiError::internal)?
@@ -7231,27 +7379,7 @@ pub fn start_native_session_discovery(state: &AppState) {
     crate::external_sessions::start_history_inventory(state.native_session_home.as_deref());
 }
 
-/// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
-/// so refreshing never takes more than about half a core however often readers ask. Reads
-/// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
-/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
-const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
-
-/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
-/// a very cheap fold cannot turn fresh reads into many refreshes a second.
-const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
-
-/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
-/// twice the refresh's own length, though never past the full pause. A host whose seats write a
-/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
-/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
-/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
-/// its half-core bound, as a pause no local claim cuts.
-const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
-
-/// How long a legacy fresh or named-cut read waits for publication: long enough
-/// for the refresher to finish a fold, pause as long, and fold again.
+/// How long a legacy fresh or named-cut read waits for an event-driven publication.
 const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 
 /// Keep the complete agents roster published off the request path. As the daemon starts it
@@ -7267,17 +7395,20 @@ pub fn start_agent_roster(state: &AppState) {
         return;
     };
     let store = state.store.clone();
+    let mut changed = state.event_notify.subscribe();
+    let mut delivery = delivery_presence::subscribe_semantic();
+    let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
+    let inputs = {
+        let wake = Arc::clone(&wake);
+        store.connection.observe_tables(&["claims", "local_observations", "meta"], move |_| wake.notify_one())
+    };
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
-        // Whether a commit holds a claim this node wrote about a subject a card reads is read off
-        // the writer, once for every refresher that pauses on it.
-        let mut local = agent_roster_local_commits(&store);
+        // Subscribe before the first fold so writes during materialization remain pending.
+        let _inputs = inputs;
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
         loop {
-            let started = tokio::time::Instant::now();
-            // Every claim at or before this index is in the fold below or an earlier one.
-            let folded_through = store.index().unwrap_or(u64::MAX);
             let first = std::mem::take(&mut head);
             let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
@@ -7288,56 +7419,40 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            agent_roster_pause(&store, &mut local, started.elapsed(), folded_through).await;
-            // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
-            // paced by the existing refresh pause, never a timer per subscriber.
-            if store.agent_roster_refresh_failed() {
-                wake.notified().await;
-            }
-            wait_for_agent_roster_demand(&store, &wake).await;
+            wait_for_agent_roster_change(&store, &wake, &mut changed, &mut delivery, &mut relayed, client_now_ms()).await;
         }
     }));
 }
 
-/// Why the refresher's pause between two refreshes ended.
-type AgentRosterPauseEnd = local_commits::PauseEnd;
-
-/// The roster's hold on the store's local-commit scanner: a claim this node wrote cuts the
-/// refresher's pause only when a card reads it (`local_agent_card_input_after`, the subjects the
-/// roster's incremental fold reads).
-fn agent_roster_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
-    let reader = Arc::clone(store);
-    store.local_commits(AGENT_ROSTER_LOCAL_CHECK, Arc::new(move |after, through| reader.local_agent_card_input_after(after, through)))
-}
-
-/// The name the roster's check has on the scanner.
-const AGENT_ROSTER_LOCAL_CHECK: &str = "agents";
-
-/// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
-/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
-/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
-/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
-/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
-/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
-/// fold, so a person waiting to see their own write is not left waiting up to a second for the
-/// next timed fold, while a stream of local writes folds no more than about twice a second and
-/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
-/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
-/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
-/// stream or a node's other writes do not fold the roster any more often. See
-/// [`local_commits::pause_after_fold`].
-async fn agent_roster_pause(
-    store: &Arc<Store>,
-    local: &mut local_commits::LocalCommits,
-    folded: Duration,
-    through: u64,
-) -> AgentRosterPauseEnd {
-    let pace = local_commits::Pace {
-        floor: AGENT_ROSTER_FRESH_PAUSE,
-        local: AGENT_ROSTER_LOCAL_PAUSE,
-        full: AGENT_ROSTER_REFRESH_PAUSE,
-    };
-    local_commits::pause_after_fold(Some(local), store.fresh_agent_roster_wanted(), pace, folded, through).await
+/// Wait for semantic inputs, explicit demand, or the earliest actual evidence boundary.
+async fn wait_for_agent_roster_change(
+    store: &Store,
+    wake: &tokio::sync::Notify,
+    changed: &mut tokio::sync::watch::Receiver<u64>,
+    delivery: &mut tokio::sync::watch::Receiver<u64>,
+    relayed: &mut tokio::sync::watch::Receiver<u64>,
+    now_ms: u128,
+) {
+    loop {
+        let deadline = (store.agents_publication_demand() && !store.agent_roster_refresh_failed())
+            .then(|| store.agents_publication()
+                .and_then(|publication| publication.valid_until_unix_ms)).flatten();
+        let clock = async {
+            match deadline {
+                Some(at) => tokio::time::sleep(Duration::from_millis(
+                    at.saturating_sub(now_ms).min(u128::from(u64::MAX)) as u64)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = wake.notified() => {},
+            _ = changed.changed() => {},
+            _ = delivery.changed() => {},
+            _ = relayed.changed() => {},
+            _ = clock => {},
+        }
+        if store.agents_publication_demand() { return; }
+    }
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no
@@ -7366,6 +7481,9 @@ async fn refresh_agent_roster_admitted(
     store: Arc<Store>,
     first: bool,
 ) -> Result<anyhow::Result<()>, tokio::task::JoinError> {
+    if !first && !store.agents_publication_demand() {
+        return Ok(Ok(()));
+    }
     let mut admission = store.admit_agent_resources("refresher").await;
     if !first {
         if !store.agents_publication_demand() {
@@ -7411,7 +7529,7 @@ async fn refresh_agent_roster_admitted(
                     // Queue the complete follow-on before publishing the head: a projection
                     // reset after that publication must be able to cancel this old demand.
                     reader.fractal.request_roster_refresh();
-                    reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
+                    agent_roster_snapshot(&reader, |index| client_agent_roster_head(&reader, index))
                 })
             } else {
                 let before = reader.published_agent_roster(u64::MAX, false).map(|(cut, _, _)| cut);
@@ -7440,14 +7558,6 @@ async fn refresh_agent_roster_admitted(
     }).await
 }
 
-async fn wait_for_agent_roster_demand(store: &Store, wake: &tokio::sync::Notify) {
-    // Notifications may have been queued while readers were present. Recheck demand
-    // after consuming them rather than doing one last presentation fold on an idle node.
-    while !store.agents_publication_demand() {
-        wake.notified().await;
-    }
-}
-
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
 /// its parents. `state_socket` gives clients without the daemon's runtime environment a stable
 /// address for the same listener. Test servers and the paired gateway use the unbound listener.
@@ -7471,7 +7581,7 @@ pub async fn serve_unix_bound_with_ready(
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, Some(state_socket)).await?;
-    serve_reserved_unix_with_ready(reserved, app, Some(store), None, ready).await
+    serve_reserved_unix_with_ready(reserved, app, Some(store), None, None, ready).await
 }
 
 /// Serve with injected ancestry lookup. `Some(store)` enables both binding and mandatory actor
@@ -7496,7 +7606,7 @@ async fn serve_unix_with_ancestor_ready(
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
     // Generic/injected-ancestry servers have no daemon supervisor authority.
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, None, ancestor, ready).await
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, None, None, ancestor, ready).await
 }
 
 /// An address reservation, not a listener. Connect attempts remain refused until
@@ -7582,9 +7692,10 @@ pub async fn serve_reserved_unix_with_ready(
     app: Router,
     bound_store: Option<Arc<Store>>,
     worker: Option<WorkerAuthority>,
+    local_run_authority: Option<Arc<dyn run_requests::LocalRunAuthority>>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, observed_harness_ancestor, ready).await
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, local_run_authority, observed_harness_ancestor, ready).await
 }
 
 async fn serve_reserved_unix_with_ancestor_ready(
@@ -7592,10 +7703,11 @@ async fn serve_reserved_unix_with_ancestor_ready(
     app: Router,
     bound_store: Option<Arc<Store>>,
     worker: Option<WorkerAuthority>,
+    local_run_authority: Option<Arc<dyn run_requests::LocalRunAuthority>>,
     ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker,
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, local_run_authority,
         move |pid, peer| Ok(ancestor(pid, peer)), ready).await
 }
 
@@ -7604,6 +7716,7 @@ async fn serve_reserved_unix_with_lookup_ready(
     app: Router,
     bound_store: Option<Arc<Store>>,
     worker: Option<WorkerAuthority>,
+    local_run_authority: Option<Arc<dyn run_requests::LocalRunAuthority>>,
     ancestor: impl Fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
         -> Result<HarnessAncestry, AncestryUnavailableCause> + Copy + Send + Sync + 'static,
     ready: impl FnOnce(),
@@ -7617,6 +7730,12 @@ async fn serve_reserved_unix_with_lookup_ready(
     let bind_harness = bound_store.is_some();
     let app = match bound_store {
         Some(store) => app.layer(from_fn_with_state((store, worker), guard_bound_actor)),
+        None => app,
+    };
+    // This extension must be outside the mandatory serving guard: offline credential binding
+    // consults this journal-backed service before any inner router middleware runs.
+    let app = match local_run_authority {
+        Some(authority) => app.layer(Extension(authority)),
         None => app,
     };
     let listener = socket.listen(1024)?;
@@ -8281,7 +8400,40 @@ fn record_legacy_poll(
 }
 
 /// Generation authority supplied by the replication worker's supervisor.
-pub type WorkerAuthority = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
+#[derive(Clone)]
+pub struct WorkerAuthority {
+    observe: Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>,
+    supervisor: Arc<str>,
+}
+
+impl WorkerAuthority {
+    pub fn new(supervisor: impl Into<Arc<str>>, observe: impl Fn() -> anyhow::Result<u32> + Send + Sync + 'static) -> Self {
+        Self { observe: Arc::new(observe), supervisor: supervisor.into() }
+    }
+}
+
+impl std::ops::Deref for WorkerAuthority {
+    type Target = dyn Fn() -> anyhow::Result<u32> + Send + Sync;
+    fn deref(&self) -> &Self::Target { &*self.observe }
+}
+
+// One process-wide warning per minute, independent of connector PID or error text.
+// A changing caller must not bypass the limit.
+fn worker_warning_due(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    if last.is_some_and(|last| now.duration_since(last) < std::time::Duration::from_secs(60)) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+fn warn_worker_authorization(connector_pid: Option<u32>, supervisor: &str, error: &dyn std::fmt::Display) {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if worker_warning_due(&mut last, std::time::Instant::now()) {
+        tracing::warn!(connector_pid, supervisor, error = %error, "replication worker authorization failed");
+    }
+}
 
 pub fn worker_route(path: &str) -> bool {
     path.starts_with("/v1/internal/replication/")
@@ -8345,29 +8497,49 @@ async fn guard_bound_actor(
 ) -> Response {
     request.extensions_mut().remove::<ancestry_diagnostics::VerifiedWorkerFallback>();
     let ancestry_diagnostic = ancestry_diagnostics::RequestDiagnostic::capture(&request);
-    let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
+    // A carried run capability takes precedence over inherited agent ancestry.
     // A run credential binds only while its attempt runs; one that no longer binds leaves the
     // caller unverifiable, so it writes nothing.
     request.extensions_mut().remove::<BoundRun>();
+    if request.extensions().get::<RunCredential>().is_some() {
+        request.extensions_mut().remove::<BoundAgent>();
+    }
     if let Some(credential) = request.extensions().get::<RunCredential>().cloned() {
         let lookup = store.clone();
-        match tokio::task::spawn_blocking(move || lookup.run_binding(credential.secret())).await {
+        let local = request.extensions().get::<Arc<dyn run_requests::LocalRunAuthority>>().cloned();
+        match tokio::task::spawn_blocking(move || {
+            if let Some(local) = local {
+                local.resolve(credential.secret())?.run.ok_or_else(|| FractalError::new(
+                    "run-request-refused", "this execution has no admitted run authority",
+                ))
+            } else {
+                lookup.run_binding(credential.secret())
+            }
+        }).await {
             Ok(Ok(binding)) => { request.extensions_mut().insert(BoundRun(binding)); }
             _ => { request.extensions_mut().insert(HarnessAncestry::Unavailable); }
         }
     }
+    let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
     let client_request = request.uri().path().starts_with("/v1/client/");
     // This guard is outside all router layers. Authenticate here, before ancestry admission,
     // independently of the ingress observe/enforce rollout.
     if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
+        && request.extensions().get::<RunCredential>().is_none()
         && let Some(worker) = worker
     {
         let peer = request.extensions().get::<LocalPeer>().cloned();
-        if matches!(tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await, Ok(Ok(()))) {
-            // The supervised worker runs in no harness. Its live generation is stronger
-            // evidence than an unreadable service-manager environment.
-            request.extensions_mut().insert(HarnessAncestry::Person);
-            request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
+        let connector_pid = peer.as_ref().map(|peer| peer.pid);
+        let supervisor = worker.supervisor.clone();
+        match tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await {
+            Ok(Ok(())) => {
+                // The supervised worker runs in no harness. Its live generation is stronger
+                // evidence than an unreadable service-manager environment.
+                request.extensions_mut().insert(HarnessAncestry::Person);
+                request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
+            }
+            Ok(Err(error)) => warn_worker_authorization(connector_pid, &supervisor, &format_args!("{error:#}")),
+            Err(error) => warn_worker_authorization(connector_pid, &supervisor, &error),
         }
     }
     let verified_worker = request.extensions().get::<ancestry_diagnostics::VerifiedWorkerFallback>().is_some();
@@ -8376,7 +8548,14 @@ async fn guard_bound_actor(
         diagnostic.record(result.as_ref().err().map(|error| error.status), verified_worker);
     }
     match result {
-        Ok(request) => next.run(request).await,
+        Ok(request) => {
+            let binding = request.extensions().get::<BoundRun>().map(|bound| bound.0.clone());
+            if let Some(binding) = binding {
+                crate::store::run_credentials::request_context::scope(binding, next.run(request)).await
+            } else {
+                next.run(request).await
+            }
+        }
         Err(error) if client_request => {
             let status = error.status;
             let raw = json!({"code":error.code,"message":error.message,"details":error.details});
@@ -8433,7 +8612,9 @@ pub async fn guard_bound_request(
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
         // Resource handlers bind submission to native ownership and scope inspection/control
         // to that same owner. No other internal route (or method) admits bound callers.
-        if resources::allows_bound_request(request.method(), request.uri().path()) {
+        if resources::allows_bound_request(request.method(), request.uri().path())
+            || (bound_run.is_some() && run_requests::allows_bound_request(request.method(), request.uri().path()))
+        {
             return Ok(request);
         }
         return Err(ApiError::bad(FractalError::new(
@@ -8562,8 +8743,12 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
         "foreign-agent-actor", "local caller ancestry could not be verified; run person commands from a local terminal on this host (SSH sessions are not supported)",
     ));
     let path = request.uri().path();
+    // This read-only snapshot is also consumed by same-UID daemon companions with no
+    // agent identity. Unavailable ancestry must not turn it into an attributed operation.
+    let companion_read = matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && path == "/v1/internal/fleet/leave-state";
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
-        || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || (path.starts_with(INTERNAL_ROUTE_PREFIX) && !companion_read)
         || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
         || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
     {
@@ -8628,8 +8813,8 @@ async fn health(
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"resource_profile_keys":1,"mission_run_follow_head":1},
+        "features": {"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"owned_set_native_policy":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"resource_profile_keys":1,"resource_recovery_observations":1,"mission_run_follow_head":1},
     });
     let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;
     health["replication"] = json!({
@@ -8670,6 +8855,7 @@ fn apply_systemd_health(health: &mut Value, supervisor: fractal_runtime::systemd
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
     match mode {
         fractal_runtime::Isolation::Scope => "scope",
+        fractal_runtime::Isolation::DarwinSlot { .. } => "darwin-slot",
         fractal_runtime::Isolation::Detached => "detached",
         fractal_runtime::Isolation::DegradedDetached => "degraded-detached",
     }
@@ -9708,12 +9894,16 @@ pub(crate) fn doctor_workers(read_limit: usize) -> usize {
 
 type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
 
-fn checkpoint_doctor_check(status: &crate::store::CheckpointStatusView) -> DoctorCheck {
+fn trim_doctor_check(status: &crate::store::TrimStatusView) -> DoctorCheck {
     let blocking = status.blocking_summary();
     DoctorCheck {
-        name: "checkpoint".into(),
+        name: "trim".into(),
         status: if blocking.is_some() { "warn" } else { "pass" }.into(),
-        message: blocking.unwrap_or_else(|| "no checkpoint is pending".into()),
+        message: blocking.unwrap_or_else(|| match (&status.trimmed, status.trims) {
+            (_, false) => "trimming is off ([trim] local = false)".into(),
+            (Some(cut), true) => format!("trimming on its own; newest trimmed cut {cut}"),
+            (None, true) => "trimming on its own; no cut trimmed yet".into(),
+        }),
     }
 }
 
@@ -10131,9 +10321,13 @@ fn doctor_report_within(
             }),
         }
         let isolation = fractal_runtime::isolation_mode();
+        let custody_available =
+            !cfg!(target_os = "macos") || fractal_runtime::darwin_slot::available();
         checks.push(DoctorCheck {
             name: "process-isolation".into(),
-            status: if isolation == fractal_runtime::Isolation::DegradedDetached {
+            status: if isolation == fractal_runtime::Isolation::DegradedDetached
+                || !custody_available
+            {
                 "warn"
             } else {
                 "pass"
@@ -10141,8 +10335,17 @@ fn doctor_report_within(
             .into(),
             message: match isolation {
                 fractal_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
+                fractal_runtime::Isolation::DarwinSlot { slot } => {
+                    format!("explicit finite executions use Darwin slot {slot}")
+                }
                 fractal_runtime::Isolation::Detached => {
-                    "tasks use detached process groups on this platform".into()
+                    if !custody_available {
+                        "helperUnavailable: Darwin custody helper is unavailable; ordinary tasks remain detached".into()
+                    } else if cfg!(target_os = "macos") {
+                        "ordinary tasks use detached process groups; explicit finite launches can request Darwin slot custody".into()
+                    } else {
+                        "tasks use detached process groups on this platform".into()
+                    }
                 }
                 fractal_runtime::Isolation::DegradedDetached => {
                     "systemd user scopes are unavailable; a daemon restart can stop tasks".into()
@@ -10581,13 +10784,10 @@ fn doctor_report_within(
         }
         Ok(checks)
     });
-    if state.fleet_id.is_some() {
-        checks.check("checkpoint", || {
-            let status = state.store.checkpoint_status(client_now_ms(), &replication_peer_names(state))
-                .map_err(ApiError::internal)?;
-            Ok(vec![checkpoint_doctor_check(&status)])
-        });
-    }
+    checks.check("trim", || {
+        let status = state.store.trim_status().map_err(ApiError::internal)?;
+        Ok(vec![trim_doctor_check(&status)])
+    });
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
     });
@@ -10771,9 +10971,6 @@ fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T
 #[path = "api/replication_guard_tests.rs"]
 mod replication_guard_tests;
 
-#[cfg(test)]
-#[path = "api/checkpoint_plan_tests.rs"]
-mod checkpoint_plan_tests;
 
 #[cfg(test)]
 #[path = "api/storage_census_tests.rs"]
@@ -10952,10 +11149,10 @@ async fn refuse_while_leaving(
             path,
             "/v1/health"
                 | "/v1/internal/replication/export"
+                | "/v1/internal/replication/revision"
                 | "/v1/internal/replication/receive"
                 | "/v1/internal/replication/peer-failure"
                 | "/v1/internal/replication/worker-status"
-                | "/v1/internal/replication/checkpoint"
                 | "/v1/internal/replication-wake"
         );
     if mutating && !allowed && state.store.fleet_leaving().unwrap_or(false) {
@@ -11844,6 +12041,15 @@ async fn finish_claim_publication(
 /// Every native, source-backed and declared objective and budget as one list.
 /// Domain rows precede declaration evaluation so native bindings see their real source rows.
 pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow::Result<Vec<Value>> {
+    slo_rows_from_declarations(store, domain_rows, store.declared_objectives()?.iter())
+}
+
+/// Render a history cut from the recorder's changed-key declaration inputs. Native windows
+/// still advance at their real period boundaries; unchanged declaration bodies are not reparsed.
+pub fn slo_rows_from_declarations<'a>(
+    store: &crate::store::Store, domain_rows: Vec<Value>,
+    declarations: impl Iterator<Item = &'a crate::store::declared_objectives::DeclaredObjective> + Clone,
+) -> anyhow::Result<Vec<Value>> {
     let limits = store.account_limits()?;
     let fresh_ms = crate::config::reload_daemon_limits()
         .and_then(|reloaded| reloaded.ok())
@@ -11875,7 +12081,7 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, mail));
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
-    let declared = crate::declared_objectives::rows(store, now, &rows)?;
+    let declared = crate::declared_objectives::rows_from_declarations(store, now, &rows, declarations)?;
     drop(rows.splice(budgets..budgets, declared));
     Ok(rows)
 }
@@ -13360,12 +13566,17 @@ async fn work_action_response_viewing(
 pub struct LiveSession {
     pub runtime_id: String,
     pub incarnation_id: String,
+    pub native_incarnation_id: String,
+    pub custody: crate::store::local_sessions::SessionCustody,
     pub owner_host_id: String,
     pub terminal: bool,
     pub driver: Option<String>,
 }
 
 pub fn session_storage_subject(state: &AppState, subject: &str) -> Result<String, ApiError> {
+    if state.store.has_current_local_session(subject).map_err(ApiError::internal)? {
+        return Ok(subject.into());
+    }
     crate::store::identities::resolve_reference_conn(&state.store.readers.get(), subject)
         .map_err(ApiError::bad)
 }
@@ -13377,6 +13588,22 @@ pub fn live_session(
 ) -> Result<LiveSession, ApiError> {
     let identity = session_storage_subject(state, subject)?;
     let subject = identity.as_str();
+    if state.store.has_current_local_session(subject).map_err(ApiError::internal)? {
+        let runtime = crate::reconcile::NativeRuntime::new(
+            &state.state_dir, Some(&state.pty_root), &state.pty_binary);
+        let binding = crate::reconcile::local_session(&state.store, &runtime, subject, expected_incarnation)
+            .map_err(|error| match error.downcast_ref::<crate::reconcile::LocalSessionUnavailable>() {
+                Some(crate::reconcile::LocalSessionUnavailable::Missing) => ApiError::not_found(error.to_string()),
+                Some(_) => ApiError::bad(FractalError::new("stale-incarnation", error.to_string())),
+                None => ApiError::internal(error),
+            })?;
+        return Ok(LiveSession {
+            runtime_id: binding.runtime_id, incarnation_id: binding.incarnation,
+            native_incarnation_id: binding.native_incarnation,
+            custody: binding.custody,
+            owner_host_id: client_host_id(state.store.origin()), terminal: binding.terminal, driver: binding.driver,
+        });
+    }
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
@@ -13434,9 +13661,14 @@ pub fn live_session(
         .map(|member| member.terminal)
         .or_else(|| fields.get("terminal").and_then(Value::as_bool))
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no runtime kind")))?;
+    let custody = if member.as_ref().is_some_and(|member| member.lifecycle == crate::model::MemberLifecycle::TerminalBound) {
+        return Err(ApiError::not_found("bound invocation has no current local custody"));
+    } else { crate::store::local_sessions::SessionCustody::Owned };
     Ok(LiveSession {
         runtime_id: runtime_id.into(),
         incarnation_id: incarnation_id.into(),
+        native_incarnation_id: incarnation_id.into(),
+        custody,
         owner_host_id: client_host_id(origin),
         terminal,
         driver: member.and_then(|member| member.driver),
@@ -13543,15 +13775,15 @@ pub async fn input_session_as(
         SessionInputMode::Line => runtime.send_line_if(
             &effect_session.runtime_id,
             &request.value,
-            Some(&effect_session.incarnation_id),
+            Some(&effect_session.native_incarnation_id),
         ),
         SessionInputMode::Raw => {
-            runtime.send_raw_if(&effect_session.runtime_id, &bytes, Some(&effect_session.incarnation_id))
+            runtime.send_raw_if(&effect_session.runtime_id, &bytes, Some(&effect_session.native_incarnation_id))
         }
         SessionInputMode::Key => runtime.send_key_if(
             &effect_session.runtime_id,
             &request.value,
-            Some(&effect_session.incarnation_id),
+            Some(&effect_session.native_incarnation_id),
         ),
     })).await?;
     finish_session_control(
@@ -13597,6 +13829,10 @@ pub async fn signal_session_as(
         return Ok(Json(session_control_response(&subject, &result)));
     }
     let session = live_session(&state, &subject, Some(&request.expected_incarnation))?;
+    if session.custody == crate::store::local_sessions::SessionCustody::Borrowed && request.signal != "terminate" {
+        return Err(ApiError::bad(FractalError::new("unsupported-capability",
+            "a borrowed invocation may be detached, never signalled")));
+    }
     let request_key = format!(
         "session-control-request:signal:{subject}:{}",
         request.idempotency_key
@@ -13644,14 +13880,11 @@ pub async fn signal_session_as(
         .map_err(ApiError::bad)?;
     let effect_state = state.clone();
     let effect_session = session.clone();
-    let effect = blocking_external(move || if effect_session.terminal {
-        daemon_pty(&effect_state).and_then(|runtime| {
-            runtime.signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
-        })
-    } else {
-        fractal_runtime::ExecRuntime::new(effect_state.state_dir.join("exec"), effect_state.state_dir.join("logs"))
-            .signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
-    }).await?;
+    let detach_subject = subject.clone();
+    let detach_operation = result_key.clone();
+    let effect = blocking_external(move ||
+        apply_session_signal(&effect_state, &detach_subject, &effect_session, signal, &detach_operation)
+    ).await?;
     finish_session_control(
         &state,
         &subject,
@@ -13661,6 +13894,21 @@ pub async fn signal_session_as(
         &session,
         effect,
     )
+}
+
+/// Native identity and custody travel together from one resolved durable binding.
+fn apply_session_signal(
+    state: &AppState, subject: &str, session: &LiveSession, signal: i32, operation: &str,
+) -> anyhow::Result<()> {
+    if session.custody == crate::store::local_sessions::SessionCustody::Borrowed {
+        anyhow::ensure!(signal == libc::SIGTERM, "a borrowed invocation may be detached, never signalled");
+        state.store.detach_local_session(subject, &session.incarnation_id, operation)
+    } else if session.terminal {
+        daemon_pty(state)?.signal_if(&session.runtime_id, Some(&session.native_incarnation_id), signal)
+    } else {
+        fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"))
+            .signal_if(&session.runtime_id, Some(&session.native_incarnation_id), signal)
+    }
 }
 
 fn finish_session_control(

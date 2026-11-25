@@ -13,13 +13,28 @@ impl Store {
 
     fn snapshot_backup_header(&self) -> Result<Header> {
         let connection = self.readers.get();
-        let digests = projection_digest::tables(&connection)?;
-        let counts = connection
+        let mut digests = projection_digest::tables(&connection)?;
+        let mut counts = connection
             .prepare(
                 "SELECT table_name,row_count FROM projection_digest_state ORDER BY table_name",
             )?
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        // Archives commit logical blob bytes, as before bytes moved out of the graph file.
+        // Live projection digests deliberately omit this physical table, but omitting it
+        // from the archive would change even an empty store's header and graph digest.
+        let columns = serde_json::to_string(&projection_digest::columns(&connection, "blobs", &[])?)?;
+        let (count, accumulator) = projection_digest::scan(
+            &connection,
+            "blobs",
+            &columns,
+            concat!(
+                "SELECT json_array(hex(", smallclaims::blob_bytes!("b"),
+                "),b.hash||'',b.size) FROM blobs AS b"
+            ),
+        )?;
+        digests.insert("blobs".into(), projection_digest::table_digest("blobs", &columns, count, &accumulator));
+        counts.insert("blobs".into(), count);
         Ok(Header {
             format: super::backup_format::FORMAT.into(),
             version: super::backup_format::VERSION,
@@ -39,6 +54,19 @@ impl Store {
                 .collect(),
             ledgers: super::backup_ledgers::digests(&connection)?,
             shards: BTreeMap::new(),
+            source: connection.query_row(
+                "SELECT value FROM meta WHERE key IN ('local_node_writer','backup_restore_writer')
+                 ORDER BY CASE key WHEN 'local_node_writer' THEN 0 ELSE 1 END LIMIT 1",
+                [], |row| row.get::<_, String>(0),
+            ).optional()?.map(|writer_id| -> Result<_> {
+                Ok(super::backup_format::SourceIdentity {
+                    writer_id,
+                    max_store_index: connection.query_row(
+                        "SELECT COALESCE(MAX(store_index),0) FROM claims",
+                        [], |row| row.get(0),
+                    )?,
+                })
+            }).transpose()?,
         })
     }
 
@@ -72,6 +100,17 @@ impl Store {
         &self,
         output: &mut impl Write,
         bodies: Option<&crate::message_body::Bodies>,
+    ) -> Result<Header> {
+        self.write_backup_with_snapshot(output, bodies, |_, _| Ok(()))
+    }
+
+    /// Inspect the exact pinned connections before reading archive data. Streaming
+    /// callers use this to guard all attached database WALs through backpressure.
+    pub fn write_backup_with_snapshot(
+        &self,
+        output: &mut impl Write,
+        bodies: Option<&crate::message_body::Bodies>,
+        mut pinned: impl FnMut(&Connection, Option<&Connection>) -> Result<()>,
     ) -> Result<Header> {
         // The bodies this member owns that its claims name, checked once here so the header can
         // say whether the archive carries any, and written again below inside the snapshot.
@@ -142,15 +181,61 @@ impl Store {
                         if max_batch_rowid(&shard.readers.get())? > seeded_through {
                             return Ok(None);
                         }
+                        pinned(&self.readers.get(), Some(&shard.readers.get()))?;
                         self.write_pinned_backup(output, bodies, &owned, Some(&**shard)).map(Some)
                     }),
-                    _ => self.write_pinned_backup(output, bodies, &owned, None).map(Some),
+                    _ => {
+                        pinned(&self.readers.get(), None)?;
+                        self.write_pinned_backup(output, bodies, &owned, None).map(Some)
+                    }
                 }
             })?;
             if let Some(header) = result {
                 return Ok(header);
             }
         }
+    }
+
+    /// Export an already sealed offline source using read-only graph and shard snapshots.
+    /// Unlike the live exporter, this never drains pending mail or creates missing envelopes.
+    pub fn write_backup_read_only(
+        &self,
+        output: &mut impl Write,
+        bodies: Option<&crate::message_body::Bodies>,
+    ) -> Result<Header> {
+        let shard = super::messages_shard::shard(self);
+        self.read_snapshot(|_| {
+            self.check_backup_sealed()?;
+            self.check_backup_projection()?;
+            anyhow::ensure!(
+                super::message_outbox::oldest(&self.readers.get())?.is_none(),
+                "read-only backup refuses pending messages in the outbox; let the daemon drain them before exporting"
+            );
+            let export = |shard: Option<&GraphStore>, output: &mut _| -> Result<Header> {
+                let mut owned = Vec::new();
+                if let Some(bodies) = bodies {
+                    for file in bodies.files().into_iter().filter(|file| !file.temporary && !file.expired) {
+                        let subject = format!("message/{}", file.id);
+                        let Some(message) = self.message(&subject)? else { continue };
+                        let (Some(named), true) = (message.body_attachment(), bodies.holds(&message.from, &file))
+                        else { continue };
+                        let Some(bytes) = bodies.read(&message.from, &subject)? else { continue };
+                        if hex::encode(Sha256::digest(&bytes)) == named.sha256 {
+                            owned.push((subject, message.from, named.sha256));
+                        }
+                    }
+                }
+                self.write_pinned_backup(output, bodies, &owned, shard)
+            };
+            if let Some(shard) = &shard {
+                shard.read_snapshot(|_| {
+                    shard.check_backup_sealed()?;
+                    export(Some(shard), output)
+                })
+            } else {
+                export(None, output)
+            }
+        })
     }
 
     /// Write the archive from the graph snapshot this thread has pinned and, when the shard is
@@ -180,6 +265,9 @@ impl Store {
         }
         if !quarantined.is_empty() || header.ledgers.contains_key("replica_restore_quarantine") {
             header.version = super::backup_format::VERSION_WITH_QUARANTINE;
+        }
+        if self.released_envelopes()? > 0 {
+            header.version = super::backup_format::VERSION_WITH_SIGNED_CLAIMS;
         }
         let mut hash = Sha256::new();
         write_record(output, &mut hash, &Record::Header(header.clone()))?;
@@ -216,7 +304,33 @@ impl Store {
                 write_record(output, &mut hash, &Record::Signatures(signatures))?;
             }
         }
-        // A trim records its complete certified tombstones before deleting any rows.
+        // The envelopes this member released have no payload to archive: their claims go as
+        // signed envelopes, after every envelope, so a restore admits them by the membership the
+        // restored log folds.
+        let mut after = (String::new(), 0_u64, String::new());
+        loop {
+            let identities = self
+                .readers
+                .get()
+                .prepare_cached(
+                    "SELECT writer,sequence,envelope_hash FROM released_envelopes
+                     WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
+                     ORDER BY writer,sequence,envelope_hash LIMIT ?4",
+                )?
+                .query_map(params![after.0, after.1, after.2, smallclaims::store::signed_claims::SIGNED_ENVELOPE_LIMIT], |r| {
+                    Ok(ReplicaEnvelopeId { writer: r.get(0)?, sequence: r.get(1)?, hash: r.get(2)? })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let Some(last) = identities.last() else { break };
+            after = (last.writer.clone(), last.sequence, last.hash.clone());
+            let signed = self.signed_envelopes(&identities)?;
+            anyhow::ensure!(
+                signed.len() == identities.len(),
+                "a released envelope's claims cannot all be archived as signed claims"
+            );
+            write_record(output, &mut hash, &Record::SignedEnvelopes(signed))?;
+        }
+        // A trim records its complete tombstones before deleting any rows.
         // A snapshot between deletion chunks must include that manifest too.
         let checkpoint: Option<(String, u128)> = self
             .readers
@@ -235,8 +349,8 @@ impl Store {
             )
             .optional()?;
         if let Some((checkpoint, cut_unix_ms)) = checkpoint {
-            // The manifest is the sync representation, verified against signed certificate
-            // claims on restore. No SQL or local checkpoint bookkeeping enters the archive.
+            // The manifest is the archive's representation of the tombstones; restore records
+            // them as this member's own. No SQL or local checkpoint bookkeeping enters the archive.
             let mut after = None;
             loop {
                 let page = self.manifest_page(
@@ -418,6 +532,19 @@ impl Store {
 
     /// Add one archived ledger page by union. Admission reads none of these ledgers, and sequence
     /// allocation reads them only for its own writer, which a restore names afresh.
+    /// Admit one archived page of signed envelopes, after every archived envelope: the
+    /// membership the restored log folds admits their writers' keys. Each must verify.
+    pub fn receive_backup_signed_envelopes(
+        &self,
+        header: &Header,
+        signed: &[smallclaims::replication::SignedEnvelope],
+    ) -> Result<()> {
+        let fleet = header.fleet_id.as_deref().unwrap_or("");
+        let (_, refused) = self.receive_signed_envelopes(fleet, None, signed)?;
+        anyhow::ensure!(refused == 0, "{refused} archived signed envelopes do not verify");
+        Ok(())
+    }
+
     pub fn receive_backup_ledger(&self, page: &super::backup_ledgers::LedgerPage) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
@@ -470,7 +597,10 @@ impl Store {
         // admitted before their arrival. Preserve that history, including doctor residue.
         self.replay_replication_graph()?;
         if let Some(manifest) = checkpoint {
-            self.restore_checkpoint_history(manifest)?;
+            self.restore_checkpoint_history(
+                manifest,
+                header.version >= super::backup_format::VERSION_WITH_LEDGERS,
+            )?;
             self.replay_replication_graph()?;
         }
         self.check_backup_chains(&quarantined)?;
@@ -582,7 +712,7 @@ impl Store {
                     anyhow::ensure!(sequence > 0,
                         "backup writer chain has an invalid root: writer={writer:?} sequence={sequence}");
                     // Retained predecessors must match their exact batch hash. A predecessor
-                    // removed by a verified checkpoint has only its certified wire identity left.
+                    // removed by a trim has only its tombstoned wire identity left.
                     let found: bool =
                         predecessor.query_row(/* sqlite-large-value: allow-for-now lv-haf3f28b6f1dd owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ params![writer, sequence - 1, link], |r| r.get(0))?;
                     if !found && !quarantined.contains_key(&(writer.clone(), sequence - 1, link.clone())) {
@@ -617,7 +747,7 @@ impl Store {
     }
 }
 
-/// The digest of a store's complete admitted envelope log, certified tombstones included: the
+/// The digest of a store's complete admitted envelope log, tombstones included: the
 /// graph's `log_digest`, and each shard's in the same form.
 pub(super) fn log_digest(store: &GraphStore) -> Result<String> {
     log_digest_with_quarantine(store, false)
@@ -632,13 +762,17 @@ fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> 
     loop {
         // Both index seeks are bounded before the UNION sorts at most two pages.
         let identities = connection.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h756acba9d94c owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
+            /* sqlite-large-value: allow-for-now lv-h211536259bef owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
                WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND (batch_id IS NOT NULL OR ?5)
                ORDER BY writer,sequence,envelope_hash LIMIT ?4),
              dropped AS (SELECT writer,sequence,envelope_hash FROM checkpoint_envelopes
                WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
+               ORDER BY writer,sequence,envelope_hash LIMIT ?4),
+             released AS (SELECT writer,sequence,envelope_hash FROM released_envelopes
+               WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
                ORDER BY writer,sequence,envelope_hash LIMIT ?4)
-             SELECT * FROM live UNION SELECT * FROM dropped ORDER BY writer,sequence,envelope_hash LIMIT ?4"
+             SELECT * FROM live UNION SELECT * FROM dropped UNION SELECT * FROM released
+             ORDER BY writer,sequence,envelope_hash LIMIT ?4"
         )?.query_map(params![after.0,after.1,after.2,PAGE,include_quarantined], |r| Ok(ReplicaEnvelopeId {
             writer:r.get(0)?,sequence:r.get(1)?,hash:r.get(2)?,
         }))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -663,6 +797,256 @@ fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> 
 mod tests {
     use super::*;
     use crate::backup;
+    use std::path::PathBuf;
+
+    // Closing the last writer does not guarantee that read-only pooled connections
+    // removed its WAL. Prepare a genuinely stopped, checkpointed fixture explicitly.
+    fn checkpoint_offline_fixture(path: &Path) {
+        let blob = PathBuf::from(smallclaims::store::blob_file::location(path));
+        for database in [path, blob.as_path()] {
+            let connection = Connection::open(database).unwrap();
+            let busy: u64 = connection.query_row(
+                "PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(busy, 0, "fixture checkpoint is busy: {}", database.display());
+            connection.close().unwrap();
+            let wal = sidecar(database, "-wal");
+            if wal.exists() {
+                assert_eq!(fs::metadata(&wal).unwrap().len(), 0, "fixture WAL must be fully checkpointed");
+                fs::remove_file(wal).unwrap();
+            }
+            let shm = sidecar(database, "-shm");
+            if shm.exists() {
+                fs::remove_file(shm).unwrap();
+            }
+        }
+    }
+
+    fn offline_fixture(path: &Path, seal: bool) {
+        let source = Store::open(path, "alder").unwrap();
+        diagnostic(&source, "offline-source");
+        if seal {
+            source.write_backup(&mut Vec::new()).unwrap();
+        }
+        drop(source);
+        let connection = Connection::open(path).unwrap();
+        connection.execute(
+            "INSERT INTO meta(key,value) VALUES('local_node_writer','alder')", [],
+        ).unwrap();
+        connection.close().unwrap();
+        checkpoint_offline_fixture(path);
+    }
+
+    // Include every filename (directories too) and every file's content digest, including
+    // absent/present WAL and SHM sidecars and the separately attached blob databases.
+    fn source_snapshot(directory: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+            for entry in fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                if path.is_dir() {
+                    files.insert(relative, None);
+                    visit(root, &path, files);
+                } else {
+                    files.insert(relative, Some(Sha256::digest(fs::read(&path).unwrap()).to_vec()));
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        visit(directory, directory, &mut files);
+        files
+    }
+
+    fn sidecar(database: &Path, suffix: &str) -> PathBuf {
+        let mut path = database.as_os_str().to_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
+    fn offline_shard(directory: &Path) -> PathBuf {
+        let path = super::super::backup_shards::database_path(directory).unwrap();
+        let shard = GraphStore::open(
+            &path, "alder",
+            Arc::new(super::super::messages_shard::MessagesRuntime::default()),
+        ).unwrap();
+        shard.connection.write().execute(
+            "INSERT INTO stream_lifecycle(subject,kind,actor,fields,recorded_at_unix_ms)
+             VALUES('message/offline','message.read','agent/reader','{}',1)", [],
+        ).unwrap();
+        drop(shard);
+        checkpoint_offline_fixture(&path);
+        path
+    }
+
+    #[test]
+    fn offline_export_preserves_all_files_with_present_and_absent_sidecars() {
+        for present in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().join("source ?#%");
+            fs::create_dir(&directory).unwrap();
+            let database = directory.join("claims ?#%.sqlite3");
+            offline_fixture(&database, true);
+            let shard = offline_shard(&directory);
+            for path in [&database, &shard] {
+                let blob = PathBuf::from(smallclaims::store::blob_file::location(path));
+                for database in [path.as_path(), blob.as_path()] {
+                    assert!(!sidecar(database, "-wal").exists());
+                    assert!(!sidecar(database, "-shm").exists());
+                    if present {
+                        fs::write(sidecar(database, "-wal"), []).unwrap();
+                        fs::write(sidecar(database, "-shm"), b"must remain byte-for-byte unchanged").unwrap();
+                    }
+                }
+            }
+            let before = source_snapshot(&directory);
+            let source = Store::open_backup_read_only(&database).unwrap();
+            assert_eq!(source_snapshot(&directory), before);
+            // Force the pool to open another physical reader, not just reuse its first one.
+            let first = source.readers.get();
+            let second = source.readers.get();
+            drop((first, second));
+            let mut output = Vec::new();
+            let header = source.write_backup_read_only(&mut output, None).unwrap();
+            assert!(header.shards.contains_key(super::super::messages_shard::SHARD_ID));
+            assert_eq!(source_snapshot(&directory), before);
+            drop(source);
+            assert_eq!(source_snapshot(&directory), before);
+        }
+    }
+
+    #[test]
+    fn offline_open_refuses_nonempty_graph_and_shard_wals_without_changing_source() {
+        for shard_wal in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let database = root.path().join("claims.sqlite3");
+            offline_fixture(&database, true);
+            let shard = offline_shard(root.path());
+            let target = if shard_wal { &shard } else { &database };
+            let writer = Connection::open(target).unwrap();
+            writer.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA wal_autocheckpoint=0;
+                 INSERT INTO meta(key,value) VALUES('offline_wal_test','uncheckpointed');",
+            ).unwrap();
+            assert!(fs::metadata(sidecar(target, "-wal")).unwrap().len() > 0);
+            let before = source_snapshot(root.path());
+            let error = Store::open_backup_read_only(&database).err().unwrap();
+            let message = format!("{error:#}");
+            assert!(message.contains("nonempty WAL"), "{message}");
+            assert!(message.contains("cleanly stopped and checkpointed"), "{message}");
+            assert!(message.contains(&sidecar(target, "-wal").display().to_string()), "{message}");
+            assert_eq!(source_snapshot(root.path()), before);
+            drop(writer);
+        }
+    }
+
+    #[test]
+    fn offline_export_preserves_source_bytes_and_round_trips() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, true);
+        let before = Sha256::digest(fs::read(&database).unwrap());
+        let source = Store::open_backup_read_only(&database).unwrap();
+        assert!(source.connection.thread.lock().unwrap().is_none());
+        assert!(source.connection.jobs.lock().unwrap().is_none());
+        let archive = root.path().join("offline.jsonl");
+        let header = source.write_backup_read_only(
+            &mut fs::File::create(&archive).unwrap(), None,
+        ).unwrap();
+        assert_eq!(header.source.as_ref().unwrap().writer_id, "alder");
+        assert!(header.source.as_ref().unwrap().max_store_index > 0);
+        drop(source);
+        assert_eq!(Sha256::digest(fs::read(&database).unwrap()), before);
+        let restored = root.path().join("restored.sqlite3");
+        let report = backup::restore(&archive, &restored, root.path()).unwrap();
+        assert!(report.projections_match);
+        let restored = Store::open(&restored, &report.writer).unwrap();
+        assert_eq!(restored.backup_header().unwrap().graph_digest, header.graph_digest);
+    }
+
+    #[test]
+    fn offline_export_refuses_unsealed_history_without_writing_output() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, false);
+        let before = Sha256::digest(fs::read(&database).unwrap());
+        let source = Store::open_backup_read_only(&database).unwrap();
+        let mut output = Vec::new();
+        let error = source.write_backup_read_only(&mut output, None).unwrap_err();
+        assert!(error.to_string().contains("unsealed history"), "{error:#}");
+        assert!(output.is_empty());
+        drop(source);
+        assert_eq!(Sha256::digest(fs::read(&database).unwrap()), before);
+    }
+
+    #[test]
+    fn offline_open_refuses_schema_migration_without_changing_source() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, true);
+        let connection = Connection::open(&database).unwrap();
+        connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION - 1).unwrap();
+        drop(connection);
+        let before = Sha256::digest(fs::read(&database).unwrap());
+        let error = Store::open_backup_read_only(&database).err().unwrap();
+        assert!(error.to_string().contains(&format!("requires schema version {CURRENT_SCHEMA_VERSION}")), "{error:#}");
+        assert_eq!(Sha256::digest(fs::read(&database).unwrap()), before);
+    }
+
+    #[test]
+    fn offline_open_refuses_missing_or_conflicting_writer_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, true);
+        let connection = Connection::open(&database).unwrap();
+        connection.execute("DELETE FROM meta WHERE key='local_node_writer'", []).unwrap();
+        drop(connection);
+        let error = Store::open_backup_read_only(&database).err().unwrap();
+        assert!(error.to_string().contains("persisted local writer identity"), "{error:#}");
+        let connection = Connection::open(&database).unwrap();
+        connection.execute_batch(
+            "INSERT INTO meta(key,value) VALUES('local_node_writer','alder');
+             INSERT INTO meta(key,value) VALUES('backup_restore_writer','birch');",
+        ).unwrap();
+        drop(connection);
+        let error = Store::open_backup_read_only(&database).err().unwrap();
+        assert!(error.to_string().contains("ambiguous persisted writer identity"), "{error:#}");
+    }
+
+    #[test]
+    fn offline_export_reads_existing_shard_without_changing_its_database() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        offline_fixture(&database, true);
+        let shard_path = offline_shard(root.path());
+        let before = Sha256::digest(fs::read(&shard_path).unwrap());
+        let source = Store::open_backup_read_only(&database).unwrap();
+        let mut output = Vec::new();
+        let header = source.write_backup_read_only(&mut output, None).unwrap();
+        assert!(header.shards.contains_key(super::super::messages_shard::SHARD_ID));
+        assert_eq!(Sha256::digest(fs::read(&shard_path).unwrap()), before);
+    }
+
+    /// Bind `store`, make it trim, and give it twelve observations of one observer: the newest
+    /// stays, and its trim drops the rest.
+    fn trimming(store: &Store) {
+        store.bind_fleet("test-fleet").unwrap();
+        store.import_retired_identities_paced(|_| {}).unwrap();
+        store.trim_locally(true).unwrap();
+        for index in 0..12 {
+            store
+                .append_as_older_build_for_test(&ClaimInput {
+                    subject: "observer/backup-test".into(),
+                    kind: "observer.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([("status".into(), json!(["ok", "changed"][index % 2]))]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+    }
 
     fn diagnostic(store: &Store, reason: &str) {
         store
@@ -726,6 +1110,56 @@ mod tests {
         let error = error.downcast_ref::<FractalError>().unwrap();
         assert_eq!(error.code, "invalid-desired-cursor",
             "a new restore writer must reject old cursors regardless of generation");
+    }
+
+    /// A member that released envelopes archives their claims as signed envelopes, at the
+    /// version that declares them, and the archive restores to the same claims, identities and
+    /// projections. An archive with none keeps the earlier version and restores as before.
+    #[test]
+    fn an_archive_carries_released_envelopes_as_signed_claims_and_restores_the_same_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        source.bind_fleet("archive-fleet").unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor("archive-fleet", key.public(), "listening").unwrap();
+        for n in 0..12 {
+            diagnostic(&source, &format!("released-{n}"));
+        }
+        source.replication_snapshot().unwrap();
+        while !source.sign_own_claims().unwrap().done {}
+        let unreleased = root.path().join("unreleased.backup");
+        let header = archive(&source, &unreleased);
+        assert!(header.version < super::super::backup_format::VERSION_WITH_SIGNED_CLAIMS);
+        assert!(backup::restore(&unreleased, &root.path().join("unreleased.db"), root.path()).unwrap().projections_match);
+
+        while !source.release_envelopes(0).unwrap().done {}
+        assert!(source.released_envelopes().unwrap() > 5);
+        let path = root.path().join("released.backup");
+        let header = archive(&source, &path);
+        assert_eq!(header.version, super::super::backup_format::VERSION_WITH_SIGNED_CLAIMS);
+        let destination = root.path().join("restored.db");
+        let report = backup::restore(&path, &destination, root.path()).unwrap();
+        assert!(report.projections_match);
+        assert_eq!(report.log_digest, header.log_digest);
+        let restored = Store::open(&destination, &report.writer).unwrap();
+        let claims = |store: &Store| -> Vec<String> {
+            store.readers.get().prepare("SELECT id FROM claims ORDER BY id").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        let released = |store: &Store| -> Vec<(String, u64, String)> {
+            store.readers.get().prepare("SELECT writer, sequence, envelope_hash FROM released_envelopes ORDER BY 1, 2, 3").unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(claims(&restored), claims(&source));
+        assert_eq!(released(&restored), released(&source));
+        assert_eq!(
+            restored.replication_snapshot().unwrap().authority_digest,
+            source.replication_snapshot().unwrap().authority_digest
+        );
+        assert_eq!(restored.backup_header().unwrap().tables, source.backup_header().unwrap().tables);
     }
 
     #[test]
@@ -1389,18 +1823,13 @@ mod tests {
     }
 
     #[test]
-    fn a_trimmed_backup_restores_verified_tombstones_and_the_same_inventory() {
+    fn a_trimmed_backup_restores_its_tombstones_and_the_same_inventory() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open(&root.path().join("source.db"), "alder").unwrap();
-        source.bind_fleet("test-fleet").unwrap();
-        for index in 0..12 {
-            diagnostic(&source, &format!("note-{index}"));
-        }
+        trimming(&source);
         let context = CheckpointContext {
             now_unix_ms: now_ms() + 3 * 86_400_000,
-            configured_peers: vec![],
             scratch: root.path().join("scratch"),
-            reviewer: "person/operator".into(),
         };
         for _ in 0..3 {
             source.checkpoint_step(&context).unwrap();
@@ -1409,7 +1838,7 @@ mod tests {
         assert!(source.checkpointed_envelopes().unwrap() > 0);
         assert_eq!(
             source
-                .restore_checkpoint_history(&CheckpointManifest::default())
+                .restore_checkpoint_history(&CheckpointManifest::default(), true)
                 .unwrap_err()
                 .code,
             "checkpoint-history-exists"
@@ -1434,19 +1863,14 @@ mod tests {
     fn a_backup_during_an_interrupted_trim_preserves_the_complete_log() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open_memory("alder").unwrap();
-        source.bind_fleet("test-fleet").unwrap();
-        for index in 0..12 {
-            diagnostic(&source, &format!("note-{index}"));
-        }
+        trimming(&source);
         let context = CheckpointContext {
             now_unix_ms: now_ms() + 3 * 86_400_000,
-            configured_peers: vec![],
             scratch: root.path().join("scratch"),
-            reviewer: "person/operator".into(),
         };
-        for _ in 0..2 {
-            source.checkpoint_step(&context).unwrap();
-        }
+        // The first chunk deletes some of the cut and the trim stops there: the source has
+        // retired only what it deleted, and its archive restores exactly that ledger.
+        source.set_trim_chunk_envelopes(3);
         source.set_trim_fault(Some(TrimFault::AfterChunk(1)));
         assert!(source.checkpoint_step(&context).is_err());
         assert!(source.trimmed_checkpoint().unwrap().is_none());
@@ -1459,40 +1883,23 @@ mod tests {
     }
 
     #[test]
-    fn a_backup_keeps_trimmed_history_when_a_newer_certificate_is_not_applied_yet() {
+    fn a_backup_keeps_trimmed_history_while_a_newer_cut_waits() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open_memory("alder").unwrap();
-        source.bind_fleet("test-fleet").unwrap();
-        for index in 0..12 {
-            diagnostic(&source, &format!("note-{index}"));
-        }
+        trimming(&source);
         let mut context = CheckpointContext {
             now_unix_ms: now_ms() + 3 * 86_400_000,
-            configured_peers: vec![],
             scratch: root.path().join("scratch"),
-            reviewer: "person/operator".into(),
         };
-        for _ in 0..3 {
-            source.checkpoint_step(&context).unwrap();
-        }
+        source.checkpoint_step(&context).unwrap();
         let applied = source.trimmed_checkpoint().unwrap().unwrap();
         diagnostic(&source, "after the first trim");
+        // The next day's cut has no claims left to delete today, so it waits unrecorded.
         context.now_unix_ms += 86_400_000;
-        for _ in 0..2 {
-            source.checkpoint_step(&context).unwrap();
-        }
+        source.trim_locally_at_most(0);
+        source.checkpoint_step(&context).unwrap();
         assert_eq!(source.trimmed_checkpoint().unwrap().unwrap(), applied);
-        assert!(
-            source
-                .checkpoint_status(context.now_unix_ms, &context.configured_peers)
-                .unwrap()
-                .newest_stable
-                .unwrap()
-                .terms
-                .cut_unix_ms
-                > applied.cut_unix_ms
-        );
-        let path = root.path().join("certified.jsonl");
+        let path = root.path().join("waiting.jsonl");
         let header = archive(&source, &path);
         let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(report.log_digest, header.log_digest);
@@ -1501,15 +1908,10 @@ mod tests {
 
     fn trimmed_source(root: &Path) -> Store {
         let source = Store::open(&root.join("source.db"), "alder").unwrap();
-        source.bind_fleet("test-fleet").unwrap();
-        for index in 0..12 {
-            diagnostic(&source, &format!("note-{index}"));
-        }
+        trimming(&source);
         let context = CheckpointContext {
             now_unix_ms: now_ms() + 3 * 86_400_000,
-            configured_peers: vec![],
             scratch: root.join("scratch"),
-            reviewer: "person/operator".into(),
         };
         for _ in 0..3 {
             source.checkpoint_step(&context).unwrap();
@@ -1857,9 +2259,9 @@ mod tests {
                     header.shards.insert("notes".into(), digest);
                 }
             })),
-            ("unsupported claim backup format/version: \"st3.claim-backup\" version 7", Box::new(|records| {
+            ("unsupported claim backup format/version: \"st3.claim-backup\" version 8", Box::new(|records| {
                 if let Record::Header(header) = &mut records[0] {
-                    header.version = 7;
+                    header.version = super::super::backup_format::VERSION_WITH_SIGNED_CLAIMS + 1;
                 }
             })),
         ];
@@ -2361,17 +2763,14 @@ mod tests {
         }
 
         #[test]
-        fn certified_trim_and_ingest_during_export_preserve_the_old_complete_cut() {
+        fn a_trim_and_ingest_during_export_preserve_the_old_complete_cut() {
             let root = tempfile::tempdir().unwrap();
             let source = Arc::new(Store::open(&root.path().join("source.db"), "alder").unwrap());
-            source.bind_fleet("test-fleet").unwrap();
-            for index in 0..12 { diagnostic(&source, &format!("note-{index}")); }
+            trimming(&source);
             let context = CheckpointContext {
                 now_unix_ms: now_ms() + 3 * 86_400_000,
-                configured_peers: vec![], scratch: root.path().join("scratch"),
-                reviewer: "person/operator".into(),
+                scratch: root.path().join("scratch"),
             };
-            for _ in 0..2 { source.checkpoint_step(&context).unwrap(); }
             struct TrimDuringBackup {
                 source: Arc<Store>, context: CheckpointContext, bytes: Vec<u8>, ran: bool,
             }

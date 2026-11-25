@@ -121,8 +121,8 @@ mod tests {
     }
 
     #[test]
-    fn storage_23_upgrade_preserves_existing_history_and_pairing_admission() {
-        for previous in [20_u32, 21, 22] {
+    fn storage_28_upgrade_preserves_existing_history_and_pairing_admission() {
+        for previous in [20_u32, 21, 22, 25, 26, 27] {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("claims.sqlite3");
         let store = Store::open(&path, "upgrade").unwrap();
@@ -148,7 +148,7 @@ mod tests {
         // This does not manufacture trust for an ambiguous old pairing record.
         Connection::open(&path).unwrap().pragma_update(None,"user_version",previous).unwrap();
         let upgraded = Store::open(&path,"upgrade").unwrap();
-        assert_eq!(upgraded.readers.get().pragma_query_value(None,"user_version",|row|row.get::<_,u32>(0)).unwrap(),23);
+        assert_eq!(upgraded.readers.get().pragma_query_value(None,"user_version",|row|row.get::<_,u32>(0)).unwrap(),28);
         for original in [&message, &paired] {
             let retained = upgraded.graph.claim_by_id(&original.id).unwrap().unwrap();
             assert_eq!(retained.body, original.body);
@@ -161,11 +161,27 @@ mod tests {
     }
 
     #[test]
+    fn preview_privacy_storage_versions_are_refused_without_relabeling() {
+        for previous in [23_u32, 24] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("claims.sqlite3");
+            drop(Store::open(&path, "preview").unwrap());
+            let connection = Connection::open(&path).unwrap();
+            connection.pragma_update(None, "user_version", previous).unwrap();
+            drop(connection);
+            let error = Store::open(&path, "preview").err().expect("unsupported preview");
+            assert!(error.to_string().contains("unsupported st schema version"), "{error}");
+            let connection = Connection::open(&path).unwrap();
+            assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), previous);
+        }
+    }
+
+    #[test]
     fn privacy_floor_activates_reference_writers_only_for_application_stores() {
         use smallclaims::fleet::MemberKey;
         use smallclaims::principal::Verdict;
 
-        for previous in [None, Some(20_u32), Some(21), Some(22)] {
+        for previous in [None, Some(20_u32), Some(21), Some(22), Some(25), Some(26), Some(27)] {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("claims.sqlite3");
             if let Some(previous) = previous {
@@ -184,11 +200,11 @@ mod tests {
             let version = store.readers.get().pragma_query_value(
                 None, "user_version", |row| row.get::<_, u32>(0),
             ).unwrap();
-            assert_eq!(version, 23);
-            // This is the shipped main reader's version guard (max22), not the
-            // current reader's max23 guard. It must refuse this application DB.
-            assert!((10..=22).contains(&20));
-            assert!(!(10..=22).contains(&version));
+            assert_eq!(version, 28);
+            // Every pre-privacy reader, including main's max27 build, refuses
+            // this application DB before reading private thread data.
+            assert!((10..=27).contains(&20));
+            assert!(!(10..=27).contains(&version));
 
             store.graph.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
             let message = store.append_claim(&ClaimInput {

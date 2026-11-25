@@ -323,26 +323,38 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         }
         return run_st2_native_driver(client, subject, &args.driver, argv, paths).await;
     }
+    if args.driver == "exec" {
+        fractal_runtime::payload_receipt::publish_from_environment(
+            fractal_runtime::payload_receipt::PayloadState::Running)?;
+    }
     let (program, arguments) = args.argv.split_first().context("driver argv is empty")?;
     let mut child = tokio::process::Command::new(program)
         .args(arguments)
+        .env_remove(fractal_runtime::payload_receipt::PATH_ENV)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
         .with_context(|| format!("start {} provider", args.driver))?;
     let status = child.wait().await?;
+    // Capture the payload edge before retrying delivery to a restarting daemon.
+    let exec_exited_at_unix_ms = now_ms() as u64;
+    if args.driver == "exec" {
+        fractal_runtime::payload_receipt::publish_from_environment(
+            fractal_runtime::payload_receipt::PayloadState::Exited { at_unix_ms: exec_exited_at_unix_ms })?;
+    }
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt as _;
         status.signal()
     };
-    let exit = ClaimInput {
+    let mut exit = ClaimInput {
         subject: subject.into(),
         kind: "runtime.observed".into(),
         actor: Some(subject.into()),
         fields: BTreeMap::from([
             ("status".into(), Value::String("exited".into())),
+            ("exec_exited_at_unix_ms".into(), Value::from(exec_exited_at_unix_ms)),
             (
                 "exit_code".into(),
                 status.code().map(Value::from).unwrap_or(Value::Null),
@@ -356,6 +368,9 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         expected_subject: None,
         idempotency_key: None,
     };
+    if let Ok(operation) = std::env::var("ST3_START_OPERATION") {
+        exit.fields.insert("start_operation".into(), Value::from(operation));
+    }
     // A provider that exits while the daemon restarts still reports its own exit status.
     let _: ClaimRecord =
         retry_while_daemon_unreachable(subject, || client.post("/v1/claims", &exit)).await?;
@@ -537,6 +552,7 @@ async fn run_st2_native_driver(
     let loop_state = NativeLoopState {
         paths: Some(paths.resolved()),
         predecessor_harness_record: fs::read(&harness_state_path).ok(),
+        provider_started_at_ms: fractal_drivers::subagents::now_ms(),
         ..NativeLoopState::default()
     };
     let task = spawn_st3_provider(
@@ -882,7 +898,7 @@ async fn drive_st2_native_loop(
             driver,
             &incarnation,
             &agent_dir,
-            fractal_drivers::subagents::now_ms(),
+            loop_state.provider_started_at_ms,
         )
     });
     let mut completion_announced = false;
@@ -1219,7 +1235,7 @@ async fn drive_st2_native_loop(
                                 loop_state.ready = true;
                             }
                             publish_harness_activity(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 if driver == "claude" {
@@ -1256,7 +1272,7 @@ async fn drive_st2_native_loop(
                             if let Some(context) = fractal_drivers::harness_context::read(
                                 &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 &incarnation,
@@ -1265,7 +1281,7 @@ async fn drive_st2_native_loop(
                             )
                             .await?;
                             publish_harness_limits(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 &incarnation,
@@ -1420,7 +1436,7 @@ async fn publish_harness_timeline(
         // fields here; the client projection joins the exact desired owner run/generation/step at
         // its snapshot index and overwrites attribution on every explicit usage entry.
         let claim = native_timeline_claim(client, subject, incarnation, operation).await?;
-        let _: ClaimRecord = ObservationClient { client, event: None }
+        let _: ClaimRecord = ObservationClient { client, event: None, source_runtime: None }
             .post(
                 "/v1/claims",
                 &claim,
@@ -2616,6 +2632,9 @@ async fn drive_codex_native_loop(
     ))
         .then(|| codex_continued_thread(&argv))
         .flatten();
+    if matches!(start, ProviderStart::Launch(..)) {
+        loop_state.provider_started_at_ms = fractal_drivers::subagents::now_ms();
+    }
     let task = task.insert(spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start));
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
@@ -2624,7 +2643,7 @@ async fn drive_codex_native_loop(
         "codex",
         &incarnation,
         &agent_dir,
-        fractal_drivers::subagents::now_ms(),
+        loop_state.provider_started_at_ms,
     );
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2887,7 +2906,7 @@ async fn drive_codex_native_loop(
                         .flatten()
                     {
                         publish_harness_activity(
-                            &ObservationClient { client, event: None },
+                            &ObservationClient { client, event: None, source_runtime: None },
                             subject,
                             "codex",
                             "app-server",
@@ -2923,7 +2942,7 @@ async fn drive_codex_native_loop(
                     if let Some(context) = fractal_drivers::harness_context::read(
                         &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
-                        &ObservationClient { client, event: None },
+                        &ObservationClient { client, event: None, source_runtime: None },
                         subject,
                         "codex",
                         &incarnation,
@@ -2932,7 +2951,7 @@ async fn drive_codex_native_loop(
                     )
                     .await?;
                     publish_harness_limits(
-                        &ObservationClient { client, event: None },
+                        &ObservationClient { client, event: None, source_runtime: None },
                         subject,
                         "codex",
                         &incarnation,

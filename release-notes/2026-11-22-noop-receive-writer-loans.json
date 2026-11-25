@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Unchanged empty replication receipts and settled first-sync observations check committed state on readers before borrowing the SQLite writer. Changed receipts and due freshness checkpoints still recheck and write under the writer.",
+  "replay": {"status": "none", "detail": "Envelope and signature admission are unchanged."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "No authority or rule changes."},
+  "compatibility": {"status": "none", "detail": "Wire contracts, exact process-local last-seen times and the existing 17.5-second receipt checkpoint interval are unchanged."},
+  "downtime": {"status": "none", "detail": "Normal deployment; no migration downtime."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Persisted checkpoints and restart behavior are unchanged. Concurrent durable changes invalidate process-local extensions of older checkpoints."}
+}

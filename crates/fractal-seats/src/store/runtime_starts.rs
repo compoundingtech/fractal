@@ -376,6 +376,8 @@ pub trait RuntimeStartsStore {
             limit: usize,
         ) -> Result<RuntimeStartAdmission>;
     fn dispatch_runtime_start(&self, id: &str, limit: usize) -> Result<bool>;
+    /// Advance the dispatch fence durably before invoking any runtime backend.
+    fn enter_runtime_start_backend(&self, id: &str, owner: &str) -> Result<()>;
     /// Transfer a never-dispatched durable operation to the current daemon before dispatch.
     fn adopt_queued_runtime_start(&self, id: &str, owner: &str) -> Result<bool>;
     fn runtime_start_failure(&self, subject: &str) -> Result<Option<String>>;
@@ -1001,7 +1003,24 @@ impl RuntimeStartsStore for Store {
             }
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
-            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-ha2a0e9b6e6e1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1 WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h9cfcb3ca5088 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,body=json_set(body,'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','before-backend')) WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+        }).map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
+    fn enter_runtime_start_backend(&self, id: &str, owner: &str) -> Result<()> {
+        self.connection.batched(|tx| -> Result<()> {
+            let changed = tx.execute(
+                /* sqlite-large-value: allow-for-now lv-h32881e5b0f45 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE local_runtime_starts SET body=json_set(body,'$.backend_entry.phase','backend-entering')
+                 WHERE id=?1 AND owner=?2 AND dispatched=1 AND finished=0 AND revoked_by IS NULL
+                   AND json_extract(body,'$.backend_entry.version')=1
+                   AND json_extract(body,'$.backend_entry.operation')=id
+                   AND json_extract(body,'$.backend_entry.owner')=owner
+                   AND json_extract(body,'$.backend_entry.phase')='before-backend'",
+                params![id, owner],
+            )?;
+            anyhow::ensure!(changed == 1, "runtime backend entry fence was rejected");
+            Ok(())
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
@@ -2826,8 +2845,8 @@ mission "launch-publication" state="ready" {
             connection.execute("UPDATE claim_signatures SET signature=(SELECT signature FROM claim_signature_originals o WHERE o.claim_id=claim_signatures.claim_id AND o.reference=claim_signatures.signature) WHERE typeof(signature)='blob'", []).unwrap();
             connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
             connection.execute_batch("DROP VIEW claim_verdict_dependency_links; DROP TABLE claim_verdict_dependency_edges; DROP TABLE claim_verdict_dependency_keys;").unwrap();
-            connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
-                DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
+            connection.execute_batch("DROP TRIGGER claim_verdict_queue_marks_pruned; DROP TRIGGER claim_verdict_batch_arrived; DROP TRIGGER claim_verdict_claim_arrived; DROP TABLE claim_batch_disorder; DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
+                DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX IF EXISTS claim_candidate_verdict_links_claim_index;
                 CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);
                 CREATE INDEX claim_verdict_links_claim_index ON claim_verdict_links(claim_id);
                 CREATE INDEX claim_signatures_nonce_index ON claim_signatures(key,nonce); PRAGMA user_version=19;").unwrap();

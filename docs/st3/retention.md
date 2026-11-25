@@ -6,11 +6,10 @@ registered claim kind once, with its class, where its writes go and, for a trans
 It also holds the checkpoint rules, in order: which claims of a kind a checkpoint may drop.
 
 The daemon reads the policy when it builds the schema registry (`fractal_schema::retention`). It is
-compiled into the build rather than read from a node's configuration, because every member of a
-fleet must apply the same rules: the rules render the rules description, whose hash is the
-`rules_digest` in every checkpoint seal. A member that runs different rules seals different terms
-and the checkpoint waits for it, so no member drops a claim its peers keep. See
-[Checkpoints and trimming](checkpoints.md) for the agreement, the proof and the trim.
+compiled into the build rather than read from a node's configuration, so a rule changes only with
+an audited build. The rules render the rules description, whose hash is the `rules_digest`. Each
+member trims its own copy with its own build's rules. See
+[Checkpoints and trimming](checkpoints.md) for the rules, the checks and the trim.
 
 ## Inactive lossless claim archive readers
 
@@ -46,6 +45,27 @@ the exported claim count. Nonces, signatures and idempotency remain authoritativ
 | `otel` | observation series: usage samples, latency, readings over time | history goes to OpenTelemetry through `[observations.otlp]`; the graph keeps the latest of each slot |
 
 A person's claim of any kind is durable, whatever its class: the planner never drops one.
+
+Graph mail is the exception to `durable` on a member that trims locally and opts in (`[trim] local`
+and `[trim] mail = true`). There, a closed agent or daemon thread retires a week after it closes: all
+its `message.*` claims are deleted and their IDs join the retired set
+(`crates/fractal-store/src/store/mail_retirement.rs`). Person threads (from or to a `person/`)
+and any thread another claim cites are kept forever. The rule reads only the claims, so every such
+member retires the same threads without coordination, and a retired ID is never sent back. A
+thread whose closed claim arrived before its sent claim waits on a short list and is judged again
+once the sent claim is there. A citation that reaches one member before it judges a thread and
+another only after it retired it leaves the two apart: the first keeps its copy until set exchange
+applies a peer's retired set to it (the retired set wins there; today the claim range comparison
+only shows the difference). Off unless `[trim] mail = true`, until the owner decides whether it becomes the default for such members; retired mail
+does not come back on a rollback. Each
+writer hold deletes for at most 40 ms and rests four times as long; the pages go back as below.
+Retirement and free-page commits run at `synchronous=NORMAL` with no checkpoint inside the commit,
+and put both back afterwards, on error too: on a busy host the fsync took most of a hold, and a
+crash before the writer's next ordinary commit loses only steps the next pass redoes. Before each
+hold a reader reads the signature and replica rows the hold will delete, so it finds them cached.
+Escalation notifications tagged `mission-escalation-v1` also stay: their native delivery receipts
+are permanent episode-stage deduplication authority, including after later ladder deadlines or restarts.
+Mail in the messages shard is not touched.
 
 ## Where writes go
 
@@ -120,14 +140,15 @@ Changing a class, a window or a `pending` reason changes nothing a checkpoint do
 rule does, and changes the rules digest:
 
 1. List every reader of the kind and give each kept claim a reason in terms of a reader's answer.
-   If the checkpoint proof's reader answers (`subject_answers` in `checkpoint_rules.rs`) do not
-   cover the new reader, add it, so a rule that changes an answer fails the proof.
+   If the reader answers the daily answers check compares (`subject_answers` in
+   `checkpoint_rules.rs`) do not cover the new reader, add it, so a rule that changes an answer
+   shows as a difference between members. A kind is dropped only once it is in `LOCAL_TRIM_KINDS`
+   with a test that every reader answers the same from the full and the trimmed log.
 2. Bump `RULES_VERSION` and say why in its comment.
 3. Add a test in `crates/fractal-store/src/store/checkpoint_tests.rs` that names the dropped and the kept
    claims.
 4. Measure it on a copy of a real store (below), never on a live one.
-5. Deploy it to every member. Until every participant runs the same rules, checkpoints wait at
-   sealing; replication and ordinary work go on.
+5. Deploy it. Each member applies it from its next daily cut; members do not wait for each other.
 
 ## Measuring a change
 
@@ -152,7 +173,7 @@ UNKNOWN conflict states. Ordinary mission and active fix history retain their ow
 
 A trim or an expiry deletes rows, and SQLite keeps their pages as free pages inside the file. A
 store made with incremental auto-vacuum gives them back: the hourly retention pass releases free
-pages 512 at a time (2 MiB), one short write each, so other writes run between them. A new store
+pages 128 at a time (512 KiB), one short write each, so other writes run between them. A new store
 is made that way.
 
 A store made before then has auto-vacuum off: the file never shrinks, whatever the trims free. One
@@ -166,3 +187,46 @@ python3 -c 'import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("PR
 The VACUUM also gives back every page already free, so run it after the trims have caught up.
 `PRAGMA auto_vacuum` then answers 2, and from then on the hourly pass keeps the file close to its
 pages in use.
+
+## Retention passes
+
+Each member runs these passes on its own copy. `fractal replication status` prints one line per
+pass, and `--json` gives them under `retention`. Counts since start cover the running daemon only.
+The status reads a few `meta` keys, the newest rows of the `checkpoints` ledger (one row per daily
+cut) and the first or last rowid of a table. It never counts the rows of a large table.
+
+- **Checkpoint trim.** Each daily cut is trimmed under the rules and budget in
+  [Checkpoints and trimming](checkpoints.md#the-trim-budget). The status shows the newest cut, its
+  state, and the envelopes and claims its plan made eligible. It also shows the claims deleted
+  today against `[trim] daily_claims`, plus what the last pass deleted, deferred or set aside, how
+  it ended and why it stopped. The deleted counts are what the pass's committed chunks deleted,
+  and the finished cuts are those it finished before it ended, so both hold even when the pass
+  ends early. The pass ends `complete`, `partial` (it left a cut unfinished: deferred, halted or
+  set aside, whether or not it had deleted anything) or `failed` (it returned an error). It
+  stopped for one of these reasons:
+  - `catching_up`: replication is catching up with a peer.
+  - `disabled`: `[trim] local` is off.
+  - `halted_cut`: a trim stopped because the graph would change, and waits for
+    `fractal replication checkpoint resume`.
+  - `unfinished_cut`: an earlier cut is still `trimming`.
+  - `daily_cap`: the day's paced allowance is spent.
+  - `wal_restart`: the trim stopped to restart the WAL.
+  - `graph_changed`: this pass halted a cut.
+  - `nothing_due`: every due cut is trimmed.
+- **Valid record bytes.** A valid replica record keeps an empty `raw`. This pass empties the bytes
+  earlier builds kept, a bounded page at a time, and the pages go back as described in
+  [Giving space back](#giving-space-back). The status shows the pass's cursor against the newest
+  record.
+- **Settled judging rows.** A settled signature judgment drops its `claim_signature_judging` row.
+  Once the signature migration is done, a paced prune drops the rows that earlier releases kept.
+  The status shows its cursor: not started, the last claim it passed, or `done`. See the
+  table list in [Fractal data authority](data-authority.md#retention-and-local-observations).
+- **Legacy receipts.** Receipts stored before expiry was recorded sit at or below
+  `idempotency_legacy_rowid`. The cleanup treats them as due. It deletes a receipt when no live work
+  uses it and either the operation it answered is recorded in a claim or a checkpoint tombstone, or
+  a retry may simply repeat it. Any other receipt gets a new expiry and moves past the boundary. The
+  status shows whether any legacy receipts remain.
+- **Off in this build.** Envelope release and valid-record row deletion do not run, and the status
+  says why for each. Envelope release waits until the claim-set transport can serve a released
+  envelope's claims to a peer that lacks them. Row deletion waits until the signature-reference
+  writer has its own flag.

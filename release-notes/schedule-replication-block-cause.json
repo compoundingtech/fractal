@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The warning for a schedule tick held by replication for 15 minutes now names the admission inputs that can hold it: whether replication admission is healthy, whether the schedule requires complete history, and for each peer whether its bounded-progress fallback counts as progressing, its healthy-exchange streak, and whether its measured member and inventory basis still match",
+  "replay": {"status": "none", "detail": "No claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Only the free-text reason of the existing operational.failure warning gains fields; admission and catch-up decisions are unchanged."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

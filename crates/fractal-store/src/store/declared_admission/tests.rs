@@ -54,6 +54,105 @@ fn peer(store: &Store, anchor: &MemberKey) -> (Store, Arc<MemberKey>) {
 }
 
 #[test]
+fn recovery_observations_require_every_signed_fleet_reader() {
+    use crate::store::resource_membership::{Admission, Coverage, DiskFit, Fit, LaneRequest, Owner};
+    use fractal_runtime::{Capacity, RequestClass};
+    let (store, anchor) = enabled();
+    started(&store, json!({"resource_recovery_observations":1}));
+    store.replication_snapshot().unwrap();
+    let (peer, _) = peer(&store, &anchor);
+    store.start_resource_authority("alder", "epoch").unwrap();
+    let request = LaneRequest {
+        id: "recovery".into(), name: "recovery".into(), host: "alder".into(),
+        max_members: 1, capacity: Some(Capacity { cores: 1, memory: 1024 }),
+        coverage: Coverage::Logical, admission_timeout_ms: None,
+        class: RequestClass::Recovery, disk: None, io: None,
+        profile: None, profile_estimate: None, disk_path: None,
+        owner: Owner { run: "mission-run/recovery".into(), step: "step-run/recovery".into(),
+            attempt: 1, invocation: None },
+    };
+    let fit = Fit { room: request.capacity, recovery_capable: true,
+        disk: Some(DiskFit { filesystem: 1, available: 100, floor: 20 }), ..Fit::default() };
+    for advertisement in [json!({}), json!({"resource_recovery_observations":0})] {
+        started(&peer, advertisement);
+        sync(&peer, &store);
+        let before = store.index().unwrap();
+        let error = store.request_resource_membership(&request, fit.clone(), 1).unwrap_err();
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code,
+            "resource-recovery-feature-barrier");
+        assert_eq!(store.index().unwrap(), before, "no observation or membership may be written");
+    }
+    started(&peer, json!({"resource_recovery_observations":1}));
+    sync(&peer, &store);
+    assert!(matches!(store.request_resource_membership(&request,
+        Fit { held_bytes: 1024, ..fit.clone() }, 2).unwrap(), Admission::Queued { .. }));
+    let mut queued = vec![request.clone()];
+    for index in 0..crate::store::resource_admission_objectives::REPLAY_PAGE_SIZE {
+        let mut extra = request.clone();
+        extra.id = format!("recovery-{index:03}");
+        extra.name = extra.id.clone();
+        assert!(matches!(store.request_resource_membership(&extra,
+            Fit { held_bytes: 1024, ..fit.clone() }, 2).unwrap(), Admission::Queued { .. }));
+        queued.push(extra);
+    }
+    let mut refused = request.clone();
+    refused.id = "refused-recovery".into();
+    refused.name = refused.id.clone();
+    assert!(matches!(store.request_resource_membership(&refused,
+        Fit { recovery_capable: false, ..fit.clone() }, 3).unwrap(), Admission::Refused { .. }));
+    started(&peer, json!({"resource_recovery_observations":0}));
+    sync(&peer, &store);
+    let coverage = || store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::COVERAGE_KIND], None, 0, 1000)
+        .unwrap().claims.last().unwrap().body["fields"]["complete"].clone();
+    assert_eq!(coverage(), true);
+    // No authority restart: withdrawal commits custody but withholds its terminal fact.
+    for (index, member) in queued.iter().enumerate() {
+        store.withdraw_resource_membership(&member.id, &member.owner, 4).unwrap();
+        if index.is_multiple_of(16) {
+            // Continuous withheld traffic during repair must not reset or starve
+            // previously pending IDs. They remain queued until readers recover.
+            assert!(store.replay_resource_admission_observations().unwrap());
+        }
+    }
+    assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().state, "retired");
+    assert_eq!(coverage(), false);
+    assert!(store.fractal.extensions.get::<crate::store::resource_admission_objectives::Coverage>().0
+        .load(std::sync::atomic::Ordering::Acquire), "authority acquisition proof is still live");
+    let observations = || store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::KIND], None, 0, 1000).unwrap().claims;
+    assert_eq!(observations().iter().rfind(|claim| claim.body["fields"]["id"] == request.id)
+        .unwrap().body["fields"]["state"], "queued");
+    assert!(store.replay_resource_admission_observations().unwrap());
+    assert_eq!(coverage(), false, "a tick cannot certify while fleet support is absent");
+    started(&peer, json!({"resource_recovery_observations":1}));
+    sync(&peer, &store);
+    assert_eq!(coverage(), false, "advertisement alone cannot repair stale evidence");
+    // Idle authority maintenance, with no new membership request or restart:
+    // one tick cannot replay more than the configured page.
+    let before = observations().len();
+    let validations = crate::store::resource_admission_objectives::reader_validation_count();
+    assert!(store.replay_resource_admission_observations().unwrap());
+    assert_eq!(crate::store::resource_admission_objectives::reader_validation_count() - validations, 1,
+        "a full replay page must evaluate the fleet-reader barrier once, not once per ID");
+    assert!(observations().len() - before <= crate::store::resource_admission_objectives::REPLAY_PAGE_SIZE);
+    assert_eq!(coverage(), false);
+    assert!(!store.replay_resource_admission_observations().unwrap());
+    assert_eq!(crate::store::resource_admission_objectives::reader_validation_count() - validations, 2,
+        "the final partial page validates its reader snapshot once");
+    assert!(!store.replay_resource_admission_observations().unwrap());
+    assert_eq!(crate::store::resource_admission_objectives::reader_validation_count() - validations, 2,
+        "an idle complete queue must not fold fleet history");
+    let events = observations();
+    let retired = events.iter().rfind(|claim| claim.body["fields"]["id"] == request.id).unwrap();
+    assert_eq!(retired.body["fields"]["state"], "retired");
+    assert_eq!(coverage(), true);
+    let cut = store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::COVERAGE_KIND], None, 0, 1000).unwrap();
+    assert!(retired.store_index < cut.claims.last().unwrap().store_index);
+}
+
+#[test]
 fn absent_declarations_do_not_require_a_feature_barrier() {
     publish(&Store::open_memory("alder").unwrap(), PLAIN, "plain").unwrap();
 }
@@ -421,4 +520,83 @@ fn attention_capability_is_additive_and_anchored() {
     assert_eq!(publish(&store, attention, "unanchored").unwrap_err().code, ERROR);
     sync(&peer, &store);
     publish(&store, attention, "supported").unwrap();
+}
+
+#[test]
+fn escalation_publication_refuses_an_older_reader_until_signed_upgrade() {
+    let (store, anchor) = enabled();
+    started(&store, json!({"mission-escalation-v1":1}));
+    let (peer, _) = peer(&store, &anchor);
+    started(&peer, json!({"declared_admission":1}));
+    sync(&peer, &store);
+    let source = r#"version 2
+mission "escalated" state="ready" {
+ goal "Escalate overdue work."
+ escalation { policy "waiting" state="waiting" clock="since-entered" {
+   stage "1m" notify="agent/example/reporter"
+ } }
+ step "work" { agentless }
+}"#;
+    let before = store.index().unwrap();
+    let error = publish(&store, source, "older-reader").unwrap_err();
+    assert_eq!(error.code, MISSION_ESCALATION.code);
+    assert!(error.message.contains("mission-escalation-v1"));
+    assert_eq!(store.index().unwrap(), before);
+    let intent = crate::graph::parse_intent(source, "alder").unwrap();
+    let mission = serde_json::to_value(&intent.missions["escalated"]).unwrap();
+    for body in [mission.clone(), json!({"fields":{"body":mission}})] {
+        assert_eq!(validate_claim(&store.readers.get(), "alder", "mission.published", &body)
+            .unwrap_err().code, MISSION_ESCALATION.code);
+    }
+    started(&peer, json!({"mission-escalation-v1":1}));
+    assert_eq!(publish(&store, source, "unsigned-upgrade").unwrap_err().code, MISSION_ESCALATION.code);
+    sync(&peer, &store);
+    publish(&store, source, "upgraded-readers").unwrap();
+}
+
+#[test]
+fn ordinary_step_and_input_names_do_not_require_escalation_support() {
+    let source = "version 2\nmission \"ordinary\" state=\"ready\" { goal \"Ordinary names.\"; step \"escalation\" { agentless; } }";
+    let store = Store::open_memory("alder").unwrap();
+    publish(&store, source, "typed").unwrap();
+    let intent = crate::graph::parse_intent(source, "alder").unwrap();
+    let mut mission = serde_json::to_value(&intent.missions["ordinary"]).unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "mission/ordinary".into(), kind: "mission.published".into(),
+        actor: Some("person/example".into()), fields: schema_fields_for_body("mission.published", &mission).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    mission["inputs"] = json!({"escalation":{"type":"text","default":"ordinary"}});
+    for body in [mission.clone(), json!({"fields":{"body":mission}})] {
+        validate_claim(&store.readers.get(), "alder", "mission.published", &body).unwrap();
+    }
+    let (mixed, anchor) = enabled();
+    let (old, _) = peer(&mixed, &anchor);
+    started(&old, json!({"declared_admission":1}));
+    sync(&old, &mixed);
+    let ordinary = json!({"steps":{"escalation":{"escalation":{"_tag":"inherit"}}},"inputs":{"escalation":{}}});
+    validate_claim(&mixed.readers.get(), "alder", "mission.published", &ordinary).unwrap();
+}
+
+#[test]
+fn escalation_detection_follows_only_mission_and_step_declaration_locations() {
+    for declaration in [
+        json!({"escalation":{"_tag":"disable"}}),
+        json!({"steps":{"work":{"escalation":{"_tag":"replace","policies":[]}}}}),
+        json!({"steps":{"work":{"nested_mission":{"escalation":{"_tag":"disable"}}}}}),
+        json!({"steps":{"work":{"loop_spec":{"round":{"escalation":{"_tag":"disable"}}}}}}),
+        json!({"steps":{"work":{"loop_spec":{"on_keep":{"escalation":{"_tag":"disable"}}}}}}),
+        json!({"steps":{"work":{"loop_spec":{"on_discard":{"escalation":{"_tag":"disable"}}}}}}),
+        json!({"declarations_kdl":"mission \"nested\" { escalation disabled=#true; }"}),
+    ] {
+        assert!(declares_escalation(&declaration), "{declaration}");
+    }
+    for ordinary in [
+        json!({"steps":{"escalation":{}}}),
+        json!({"inputs":{"escalation":{}}}),
+        json!({"inputs":{"data":{"default":{"escalation":{"_tag":"disable"}}}}}),
+        json!({"declarations_kdl":"mission \"ordinary\" { step \"escalation\" { agentless; } }"}),
+    ] {
+        assert!(!declares_escalation(&ordinary), "{ordinary}");
+    }
 }

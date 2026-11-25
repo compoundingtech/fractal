@@ -155,7 +155,8 @@ can run an effect to its end but can never journal it.
 | host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups after explicit or host-initiated termination; matched to the host incarnation and attempt, not another host's acknowledgement |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
-| daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
+| host → daemon | `await-pr` | `step`, `attempt`, `seq`, `key`, `repo`, `pr`, `head` | register or adopt a native pull-request outcome wait for `key` (§6) |
+| daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run, ask or pull-request wait for `key` ended; its result is journaled |
 | host → daemon | `done` | `step`, `attempt`, `exit` (`{_tag: Success, value}` or `{_tag: Failure, error}`) | the program ended |
 | host → daemon | `unresponsive` | `step`, `attempt`, `ms` | the program's worker missed the liveness deadline and began termination; the failure is visible before actual worker exit (DQ8) |
 | daemon → host / host → daemon | `ping` / `pong` | `seq` | host liveness (DQ8) |
@@ -256,7 +257,7 @@ kill or unprovable identity remains visible as `supersession-effect-fence`; it c
 converted into success by a cleanup deadline. Owned runtimes of all predecessor generations
 and descendants must likewise be confirmed quiescent. Acknowledgements and runtime observations
 wake reconciliation; no polling or replacement execution timeout is introduced. New program
-credentials are minted inside the run writer fence only for the current live attempt and
+credentials on unconfigured full nodes are minted inside the run writer fence for the current live attempt
 after checking that it does not await automatic publication cutover.
 
 The host does not acknowledge a merely requested `Worker.terminate()`: it awaits that
@@ -271,7 +272,8 @@ every exact host-incarnation/step/attempt termination independently of its outco
 removing an attempt from the running map or failing its step cannot erase that fence.
 Daemon-initiated failure registers its cancellation proof under the same mutex that
 removes the running entry, before persisting failure. The worker-message forwarding
-path accepts only `journal`, `run`, and `ask`, not host lifecycle notifications.
+path accepts only program operation messages (`journal`, `run`, `ask`, `await-pr`, and native
+resource requests), not host lifecycle notifications.
 
 A replacement fences only its own supersession lineage: itself, every superseded
 predecessor, and their descendants across all generations. Both pending worker
@@ -336,18 +338,40 @@ authority in free mode, and the rules that restrict it (`rule.set` in enforce mo
 the run's writes as well. With exact-or-namespace patterns the intersection is exact: for each
 pair with one verb, the narrower pattern if one covers the other, nothing otherwise.
 
-**Credential.** For each start or resume of an attempt the engine mints a store capability of kind
-`program-run` whose subject is the step run and whose incarnation is the attempt (the secret is
-hashed at rest and never journaled), and passes it as `ST_RUN_CREDENTIAL` in the `start`
-message's `env`. The host spreads the run env last, so an effect cannot replace it.
+**Credential.** On an unconfigured full node, each start or resume mints a `program-run` store
+capability whose subject is the step run and whose incarnation is the attempt. The opt-in
+light-node issuer instead uses the session journal's exact execution binding: engine instance,
+actual host generation, fresh dispatch identity, runtime, run, step, attempt and admitted
+authorization revision. An admission-ACK wait retains that dispatch identity while the graph
+attempt and actual host generation match. Once issuance is revoked, retrying the same graph
+attempt on the same live host uses a new dispatch identity; a persistence failure cannot
+resurrect a tombstoned authorization revision. The issuer waits for its own home admission ACK
+before minting and for predecessor revocation ACK before replacing; an ACK targets waiting run
+evaluations, not a timer poll. Already acknowledged live authority can mint offline. Both paths
+hash secrets at rest, never journal them as graph claims, and pass only
+the local secret as `ST_RUN_CREDENTIAL` in the start message's `env`. The host spreads run env last,
+so an effect cannot replace it. See [light-node authorization](light-node.md#authorization-withdrawal-and-host-admission).
+The shared host is launched without inherited `ST_AGENT`, `FRACTAL_AGENT` or
+`ST_RUN_CREDENTIAL` markers from the process that started the daemon. Each effect
+receives only its own dispatch's authoritative run credential; an invoking
+harness's identity must not conflict with that run at the Unix ancestry guard.
+The guard still rejects an effect that explicitly supplies both identity kinds.
 
 **Binding.** The ancestry walk reads `ST_RUN_CREDENTIAL` from each ancestor's exec-time environment
 beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon
-binds a request to `mission-run/RUN` only while the credential's attempt is its step run's current,
-live attempt, so the credential dies with its attempt and needs no revocation; one that no longer
-binds leaves the caller unverifiable. A run-bound request follows the bound-agent rules: no internal
-routes, no person headers other than its own run, and `actor`/`requester` must be the run. Handlers
-that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
+binds a request to `mission-run/RUN` only while its authority is live. Full nodes retain the
+current graph-attempt check and recheck authenticated run scope in the actual claim transaction.
+That scope travels with the queued SQLite writer action, not just the submitting blocking thread.
+Both the batched writer and the direct writer after projection drain recheck it before the effect;
+the shared writer's previous identity is restored on success, refusal or unwinding.
+Light nodes resolve durable local admission without a graph lookup and explicitly revoke it before
+forgetting an ended or replaced engine attempt. One that no longer binds leaves the caller
+unverifiable. A run-bound request follows bound-agent attribution: no general internal routes,
+no person headers other than its own run, and `actor`/`requester` must be the run. The narrow native
+run-claim bridge signs and durably forwards graph effects to their home, where signature, current
+graph authority, revocation and the effect receipt share one writer transaction. It does not
+enable cross-shard messages or local-observation effects.
+Handlers that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
 alike, so a run writes no seat's `doc/agents/…` document and is the writer its document writes
 name. The CLI defaults its actor to the run when the credential is present and names it on the
 trusted Unix client, which the daemon accepts only from a request its credential binds to that
@@ -460,12 +484,12 @@ Each inner step writes registered `program.step` claims on the program's step ru
 | Field | Type | Meaning |
 |---|---|---|
 | `key` | string | step identity in this execution: `id`, then `id#2`, `id#3`… for repeats |
-| `status` | `started` / `completed` / `failed` | `started` is for visibility only and never replayed |
+| `status` | `started` / `completed` / `failed` | `started` is not a replayable result; native waits may retain adoption metadata in it |
 | `attempt` | integer | the program step's attempt that wrote it |
 | `program` | string | the bundle sha256 that wrote it |
-| `value` / `error` | any | the encoded success value, or the typed error with `_tag` and fields |
+| `value` / `error` | any | the encoded success value, typed error with `_tag` and fields, or a native wait's `started` registration payload |
 | `ms` | integer | effect duration |
-| `child` | string, optional | the child `mission-run/…` or ask subject the key waits on (§6) |
+| `child` | string, optional | the child `mission-run/…`, ask, or native `program-await-pr/…` subject the key waits on (§6) |
 
 Idempotency key: `program:STEP:ATTEMPT:KEY:result` for both `completed` and `failed`, so a key has
 one result per attempt whatever its status, and a double execution that produces a different
@@ -489,16 +513,17 @@ fail the step (a bug), interrupts (host or daemon gone) are never journaled and 
 Long-lived loops do not grow one journal forever: a recurring program is a schedule of finite runs,
 and an iterative program that needs more than a few thousand steps runs rounds as child runs (§6).
 
-### 6. Linked child runs, worker turns and asks
+### 6. Linked child runs, worker turns, asks and pull requests
 
-A program waits on two kinds of things the daemon owns: a linked child run (`run`, from
-`Fractal.run` and worker turns) and a native person ask (`ask`, from `Fractal.ask`). The engine
+A program waits on three kinds of things the daemon owns: a linked child run (`run`, from
+`Fractal.run` and worker turns), a native person ask (`ask`, from `Fractal.ask`), and a
+pull-request outcome (`await-pr`, from `Fractal.awaitPr`). The engine
 journals a `started` entry for the key when the request arrives, and the program's run evaluation
-does the rest: it starts or adopts what the key waits on, journals a second `started` entry whose
-`child` names it, and, once it ends, journals the result under the key (with `child` set) and sends
+starts or adopts what the key waits on. Child runs and asks receive a second `started` entry whose
+`child` names them. Once a wait ends, the daemon journals its result under the key and sends
 `resolved`. Everything the evaluation looks at is a noted read, so the store transition that ends a
-child run or answers an ask evaluates the parent run again; nothing polls. A replayed key never
-asks again; a resumed attempt that asks for an open key adopts what that key already waits on. A
+child run, answers an ask or records a changed PR observation evaluates the parent run again;
+nothing polls. A replayed key never registers again; a resumed attempt adopts its open wait. A
 request the daemon refuses (an unknown mission, inputs the mission does not accept, an ask without
 a person) fails the program step with the reason, as a defect would; a store failure leaves the
 step as it is, and the next evaluation tries again. A child run or ask is journaled as `child` even
@@ -514,7 +539,7 @@ again and the start is retried then. When the child ends, the program receives:
 
 | Child | Exit |
 |---|---|
-| `completed` | Success `{ run, status: 'completed', products? }`; `products` holds the value of each product the child's steps declare, by full subject (`resource/mission-run/CHILD/…`) |
+| `completed` | Success `{ run, status: 'completed', products?, executions?, result? }`; `products` holds each declared product by full subject (`resource/mission-run/CHILD/…`); `result` is the actual completed native program output when present, not a resource claim |
 | `failed` / `cancelled` | Failure `{ _tag: 'ChildFailed', run, status, reason }`; `reason` is the run's end reason, else its failed step's |
 
 A worker turn, `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission,
@@ -526,6 +551,32 @@ to retire it on exit. `Fractal.Worker.layer` does not fork the program caller's 
 mailbox or handoff into the child. A standing worker selected by the child retains its own
 mailbox, and `one-shot` alone does not request a fresh session. See
 [step context isolation](mission-graph-runtime.md#step-syntax).
+
+For a native assigned episode, `Fractal.turn({ id, agent, instructions, context,
+products?, freshContext? })` uses the existing resource transport's `agent.turn`
+operation under its durable key. `agent` is the full agent subject. Instructions and
+context are inert text, not commands or environment. Products are required run-relative
+resource specs `{ path, kind, fields }` with scalar field constraints. The native engine
+owns the persisted parent-linked finite work episode, wake/claim/report lifecycle and
+lease fences; it does not impersonate the parent as spontaneous agent work. Fresh context
+is optional, never the default. Refusal is `ResourceError`; terminal failure is
+`ChildFailed`. Success is `WorkerReport` with actual `run`, `step`, `summary`,
+`evidence: string[]`, relative-path `products`, and optional actual `executions`.
+
+The parent revision must grant `authority { start "native-turn" }`, intersected with its
+starter's authority like any other child start. Native admission establishes the parent-linked
+run row before checking that start, in the same transaction; a refusal leaves no run or ready
+work. The verified `program.turn.report` is a daemon receipt of the literal worker submission,
+not a second parent effect requiring a broad write grant. Inherited resource context must be
+attached before the episode becomes runnable, never retrofitted onto an existing run.
+
+`Worker.layer({ mission, input, product, report: true })` explicitly decodes the child's
+`result` as `WorkerReport`, selecting `report.products` by the requested relative paths.
+Missing or malformed reports are not accepted, even without requested products.
+With `execution: true`, this mode returns the report's episode receipts rather than the
+wrapper child program's accounting. Without report mode, the original declared-resource
+protocol and child receipt behavior remain unchanged.
+
 
 Worker turns can request `Fractal.step({ id, success, execution: true })` to return
 `{ value, executions }` instead of the decoded product alone. `value` remains domain data;
@@ -569,6 +620,53 @@ the waiting step with reason `ask cancelled by ACTOR`, using ordinary retries an
 handling rather than resuming the step as ready.
 
 An ask that ends with its run is never resolved: the program ended with it.
+
+The host publishes an external invalidation of the owning program step before exposing a
+new request to run evaluation. Resource requests need this wake even before they have a
+journal claim. Mission evaluation acknowledges only invalidations present when it started;
+one arriving while it evaluates remains pending for the next pass. The incremental
+correction checker recognizes these external wakes as well as durable feed changes.
+
+**Pull requests.** `Fractal.awaitPr({ id, repo, pr, head })` waits for the outcome of one
+pull request at an exact head. `repo` is `owner/name`, `pr` is its number, and `head` is the
+commit the caller verified and enqueued. The caller chooses the journal key with `id`; use
+the same key when replacing a worker-turn wait with this native wait (for example,
+`await-outcome`). It does not verify approval, enqueue, merge, bypass checks, or send messages.
+
+The daemon registers the PR with its existing GitHub observation machinery. Its run evaluation
+reads those observations through noted reads: committing a changed observation reevaluates the
+waiting program, without a timer or polling inside the program or its engine. A completed key
+replays its journaled outcome without registering again. A resumed attempt adopts the existing
+registration and its queue-exit baseline, rather than starting a new wait.
+
+Registration is a `program.step` `started` entry whose `child` is a deterministic
+`program-await-pr/…` subject and whose `value` holds the PR, requested head and observation
+baseline. It is not a completed result and is not handed to the program as one. Registration
+interest lasts only while that step and attempt are live and the key has no terminal result;
+ending, cancelling or retrying the step releases it without creating a seat-owned watch.
+Each repository observation conditionally revalidates active targets directly, including closed
+or previously unseen PRs, within the observer's existing cadence. The acquired head, merged flag
+and merge commit travel together with the durable registration claim IDs in one item fact.
+Only evidence bound to the current registration can resolve the wait; a lagging observer or an
+older cached GraphQL head cannot produce a false dequeue or pair an old head with a new merge.
+A targeted 404 likewise binds its absence evidence to those registration IDs; incremental listing
+absence is not evidence. Repository lookup failures cite the registration claims in the observer
+state's native evidence. GitHub also uses 404 to hide inaccessible objects, so an unknown
+repository/PR failure can require correcting the daemon credential's access.
+
+| PR observation | Exit |
+|---|---|
+| merged at the requested head | Success `{ outcome: 'merged', mergeCommit }` |
+| left the merge queue without merging | Success `{ outcome: 'dequeued', reason: 'merge-queue-exit' }` |
+| head differs from the requested head | Success `{ outcome: 'dequeued', reason: 'head-changed' }` |
+| repository or PR is unknown | Failure `{ _tag: 'AwaitPrFailed', code: 'unknown-repo' \| 'unknown-pr', repo, pr, message }` |
+
+Being outside the queue before an observed entry is not itself a dequeue. An old queue exit must
+not resolve a newly registered wait. Typed lookup failures may be handled with `Effect.catchTag`;
+transport or store failures are not successful outcomes. Once resolved, later GitHub observations
+do not replace the journaled result.
+The exit reason names the observed transition; it does not infer GitHub's underlying rejection
+cause when the observation does not contain one.
 
 **Cancellation.** Cancelling the parent run cancels its children through
 `cancel_descendant_mission_runs_tx` (R08), and its asks end with the run. When a program step ends,
@@ -676,18 +774,32 @@ const graph = Fractal.mission({
 export default Fractal.lower(graph, {
   id: 'example/change',
   host: 'local',
-  workers: { 'example/worker': { mission: 'example/seat-turn', goalInput: 'goal' } },
+  // Optional per-agent overrides belong in workers; the standard route needs none.
 })
 ```
 
-Bindings are explicit: `workers` maps an assigned agent id to a published child mission
-and that mission's `goalInput` instruction parameter. Worker children receive every
-declared text input unchanged, plus the expanded step goal under `goalInput`. If that
-key collides with a declared graph input, compilation refuses the binding; choose an
-unused child parameter (for example `instructions` when the graph has `input.text('goal')`).
-A tree using imported agent references supplies `resolveAgent` using its existing
-reference resolver. Resolve context factories before calling `lower`. Missing worker
-bindings are compile refusals; the compiler invents no implicit seat-turn protocol.
+Assigned agents default to the published `fractal/seat-turn` child mission. Publish it
+as an ordinary `fractal/seat-turn/mission.ts` with
+`Fractal.seatTurn({ meta: import.meta, reportTo })` from `fractal/effect`; the full source
+entry is `packages/fractal/fixtures/programs/fractal/seat-turn/mission.ts`. The SDK does
+not fabricate a published revision. The helper has fixed required text inputs `agent`,
+`instructions` and `context`, calls native `Fractal.turn`, and returns `WorkerReport`.
+The default binding maps `goalInput: 'instructions'`, `contextInput: 'context'`,
+`agentInput: 'agent'`, and `report: true`. Context JSON contains `{ inputs, products,
+freshContext? }`: all original graph inputs and expanded product paths/kinds/fields
+stay inside the wrapper, avoiding collisions even for graph inputs named `agent`,
+`instructions`, `context` or `goal`. The helper decodes that wrapper and passes inputs
+as inert JSON context plus separate product specs and optional fresh-context request.
+
+`workers` optionally overrides individual assigned-agent ids with a published child
+mission and its `goalInput`, optional `contextInput`, optional `agentInput`, and optional
+`report` mode. A `goalInput`-only override keeps the original protocol: spread every
+declared text input unchanged and supply the expanded goal under that key. A collision
+refuses compilation; use a separate key or the encoded `contextInput` protocol.
+Mapped instruction, context and agent keys must be distinct. `strictWorkers: true`
+disables the standard resolver and refuses missing overrides. A tree using imported
+agent references supplies `resolveAgent` through its existing tree resolver. Resolve
+context factories before calling `lower`.
 
 The compiler validates a completed-dependency DAG and precomputes its ready sets.
 Each ready set runs through `Effect.all` with unbounded sibling concurrency; a dependent
@@ -696,12 +808,32 @@ mission budget, authority, timeout, stall threshold, resources and pinned docs r
 native mission declarations. The returned `graph` projection preserves the original ids,
 edges and gates for inspection.
 
+Mission `constraints` are ordered policy text, not executable predicates. The graph
+runtime inherits them into each step's work context (`flatten_run_steps` in
+`crates/fractal-store/src/store.rs`); the work CLI surfaces each as `Constraint:`.
+Lowering preserves every entry verbatim, including multiline text, under a
+`Constraints:` section in the native mission goal and in **every** worker's
+instruction input. Input/run references expand there just as they do in step goals;
+graph escapes such as `$${input.example}` produce literal `${input.example}`, even
+when no such input is declared. An absent or empty constraint list adds no section.
+This preserves instruction
+delivery; it does not claim mechanical enforcement of arbitrary authority, safety,
+review or admission prose. No natural-language interpretation creates new gates,
+resource limits or approvals.
+
+Mission `resources` remain owned resource declarations, not host admission limits.
+Completed `dependsOn` edges supply DAG ordering. Graph `lanes` describe ordered
+entries and optional person approval; they are not `Fractal.resources.lane` command
+admission and remain unsupported. Similar words in policy text do not make these
+contracts interchangeable.
+
 Assigned steps use native worker turns with their original graph step ids as journal
-keys. `input.text` is a required string input. Run-scoped `product.resource` values are
-decoded from the child run's **full resource subject**, including when a worker declares
-several products, and their scalar constraints are checked durably. Product field gates
-read these typed product records; their producer must be the same step or a dependency
-ancestor. Both a missing field and a mismatched value fail with `GraphGateFailed`.
+keys. `input.text` is a required string input. The standard route decodes run-scoped
+`product.resource` values from the real episode's `WorkerReport.products`, by relative
+path. Legacy overrides decode the child run's full resource subjects. Both support
+multiple products and durably check scalar constraints. Product field gates read these
+typed records; their producer must be the same step or a dependency ancestor. Both a
+missing field and a mismatched value fail with `GraphGateFailed`.
 
 `gate.human` becomes a native decision ask addressed to the declared reviewer. Only that
 reviewer's named approval lets the step finish; rejection, dismissal and cancellation
@@ -718,12 +850,19 @@ This is an explicit W1 subset, not the whole design table above. `GraphCompileRe
 names `step`, `construct` and `reason` before execution for unsupported constructs:
 `waitFor`/`usesMission`, watch/observer/subscription dispatch, `Timing`, `Review`,
 `waitUntil`, loops, non-completed dependency states, retries, compensation/finally,
-custom completion, mission gates/constraints/lanes/report flags, step-owned declarations,
+custom completion, mission gates/lanes/report flags, step-owned declarations,
 direct exec/program steps, resource inputs, external product subjects, non-resource
 products, feedback-mode human gates, exec time limits and remote exec hosts. Other gate
 kinds (including merged/document/exists) are also refused. Nothing is silently dropped.
 Existing published graph missions stay on their current runtime until explicitly
 republished from a supported lowered definition.
+
+Invalid authoring data raises `GraphCompileRefusal` with construct `authoring boundary`
+and the original schema diagnostic, including its field path. This includes handles
+that were copied or imported through a different SDK module instance, but does not
+assume every validation failure is an SDK identity problem. Keep intact authoring
+handles and resolve the graph and compiler through one SDK instance. Other typed
+refusals and unexpected defects are not reclassified as schema failures.
 
 
 ### 10. Priority
@@ -738,7 +877,8 @@ command (`Fractal.command(argv, { priority: 'background' })`); this is the progr
 The author-facing API is the `Fractal` namespace of the `fractal` package's `fractal/effect` entry
 point (`import { Fractal } from 'fractal/effect'`, D7), on `effect/workflow`. The entry point's other
 named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `ChildFailed`,
-`AskAnswer`, `AskCancelled`) are the host contract a bundle implements and the exits it decodes.
+`AskAnswer`, `AskCancelled`, `AwaitPrOutcome`, `AwaitPrFailed`) are the host contract a bundle
+implements and the exits it decodes.
 
 | `Fractal` | `effect/workflow` | Engine |
 |---|---|---|
@@ -747,6 +887,7 @@ named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `Chil
 | `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | `DurableDeferred.make` named by the key | a worker turn: `ctx.child` (protocol `run`) of `mission` with `input`; the value is the child's product `resource/RUN/PRODUCT` decoded with `success` (§6) |
 | `Fractal.ask({ id, for, title, request, deadline, default })` | `DurableDeferred.make` named by the ask's key | `ctx.ask` (protocol `ask`): a native person ask on the program step; the answer is journaled under the key, `AskCancelled` when it is withdrawn (§6) |
 | `Fractal.run(mission, input, { id })` | `DurableDeferred.make` named by the key (default: the mission's id) | `ctx.child` (protocol `run`): a linked child run; its end is journaled under the key, `ChildFailed` when it does not complete (§6) |
+| `Fractal.awaitPr({ id, repo, pr, head })` | `DurableDeferred.make` named by the key | `ctx.awaitPr` (protocol `await-pr`): a native GitHub observation wait at an exact head; merged/dequeued outcomes or typed `AwaitPrFailed` are journaled under the key (§6) |
 | — | `WorkflowEngine` | the host's engine: `activityExecute` returns a journaled result or runs the activity and records it through the host protocol; `deferredResult` reads the journal, else waits for the daemon's `resolved` |
 
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
@@ -756,8 +897,26 @@ value. The success value is encoded with `intent.output` and journaled under the
 a failed result, and fails the step with it. Retry classification reads this attempt's durable
 failure rather than an inner effect's possibly caught error.
 
-A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
-program to the same wait.
+Required string-encoded fields normally lower to `input "name" kind="text"`. For a native
+subscription resource binding, use `Schema.Struct({ source: Fractal.resourceInput('vcs.pull-request') })`.
+This field lowers to `input "source" kind="resource" resource-kind="vcs.pull-request"`, the same
+resource input convention used by native missions. Use the helper directly as the Struct field;
+it carries declaration metadata in addition to the pinned-reference string schema. Optional fields
+are not admitted. The existing subscription `delivery "mission" { ...; resource "source" }` starts
+the program without a dispatch mission or a separate program delivery protocol.
+
+Run admission resolves and pins the observation before the worker starts. Both explicit
+`resource/NAME@CLAIM` and unpinned `resource/NAME` starts check the resolved claim's resource kind,
+not the subject's latest kind; `vcs.item.state` pins use their `item_kind`. A mismatch returns the
+typed native error code `resource-input-kind-mismatch` and creates no run. The program receives
+the unchanged `resource/NAME@CLAIM` string, preserving native observation identity and replay.
+Constraints are optional for existing native declarations; declarations without one retain their
+previous behavior and serialized revision identity. Deploy supporting daemons to every member
+that can admit runs before publishing constrained inputs; older binaries do not enforce the new
+constraint in replicated structured revisions.
+
+A program waiting on an ask, a child run or a pull-request outcome stays loaded in the host.
+A replaced host replays the program to the same wait.
 
 In a lane-bound run, `Fractal.command` inherits the native membership and uses command keys scoped
 to its durable activity (`resource.command/<activity-key>`, then `#2`, `#3`, … for same-fiber

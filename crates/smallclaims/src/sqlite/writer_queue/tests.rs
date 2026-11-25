@@ -17,12 +17,27 @@ fn loan() -> (WriterJob, Loan) {
     let (lent, receives) = mpsc::sync_channel(1);
     let (gives, returned) = mpsc::sync_channel(1);
     (
-        WriterJob::Lend { lent, returned, holder: crate::windows::holds::Holder::current(), enqueued: Instant::now(), origin: None },
+        WriterJob::Lend { lent, returned, holder: crate::windows::holds::Holder::current(), enqueued: Instant::now(), origin: None, deadline_unix_ms: None },
         Loan {
             lent: receives,
             returned: gives,
         },
     )
+}
+
+#[test]
+fn expired_queued_receive_is_never_lent_the_writer() {
+    let writer = writer();
+    let held = writer.write();
+    let (mut job, expired) = loan();
+    let WriterJob::Lend { deadline_unix_ms, .. } = &mut job else { unreachable!() };
+    *deadline_unix_ms = Some(0);
+    writer.enqueue_background(job);
+    // The existing holder is the barrier: the expired request is definitely queued.
+    drop(held);
+    assert!(expired.lent.recv().is_err(), "expired work must receive no connection");
+    // Skipping a loan must not consume or close the writer.
+    drop(writer.write());
 }
 
 impl Loan {
@@ -135,7 +150,20 @@ fn background_guard_retains_prepare_finalize_rollback_and_return_observer_order(
         tx.execute(/* sqlite-large-value: allow-for-now lv-h411c31509178 owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO values_ VALUES(3)", []).unwrap();
         tx.rollback().unwrap();
     }
-    assert_eq!(observed.recv().unwrap(), 0);
+    // The guard notifies observers inside its own drop on this thread before returning,
+    // so a notification from the rolled-back loan would already be in the channel here.
+    assert!(
+        observed.try_recv().is_err(),
+        "a rolled-back loan must not notify any observer"
+    );
+    assert_eq!(
+        writer
+            .write()
+            .query_row("SELECT COUNT(*) FROM values_", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        0,
+        "prepare and the rolled-back write left no rows"
+    );
     {
         let mut connection = writer.write_background();
         let tx = connection.transaction().unwrap();
@@ -189,7 +217,7 @@ fn hook_configuration_fence_drains_prior_background_but_not_later_background() {
         .unwrap();
     let through = queue.watermark();
     let (job, fence) = loan();
-    let WriterJob::Lend { lent, returned, holder, enqueued, origin } = job else {
+    let WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms } = job else {
         unreachable!()
     };
     sent.send(WriterJob::FenceLend {
@@ -199,6 +227,7 @@ fn hook_configuration_fence_drains_prior_background_but_not_later_background() {
         holder,
         enqueued,
         origin,
+        deadline_unix_ms,
     })
     .unwrap();
     let (later, later_loan) = loan();
@@ -289,6 +318,7 @@ fn foreground_only_fifo_and_batched_durable_answers_are_unchanged() {
             true
         }),
         profile: None,
+        charged: None,
         wait: None,
         holder: crate::windows::holds::Holder::current(),
         done,
@@ -364,6 +394,7 @@ fn foreground_batched_write_gets_a_bounded_turn_during_a_long_verdict_loop() {
             true
         }),
         profile: None,
+        charged: None,
         wait: None,
         holder: crate::windows::holds::Holder::current(),
         done,

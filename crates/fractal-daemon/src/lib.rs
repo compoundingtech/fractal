@@ -19,6 +19,7 @@ pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;
 pub use fractal_store::blobs;
+pub use fractal_store::blob_restore;
 pub use fractal_store::owner_indexes;
 pub use fractal_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.
@@ -91,6 +92,7 @@ pub use fractal_telemetry::otel;
 pub use fractal_telemetry::otel_client_class;
 pub use fractal_telemetry::otlp;
 pub use fractal_peer::peer;
+pub use fractal_peer::light_node;
 pub use fractal_reconcile::placement;
 pub use fractal_store::person_request;
 pub use fractal_kernel::pricing;

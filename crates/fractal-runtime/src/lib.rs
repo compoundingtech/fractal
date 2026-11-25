@@ -18,11 +18,16 @@ mod isolate;
 mod lane;
 mod priority;
 mod peer_process;
+pub mod native_attach;
 mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+pub mod store_worktree_lease;
 mod resource_profile;
+pub mod resource_pressure;
+pub mod resource_class;
+pub mod resource_readiness;
 pub use resource_profile::{
     ResourceLearningCoverage, ResourceProfileEstimate, ResourceProfileSamples, ResourceProfileSeed, validate_profile_key,
 };
@@ -37,6 +42,7 @@ mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]
 mod pty_launch_environment;
 
+pub mod payload_receipt;
 pub use environment::{
     ShellStartupTimeout, expand_path_placeholder, is_shell_startup_timeout, login_environment,
     login_environment_from, login_environment_within, materialize_environment, overlay_environment,
@@ -47,6 +53,7 @@ pub use isolate::{
     initialize_isolation, mode as isolation_mode, scope_unit, signal_scope, systemd_user_available,
     warn_if_degraded, wrap as wrap_isolated,
 };
+pub use isolate::darwin_slot;
 pub use priority::{
     BACKGROUND_IO_LEVEL, BACKGROUND_NICE, LIVE_WEIGHT, PRIORITY_ENV, SeatPriority, ServerPlacement,
     protect_server, protect_servers, report as priority_report, server_unit,

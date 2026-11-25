@@ -90,8 +90,11 @@ impl Context<'_> {
 }
 
 /// What one open step waits on.
-fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
+fn classify(row: &WorkRow, context: &Context<'_>, store: &Store, definitions: &mut crate::intentional_wait::PredicateDefinitions) -> anyhow::Result<StepWait> {
     let view = &row.view;
+    use crate::intentional_wait::{classify as intentional_wait, IntentionalWait};
+    let human_gate = context.gates.iter().find(|gate| gate.step.as_deref() == Some(view.subject.as_str()));
+    let intentional = intentional_wait(view, context.now, human_gate.is_some(), false);
     let mut wait = StepWait {
         step: view.subject.clone(),
         path: view.step.clone(),
@@ -111,20 +114,21 @@ fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
         wait.lease_expires_at_unix_ms = view.claim_expires_at_unix_ms;
     }
     // A person must answer: a human gate on the step, the step is an ask, or it waits on one.
-    if let Some(gate) = context.gates.iter().find(|gate| gate.step.as_deref() == Some(view.subject.as_str())) {
+    if let Some(gate) = human_gate {
         wait.kind = WaitKind::Ask;
         wait.who = Some(gate.person.clone());
         wait.detail = Some("a human gate waits for an answer".into());
-        return wait;
+        return Ok(wait);
     }
-    if let Some(person) = view.assigned_to.as_deref().filter(|actor| actor.starts_with("person/")) {
+    if intentional == Some(IntentionalWait::Person) {
+        let person = view.assigned_to.as_deref().expect("a person wait has an assignee");
         wait.kind = WaitKind::Ask;
         wait.who = Some(person.to_owned());
         wait.since_unix_ms = Some(view.created_at_unix_ms);
         wait.detail = view.title.clone().or_else(|| view.goals.first().cloned());
-        return wait;
+        return Ok(wait);
     }
-    if view.status == "waiting-person" {
+    if intentional == Some(IntentionalWait::Answer) {
         let ask = view.blocked_reason.as_deref().and_then(|ask| context.rows.rows.get(ask));
         wait.kind = WaitKind::Ask;
         wait.who = ask.and_then(|ask| ask.view.assigned_to.clone());
@@ -139,15 +143,15 @@ fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
                 None => key.to_owned(),
             });
         }
-        return wait;
+        return Ok(wait);
     }
-    if view.status == "blocked" {
+    if intentional == Some(IntentionalWait::Blocked) {
         wait.kind = WaitKind::Hold;
         wait.until_unix_ms = view.not_before_unix_ms;
         wait.detail = view.blocked_reason.clone().or_else(|| {
             (!view.blockers.is_empty()).then(|| format!("blocked by {}", view.blockers.join(", ")))
         });
-        return wait;
+        return Ok(wait);
     }
     if view.agentless {
         wait.who = Some("st".into());
@@ -160,18 +164,30 @@ fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
                     view.blocked_reason.clone().unwrap_or_else(|| "waits for another run to finish".into()),
                 );
             }
+            // Nested steps have no gate_kind in the published work row: resolve their
+            // predicate eligibility from the same pinned definition as their gates.
+            Some("predicate") | None => {
+                wait.kind = WaitKind::Verifying;
+                wait.detail = row.value["gate_kind"].as_str().map(|_| "st checks its predicate gates".into());
+                if let Some(detail) = predicate_wait(store, view, definitions)? {
+                    wait.kind = WaitKind::Hold;
+                    wait.since_unix_ms = view.execution_started_at_unix_ms;
+                    wait.detail = Some(detail);
+                }
+            }
             kind => {
                 wait.kind = WaitKind::Verifying;
                 wait.detail = kind.map(|kind| format!("st checks its {kind} gates"));
             }
         }
-        return wait;
+        return Ok(wait);
     }
-    if let Some(until) = view.not_before_unix_ms.filter(|until| *until > context.now) {
+    if intentional == Some(IntentionalWait::Backoff) {
+        let until = view.not_before_unix_ms.expect("a backoff has a deadline");
         wait.kind = WaitKind::Hold;
         wait.until_unix_ms = Some(until);
         wait.detail = Some(format!("retry backoff, attempt {}", view.attempt));
-        return wait;
+        return Ok(wait);
     }
     // The seat that holds the step, or that would take it: a ready step waits in whichever queue
     // holds it, whoever it was assigned to.
@@ -195,16 +211,17 @@ fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
         if held {
             wait.since_unix_ms = view.progress_at_unix_ms.or(view.execution_started_at_unix_ms).or(wait.since_unix_ms);
         }
-        return wait;
+        return Ok(wait);
     }
     match view.status.as_str() {
         "claimed" | "working" => {
-            if let Some(until) = view.execution_paused_until_unix_ms.filter(|until| *until > context.now) {
+            if intentional == Some(IntentionalWait::Declared) {
+                let until = view.execution_paused_until_unix_ms.expect("a declared wait has a deadline");
                 wait.kind = WaitKind::Hold;
                 wait.until_unix_ms = Some(until);
                 wait.since_unix_ms = view.progress_at_unix_ms.or(wait.since_unix_ms);
                 wait.detail = Some(view.progress_summary.clone().unwrap_or_else(|| "a declared wait".into()));
-                return wait;
+                return Ok(wait);
             }
             // The last sign the holder is moving: its progress, else the start of this attempt.
             let since = [view.progress_at_unix_ms, view.execution_started_at_unix_ms]
@@ -245,7 +262,43 @@ fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
             wait.detail = view.blocked_reason.clone();
         }
     }
-    wait
+    Ok(wait)
+}
+
+/// Render the same bounded, known-false predicate evidence used by run reporting.
+fn predicate_wait(store: &Store, step: &StepRunView, definitions: &mut crate::intentional_wait::PredicateDefinitions) -> anyhow::Result<Option<String>> {
+    crate::intentional_wait::predicate_wait(store, step, definitions, |name, subject, path, operator, value, found| {
+        format!(
+            "waits for gate {name:?}: {subject} {path} is {}, expects {operator} {}",
+            summarize_value(found), summarize_value(value),
+        )
+    })
+}
+
+/// Values are hints, not payload exports: containers show only their shape.
+fn summarize_value(value: &Value) -> String {
+    match value {
+        Value::Array(values) => format!("array({} items)", values.len()),
+        Value::Object(fields) => format!("object({} keys)", fields.len()),
+        Value::String(text) => {
+            let mut summary = String::with_capacity(80 * 4);
+            summary.push('"');
+            let mut length = 0;
+            'text: for character in text.chars() {
+                for escaped in character.escape_debug() {
+                    if length == 77 {
+                        summary.push('…');
+                        break 'text;
+                    }
+                    summary.push(escaped);
+                    length += 1;
+                }
+            }
+            summary.push('"');
+            summary
+        }
+        _ => value.to_string(),
+    }
 }
 
 /// A program step moves while its journal does: past its `stalled-after` without a new entry it
@@ -360,19 +413,21 @@ fn context<'a>(work: &'a WorkRows, missions: &'a MissionRows, now: u128, quiet_a
 
 /// What one run waits on: its open steps from the work list, the rest from its own rows.
 pub fn run_waiting_on(
+    store: &Store,
     steps: &RunSteps,
     work: &Publication<WorkRows>,
     missions: &MissionRows,
     now: u128,
     quiet_after_ms: u64,
-) -> RunWaitingOn {
+) -> anyhow::Result<RunWaitingOn> {
     let context = context(&work.rows, missions, now, quiet_after_ms);
+    let mut definitions = crate::intentional_wait::PredicateDefinitions::default();
     let mut open = Vec::new();
     let mut pending = Vec::new();
     let mut finished = Vec::new();
     for step in &steps.steps {
         if let Some(row) = work.rows.rows.get(&step.subject) {
-            open.push(classify(row, &context));
+            open.push(classify(row, &context, store, &mut definitions)?);
             continue;
         }
         let settled = StepSettled {
@@ -395,7 +450,7 @@ pub fn run_waiting_on(
     } else {
         verdict(&open)
     };
-    RunWaitingOn {
+    Ok(RunWaitingOn {
         run: steps.run.clone(),
         mission: steps.mission.clone(),
         status: steps.status.clone(),
@@ -409,21 +464,23 @@ pub fn run_waiting_on(
         quiet_after_ms,
         work_cut: work.cut,
         as_of_unix_ms: now,
-    }
+    })
 }
 
 /// Every run with open work that is stalled or waiting, one line each, grouped by cause.
 pub fn blocked_runs(
+    store: &Store,
     work: &Publication<WorkRows>,
     missions: &MissionRows,
     now: u128,
     quiet_after_ms: u64,
-) -> BlockedRuns {
+) -> anyhow::Result<BlockedRuns> {
     let context = context(&work.rows, missions, now, quiet_after_ms);
+    let mut definitions = crate::intentional_wait::PredicateDefinitions::default();
     let mut runs = HashMap::<&str, (Option<&str>, Vec<StepWait>)>::new();
     for row in work.rows.rows.values() {
         let entry = runs.entry(row.view.run.as_str()).or_insert_with(|| (row.value["mission_id"].as_str(), Vec::new()));
-        entry.1.push(classify(row, &context));
+        entry.1.push(classify(row, &context, store, &mut definitions)?);
     }
     let runs_read = runs.len();
     let mut groups = WaitKind::CAUSES
@@ -461,7 +518,7 @@ pub fn blocked_runs(
         });
     }
     groups.retain(|group| !group.runs.is_empty());
-    BlockedRuns { groups, runs_read, quiet_after_ms, work_cut: work.cut, as_of_unix_ms: now }
+    Ok(BlockedRuns { groups, runs_read, quiet_after_ms, work_cut: work.cut, as_of_unix_ms: now })
 }
 
 pub async fn get_run_waiting_on(
@@ -477,7 +534,7 @@ pub async fn get_run_waiting_on(
         let Some(steps) = store.run_step_states(&wanted)? else {
             return Ok(None);
         };
-        Ok(Some(run_waiting_on(&steps, &work, &missions.rows, now_ms(), quiet_after_ms)))
+        Ok(Some(run_waiting_on(&store, &steps, &work, &missions.rows, now_ms(), quiet_after_ms)?))
     })
     .await?
     .map(Json)
@@ -490,7 +547,10 @@ pub async fn get_blocked_runs(
 ) -> Result<Json<BlockedRuns>, ApiError> {
     let Sources { work, missions } = sources(&state.store)?;
     let quiet_after_ms = query.quiet_after_ms.unwrap_or(DEFAULT_QUIET_AFTER_MS);
-    Ok(Json(blocked_runs(&work, &missions.rows, now_ms(), quiet_after_ms)))
+    let store = state.store.clone();
+    blocking_store(move || {
+        Ok(Json(blocked_runs(&store, &work, &missions.rows, now_ms(), quiet_after_ms)?))
+    }).await
 }
 
 #[cfg(test)]

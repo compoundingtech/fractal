@@ -146,13 +146,19 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
     ("GET /v1/repair", 97.0),
-    // Sessions read every harness observation (11.5x full-scan steps).
-    ("GET /v1/sessions", 17.5),
 ];
 
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "POST /v1/internal/native/run-request/claim",
+        "host-local Unix-only forwarding requires an explicitly configured run-authority session and an admitted native credential, absent from generated full-node cost stores; run_requests guards exact bound requests and closed admission, while run_fence tests actual atomic writer admission and retry receipts; this local forwarding route's transport and home-writer cost is not measured by this JSON graph cost client",
+    ),
+    (
+        "POST /v1/internal/native/run-request/acknowledge",
+        "host-local Unix-only durable-consumer acknowledgment requires a configured authority session and the original admitted execution/request/result, absent from generated full-node cost stores; the real light-node program fixture covers explicit durable acceptance, changed-result refusal, duplicate ACK and capacity reclamation; transport and journal acknowledgment costs are not measured by this graph cost client",
+    ),
     (
         "GET /v1/source-blobs/{hash}",
         "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
@@ -417,6 +423,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "one indexed daemon.started lookup per member or configured peer; grows with the fleet, not the store",
     ),
     (
+        "POST /v1/internal/replication/shard/{shard}/peers/revision",
+        "subscribes to the graph's store-local membership watch for shard advertisements; the generated fixture holds an empty messages shard, and the wait retains no read transaction",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/revision",
+        "subscribes to the shard's store-local authority or membership watch; the generated fixture holds no populated messages shard, and authority snapshot work is covered by the graph revision probe",
+    ),
+    (
         "POST /v1/internal/replication/shard/{shard}/export",
         "pages the messages shard like the graph export; the shard stays empty until the stream writer",
     ),
@@ -432,13 +446,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/replication/shard/{shard}/wake",
         "drains the messages shard backlog; the shard stays empty until the stream writer",
     ),
-    // Checkpoints: the trim is measured directly, per deleted row.
-    (
-        "POST /v1/checkpoint/plan",
-        "plans a checkpoint over the whole sealed set, by design",
-    ),
-    ("POST /v1/checkpoint/excuse", "checkpoint agreement"),
-    ("POST /v1/checkpoint/resume", "checkpoint agreement"),
+    // The trim is measured directly, per deleted row.
+    ("POST /v1/checkpoint/resume", "a person's word after a trim stopped: one state row"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
     ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
     ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
@@ -446,14 +455,6 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
     ("POST /v1/hosts/launch-freeze", "rare host-local daemon-replacement barrier; bounded spawn drain and typed failures covered by launch_freeze tests"),
     ("POST /v1/hosts/launch-freeze/clear", "authenticated owner/id-fenced host-local release; covered by host_holds::tests::launch_freeze_api_authenticates_owner_reports_state_and_clears"),
-    (
-        "POST /v1/internal/replication/checkpoint",
-        "pages a trimmed checkpoint's manifest",
-    ),
-    (
-        "POST /v1/internal/replication/checkpoint-adopt",
-        "adopts a peer's checkpoint",
-    ),
     (
         "POST /v1/internal/replication/answers",
         "answers from a cache filled off the request path; filling it reads every claim, once a day by design",
@@ -1319,7 +1320,6 @@ const PROBES: &[Probe] = &[
         "GET /v1/replication/records/{*record}",
         "/v1/replication/records/{record}",
     ),
-    get("GET /v1/checkpoint/status", "/v1/checkpoint/status"),
     get(
         "GET /v1/internal/fleet/membership",
         "/v1/internal/fleet/membership",
@@ -1548,7 +1548,9 @@ const PROBES: &[Probe] = &[
     // Native physical authority is absent from generated stores. Exercise the real fenced
     // persistence path, including a fresh incarnation and non-replayed frontier each time.
     direct("POST /v1/mailbox/acceptance-frontier", |store, fixture, attempt| {
-        let agent = &fixture.subjects.seats[0];
+        // Reserve the third seat for frontier incarnations; seat zero remains the
+        // running driver used by subsequent harness-event and native-question probes.
+        let agent = &fixture.subjects.seats[2];
         let incarnation = format!("cost-mail-frontier-{attempt}");
         for (kind, fields) in [
             ("runtime.observed", json!({"status":"running","runtime_id":"cost-frontier","incarnation_id":incarnation})),
@@ -1637,6 +1639,11 @@ const PROBES: &[Probe] = &[
     // Replication, as the worker calls it: an in-step peer asks for a summary, and each side
     // answers the other's summary with what it lacks, here a few new claims.
     post(
+        "POST /v1/internal/replication/revision",
+        "/v1/internal/replication/revision",
+        |_, _| json!({"kind": "authority", "after": null}),
+    ),
+    post(
         "POST /v1/internal/replication/export",
         "/v1/internal/replication/export",
         |fixture, _| {
@@ -1658,11 +1665,6 @@ const PROBES: &[Probe] = &[
                 "round_trip_ms": 5,
             })
         },
-    ),
-    post(
-        "POST /v1/internal/replication/checkpoint-need",
-        "/v1/internal/replication/checkpoint-need",
-        |_, _| json!({}),
     ),
     get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
     get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
@@ -2780,7 +2782,7 @@ fn cold_dependency_reads_and_invalidation_pages_are_history_bounded() {
 }
 
 /// Both the HTTP SLO route and main.rs's history tick call this same SLO fold.
-/// Repeated observations grow the durable log, not the projected credit inventory.
+/// Legacy observations remain durable but cannot manufacture authenticated source coverage.
 #[test]
 fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
     const WRITER: &str = "agent/sample/usage-producer";
@@ -2788,8 +2790,6 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().join("credits.db"), "cost-node").unwrap();
     store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
-    // Complete initialization outside measured request scopes; joining the worker is deterministic.
-    store.wait_for_usage_credit_backfill().unwrap();
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
     let append = |credit_id: &str, state: &str, expires: u64, n: u64| {
@@ -2809,18 +2809,22 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
         }).unwrap()
     };
     // An identity not refreshed by any later batch must never vanish from the inventory.
-    let forfeited = append("retained-forfeiture", "forfeited", now - DAY_MS, 0);
+    let _forfeited = append("retained-forfeiture", "forfeited", now - DAY_MS, 0);
     let mut enabled = Vec::new();
     let mut disabled = Vec::new();
     for n in 1..=1_000 {
-        let refreshed = append("refreshed", "available", now + 2 * DAY_MS, n);
+        let _refreshed = append("refreshed", "available", now + 2 * DAY_MS, n);
         if !matches!(n, 100 | 1_000) {
             continue;
         }
         for configured in [true, false] {
             store.set_usage_limits_writers(if configured { vec![WRITER.into()] } else { vec![] }).unwrap();
             if configured {
-                store.wait_for_usage_credit_backfill().unwrap();
+                // Replay bounded source pages before measuring steady-state requests.
+                // No source frontier exists in this legacy fixture: no historical pass is valid.
+                for _ in 0..(n / 64 + 2) {
+                    fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
+                }
             }
             let mut samples = Vec::new();
             for _ in 0..4 {
@@ -2828,17 +2832,11 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
                 let rows = fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
                 let spent = scope.finish();
                 if configured {
-                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();
-                    assert_eq!(row["status"], "missed");
-                    assert_eq!(row["current"], "1 forfeited window-equivalents");
-                    let evidence = row["evidence"].as_array().unwrap();
-                    assert_eq!(evidence.len(), 2);
-                    assert!(evidence.iter().any(|entry| entry["claim_id"] == forfeited.id));
-                    assert!(evidence.iter().any(|entry| entry["claim_id"] == refreshed.id));
-                } else {
-                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/unknown").unwrap();
+                    let row = rows.iter().find(|row| row["id"] == "spend/cam-r01/unknown").unwrap();
                     assert_eq!(row["status"], "no-data");
-                    assert!(row["evidence"].as_array().unwrap().is_empty());
+                } else {
+                    let row = rows.iter().find(|row| row["id"] == "spend/cam-r01/unknown").unwrap();
+                    assert_eq!(row["status"], "no-data");
                 }
                 samples.push(spent);
             }
@@ -2857,6 +2855,67 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
         assert!(large.fullscan_steps <= small.fullscan_steps + 8,
             "SLO scanned durable credit history (configured={configured}): {small:?} -> {large:?}");
     }
+}
+
+/// Authenticated source history is warmed incrementally, then quiet reads stay bounded.
+#[test]
+fn slo_spend_closed_source_sql_work_is_bounded_independently_of_history() {
+    const WRITER: &str = "agent/sample/usage-producer";
+    const DAY: u64 = 86_400_000;
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("spend.db"), "cost-node").unwrap();
+    store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let start = now - 61 * DAY;
+    let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
+    let mut previous = None::<String>;
+    let mut append = |sequence: u64, observed: u64, credits: Value| {
+        store.set_write_clock_at(observed as u128).unwrap();
+        let claim = store.append_claim(&ClaimInput {
+            subject: WRITER.into(), kind: "usage.limits.observed".into(), actor: Some(WRITER.into()),
+            fields: BTreeMap::from([
+                ("readings".into(), json!([])),
+                ("credit_readings".into(), credits),
+                ("source_frontier".into(), json!({
+                    "producer_incarnation":"cost-source", "host":"cost-node",
+                    "sequence":sequence, "previous_claim":previous,
+                    "accounts":[{"provider":"anthropic","account":"digest","provider_plan":"anthropic/pro"}],
+                    "observed_at":time(observed), "covered_from":time(start),
+                    "covered_through":time(observed), "complete":true,
+                })),
+            ]),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        previous = Some(claim.id);
+    };
+    // Native enrollment really precedes the evaluation horizon; it is not backdated JSON.
+    append(0, start, json!([]));
+    let mut measurements = Vec::new();
+    for sequence in 1..=1_000 {
+        let observed = now - 1_000 + sequence;
+        append(sequence, observed, json!([{
+            "account":"digest","account_ref":"account/one","provider":"anthropic",
+            "provider_plan":"anthropic/pro","credit_id":"retained",
+            "expires_at":time(now-DAY),"measured_at":time(observed),
+            "state":"forfeited","coverage":"reported","source":"omp-usage","host":"cost-node",
+            "disposition":{"kind":"declined","at":time(now-2*DAY),"evidence_ref":"plan/declined"},
+        }]));
+        if !matches!(sequence, 100 | 1_000) { continue; }
+        for _ in 0..(sequence / 64 + 2) {
+            fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
+        }
+        let scope = work::SqliteWorkScope::start();
+        let rows = fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
+        let spent = scope.finish();
+        let row = rows.iter().find(|row| row["id"] == "spend/cam-r01/anthropic").unwrap();
+        assert_ne!(row["status"], "no-data", "closed source must exercise real native accounting");
+        assert_eq!(row["source"]["producers"][0]["next_sequence"], sequence + 1);
+        measurements.push(spent);
+    }
+    let (small, large) = (measurements[0], measurements[1]);
+    assert!(large.statements <= small.statements + 2, "{small:?} -> {large:?}");
+    assert!(large.vm_steps <= small.vm_steps + SLACK, "{small:?} -> {large:?}");
+    assert!(large.fullscan_steps <= small.fullscan_steps + 8, "{small:?} -> {large:?}");
 }
 
 /// The roll source maintains signed graph receipt references; SLO reads must not scan history.
@@ -3142,6 +3201,7 @@ fn routes_in(router: &str) -> BTreeSet<String> {
             .expect("a .route call has a path and a handler");
         let path = match path_argument.trim() {
             "crate::peer::CLIENT_READ_FORWARD_PATH" => fractal_daemon::peer::CLIENT_READ_FORWARD_PATH,
+            "run_requests::ACKNOWLEDGE_PATH" => fractal_daemon::api::run_requests::ACKNOWLEDGE_PATH,
             literal if literal.starts_with('"') && literal.ends_with('"') => {
                 literal.trim_matches('"')
             }
@@ -3824,6 +3884,23 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         tokio::task::spawn_blocking(move || seed_series_reads(&store, scale))
             .await
             .unwrap();
+    }
+    {
+        // This fixture serves routers directly, without main.rs maintenance workers.
+        // Finish the real bounded builder before any measured route scope; never
+        // charge concurrent catch-up SQL to an unrelated endpoint or assume a warmup.
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            loop {
+                let mut writer = store.connection.write_background();
+                let tx = writer.transaction().unwrap();
+                let complete = fractal_daemon::store::usage_period::backfill_step_tx(&tx).unwrap();
+                tx.commit().unwrap();
+                drop(writer);
+                if complete { break; }
+            }
+            assert!(fractal_daemon::store::usage_period::ready(&store.readers.get()).unwrap());
+        }).await.unwrap();
     }
     let claims = store.index().unwrap();
 
@@ -5175,7 +5252,6 @@ async fn trim_cost(store: &Arc<Store>) -> Cost {
             &plan.drop_digest,
             &plan.envelopes,
             &plan.claims,
-            false,
             &mut actions,
         );
         let spent = work::total() - before;

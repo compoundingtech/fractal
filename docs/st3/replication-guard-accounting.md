@@ -1,14 +1,20 @@
 # Replication guard accounting
 
-The recent-inbound guard asks its local daemon for a full replication summary and compares
-only its authority digest. Its export, digest comparison, error handling and scheduling are
-unchanged. The `authority_guard` body marker classifies only that local request. It is omitted
-from ordinary requests, ignored by old daemons, and never enters a signed peer exchange.
+Current workers compare the daemon's store-scoped authority revision snapshot with
+the authenticated inbound authority witness. They do not fetch an authority guard
+on every wake. Membership has an independent subscription.
 
-The existing `/v1/performance` meter records two fixed labels:
+The daemon still accepts the `authority_guard` body marker from older workers.
+It classifies only that local request, is ignored by old daemons, and never enters
+a signed peer exchange. This request-decoding compatibility does not restore the
+old worker polling path.
 
-- `replication/authority-guard`: completed summary store calls marked by the guard, including errors.
+The existing `/v1/performance` meter records these fixed labels:
+
+- `replication/authority-guard`: completed legacy guard store calls, including errors.
 - `replication/summary`: other completed summary store calls, including errors.
+- `replication/root-summary`: root-only summary constructions.
+- `replication/full-summary`: full bucket summary constructions, including difference exports.
 
 The second label includes every ordinary peer-summary export served by this handler. It is
 a visible addition to the report, not a new route. The CLI renderer prints arbitrary kinds;
@@ -22,13 +28,13 @@ across the worker's await is also not CPU. JSON serialization, client decode, ha
 compression are outside these labels; their CPU shares remain unknown. Existing route and
 client accounting continues unchanged, apart from the bounded recorder overhead.
 
-The meter is a rolling, at-most-300-second top-20 report. A missing label is unknown, not zero;
-use only a report that includes both labels and the export route for a call-share comparison.
+The meter is a rolling, at-most-300-second top-20 report. A missing label is unknown,
+not zero. Deterministic counting tests establish the zero-work contract; a missing
+row alone does not.
 Calls that fail before entering the summary handler or never complete are not in the label.
-No new endpoint, profiler enablement, stored payload or sampling service is introduced.
+These labels require no profiler enablement, stored payload or sampling service.
 
-Existing aggregate export counters do not distinguish guard calls. Private incident
-measurements are retained outside the repository. Compact-mode implementation waits for a
-bounded read on a reachable real node after the
-normal Operations rollout. This baseline alone establishes neither a CPU saving nor an idle
-floor, and does not qualify the four-member, ten-minute idle goal.
+Aggregate export counters alone do not establish how much full-summary work was
+avoided. Compare the summary-construction labels and the enclosing export routes
+over the same window. Work-count reductions do not by themselves establish a
+measured CPU saving or an idle CPU floor.

@@ -1,10 +1,9 @@
-//! What the sync worker asks of the store it keeps in step: export and receive exchanges, serve
-//! and adopt checkpoints, publish endpoints, redeem invites, and read membership.
+//! What the sync worker asks of the store it keeps in step: export and receive exchanges,
+//! publish endpoints, redeem invites, and read membership.
 
 use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -14,13 +13,10 @@ use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
 use crate::fleet::handshake::JoinRequest;
 use crate::replication::{
-    ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
+    ReceiveOptions, ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
     ReplicationReceiveResponse,
 };
-use crate::store::{
-    CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest, FleetRedemption, Store,
-};
+use crate::store::{FleetRedemption, Store};
 
 /// The store the worker syncs, as the worker reaches it. Every call may cross a process
 /// boundary, so each takes and returns plain values.
@@ -39,53 +35,16 @@ pub trait Backend: Clone + Send + Sync + 'static {
         signature_requests: &[ReplicaEnvelopeId],
     ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send;
 
-    /// The recent-inbound guard still requests the complete, unchanged summary.
-    /// A process boundary may mark this local request for count/wall accounting.
-    fn guard_summary(
-        &self,
-        fleet_id: &str,
-    ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send {
-        async move {
-            self.export(fleet_id, &ReplicationInventory::default(), true, &[]).await
-        }
-    }
 
-    /// Read the recent-inbound guard's scalar without requiring a process boundary to carry
-    /// every bucket. Backends without that local optimization keep the full summary path and
-    /// its errors, exactly once. The result is fresh at its read cut, not a promise about later
-    /// writes; callers must retain their existing change notifications and anti-entropy.
-    fn authority_digest(
-        &self,
-        fleet_id: &str,
-    ) -> impl Future<Output = Result<String>> + Send {
-        async move { Ok(self.guard_summary(fleet_id).await?.exchange.authority_digest) }
-    }
-
-    /// Store a peer's exchange, then admit and project what it carried. `round_trip` is how
-    /// long this worker's request that returned it took, when the exchange is a response.
+    /// Store a peer's exchange, then admit and project what it carried. The options retain
+    /// local dial evidence, authenticated sender incarnation and the optional answer deadline.
     fn receive(
         &self,
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: crate::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
+        options: ReceiveOptions<'_>,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
-
-    fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> impl Future<Output = Result<CheckpointManifestPage>> + Send;
-
-    fn checkpoint_need(
-        &self,
-    ) -> impl Future<Output = Result<Option<CheckpointManifestNeed>>> + Send;
-
-    fn adopt_checkpoint(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> impl Future<Output = Result<Vec<CheckpointAction>>> + Send;
 
     fn publish_endpoints(
         &self,
@@ -98,6 +57,13 @@ pub trait Backend: Clone + Send + Sync + 'static {
     fn redeem(&self, request: &JoinRequest) -> impl Future<Output = Result<Value>> + Send;
 
     fn fleet_view(&self) -> impl Future<Output = Result<FleetView>> + Send;
+
+    /// Return the current store-local cursor, or wait for it to differ from `after`.
+    /// Registration precedes the revision check; cancellation never consumes a change.
+    fn wait_revision(
+        &self,
+        request: super::revision::RevisionRequest,
+    ) -> impl Future<Output = Result<super::revision::StoreRevision>> + Send;
 
     fn record_failure(
         &self,
@@ -193,6 +159,16 @@ impl<S> Backend for Local<S>
 where
     S: Borrow<Store> + Send + Sync + 'static,
 {
+    async fn wait_revision(
+        &self,
+        request: super::revision::RevisionRequest,
+    ) -> Result<super::revision::StoreRevision> {
+        let kind = request.kind;
+        self.store().wait_replication_revision(request).await?;
+        let backend = self.clone();
+        tokio::task::spawn_blocking(move || backend.store().replication_revision_snapshot(kind)).await?
+    }
+
     async fn export(
         &self,
         fleet_id: &str,
@@ -207,7 +183,11 @@ where
         tokio::task::spawn_blocking(move || crate::task_cpu::blocking("replication.export", || {
             let store = backend.store();
             let exchange = if summary_only {
-                store.export_replication_summary(&fleet_id)?
+                if inventory.can(crate::replication::ROOT_SUMMARY) {
+                    store.export_replication_root_summary(&fleet_id)?
+                } else {
+                    store.export_replication_summary(&fleet_id)?
+                }
             } else {
                 store.export_replication_exchange_answering(
                     &fleet_id,
@@ -228,10 +208,9 @@ where
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: crate::replication::ReplicationCarrier,
-        authenticated_member_key: Option<&str>,
+        options: ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
+        let ReceiveOptions { round_trip, carrier, authenticated_member_key, deadline_unix_ms } = options;
         let backend = self.clone();
         let peer = peer.to_owned();
         let fleet_id = fleet_id.to_owned();
@@ -239,19 +218,24 @@ where
         let authenticated_member_key = authenticated_member_key.map(str::to_owned);
         self.store().connection.spawn_blocking(move || crate::task_cpu::blocking("replication.receive", || {
             let store = backend.store();
+            crate::replication::check_receive_deadline(deadline_unix_ms)?;
             if let Some(round_trip) = round_trip {
                 store.record_replication_round_trip(round_trip);
             }
             let receipt = store
-                .receive_replication_exchange_via(
+                .receive_replication_exchange_before(
                     &peer,
                     &fleet_id,
                     &exchange,
                     round_trip.is_some(),
-                    carrier,
-                    authenticated_member_key.as_deref(),
+                    ReceiveOptions {
+                        round_trip,
+                        carrier,
+                        authenticated_member_key: authenticated_member_key.as_deref(),
+                        deadline_unix_ms,
+                    },
                 )
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::from)?;
             store.record_transport_observation(&peer, "up", None, None)?;
             let admission = store.validate_replication_backlog()?;
             let repairs = store.apply_replication_repairs()?;
@@ -263,26 +247,6 @@ where
             })
         }))
         .await?
-    }
-
-    async fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> Result<CheckpointManifestPage> {
-        self.store().checkpoint_manifest_page(request)
-    }
-
-    async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
-        self.store().checkpoint_manifest_need()
-    }
-
-    async fn adopt_checkpoint(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>> {
-        self.store()
-            .adopt_checkpoint(manifest)
-            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
     }
 
     async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {
@@ -302,6 +266,7 @@ where
     }
 
     async fn fleet_view(&self) -> Result<FleetView> {
+        crate::performance::record_request("replication/membership-read", None, std::time::Duration::ZERO);
         self.store().fleet_view()
     }
 

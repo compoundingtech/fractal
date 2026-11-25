@@ -61,9 +61,14 @@ const SEAT_RUNTIME_KINDS: &[&str] = &[
 /// Why the newest publication can no longer stand for the rows at a newer cut.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttentionDelta {
-    /// Nothing attention reads changed: the same rows hold at the newer cut, until the
-    /// earliest future acceptance time among the claims read, if any.
-    Unchanged(Option<u128>),
+    /// Nothing attention reads changed. The retained source snapshot owns clock admissions.
+    Unchanged,
+    /// Only these source subjects (and activity actors) changed. Shared source groups use
+    /// the claim kinds to discover newly introduced members of a group.
+    Subjects {
+        subjects: BTreeSet<String>,
+        kinds: BTreeSet<String>,
+    },
     /// Fold again, and why.
     Refold(String),
 }
@@ -76,6 +81,8 @@ pub struct SeatChecks<'a> {
     seat_items: Option<BTreeSet<String>>,
     needs_login: HashMap<String, bool>,
     retiring: HashMap<String, bool>,
+    subjects: BTreeSet<String>,
+    kinds: BTreeSet<String>,
 }
 
 impl<'a> SeatChecks<'a> {
@@ -86,6 +93,8 @@ impl<'a> SeatChecks<'a> {
             seat_items: None,
             needs_login: HashMap::new(),
             retiring: HashMap::new(),
+            subjects: BTreeSet::new(),
+            kinds: BTreeSet::new(),
         }
     }
 
@@ -128,9 +137,9 @@ impl<'a> SeatChecks<'a> {
 }
 
 /// Attention kinds made of a seat's harness and runtime claims.
-const SEAT_ITEM_KINDS: &[&str] = &["harness-login", "harness-prompt"];
+const SEAT_ITEM_KINDS: &[&str] = &["harness-login", "harness-prompt", "model-drift"];
 
-/// Every seat a login or prompt item in `rows` covers: its source and its targets.
+/// Every seat a runtime-derived item in `rows` covers: its source and its targets.
 fn item_seats(rows: &[Value]) -> BTreeSet<String> {
     rows.iter()
         .filter(|row| row["attention_kind"].as_str().is_some_and(|kind| SEAT_ITEM_KINDS.contains(&kind)))
@@ -217,14 +226,8 @@ pub trait AttentionListStore {
     fn note_attention_list_fold(&self, cause: &str);
     /// How many times the attention list was folded, by why.
     fn attention_list_folds(&self) -> BTreeMap<String, u64>;
-    /// When the newest list must be evaluated again with no claim: its clock period after it
-    /// was evaluated, or sooner when a claim it read becomes eligible. `None` before the first.
-    fn attention_list_due_at(&self, period_ms: u128) -> Option<u128>;
-    /// The earliest acceptance time after `now` among the claims in `(after, through]`: a
-    /// fold at `now` left them out as not yet eligible. More potentially relevant claims
-    /// than a delta reads are left to the clock period; unread traffic does not consume
-    /// that limit, but its future acceptance times still contribute to the fence.
-    fn attention_future_since(&self, after: u64, through: u64, now: u128) -> Result<Option<u128>>;
+    /// The actual next eligibility boundary; `None` when no clock can change the rows.
+    fn attention_list_due_at(&self) -> Option<u128>;
     /// The graph projection's health row, read in the snapshot that folds or compares.
     fn attention_projection_frontier(&self) -> Result<Option<(String, u64)>>;
     /// Whether the rows of `previous` still hold at `index`, evaluated at `now`, read in the
@@ -235,17 +238,13 @@ pub trait AttentionListStore {
             &self,
             previous: &AttentionPublication,
             index: u64,
-            now: u128,
         ) -> Result<AttentionDelta>;
-    /// The first reason a claim in `(after, through]` can change the attention list, if any,
-    /// noting in `due` the earliest acceptance time after `now` among them.
+    /// The first relevant claim kind, while collecting every changed subject and kind in `seats`.
     fn attention_claims_matter(
             &self,
             seats: &mut SeatChecks<'_>,
             after: u64,
             through: u64,
-            now: u128,
-            due: &mut Option<u128>,
         ) -> Result<Option<String>>;
 }
 
@@ -285,7 +284,7 @@ impl AttentionListStore for Store {
         if succeeded {
             health.failing_since.store(0, AtomicOrdering::Release);
             if health.withdrawn.swap(false, AtomicOrdering::AcqRel) {
-                eprintln!("st3: the {view} view publishes again; its windows serve it");
+                eprintln!("fractal: the {view} view publishes again; its windows serve it");
                 self.publish_collection_view(view);
             }
             return;
@@ -299,7 +298,7 @@ impl AttentionListStore for Store {
         if now.saturating_sub(since) >= WITHDRAW_AFTER_MS
             && !health.withdrawn.swap(true, AtomicOrdering::AcqRel)
         {
-            eprintln!("st3: WARN the {view} view has failed to refresh for {} s; its windows read for themselves until it publishes again", now.saturating_sub(since) / 1000);
+            eprintln!("fractal: WARN the {view} view has failed to refresh for {} s; its windows read for themselves until it publishes again", now.saturating_sub(since) / 1000);
             self.withdraw_collection_view(view);
         }
     }
@@ -331,7 +330,7 @@ impl AttentionListStore for Store {
         if list.refresher.get().is_none() || list.stopped.swap(true, AtomicOrdering::AcqRel) {
             return;
         }
-        eprintln!("st3: WARN the attention, glasses, arrangements and summary refresher stopped; their windows read for themselves");
+        eprintln!("fractal: WARN the attention, glasses, arrangements and summary refresher stopped; their windows read for themselves");
         for view in PUBLISHED_VIEWS {
             self.withdraw_collection_view(view);
         }
@@ -420,35 +419,10 @@ impl AttentionListStore for Store {
             .clone()
     }
 
-    fn attention_list_due_at(&self, period_ms: u128) -> Option<u128> {
-        let published = self.newest_attention_list().1?;
-        let clock = published.evaluated_at_unix_ms.saturating_add(period_ms);
-        Some(published.due_at_unix_ms.map_or(clock, |due| due.min(clock)))
+    fn attention_list_due_at(&self) -> Option<u128> {
+        self.newest_attention_list().1?.due_at_unix_ms
     }
 
-    fn attention_future_since(&self, after: u64, through: u64, now: u128) -> Result<Option<u128>> {
-        if through.saturating_sub(after) > DELTA_LIMIT as u64 {
-            let connection = self.readers.get();
-            let mut statement = connection.prepare_cached(
-                "SELECT COUNT(*) FROM (
-                     SELECT 1 FROM claims WHERE store_index>?1 AND store_index<=?2
-                       AND kind NOT IN (SELECT value FROM json_each(?4)) LIMIT ?3
-                 )",
-            )?;
-            let relevant: u64 = statement.query_row(
-                /* sqlite-large-value: allow-for-now lv-h19b85b4d1a3f owner=fractal_attention::store::attention_list TODO=trace-statement-and-value-representation */ params![after, through, DELTA_LIMIT as u64 + 1, UNREAD_JSON.as_str()],
-                |row| row.get(0),
-            )?;
-            if relevant > DELTA_LIMIT as u64 {
-                return Ok(None);
-            }
-        }
-        let earliest: Option<i64> = self.readers.get().prepare_cached(
-            "SELECT MIN(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
-             WHERE store_index>?1 AND store_index<=?2 AND CAST(accepted_at_unix_ms AS INTEGER)>?3",
-        )?.query_row(/* sqlite-large-value: allow-for-now lv-h88ea458f2e12 owner=fractal_attention::store::attention_list TODO=trace-statement-and-value-representation */ params![after, through, i64::try_from(now).unwrap_or(i64::MAX)], |row| row.get(0))?;
-        Ok(earliest.and_then(|at| u128::try_from(at).ok()))
-    }
 
     fn attention_projection_frontier(&self) -> Result<Option<(String, u64)>> {
         Ok(self
@@ -466,7 +440,6 @@ impl AttentionListStore for Store {
             &self,
             previous: &AttentionPublication,
             index: u64,
-            now: u128,
         ) -> Result<AttentionDelta> {
         if index < previous.cut {
             return Ok(AttentionDelta::Refold("older cut".into()));
@@ -479,7 +452,6 @@ impl AttentionListStore for Store {
         }
         let mut seats = SeatChecks::new(self, previous);
         let projection = self.attention_projection_frontier()?;
-        let mut due = None;
         if projection != previous.projection {
             // Deferred replication projection caught up under claims already admitted: the
             // claims it projected decide, as if they had just arrived.
@@ -487,20 +459,29 @@ impl AttentionListStore for Store {
                 (Some((before, after)), Some((status, through)))
                     if before == status && after <= through =>
                 {
-                    if let Some(cause) = self.attention_claims_matter(&mut seats, *after, *through, now, &mut due)? {
-                        return Ok(AttentionDelta::Refold(format!("projection {cause}")));
+                    if self.attention_claims_matter(&mut seats, *after, *through)?
+                        .as_deref() == Some("many")
+                    {
+                        return Ok(AttentionDelta::Refold("projection many".into()));
                     }
                 }
                 _ => return Ok(AttentionDelta::Refold("projection".into())),
             }
         }
         if index > previous.cut
-            && let Some(cause) =
-                self.attention_claims_matter(&mut seats, previous.cut, index, now, &mut due)?
+            && self.attention_claims_matter(&mut seats, previous.cut, index)?
+                .as_deref() == Some("many")
         {
-            return Ok(AttentionDelta::Refold(cause));
+            return Ok(AttentionDelta::Refold("many".into()));
         }
-        Ok(AttentionDelta::Unchanged(due))
+        if seats.subjects.is_empty() {
+            Ok(AttentionDelta::Unchanged)
+        } else {
+            Ok(AttentionDelta::Subjects {
+                subjects: seats.subjects,
+                kinds: seats.kinds,
+            })
+        }
     }
 
     fn attention_claims_matter(
@@ -508,19 +489,12 @@ impl AttentionListStore for Store {
             seats: &mut SeatChecks<'_>,
             after: u64,
             through: u64,
-            now: u128,
-            due: &mut Option<u128>,
         ) -> Result<Option<String>> {
-        // Keep the future-acceptance fence for *all* claims, including the unread kinds
-        // filtered below. Their arrival used to contribute to this fence before filtering.
-        if let Some(earliest) = self.attention_future_since(after, through, now)? {
-            *due = Some(due.map_or(earliest, |due| due.min(earliest)));
-        }
         let unread = UNREAD_JSON.as_str();
         let claims = {
             let connection = self.readers.get();
             let mut statement = connection.prepare_cached(
-                "SELECT id, subject, kind, actor, CAST(accepted_at_unix_ms AS TEXT) FROM claims
+                "SELECT id, subject, kind, actor FROM claims
                  WHERE store_index>?1 AND store_index<=?2
                    AND kind NOT IN (SELECT value FROM json_each(?4))
                  ORDER BY store_index LIMIT ?3",
@@ -532,7 +506,6 @@ impl AttentionListStore for Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
-                        row.get::<_, String>(4)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -540,11 +513,8 @@ impl AttentionListStore for Store {
         if claims.len() > DELTA_LIMIT {
             return Ok(Some("many".into()));
         }
-        for (id, subject, kind, actor, accepted) in claims {
-            let accepted = accepted.parse::<u128>().unwrap_or(0);
-            if accepted > now {
-                *due = Some(due.map_or(accepted, |due: u128| due.min(accepted)));
-            }
+        let mut cause = None;
+        for (id, subject, kind, actor) in claims {
             let matters = if kind == "work.progress" {
                 // Work by a seat counts as its activity in the login fold: it can only clear a
                 // login item the seat already has.
@@ -565,10 +535,27 @@ impl AttentionListStore for Store {
                 true
             };
             if matters {
-                return Ok(Some(kind));
+                cause.get_or_insert_with(|| kind.clone());
+                if fractal_schema::attention_controls::KINDS.contains(&kind.as_str()) {
+                    let attention_id: String = self.readers.get().query_row(
+                        "SELECT json_extract(body,'$.fields.attention_id') FROM claims WHERE id=?1",
+                        [&id], |row| row.get(0),
+                    )?;
+                    for row in seats.previous.rows.iter().filter(|row| row["id"].as_str() == Some(&attention_id)) {
+                        if let Some(source) = row["source_id"].as_str() {
+                            seats.subjects.insert(source.to_owned());
+                        }
+                    }
+                } else {
+                    seats.subjects.insert(subject);
+                }
+                if kind == "work.progress" && let Some(actor) = actor {
+                    seats.subjects.insert(actor);
+                }
+                seats.kinds.insert(kind);
             }
         }
-        Ok(None)
+        Ok(cause)
     }
 }
 

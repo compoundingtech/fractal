@@ -173,12 +173,98 @@ pub fn wake_batch(
     Ok((next, changed, full))
 }
 
+/// The shard index this member's stream has reached, and the work wakes sent to any of `names`
+/// after `after` up to it, as (subject, shard index), oldest first. Items are only appended, so
+/// a caller that keeps what it read asks only for those after its last answer.
+pub fn work_wakes_after(
+    graph: &crate::store::Store,
+    names: &[String],
+    after: u64,
+) -> anyhow::Result<(u64, Vec<(String, u64)>)> {
+    let Some(shard) = shard(graph) else {
+        return Ok((after, Vec::new()));
+    };
+    let connection = shard.readers.get();
+    let through: u64 = connection
+        .prepare_cached("SELECT COALESCE(MAX(store_index),0) FROM stream_messages")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-he1c1a6029a98 owner=fractal_store::store::messages_shard::mailbox_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+    let wakes = connection
+        .prepare_cached(
+            "SELECT item.subject, item.store_index FROM stream_messages AS item
+             JOIN claims ON claims.store_index=item.store_index
+             WHERE item.recipient IN (SELECT value FROM json_each(?1))
+               AND item.store_index>?2 AND item.store_index<=?3
+               AND (instr(claims.body, 'st3-work:')>0 OR instr(claims.body, 'fractal-work:')>0)
+             ORDER BY item.store_index",
+        )?
+        .query_map(rusqlite::params![serde_json::to_string(names)?, after, through], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((through.max(after), wakes))
+}
+
 /// A stream item's `message.sent` claim, which carries the time it was accepted.
 pub fn sent_claim(graph: &crate::store::Store, subject: &str) -> anyhow::Result<Option<ClaimRecord>> {
     let Some(shard) = shard(graph) else {
         return Ok(None);
     };
     Ok(stream_item(&shard, subject)?.map(|(claim, _)| claim))
+}
+
+/// The native Claude reads of stream items that `owner` recorded in `session`, for the native
+/// messages in `ids`, as (native message id, stream item): at most three for each id, newest
+/// first, so a caller that finds three cannot call the link unique.
+pub fn native_receipts(
+    graph: &crate::store::Store,
+    session: &str,
+    owner: &str,
+    ids: &[String],
+) -> anyhow::Result<Vec<(String, String)>> {
+    let Some(shard) = shard(graph) else {
+        return Ok(Vec::new());
+    };
+    let connection = shard.readers.get();
+    let mut statement = connection.prepare_cached(
+        "SELECT requested.value, proof.subject
+         FROM json_each(?1) AS requested
+         CROSS JOIN stream_lifecycle AS proof INDEXED BY stream_lifecycle_native_read
+         WHERE proof.kind='message.read' AND proof.actor=?3
+           AND json_extract(proof.fields, '$.native_receipt.session_id')=?2
+           AND json_extract(proof.fields, '$.native_receipt.message_id')=requested.value
+           AND proof.rowid IN (
+               SELECT rowid FROM stream_lifecycle INDEXED BY stream_lifecycle_native_read
+               WHERE kind='message.read' AND actor=?3
+                 AND json_extract(fields, '$.native_receipt.session_id')=?2
+                 AND json_extract(fields, '$.native_receipt.message_id')=requested.value
+               ORDER BY rowid DESC LIMIT 3)",
+    )?;
+    let receipts = statement
+        .query_map(rusqlite::params![serde_json::to_string(ids)?, session, owner], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(receipts)
+}
+
+/// Whether `owner` recorded a native Claude read of a stream item after lifecycle position
+/// `after`, up to `through`: one can change a native conversation already delivered.
+pub fn native_receipt_between(
+    graph: &crate::store::Store,
+    owner: &str,
+    after: i64,
+    through: i64,
+) -> anyhow::Result<bool> {
+    let Some(shard) = shard(graph) else {
+        return Ok(false);
+    };
+    let connection = shard.readers.get();
+    let mut statement = connection.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM stream_lifecycle INDEXED BY stream_lifecycle_native_read
+         WHERE kind='message.read' AND actor=?1 AND rowid>?2 AND rowid<=?3
+           AND json_extract(fields, '$.native_receipt.message_id') IS NOT NULL)",
+    )?;
+    Ok(statement.query_row(/* sqlite-large-value: allow-for-now lv-hdccf7bbf22e7 owner=fractal_store::store::messages_shard::mailbox_reads TODO=trace-statement-and-value-representation */ rusqlite::params![owner, after, through], |row| row.get(0))?)
 }
 
 /// This member's `kind` step for a stream item, as (actor, recorded at), if it took it.

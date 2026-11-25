@@ -2479,6 +2479,12 @@ pub struct Agent {
     /// incarnation. `None` when it reported none; differs from the declaration while drifted.
     #[serde(default)]
     pub live_model: Option<String>,
+    /// Model selected by the current harness declaration, independent of live evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_model: Option<String>,
+    /// Current-incarnation drift and native fallback evidence; omitted by older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_drift: Option<AgentModelDrift>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
     #[serde(default)]
@@ -2514,6 +2520,17 @@ pub struct Agent {
     /// The resources the seat's current declaration names. An older daemon omits them.
     #[serde(default)]
     pub resources: Vec<DeclaredResource>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentModelDrift {
+    pub state: String,
+    pub drift_since: Option<String>,
+    pub drift_age_seconds: Option<u64>,
+    pub observed_at: Option<String>,
+    /// A native sanitized cause; model mismatch alone does not establish fallback.
+    pub fallback_reason: Option<String>,
+    /// Durably admitted attempts for this incarnation; missing incarnation is unknown, not zero.
+    pub return_attempts: Option<u64>,
 }
 /// Declared seat lifecycle: standing, owner, or bounded. Absence means undeclared.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
