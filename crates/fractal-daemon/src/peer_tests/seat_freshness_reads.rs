@@ -1327,6 +1327,66 @@ async fn relayed_close_maintenance_pages_past_open_mail_without_any_get() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn legacy_close_polls_do_not_rewrite_open_candidates_and_upgrades_cancel_them() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _) = owner(root.path()).await;
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer.import_replication(OWNER, &owner.export_replication(0).unwrap()).unwrap();
+    viewer.project_replication_backlog().unwrap();
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    while crate::store::relayed_close_work::has_pending(&viewer).unwrap() {
+        crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
+    }
+    close_writer_idle(&viewer).await;
+    viewer.connection.write_background().execute_batch("
+        CREATE TEMP TRIGGER reject_poll_candidate_delete BEFORE DELETE ON local_relayed_close_candidates
+            BEGIN SELECT RAISE(ABORT,'poll rewrote candidates'); END;
+        CREATE TEMP TRIGGER reject_poll_candidate_insert BEFORE INSERT ON local_relayed_close_candidates
+            BEGIN SELECT RAISE(ABORT,'poll rewrote candidates'); END;
+        CREATE TEMP TRIGGER reject_poll_read_insert BEFORE INSERT ON local_relayed_close_reads
+            BEGIN SELECT RAISE(ABORT,'open answer gained a read job'); END;
+    ").unwrap();
+    for _ in 0..2 {
+        crate::store::relayed_close_work::enqueue_legacy_host(&viewer, OWNER).unwrap();
+        while crate::store::relayed_close_work::has_pending(&viewer).unwrap() {
+            crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
+        }
+    }
+    viewer.connection.write_background().execute_batch("
+        DROP TRIGGER reject_poll_candidate_delete;
+        DROP TRIGGER reject_poll_candidate_insert;
+        DROP TRIGGER reject_poll_read_insert;
+    ").unwrap();
+    message_marks::record(&owner, "message/00000000000000c1", "message.closed", &cedar).unwrap();
+    crate::store::relayed_close_work::enqueue_legacy_host(&viewer, OWNER).unwrap();
+    while crate::store::relayed_close_work::has_pending(&viewer).unwrap() {
+        crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
+    }
+    close_writer_idle(&viewer).await;
+    assert!(crate::store::relayed_closes::closed(
+        &viewer.readers.get(), "message/00000000000000c1",
+    ).unwrap(), "direct compatibility pages must still settle terminal answers");
+
+    send(&owner, "message/00000000000000c2", &cedar);
+    advertise(&owner, json!({
+        "seat_freshness_reads": 1, "message_offsets": 1, "message_mark_events": 1,
+    }));
+    viewer.import_replication(OWNER, &owner.export_replication(0).unwrap()).unwrap();
+    viewer.project_replication_backlog().unwrap();
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    while crate::store::relayed_close_work::has_pending(&viewer).unwrap() {
+        crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
+    }
+    let before = crate::api::relayed_close_maintenance::work_counts(&viewer);
+    crate::store::relayed_close_work::enqueue_legacy_host(&viewer, OWNER).unwrap();
+    crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
+    assert!(!crate::store::relayed_close_work::has_pending(&viewer).unwrap());
+    assert_eq!(crate::api::relayed_close_maintenance::work_counts(&viewer), before,
+        "a capability upgrade must discard queued polling without reading candidates");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn relayed_close_maintenance_cancels_an_in_flight_remote_read() {
     let root = tempfile::tempdir().unwrap();
     let (owner, url, cedar, _) = owner(root.path()).await;

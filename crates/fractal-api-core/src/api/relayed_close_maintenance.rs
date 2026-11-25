@@ -53,15 +53,28 @@ async fn discover(state: &AppState, budget: &ReadBudget) -> anyhow::Result<()> {
     relayed_closes::wait_idle(&state.store).await?;
     let store = state.store.clone();
     let selecting = budget.clone();
-    let reads = tokio::task::spawn_blocking(move || read_budget::with(Some(selecting), || {
+    let (reads, legacy) = tokio::task::spawn_blocking(move || read_budget::with(Some(selecting), || -> anyhow::Result<_> {
         read_budget::check()?;
         relayed_close_work::discovery_batch(&store, PAGE_LIMIT)?;
-        relayed_close_work::read_batch(&store, PAGE_LIMIT, now_ms()?)
+        let reads = relayed_close_work::read_batch(&store, PAGE_LIMIT, now_ms()?)?;
+        if !reads.is_empty() { return Ok((reads, None)); }
+        let legacy = relayed_close_work::legacy_read_batch(&store, PAGE_LIMIT, now_ms()?)?;
+        if let Some(page) = &legacy
+            && message_reads::advertises(&store, &page.host, crate::peer::MESSAGE_MARK_EVENTS_FEATURE, 1)?
+        {
+            relayed_close_work::cancel_legacy_host(&store, &page.host)?;
+            return Ok((Vec::new(), None));
+        }
+        let reads = legacy.as_ref().map(|page| page.messages.iter()
+            .map(|message| (message.clone(), page.host.clone())).collect()).unwrap_or_default();
+        Ok((reads, legacy))
     })).await??;
-    if reads.is_empty() { return Ok(()); }
-    let work = state.store.extension::<Work>();
-    work.discovery_passes.fetch_add(1, Ordering::Relaxed);
-    work.candidate_messages.fetch_add(reads.len() as u64, Ordering::Relaxed);
+    let compatibility = legacy.is_some();
+    if !reads.is_empty() {
+        let work = state.store.extension::<Work>();
+        work.discovery_passes.fetch_add(1, Ordering::Relaxed);
+        work.candidate_messages.fetch_add(reads.len() as u64, Ordering::Relaxed);
+    }
     let mut asks = BTreeMap::<String, Vec<String>>::new();
     for (subject, host) in reads { asks.entry(host).or_default().push(subject); }
     let mut asks = asks.into_iter();
@@ -93,10 +106,14 @@ async fn discover(state: &AppState, budget: &ReadBudget) -> anyhow::Result<()> {
             // A successful marks answer is acknowledged only after terminal evidence has
             // committed to the durable close queue. Cancellation cannot lose either job.
             relayed_closes::queue(&store, closes)?;
-            relayed_close_work::read_succeeded(&store, &succeeded)?;
+            if !compatibility { relayed_close_work::read_succeeded(&store, &succeeded)?; }
             relayed_close_work::read_failed(&store, &failed, now_ms()?)
         }).await??;
         relayed_closes::wait_idle(&state.store).await?;
+    }
+    if let Some(page) = legacy {
+        let store = state.store.clone();
+        tokio::task::spawn_blocking(move || relayed_close_work::acknowledge_legacy_page(&store, &page)).await??;
     }
     Ok(())
 }
