@@ -762,7 +762,7 @@ mod tests {
             owner: Owner { run: "run".into(), step: "step".into(), attempt: 1, invocation: None },
         }).collect();
         // Twenty waiters, no holders: PSI suppresses the fictional 20 GiB evictable credit.
-        let observation = outside().unwrap();
+        let observation = outside(&reconciler.seat_admission.finite_policy.psi_brake).unwrap();
         assert!(observation.psi_blocked);
         for request in &requests {
             let fit = Fit { room: Some(room), outside_bytes: observation.outside_bytes,
@@ -778,7 +778,8 @@ mod tests {
         let head = &requests[0];
         let fit = reconciler.resource_lane_fit(head).unwrap();
         assert_eq!(fit.reserve_bytes, 0, "a finite member is not a burst-capable seat");
-        assert_eq!(fit.outside_bytes, outside().unwrap().outside_bytes);
+        assert_eq!(fit.outside_bytes,
+            outside(&reconciler.seat_admission.finite_policy.psi_brake).unwrap().outside_bytes);
         assert!(!fit.psi_blocked);
         assert!(matches!(store.request_resource_membership(head, fit, 2).unwrap(), Admission::Admitted(_)));
         assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 15 * GIB);

@@ -189,7 +189,8 @@ fn changed_host_memory_observation_wakes_waiters_without_an_envelope_file() {
         Some(Some(HostMemoryObservation { outside_bytes: 100, psi_blocked: false }));
     reconciler.refresh_seat_admission_at(1002);
     assert!(events.has_changed().unwrap(), "changed outside bytes wake incremental fit evaluation");
-    assert_eq!(*reconciler.seat_admission.outside_observation.lock().unwrap(), Some(outside()));
+    assert_eq!(*reconciler.seat_admission.outside_observation.lock().unwrap(),
+        Some(outside(&reconciler.seat_admission.finite_policy.psi_brake)));
     events.borrow_and_update();
     *reconciler.seat_admission.outside_observation.lock().unwrap() =
         Some(Some(HostMemoryObservation { outside_bytes: 42, psi_blocked: true }));
