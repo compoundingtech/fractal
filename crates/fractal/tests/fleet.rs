@@ -10784,8 +10784,8 @@ async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_roll
 /// Closed agent mail retires a week after it closes on a member that trims locally, which was
 /// upgraded in place from the previous release with that mail in its store. Its person mail
 /// stays. The release beside it keeps its own copies and never sends a retired one back, and
-/// replication stays whole. Old readers recover pre-upgrade mail only; current recovery keeps
-/// post-upgrade retirement state and never resurrects retired claims.
+/// replication stays whole. H3 prevents the pinned release from restoring a local-trim archive;
+/// this build recovers that same pre-upgrade mail and preserves post-upgrade retirement state.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollback() {
@@ -10827,6 +10827,15 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
             }
         }
     }
+    // Match trim_status's persisted completion condition before exporting the local cut.
+    wait_until("the release member completed its local checkpoint trim", 90, || async {
+        rusqlite::Connection::open_with_flags(
+            n1.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE state='trimmed')",
+            [], |row| row.get::<_, bool>(0),
+        ).unwrap()
+    }).await;
     let recovery = previous_release_archive(&n1, root.path());
 
     // Upgrade the member in place and opt it in; a week later its closed agent thread retires.
@@ -10869,11 +10878,32 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
     }
     assert!(thread_kinds(&n1, &agent).await.is_empty(), "a retired claim came back");
 
-    // Old readers do not consume the retired store; they restore their pre-upgrade mail.
+    // H3: a307411d exports local cuts but requires a certificate when restoring them.
+    // The rollback release (a307411d plus the restore-shape check from 9ee2529f)
+    // will turn this restore refusal into a success assertion.
     n1.stop();
     fs::write(&config, &text).unwrap();
-    let recovered = previous_release_rollback(&mut n1, &old, &recovery).await
-        .expect("the pinned release must refuse the privacy floor");
+    let database = n1.state_dir().join("claims.sqlite3");
+    let version = database_schema(&database);
+    n1.binary = old.clone();
+    assert!(!n1.start_with_schema_refusal(Some(version)).await,
+        "the pinned release must refuse the privacy floor");
+    assert_eq!(database_schema(&database), version, "the refusal changed the upgraded schema");
+    let mut release_restore = Node::named(root.path(), "local-trim-release-refusal", "restoring");
+    release_restore.binary = old.clone();
+    let target = release_restore.state_dir().join("claims.sqlite3");
+    let refusal = release_restore.command(&[
+        "--json", "backup", "restore", "--database", target.to_str().unwrap(),
+        recovery.to_str().unwrap(),
+    ]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert!(!refusal.status.success(), "H3: a307411d must refuse its local-trim archive");
+    let code = stderr.lines().rev().find_map(|line| line.strip_prefix("st: "))
+        .and_then(|message| message.split_once(':'))
+        .map(|(code, _)| code);
+    assert_eq!(code, Some("checkpoint-not-stable"), "unexpected restore refusal: {stderr}");
+    // Current recovery reads the identical release-owned archive, not post-upgrade state.
+    let (recovered, _) = restored_node(root.path(), "local-trim-current-recovery", &recovery).await;
     assert_eq!(thread_kinds(&recovered, &agent).await, whole);
     assert_eq!(thread_kinds(&recovered, &person).await, whole);
     fs::write(&config, format!("{text}mail = true\n")).unwrap();
