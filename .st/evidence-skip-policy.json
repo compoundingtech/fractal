@@ -888,6 +888,7 @@
       "sample_one_in": 1,
       "inputs": [
         ".config/daily-only.filterset",
+        ".config/nextest.toml",
         ".gitattributes",
         ".github",
         ".gitignore",
