@@ -1004,7 +1004,7 @@ impl RuntimeStartsStore for Store {
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
             fractal_store::store::local_sessions::admit_capacity(tx, Some(id))?;
-            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h9cfcb3ca5088 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,body=json_set(body,'$.custody_reserved',json('true'),'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','before-backend')) WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-he6703e45fd19 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,body=json_set(body,'$.custody_reserved',json('true'),'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','before-backend')) WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
@@ -1013,7 +1013,7 @@ impl RuntimeStartsStore for Store {
             // Also covers already-dispatched operations recovered from older versions.
             fractal_store::store::local_sessions::admit_capacity(tx, Some(id))?;
             let changed = tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h32881e5b0f45 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */
+                /* sqlite-large-value: allow-for-now lv-h03ccd97102d3 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE local_runtime_starts SET body=json_set(body,'$.custody_reserved',json('true'),'$.backend_entry.phase','backend-entering')
                  WHERE id=?1 AND owner=?2 AND dispatched=1 AND finished=0 AND revoked_by IS NULL
                    AND json_extract(body,'$.backend_entry.version')=1

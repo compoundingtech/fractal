@@ -66,7 +66,7 @@ impl std::error::Error for SessionCustodyCapacityReached {}
 /// A bound producer has transferred its reservation into custody permanently,
 /// even after that generation is settled and its custody history is reclaimed.
 fn retain_bound_start_reservations(connection: &Connection) -> Result<()> {
-    connection.execute("UPDATE local_runtime_starts
+    connection.execute(/* sqlite-large-value: allow-for-now lv-he5eb2642f016 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts
         SET body=json_set(body,'$.custody_bound',json('true'))
         WHERE id IN (SELECT json_extract(body,'$.start_operation') FROM local_session_custody)
           AND json_extract(body,'$.custody_bound') IS NOT 1
@@ -84,7 +84,7 @@ fn retain_bound_start_reservations(connection: &Connection) -> Result<()> {
 pub fn admit_capacity(connection: &Connection, operation: Option<&str>) -> Result<()> {
     // Backfill retained bindings before reclamation, including pre-marker starts.
     retain_bound_start_reservations(connection)?;
-    connection.execute("DELETE FROM local_session_custody
+    connection.execute(/* sqlite-large-value: allow-for-now lv-haa0b903d4ba1 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_session_custody
         WHERE active=0 AND custody_settled=1
           AND (detached_by IS NULL OR detach_receipted=1)
           AND NOT EXISTS(SELECT 1 FROM local_runtime_starts AS starts
@@ -145,7 +145,7 @@ impl Store {
               AND (local_session_custody.body<>excluded.body OR local_session_custody.active<>1)",
             params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
         if let Some(operation) = binding.start_operation.as_deref() {
-            tx.execute("UPDATE local_runtime_starts
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hf7b7bef2f1d8 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts
                 SET body=json_set(body,'$.custody_bound',json('true'))
                 WHERE id=?1 AND subject=?2", params![operation, binding.subject])?;
         }
@@ -159,7 +159,7 @@ impl Store {
     pub fn verify_local_session_retirement(&self, binding: &LocalSession) -> Result<()> {
         anyhow::ensure!(binding.custody == SessionCustody::Owned, "borrowed custody cannot retire its native runtime");
         let changed = self.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h31a948e882b8 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET native_retirement_verified=1
+            /* sqlite-large-value: allow-for-now lv-he717590a6594 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET native_retirement_verified=1
              WHERE subject=?1 AND incarnation=?2 AND body=?3 AND active=1
                AND detached_by IS NULL",
             params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;

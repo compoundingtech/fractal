@@ -103,13 +103,13 @@ fn local_session_probe_releases_only_exact_natural_pty_exit() {
     assert!(local_session(&store, &runtime, subject, Some("wrong-expected-generation")).is_err());
     assert!(store.has_current_local_session(subject).unwrap());
     store.connection.write().execute_batch(
-        "ALTER TABLE local_observations RENAME TO unavailable_local_observations;"
+        /* sqlite-large-value: allow-for-now lv-h790ae64f7fad owner=fractal_reconcile::reconcile::local_session_tests TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE local_observations RENAME TO unavailable_local_observations;"
     ).unwrap();
     assert!(local_session(&store, &runtime, subject, None).is_err());
     assert!(store.has_current_local_session(subject).unwrap(),
         "an exit cannot release custody when its observation fails to persist");
     store.connection.write().execute_batch(
-        "ALTER TABLE unavailable_local_observations RENAME TO local_observations;"
+        /* sqlite-large-value: allow-for-now lv-hf682ac2a591a owner=fractal_reconcile::reconcile::local_session_tests TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE unavailable_local_observations RENAME TO local_observations;"
     ).unwrap();
     assert!(local_session(&store, &runtime, subject, None).is_err());
     assert!(!store.has_current_local_session(subject).unwrap());
