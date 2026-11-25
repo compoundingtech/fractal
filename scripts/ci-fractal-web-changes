@@ -188,6 +188,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/monitor/fixtures.ts",
     "apps/fractal-web/src/monitor/model.ts",
     "apps/fractal-web/src/monitor/state.ts",
+    "apps/fractal-web/src/monitor/UsageAccounts.tsx",
+    "apps/fractal-web/src/monitor/usageAccountView.ts",
     "apps/fractal-web/src/monitor/UsagePane.stories.tsx",
     "apps/fractal-web/src/monitor/UsagePane.tsx",
     "apps/fractal-web/src/monitor/usageFixtures.ts",

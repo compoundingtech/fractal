@@ -59,9 +59,12 @@ impl Store {
     /// which this build stored without bytes, or an older build stored with them after a
     /// rollback.
     pub fn release_valid_record_bytes(&self) -> Result<RecordBytesRelease> {
-        self.connection
+        let page = self
+            .connection
             .batched(|tx| release_page(tx))
-            .map_err(anyhow::Error::msg)?
+            .map_err(anyhow::Error::msg)??;
+        self.retention.valid_record_bytes(&page);
+        Ok(page)
     }
 
     /// Whether the pass has read every record this store holds.
@@ -81,6 +84,16 @@ fn cursor(connection: &Connection) -> Result<i64> {
         .query_row("SELECT value FROM meta WHERE key=?1", [CURSOR], |row| row.get(0))
         .optional()?;
     Ok(value.map(|value| value.parse::<i64>()).transpose()?.unwrap_or(0))
+}
+
+/// The pass's cursor and the newest record: two point reads.
+pub(super) fn progress(connection: &Connection) -> Result<(i64, i64)> {
+    let newest: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(rowid), 0) FROM replica_records",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok((cursor(connection)?, newest))
 }
 
 fn release_page(tx: &Connection) -> Result<RecordBytesRelease> {

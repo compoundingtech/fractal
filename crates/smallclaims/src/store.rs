@@ -96,6 +96,7 @@ pub mod member_signatures;
 pub mod envelope_release;
 pub mod signed_claims;
 pub mod retirement_wins;
+pub mod retention;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -1013,6 +1014,8 @@ pub struct Store {
     pub(crate) signed_claims: Mutex<signed_claims::Tally>,
     /// Whether a peer's retired claim IDs delete held copies (`retirement_wins`).
     pub(crate) retirement_wins: AtomicBool,
+    /// What the retention passes did since start (`retention`).
+    pub(crate) retention: retention::Tally,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1486,6 +1489,7 @@ impl Store {
             connection,
             admitted: None,
             checkpoint_worker: Default::default(),
+            retention: Default::default(),
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
             readers,
@@ -7120,6 +7124,8 @@ impl Store {
             },
         )?;
         transaction.commit()?;
+        drop(writer);
+        self.retention.receipt_cleanup(&cleaned);
         Ok(cleaned)
     }
 
@@ -11449,6 +11455,7 @@ impl Store {
             first_sync: self.first_sync()?,
             removed: None,
             stream_fallbacks: None,
+            retention: None,
         })
     }
 
