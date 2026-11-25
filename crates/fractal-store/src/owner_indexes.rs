@@ -167,7 +167,11 @@ mod tests {
             let values = vec![rusqlite::types::Value::Text("example".into()); statement.parameter_count()];
             let plan = statement.query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
                 .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
-            assert!(plan.contains(&format!("USING INDEX {name}")), "{name}: {plan}");
+            assert!(
+                plan.contains(&format!("USING INDEX {name} "))
+                    || plan.contains(&format!("USING COVERING INDEX {name} ")),
+                "{name}: {plan}",
+            );
         }
     }
 

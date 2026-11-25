@@ -947,6 +947,7 @@ mod read_progress_tests {
     fn read_helpers_anchor_seek_work_is_bounded_as_history_grows() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let store = Store::open_memory("seek-cost").unwrap();
+        store.connection.write().execute_batch(crate::owner_indexes::THREAD_INDEXES).unwrap();
         store.configure_thread_write_rollout([]);
         store.append_claim(&ClaimInput{subject:"daemon/seek-cost".into(),kind:"daemon.started".into(),actor:None,
             fields:serde_json::from_value(json!({"status":"running","features":{"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION}})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
