@@ -1,8 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fractal_daemon::{
-    model::{ClaimInput, ReplicationInventory},
-    store::Store,
-};
+    model::{ ReplicationInventory},
+    store::Store};
+use fractal_wire::{ClaimInput};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[test]
@@ -11,7 +11,7 @@ fn upgrade_preserves_signed_backups_retries_and_stream_cursors() {
     let path = root.path().join("source.sqlite3");
     let store = Store::open(&path, "alder").unwrap();
     store.bind_fleet("sample-fleet").unwrap();
-    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     store.set_member_key(Some(key.clone())).unwrap();
     let input = |n: usize| ClaimInput {
         subject: "daemon/alder".into(),
@@ -44,9 +44,9 @@ fn upgrade_preserves_signed_backups_retries_and_stream_cursors() {
         .export_replication_exchange("sample-fleet", &ReplicationInventory::default())
         .unwrap();
     for envelope in &exchange.envelopes {
-        assert!(fractal_daemon::fleet::verify_signature(
+        assert!(fractal_auth::verify_signature(
             key.public(),
-            &fractal_daemon::fleet::envelope_signature_message(
+            &fractal_auth::envelope_signature_message(
                 "sample-fleet",
                 &envelope.writer,
                 envelope.sequence,

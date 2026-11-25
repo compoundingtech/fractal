@@ -195,7 +195,7 @@ pub fn forwarded(
     if !tracing::enabled!(target: TARGET, tracing::Level::DEBUG) {
         return None;
     }
-    let actual = selector.forwarding(|| smallclaims::sync::FleetAuth::body_digest(body), caller, unix)?;
+    let actual = selector.forwarding(|| fractal_auth::FleetAuth::body_digest(body), caller, unix)?;
     let trace = Trace::new(actual);
     if let Some(connection) = connection {
         connection.record(&trace);

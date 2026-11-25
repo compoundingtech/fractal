@@ -26,12 +26,12 @@ impl Runtime for FleetCheckpointRuntime {
     }
 
     fn classify_replicated_claim(&self, connection: &Connection, batch: &crate::claim::ReplicaBatch,
-        claim: &ClaimRecord) -> Result<ReplicatedClaimAdmission, crate::error::Error> {
+        claim: &ClaimRecord) -> Result<ReplicatedClaimAdmission, fractal_wire::Error> {
         Plain.classify_replicated_claim(connection, batch, claim)
     }
 
     fn append_claim(&self, store: &Store, input: &ClaimInput)
-        -> Result<(ClaimRecord, bool), crate::error::Error> {
+        -> Result<(ClaimRecord, bool), fractal_wire::Error> {
         Plain.append_claim(store, input)
     }
 
@@ -46,15 +46,15 @@ impl Runtime for FleetCheckpointRuntime {
     }
 
     fn project_incremental(&self, tx: &Transaction<'_>, origin: &str, through: u64)
-        -> Result<IncrementalProjection, crate::error::Error> {
+        -> Result<IncrementalProjection, fractal_wire::Error> {
         Plain.project_incremental(tx, origin, through)
     }
 
-    fn replay_from_nothing(&self, tx: &Transaction<'_>) -> Result<(), crate::error::Error> {
+    fn replay_from_nothing(&self, tx: &Transaction<'_>) -> Result<(), fractal_wire::Error> {
         Plain.replay_from_nothing(tx)
     }
 
-    fn after_projection(&self, tx: &Transaction<'_>) -> Result<(), crate::error::Error> {
+    fn after_projection(&self, tx: &Transaction<'_>) -> Result<(), fractal_wire::Error> {
         Plain.after_projection(tx)
     }
 

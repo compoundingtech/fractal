@@ -1,5 +1,6 @@
 use super::*;
-use crate::claim::{ClaimInput, ReplicaEnvelopeId};
+use crate::claim::{ ReplicaEnvelopeId};
+use fractal_wire::{ClaimInput};
 use crate::replication::ReplicationInventory;
 use crate::store::runtime::Plain;
 use std::sync::Arc;

@@ -51,9 +51,9 @@ disabled in GitHub Actions; it does not currently run on PRs or main pushes. The
 fast lane requires `linux-test-build`, `linux-clippy` and `linux-fleet-compat`. The full
 `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` checks still run as
 advisory hosted proof. Merge-group support remains available (see [Merge queue](#merge-queue)).
-The VM tests
-(`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
-requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
+Native runtime and standalone light-node scope/custody controls run in the required
+`isolation-vm` job before merge and again in `daily-long.yml`. Mail redelivery
+canaries remain daily-only; a red daily run comments on its one open issue.
 
 Every **ready** pull request, including a fork, gets the Linux gate, the freshness check, the
 TypeScript client check and the web lane. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
@@ -112,11 +112,11 @@ workflow's exact-source producer archive. Before shard 1 executes, actual nextes
 lists must prove that the selected inventories form a disjoint, complete union.
 
 `linux-gate` aggregates `upgrade-impact`, applicable build/test and Rust stages,
-and `ci-script-tests`. Each must succeed, except for a stage its matching evidence
+required `isolation-vm`, HM/package proofs and `ci-script-tests`. Each must succeed, except for a stage its matching evidence
 gate explicitly permits to skip; failure, cancellation or an unexplained skip fails
-the aggregate. Mail redelivery and isolation VM coverage run in the daily lanes.
+the aggregate. Mail redelivery remains daily-only; native scope/custody runs before merge and daily.
 Namespace build/test stages use `nscloud-ubuntu-24.04-amd64-8x16-with-features`;
-the daily `isolation-vm` uses `namespace-profile-linux-x86-64`.
+the required and daily `isolation-vm` use `namespace-profile-linux-x86-64`.
 The four required Workspace gates (`linux-gate`, `typescript-client`, `fractal-web`,
 `genie-freshness`) and supporting controls (`upgrade-impact` and web change detection)
 use the existing `ci1-priority` owned role only for `merge_group` and protected-main
@@ -655,25 +655,48 @@ survives. The test remains ignored in ordinary CI; the VM explicitly selects it 
 `fractal_runtime` binary, `lib` kind and full name. This execution does not authorize production
 activation of the retirement primitive.
 
-All five controls need a real systemd user manager, which Namespace's runner image does not
-boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily `daily-isolation-vm`
-job (`daily-long.yml`):
+The standalone agent adds the sixth exact identity:
+`fractal-light-node-agent`, `binary_session`, `test`,
+`standalone_exec_observe_stop_restart_and_private_accounting_requires_systemd`.
+This is a real home process and separate agent binary with real native scope
+custody, authenticated Observe/Stop, durable restart/replay and private
+own-process performance output. It requires positive systemd whole-scope
+retirement proof, not a detached-process fallback. The separate PTY binary
+fixture, private-configuration boundaries and physical accounting sensor
+controls run in the ordinary Rust shards. None is ignored to produce a green gate.
+
+All six scope controls need a real systemd user manager, which Namespace's runner
+image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in
+required `isolation-vm`, a member of `linux-gate`, and daily `daily-isolation-vm`:
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
-2. The producer prebuilds the current workspace into one archive, including the
-   fractal-runtime `scope_cascade` and library binaries.
+2. The producer prebuilds the current workspace into one archive, including
+   `fractal-runtime` and the standalone agent integration target and binary.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive and extracts it at the producer checkout's
-   path for its package working directories. It runs the five controls through nextest as a
-   transient service of that user's systemd manager. The VM compiles nothing.
+   path for its package working directories. It runs the six controls through nextest
+   as a transient service of that user's systemd manager. The VM compiles nothing.
+   It has real 8 GiB memory and sparse 64 GiB disk capacity; scratch is disk-backed
+   so the complete authenticated archive does not exhaust a small runtime tmpfs.
 
-The archive inventory must match the five exact package, binary, kind and test identities.
+The archive inventory must match the six exact package, binary, kind and test identities.
 Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
-The JUnit report must contain exactly those five distinct successful results, with no missing,
-extra, skipped, rerun or flaky result. All five tests must run and pass, with no isolation
+The JUnit report must contain exactly those six distinct successful results, with no missing,
+extra, skipped, rerun or flaky result. All six tests must run and pass, with no isolation
 opt-out. The job summary records the KVM probe and each phase's elapsed time.
+The standalone integration target uses nextest's runtime binary path, which is
+remapped inside the authenticated archive, never an embedded producer checkout path.
+The required HM job also evaluates the standalone private user-unit/package boundaries;
+the existing hermetic package-link job builds the minimal standalone Nix package with
+the same bundled SQLite policy as other Rust products. These are packaging and native
+custody proofs, not a production deployment or the 600-second CPU budget gate.
+
+Dependency-isolation checks re-evaluate the complete canonical flake input set,
+not a partial input list. The per-crate signing policy includes reviewed entries
+for every split auth, protocol-core and agent workspace member and the repository
+fixtures their tests consume.
 
 ### TypeScript client
 

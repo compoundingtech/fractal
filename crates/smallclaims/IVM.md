@@ -24,7 +24,8 @@ The application-shaped examples below cover more complex restricted relations.
 use std::{collections::BTreeMap, sync::Arc};
 use anyhow::{Context, Result};
 use serde_json::json;
-use smallclaims::{ClaimInput, ClaimRecord, Store};
+use smallclaims::{ ClaimRecord, Store};
+use fractal_wire::{ClaimInput};
 use smallclaims::ivm::{Contribution, Definition, View, Views, source_cut};
 use smallclaims::ivm::runtime::ViewRuntime;
 use smallclaims::store::canonical;

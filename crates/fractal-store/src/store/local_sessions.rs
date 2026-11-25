@@ -1,24 +1,7 @@
 //! Executor-local custody. These rows are not graph projections and never authorize a launch.
 use super::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SessionCustody { Owned, Borrowed }
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LocalSession {
-    pub subject: String,
-    pub runtime_id: String,
-    /// Logical seat incarnation, including the invocation fence for borrowed terminals.
-    pub incarnation: String,
-    /// Exact native process/PTY generation, never a PID alone.
-    pub native_incarnation: String,
-    pub terminal: bool,
-    pub driver: Option<String>,
-    pub lifecycle: crate::model::MemberLifecycle,
-    pub custody: SessionCustody,
-    pub start_operation: Option<String>,
-    pub invocation: Option<String>,
-}
+use fractal_light_node_core::custody::{LocalSession, SessionCustody};
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h75e60616e14f owner=fractal_store::store::local_sessions TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_session_custody (
@@ -117,7 +100,7 @@ impl Store {
         anyhow::ensure!(!binding.subject.is_empty() && !binding.runtime_id.is_empty()
             && !binding.native_incarnation.is_empty(), "session binding identity is empty");
         if binding.custody == SessionCustody::Borrowed {
-            anyhow::ensure!(binding.terminal && binding.lifecycle == crate::model::MemberLifecycle::TerminalBound
+            anyhow::ensure!(binding.terminal && binding.lifecycle == fractal_light_node_core::custody::MemberLifecycle::TerminalBound
                 && binding.invocation.as_deref() == Some(binding.incarnation.as_str())
                 && binding.incarnation.strip_prefix(binding.native_incarnation.as_str())
                     .is_some_and(|suffix| suffix.starts_with(":bound:") && suffix.len() > 7),
@@ -268,7 +251,7 @@ mod tests {
             subject: "agent/example/exit-stop".into(), runtime_id: "exit-stop".into(),
             incarnation: "generation".into(), native_incarnation: "generation".into(),
             terminal: true, driver: None,
-            lifecycle: crate::model::MemberLifecycle::Service,
+            lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service,
             custody: SessionCustody::Owned, start_operation: None, invocation: None,
         };
         store.bind_local_session(&binding).unwrap();
@@ -303,7 +286,7 @@ mod tests {
             subject: "agent/example/live".into(), runtime_id: "live".into(),
             incarnation: "0".into(), native_incarnation: "0".into(),
             terminal: true, driver: None,
-            lifecycle: crate::model::MemberLifecycle::Service,
+            lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service,
             custody: SessionCustody::Owned, start_operation: None, invocation: None,
         };
         for generation in 0..4100 {

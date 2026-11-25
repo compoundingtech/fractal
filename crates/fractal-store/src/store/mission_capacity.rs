@@ -402,7 +402,7 @@ pub fn require_fleet_feature(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet::MemberKey;
+    use fractal_auth::{MemberKey};
     use crate::store::directive_notes::tests_shared_delivery::{FLEET, claim, enable, sync};
 
     const LANED: &str = r#"version 2

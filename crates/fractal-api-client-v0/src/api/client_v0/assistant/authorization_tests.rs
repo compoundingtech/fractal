@@ -1089,7 +1089,7 @@ fn deadline_projection<'a>(
     _parameters: &'a BTreeMap<String,String>, _max_bytes: usize, _binding: &'a str,
     _context: &'a response_body::Context,
 ) -> ProjectFuture<'a> {
-    Box::pin(async { Err(ApiError::bad(smallclaims::error::Error::new(
+    Box::pin(async { Err(ApiError::bad(fractal_wire::Error::new(
         "read-deadline","the read exceeded its deadline or was cancelled"))) })
 }
 

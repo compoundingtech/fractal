@@ -26,7 +26,7 @@ pub struct LightNodeScope {
 impl LightNodeScope {
     pub fn validate(&self) -> Result<()> {
         if self.operations.contains(&LightNodeOperation::Start) {
-            return Err(crate::model::FractalError::new("light-node-start-not-supported",
+            return Err(fractal_wire::Error::new("light-node-start-not-supported",
                 "this session slice supports observe and stop only; graph-free remote start requires a separate authorization boundary").into());
         }
         anyhow::ensure!((1..=256).contains(&self.subjects.len()),
@@ -96,7 +96,7 @@ impl LightNodeSessionConfig {
     pub fn validate_for(&self, node: &str) -> Result<()> {
         match self {
             Self::Home { listen, grants } => {
-                anyhow::ensure!(crate::fleet::transport::is_permitted_route_address(&listen.ip()),
+                anyhow::ensure!(fractal_auth::is_permitted_route_address(&listen.ip()),
                     "light-node session listener must be loopback or Tailscale");
                 anyhow::ensure!((1..=256).contains(&grants.len()),
                     "light-node home needs between 1 and 256 explicit host grants");
@@ -110,7 +110,7 @@ impl LightNodeSessionConfig {
             Self::Agent { home_endpoint, grant } => {
                 grant.validate()?;
                 anyhow::ensure!(grant.host == node, "light-node agent grant names another host");
-                let endpoint = reqwest::Url::parse(home_endpoint).context("parse light-node home endpoint")?;
+                let endpoint = url::Url::parse(home_endpoint).context("parse light-node home endpoint")?;
                 anyhow::ensure!(matches!(endpoint.scheme(), "ws" | "wss")
                     && endpoint.username().is_empty() && endpoint.password().is_none()
                     && endpoint.query().is_none() && endpoint.fragment().is_none()
@@ -119,7 +119,7 @@ impl LightNodeSessionConfig {
                 anyhow::ensure!(endpoint.host_str().is_some(), "light-node endpoint needs a host");
                 if endpoint.scheme() == "ws" {
                     let address = endpoint.host_str().and_then(|host| host.trim_matches(['[', ']']).parse().ok());
-                    anyhow::ensure!(address.as_ref().is_some_and(crate::fleet::transport::is_permitted_route_address),
+                    anyhow::ensure!(address.as_ref().is_some_and(fractal_auth::is_permitted_route_address),
                         "unencrypted light-node endpoint must be a literal loopback or Tailscale address");
                 }
             }
@@ -176,7 +176,7 @@ mod tests {
         let mut authority = grant();
         authority.grant.operations.push(LightNodeOperation::Start);
         let assert_unsupported = |error: anyhow::Error| {
-            assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,
+            assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code,
                 "light-node-start-not-supported");
         };
         assert_unsupported(authority.validate().unwrap_err());

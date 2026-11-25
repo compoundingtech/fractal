@@ -2,7 +2,8 @@
 use crate::store::*;
 use crate::model::LoopSpec;
 use crate::store::attention_snapshot::*;
-use crate::model::{ClaimInput, PersonStepResponse};
+use crate::model::{ PersonStepResponse};
+use fractal_wire::{ClaimInput};
 
 pub fn step_back_in_time(store: &Store, subject: &str, accepted_at: &str) {
         store

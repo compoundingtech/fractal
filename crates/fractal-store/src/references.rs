@@ -5,9 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, FractalError, UsedMissionSpec,
-    WorkSelector,
-};
+    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, UsedMissionSpec,
+    WorkSelector};
+use fractal_wire::{Error as FractalError};
 
 // Prepared internally; publication stays closed until the complete agent-review safety path lands.
 #[allow(dead_code)]

@@ -207,8 +207,8 @@ pub fn transient_storage_error(error: &anyhow::Error) -> bool {
                     | rusqlite::ErrorCode::DatabaseLocked
                     | rusqlite::ErrorCode::CannotOpen))
             || cause
-                .downcast_ref::<crate::error::Error>()
-                .is_some_and(crate::error::Error::is_sqlite_contention)
+                .downcast_ref::<fractal_wire::Error>()
+                .is_some_and(fractal_wire::Error::is_sqlite_contention)
     })
 }
 
@@ -223,7 +223,7 @@ pub(super) fn cancelled_by_caller(error: &anyhow::Error) -> bool {
                 Some(rusqlite::Error::SqliteFailure(code, _))
                     if code.code == rusqlite::ErrorCode::OperationInterrupted)
                 || cause
-                    .downcast_ref::<crate::error::Error>()
+                    .downcast_ref::<fractal_wire::Error>()
                     .is_some_and(|error| error.code == "read-deadline")
         })
 }

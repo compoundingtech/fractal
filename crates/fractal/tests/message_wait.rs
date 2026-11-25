@@ -112,7 +112,7 @@ async fn stream_daemon(
 fn stream_message(store: &Arc<Store>, events: &watch::Sender<u64>, subject: &str, from: &str, to: &str, body: &str) {
     let shard = fractal_store::store::messages_shard::shard(store).expect("the daemon holds the stream");
     shard
-        .append_claim(&smallclaims::claim::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: "message.sent".into(),
             actor: Some(from.into()),

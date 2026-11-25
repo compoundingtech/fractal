@@ -36,7 +36,7 @@ mod tests {
 
     fn append(store: &Store, label: &str) -> ClaimRecord {
         store
-            .append_claim(&crate::claim::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: format!("note/{label}"),
                 kind: "example.note".into(),
                 actor: None,

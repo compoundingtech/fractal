@@ -25,7 +25,8 @@ use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Map, Value, json};
 
-use crate::model::{ClaimRecord, FractalError};
+use crate::model::{ClaimRecord};
+use fractal_wire::{Error as FractalError};
 use crate::objective::{Bound, Breach, Count, Exclude, Indicator, Interval, Objective, Only, Window, percentile_row};
 use crate::objective_faults::{ObjectiveFaults, ObjectiveResponse, check_with_response, end_unjudged};
 use crate::objectives::{clamp_percent, duration, nearest_rank, plural};

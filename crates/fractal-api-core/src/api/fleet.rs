@@ -167,7 +167,7 @@ pub async fn fleet_invite_revoke(
 
 pub async fn fleet_redeem(
     State(state): State<AppState>,
-    Json(request): Json<crate::fleet::handshake::JoinRequest>,
+    Json(request): Json<fractal_auth::handshake::JoinRequest>,
 ) -> Result<Json<Value>, ApiError> {
     use crate::store::FleetRedemption;
     let store = state.store.clone();
@@ -379,7 +379,7 @@ pub async fn fleet_leave_state(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FleetPairingAdmission {
-    request: smallclaims::fleet::handshake::JoinRequest,
+    request: fractal_auth::handshake::JoinRequest,
     node_id: String,
 }
 
@@ -387,7 +387,7 @@ pub struct FleetPairingAdmission {
 pub async fn fleet_pairing_admission(
     State(state): State<AppState>,
     Json(request): Json<FleetPairingAdmission>,
-) -> Result<Json<smallclaims::fleet::handshake::JoinResponse>, ApiError> {
+) -> Result<Json<fractal_auth::handshake::JoinResponse>, ApiError> {
     let fleet_id = state.fleet_id.as_deref().ok_or_else(|| {
         ApiError::bad(FractalError::new("not-in-a-fleet", "this node is not in a fleet"))
     })?;
@@ -409,7 +409,7 @@ pub async fn fleet_pairing_admission(
         .await?
         .error_for_status()
         .map_err(ApiError::internal)?
-        .json::<smallclaims::fleet::handshake::JoinResponse>()
+        .json::<fractal_auth::handshake::JoinResponse>()
         .await
         .map_err(ApiError::internal)?;
     if response.sponsor_key != sponsor_key {

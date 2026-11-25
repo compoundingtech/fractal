@@ -438,14 +438,14 @@ impl Store {
         for envelope in envelopes {
             match (&envelope.member_key, &envelope.signature) {
                 (Some(key), Some(signature)) => {
-                    let message = crate::fleet::envelope_signature_message(
+                    let message = fractal_auth::envelope_signature_message(
                         fleet,
                         &envelope.writer,
                         envelope.sequence,
                         &envelope.hash,
                     );
                     anyhow::ensure!(
-                        crate::fleet::verify_signature(key, &message, signature),
+                        fractal_auth::verify_signature(key, &message, signature),
                         "invalid backup envelope signature"
                     );
                     store_envelope_signature_tx(
@@ -500,14 +500,14 @@ impl Store {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         for signature in signatures {
-            let message = crate::fleet::envelope_signature_message(
+            let message = fractal_auth::envelope_signature_message(
                 fleet,
                 &signature.writer,
                 signature.sequence,
                 &signature.hash,
             );
             anyhow::ensure!(
-                crate::fleet::verify_signature(
+                fractal_auth::verify_signature(
                     &signature.member_key,
                     &message,
                     &signature.signature
@@ -1119,7 +1119,7 @@ mod tests {
     fn an_archive_carries_released_envelopes_as_signed_claims_and_restores_the_same_claims() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open_memory("alder").unwrap();
-        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         source.bind_fleet("archive-fleet").unwrap();
         source.pin_fleet_anchor(key.public()).unwrap();
         source.set_member_key(Some(key.clone())).unwrap();
@@ -1167,7 +1167,7 @@ mod tests {
         for keyed in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let source = Store::open_memory("archive-issuer").unwrap();
-            let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+            let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
             source.set_node_key(key.clone()).unwrap();
             if keyed {
                 source.bind_fleet("archive-fleet").unwrap();
@@ -1289,7 +1289,7 @@ mod tests {
             "INSERT INTO meta(key,value) VALUES('local_node_writer',?1)",
             ["alder"],
         ).unwrap();
-        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         source.bind_fleet("test-fleet").unwrap();
         source.pin_fleet_anchor(key.public()).unwrap();
         source.set_member_key(Some(key.clone())).unwrap();
@@ -1513,7 +1513,7 @@ mod tests {
             let legacy = Store::open_memory(name).unwrap();
             diagnostic(&legacy, "history already admitted");
             let source = Store::open_memory("birch").unwrap();
-            let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+            let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
             source.bind_fleet("test-fleet").unwrap();
             source.pin_fleet_anchor(key.public()).unwrap();
             source.set_member_key(Some(key.clone())).unwrap();
@@ -1528,7 +1528,7 @@ mod tests {
                 .unwrap();
             source.validate_replication_backlog().unwrap();
             source.project_replication_backlog().unwrap();
-            let later_key = crate::fleet::MemberKey::generate().unwrap().0;
+            let later_key = fractal_auth::MemberKey::generate().unwrap().0;
             source
                 .append_claim(&ClaimInput {
                     subject: format!("host/{name}"),
@@ -1569,7 +1569,7 @@ mod tests {
         for case in ["ack", "invalid-reference", "undecodable"] {
             let root = tempfile::tempdir().unwrap();
             let source = Store::open_memory("alder").unwrap();
-            let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+            let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
             source.bind_fleet("test-fleet").unwrap();
             source.set_member_key(Some(key.clone())).unwrap();
             let claim = source.append_claim(&ClaimInput {
@@ -1611,7 +1611,7 @@ mod tests {
                     envelope.accepted_at_unix_ms, &bytes);
                 envelope.payload = bytes.into();
             }
-            envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(
+            envelope.signature = Some(key.sign(&fractal_auth::envelope_signature_message(
                 "test-fleet", &envelope.writer, envelope.sequence, &envelope.hash)));
             // Keep transport identity/checksum consistent after each negative mutation.
             // The original claim-source expectation deliberately remains: a rejected claim
@@ -2280,7 +2280,7 @@ mod tests {
     fn a_signed_shard_restores_its_envelopes_admitted_rather_than_held() {
         let root = tempfile::tempdir().unwrap();
         let source = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
-        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         source.bind_fleet("test-fleet").unwrap();
         source.pin_fleet_anchor(key.public()).unwrap();
         source.set_member_key(Some(key.clone())).unwrap();
@@ -2333,7 +2333,7 @@ mod tests {
         rewrite(&path, |records| {
             for record in records {
                 if let Record::ShardEnvelope(record) = record {
-                    record.envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(
+                    record.envelope.signature = Some(key.sign(&fractal_auth::envelope_signature_message(
                         "test-fleet",
                         &record.envelope.writer,
                         record.envelope.sequence,
@@ -2426,7 +2426,7 @@ mod tests {
     fn checksummed_tampering_still_fails_signature_and_graph_verification() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open_memory("alder").unwrap();
-        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         source.bind_fleet("test-fleet").unwrap();
         source.set_member_key(Some(key.clone())).unwrap();
         diagnostic(&source, "note");

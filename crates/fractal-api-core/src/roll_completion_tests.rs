@@ -241,8 +241,8 @@ fn missing_partial_or_mislabeled_negative_proof_is_not_a_deadline_failure() {
 }
 
 pub(crate) fn setup_signer(store: &Store) {
-    static KEY: std::sync::LazyLock<std::sync::Arc<smallclaims::fleet::MemberKey>> =
-        std::sync::LazyLock::new(|| std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0));
+    static KEY: std::sync::LazyLock<std::sync::Arc<fractal_auth::MemberKey>> =
+        std::sync::LazyLock::new(|| std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0));
     store.bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
     store.pin_fleet_anchor(KEY.public()).unwrap();
     store.set_member_key(Some(KEY.clone())).unwrap();
@@ -280,7 +280,7 @@ pub(crate) fn publish_fixture(store: &Store, receipt: Receipt, actor: Option<&st
         Receipt::SourceEnabled { producer, .. } => format!("{RESOURCE}/sources/{producer}/enabled"),
         Receipt::SourceFrontier { producer, host, hosts, .. } => format!("{RESOURCE}/sources/{producer}/{host}/frontier/{}", hosts.get(host).unwrap()),
     };
-    let claim = store.append_claim(&crate::model::ClaimInput {
+    let claim = store.append_claim(&fractal_wire::ClaimInput {
         subject, kind: "resource.observed".into(), actor: actor.map(str::to_owned),
         fields: BTreeMap::from([("kind".into(), json!("custom.fractal.fleet-roll-receipt")),
             ("state".into(), json!("observed")), ("facts".into(), serde_json::to_value(receipt).unwrap())]),
@@ -455,8 +455,8 @@ fn signed_host_proof_survives_canonical_graph_replication_without_trusting_origi
     let observed = publish_fixture(&source, observation("replicated", "host-a", START + 1, Adoption::Verified), None);
     let anchor = source.claim_authorization(&observed).unwrap().signature.unwrap().key;
     source.admit_fleet_anchor(FLEET, &anchor, "listening").unwrap();
-    let member = std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
-    source.append_claim(&crate::model::ClaimInput {
+    let member = std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
+    source.append_claim(&fractal_wire::ClaimInput {
         subject: "host/host-b".into(), kind: "fleet.member-admitted".into(), actor: None,
         fields: serde_json::from_value(json!({"fleet_id":FLEET,"member_key":member.public(),"via":"invite",
             "mode":"listening","sponsor":"host/host-a"})).unwrap(),
@@ -631,7 +631,7 @@ async fn generic_claim_api_never_signs_source_frontiers_even_for_bound_authority
 
 pub(crate) fn native_source_fixture(store: &Store) -> SourceConfig {
     setup_signer(store);
-    let claim = store.append_claim(&crate::model::ClaimInput {
+    let claim = store.append_claim(&fractal_wire::ClaimInput {
         subject: "resource/demo/anchor".into(), kind: "resource.observed".into(), actor: None,
         fields: BTreeMap::from([("kind".into(), json!("custom.demo.anchor")), ("state".into(), json!("ready"))]),
         evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -723,7 +723,7 @@ fn native_receipt_backlog_chunks_without_truncating_same_millisecond_coverage() 
     let mut ids = Vec::new();
     for index in 0..513 {
         let roll = format!("chunk-{index}");
-        ids.push(store.append_claim(&crate::model::ClaimInput {
+        ids.push(store.append_claim(&fractal_wire::ClaimInput {
             subject: format!("{RESOURCE}/{roll}/declaration"), kind: "resource.observed".into(),
             actor: Some("agent/example/roll-authority".into()),
             fields: BTreeMap::from([("kind".into(), json!("custom.fractal.fleet-roll-receipt")),

@@ -57,7 +57,7 @@ fn verify(
     node: &str,
     binding: &RawTerminalLeaseBinding,
     member_key: Option<&str>,
-) -> Result<(ProofBody, crate::fleet::Sender)> {
+) -> Result<(ProofBody, fractal_auth::Sender)> {
     anyhow::ensure!(text.len() <= 16_384, "authorization proof exceeds bound");
     let proof: Proof = serde_json::from_str(text)?;
     anyhow::ensure!(

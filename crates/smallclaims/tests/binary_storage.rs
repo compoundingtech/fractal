@@ -1,5 +1,5 @@
+use fractal_wire::ClaimInput;
 use smallclaims::{
-    claim::ClaimInput,
     store::{Store, runtime::Plain},
 };
 use std::{collections::BTreeMap, sync::Arc};

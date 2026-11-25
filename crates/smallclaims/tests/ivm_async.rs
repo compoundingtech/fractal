@@ -7,19 +7,17 @@ mod history;
 mod real_views;
 use anyhow::Result;
 use serde_json::{Value, json};
-use smallclaims::{
-    ClaimInput, ClaimRecord, Runtime, Store,
+use smallclaims::{ ClaimRecord, Runtime, Store,
     ivm::{
         Contribution, Definition, Readiness, View, Views,
         after_write::{self, Target, WaitOptions, WaitOutcome, WriteOutcome},
         asynchronous::{self as async_views, Limits, PageStatus, Worker},
         events::{self, Publisher},
         runtime::ViewRuntime,
-        source_cut,
-    },
+        source_cut},
     replication::ReplicationInventory,
-    store::{canonical, runtime::Plain},
-};
+    store::{canonical, runtime::Plain}};
+use fractal_wire::{ClaimInput};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::{
     sync::watch,

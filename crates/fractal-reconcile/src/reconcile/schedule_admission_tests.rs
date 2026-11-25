@@ -58,12 +58,12 @@ fn replacement_membership_relayed_before_exchange_cannot_reuse_healthy_streak() 
     let _clock = smallclaims::store::clock_snapshot();
     let (relay, old_peer, _) = pair();
     let store = Store::open_memory("node").unwrap();
-    let node_key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    let node_key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     store.bind_fleet(FLEET).unwrap();
     store.pin_fleet_anchor(&relay.member_public_key().unwrap()).unwrap();
     store.set_member_key(Some(node_key.clone())).unwrap();
     let membership_claim = |subject: &str, kind: &str, fields: Value| {
-        relay.append_claim(&crate::model::ClaimInput {
+        relay.append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(), kind: kind.into(), actor: None,
             fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
             expected_subject: None, idempotency_key: None,
@@ -83,7 +83,7 @@ fn replacement_membership_relayed_before_exchange_cannot_reuse_healthy_streak() 
     let admitted = || schedule_admission_ready(&store, "node", &["jade".into()], since, &schedule).unwrap();
     assert!(admitted(), "the original authenticated incarnation has a healthy streak");
 
-    let replacement = crate::fleet::MemberKey::generate().unwrap().0;
+    let replacement = fractal_auth::MemberKey::generate().unwrap().0;
     membership_claim("host/jade", "fleet.member-removed", serde_json::json!({
         "member_key": old_key, "high_water": 100, "reason": "replacement",
         "removed_by": "person/test"

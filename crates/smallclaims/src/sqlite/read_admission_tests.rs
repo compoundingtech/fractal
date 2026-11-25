@@ -366,7 +366,7 @@ async fn queued_cancellation_and_parent_cancellation_never_obtain_a_connection()
         assert_eq!(pool.usage().opened, 1);
         parent.cancel();
         let error = queued.await.err().expect("queued admission must be cancelled");
-        assert_eq!(error.downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "read-deadline");
         assert_eq!(pool.usage().idle, 1);
         assert_eq!(pool.usage().opened, 1);
         assert!(pool.try_admit_read().is_none());
@@ -405,14 +405,14 @@ async fn expired_admission_and_cancelled_permit_return_capacity_without_lending(
     let (_directory, pool) = pool(1);
     let error = pool.admit_read(Some(ReadBudget::new("/expired", Duration::ZERO)))
         .await.err().expect("expired admission must fail");
-    assert_eq!(error.downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+    assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "read-deadline");
     let permit = pool.admit_read(None).await.unwrap();
     let budget = ReadBudget::new("/cancelled", Duration::from_secs(30));
     budget.cancel();
     let error = read_budget::with(Some(budget), || {
         pool.request_read_with_permit(permit, || panic!("cancelled work must not start"))
     }).unwrap_err();
-    assert_eq!(error.downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+    assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "read-deadline");
     assert_eq!(pool.usage().idle, 1);
     assert_eq!(pool.usage().opened, 1);
     assert!(pool.try_admit_read().is_some());
@@ -425,7 +425,7 @@ async fn queued_deadline_returns_capacity_without_obtaining_a_connection() {
     let mut queued = Box::pin(pool.admit_read(Some(ReadBudget::new("/deadline", Duration::from_millis(50)))));
     assert!(matches!(poll!(queued.as_mut()), Poll::Pending));
     let error = queued.await.err().expect("queued deadline must fail");
-    assert_eq!(error.downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+    assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "read-deadline");
     assert_eq!(pool.usage().idle, 1);
     assert_eq!(pool.usage().opened, 1);
     drop(held);
@@ -452,7 +452,7 @@ fn synchronous_admission_is_cancellable_without_a_tokio_runtime() {
     parent.cancel();
     let error = finished_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap_err();
     worker.join().unwrap();
-    assert_eq!(error.downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+    assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "read-deadline");
     assert_eq!(pool.usage().idle, 1);
     assert_eq!(pool.usage().opened, 1);
     drop(held);

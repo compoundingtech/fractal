@@ -10,7 +10,8 @@ pub use fractal_missions::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClaimInput, PersonStepResponse};
+    use crate::model::{ PersonStepResponse};
+    use fractal_wire::{ClaimInput};
     use fractal_missions::store::attention_snapshot_tests_shared_seats::*;
     use fractal_missions::store::attention_snapshot_tests_shared_seats::{parity, step_back_in_time};
 

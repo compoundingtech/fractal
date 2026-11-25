@@ -12,12 +12,15 @@ autobins = false
 [features]
 # Forwarded to the library; tests enable it through the dev-dependencies below, which also turn on this
 # package's own feature for build.rs and the fractal-fixture binary.
-test-support = ["fractal-daemon/test-support"]
+test-support = ["fractal-auth/test-support", "fractal-daemon/test-support"]
 # Opt in only in Performance; ordinary workspace checks need not build a second test binary.
 perf-load = []
 convergence-audit = []
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
+fractal-auth = { path = "../fractal-auth" }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
 anyhow = "1"
 fractal-daemon = { path = "../fractal-daemon" }
 fractal-store = { path = "../fractal-store" }
@@ -83,6 +86,7 @@ uuid = { version = "1", features = ["v4", "v7"] }
 walkdir = "2"
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 fractal-chatgpt = { path = "../fractal-chatgpt" }
 data-encoding = "2"
 alacritty_terminal = { version = "0.26", default-features = false }

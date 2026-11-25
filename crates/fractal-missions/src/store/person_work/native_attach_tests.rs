@@ -18,7 +18,7 @@ fn ask_input() -> PersonAskRequest {
 }
 
 fn grant(store: &Store, person: &str, session: &str, scopes: &[&str], expiry: u64, trusted: bool) -> ClaimRecord {
-    let input = smallclaims::claim::ClaimInput {
+    let input = fractal_wire::ClaimInput {
         subject:format!("custom/client/pairing-{}", uuid::Uuid::new_v4()),
         kind:"custom.client.pairing-completed".into(), actor:Some(person.into()),
         fields:serde_json::from_value(json!({"person_id":person,"session_actor":session,
@@ -112,7 +112,7 @@ fn native_attach_refuses_wrong_grants_sessions_scopes_expiry_and_revocation() {
         let invalid = grant(&store, person, session, &scopes, expiry, trusted);
         assert!(answer(&store, &input, &invalid).is_err());
     }
-    store.append_client_operation_claim(&smallclaims::claim::ClaimInput {
+    store.append_client_operation_claim(&fractal_wire::ClaimInput {
         subject:paired.subject.clone(), kind:"custom.client.pairing-revoked".into(), actor:Some(PERSON.into()),
         fields:serde_json::from_value(json!({"completion_id":paired.id})).unwrap(),
         evidence:vec![],expected_subject:None,idempotency_key:None,

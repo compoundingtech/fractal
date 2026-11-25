@@ -1411,11 +1411,11 @@ mod tests {
         store.finish_runtime_start(&start.id, &json!({
             "incarnation": incarnation, "verification": "operation-incarnation",
         })).unwrap();
-        let mut binding = fractal_store::store::local_sessions::LocalSession {
+        let mut binding = fractal_light_node_core::custody::LocalSession {
             subject: subject.into(), runtime_id: subject.into(),
             incarnation: incarnation.into(), native_incarnation: incarnation.into(),
-            terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
-            custody: fractal_store::store::local_sessions::SessionCustody::Owned,
+            terminal: true, driver: None, lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service,
+            custody: fractal_light_node_core::custody::SessionCustody::Owned,
             start_operation: Some(start.id.clone()), invocation: None,
         };
         store.bind_local_session(&binding).unwrap();
@@ -1654,11 +1654,11 @@ mod tests {
         assert!(error.downcast_ref::<fractal_store::store::local_sessions::SessionCustodyCapacityReached>().is_some());
         assert!(!store.runtime_start_for(&second.subject).unwrap().unwrap().dispatched);
         store.enter_runtime_start_backend(&first.id, &first.owner).unwrap();
-        store.bind_local_session(&fractal_store::store::local_sessions::LocalSession {
+        store.bind_local_session(&fractal_light_node_core::custody::LocalSession {
             subject: first.subject.clone(), runtime_id: "reserved".into(),
             incarnation: "reserved-generation".into(), native_incarnation: "reserved-generation".into(),
-            terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
-            custody: fractal_store::store::local_sessions::SessionCustody::Owned,
+            terminal: true, driver: None, lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service,
+            custody: fractal_light_node_core::custody::SessionCustody::Owned,
             start_operation: Some(first.id.clone()), invocation: None,
         }).unwrap();
         assert!(store.has_current_local_session(&first.subject).unwrap(),
@@ -2368,7 +2368,7 @@ mission "launch-publication" state="ready" {
             store.use_key_directory(&keys).unwrap();
             store
                 .set_node_key(Arc::new(
-                    smallclaims::fleet::MemberKey::generate().unwrap().0,
+                    fractal_auth::MemberKey::generate().unwrap().0,
                 ))
                 .unwrap();
             let held = |connection: &Connection| {

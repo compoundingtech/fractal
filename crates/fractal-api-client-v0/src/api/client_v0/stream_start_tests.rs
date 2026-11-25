@@ -100,7 +100,7 @@ async fn terminal_follow_live_grant_changes_cancel_local_and_remote_reads() {
             let (pending_tx, pending_rx) = tokio::sync::oneshot::channel();
             let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
             let server = if remote {
-                let auth = crate::peer::FleetAuth::test("live-grant-test", &[7; 32]);
+                let auth = fractal_auth::FleetAuth::test("live-grant-test", &[7; 32]);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let address = listener.local_addr().unwrap();
                 let secret = root.path().join("secret");
@@ -121,7 +121,7 @@ async fn terminal_follow_live_grant_changes_cancel_local_and_remote_reads() {
                     };
                     let bytes = serde_json::to_vec(&envelope).unwrap();
                     let headers = auth.response_headers_for("/v1/peer/client-read", "owner", &bytes,
-                        &crate::peer::FleetAuth::body_digest(&body)).unwrap();
+                        &fractal_auth::FleetAuth::body_digest(&body)).unwrap();
                     let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n", bytes.len());
                     for (name, value) in &headers {
                         response.push_str(&format!("{}: {}\r\n", name, value.to_str().unwrap()));
@@ -442,7 +442,7 @@ async fn remote_fixture(root: &Path, after: OwnerAfterFailure, failure_code: &st
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let failure_code = failure_code.to_owned();
-    let auth = crate::peer::FleetAuth::test("stream-test", &[7; 32]);
+    let auth = fractal_auth::FleetAuth::test("stream-test", &[7; 32]);
     let app = axum::Router::new().route("/v1/peer/client-read", axum::routing::post(move |body: Bytes| {
         let (calls, auth, failure_code) = (count.clone(), auth.clone(), failure_code.clone());
         async move {
@@ -471,7 +471,7 @@ async fn remote_fixture(root: &Path, after: OwnerAfterFailure, failure_code: &st
                 snapshot_host: "owner".into(), store_index: 0, value,
             };
             let bytes = serde_json::to_vec(&envelope).unwrap();
-            let headers = auth.response_headers_for("/v1/peer/client-read", "owner", &bytes, &crate::peer::FleetAuth::body_digest(&body)).unwrap();
+            let headers = auth.response_headers_for("/v1/peer/client-read", "owner", &bytes, &fractal_auth::FleetAuth::body_digest(&body)).unwrap();
             let mut response = (status, bytes).into_response();
             response.headers_mut().extend(headers);
             response

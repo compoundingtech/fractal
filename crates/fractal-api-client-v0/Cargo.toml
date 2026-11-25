@@ -7,9 +7,12 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = ["fractal-api-core/test-support"]
+test-support = ["fractal-auth/test-support", "fractal-api-core/test-support"]
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
+fractal-auth = { path = "../fractal-auth" }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
 fractal-api-core = { path = "../fractal-api-core" }
 fractal-store = { path = "../fractal-store" }
 anyhow = "1"
@@ -51,6 +54,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 socket2 = "0.6"
 fractal_api_client_v0_self = { package = "fractal-api-client-v0", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }

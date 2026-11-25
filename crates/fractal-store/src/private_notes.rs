@@ -1,6 +1,6 @@
 //! Owner-local private notes: catalog-derived identity, filesystem byte authority,
 //! and private durable mutation receipts. Nothing in this module enters fleet replication.
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 use crate::private_notes_fs as fs;
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};

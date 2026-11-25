@@ -6,7 +6,7 @@
 
 use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use smallclaims::claim::ClaimRecord;
-use smallclaims::error::Error as FractalError;
+use fractal_wire::Error as FractalError;
 
 pub(super) const LOCAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3d8e836b84c4 owner=fractal_store::store::messages_shard::stream_operations TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_operations (

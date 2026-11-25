@@ -2,10 +2,10 @@
 //! never enter claims. Git's normal index, branch and working tree are never changed.
 use crate::SeatsStore;
 use crate::{
-    model::{MemberSpec, FractalError},
+    model::{MemberSpec},
     store::Store,
-    suspension::Suspension,
-};
+    suspension::Suspension};
+use fractal_wire::{Error as FractalError};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -704,7 +704,7 @@ pub fn phase(
     suffix: &str,
     status: &str,
 ) -> Result<()> {
-    store.append_claim(&crate::model::ClaimInput {
+    store.append_claim(&fractal_wire::ClaimInput {
         subject: subject.into(),
         kind: "runtime.action.succeeded".into(),
         actor: suspension.requested_by.clone(),

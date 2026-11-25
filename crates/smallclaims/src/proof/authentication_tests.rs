@@ -1,7 +1,7 @@
 use super::*;
 use super::super::history::tests::{FLEET, anchor, sealed};
 use super::super::verify_sealed_history;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use serde_json::json;
 
 #[test]
@@ -51,7 +51,7 @@ fn replace_signature(
         &envelope.writer, envelope.sequence, envelope.previous_hash.as_deref(),
         envelope.accepted_at_unix_ms, &bytes,
     );
-    envelope.signature = Some(carrier.sign(&crate::fleet::envelope_signature_message(
+    envelope.signature = Some(carrier.sign(&fractal_auth::envelope_signature_message(
         FLEET, &envelope.writer, envelope.sequence, &envelope.hash,
     )));
     envelope.payload = bytes.into();

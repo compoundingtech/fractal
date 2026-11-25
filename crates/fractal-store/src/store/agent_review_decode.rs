@@ -1,6 +1,7 @@
 use super::agent_review_answer::{AnswerCandidate, RequestBinding, ReviewRequest};
 use crate::model::evidence_contract::{EvidenceContract, EvidenceSpec, EvidenceType};
-use crate::model::{ClaimInput, ClaimRecord, FractalError};
+use crate::model::{ ClaimRecord};
+use fractal_wire::{ClaimInput, Error as FractalError};
 use serde_json::Value;
 
 fn invalid() -> FractalError {

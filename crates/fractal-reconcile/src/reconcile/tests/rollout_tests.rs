@@ -402,7 +402,7 @@ impl Seat {
 }
 
 fn enable_idle_reader(seat: &Seat) {
-    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     seat.store.bind_fleet(fleet).unwrap();
     seat.store.pin_fleet_anchor(key.public()).unwrap();

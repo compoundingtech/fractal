@@ -6,7 +6,7 @@ pub use fractal_store::store::directive_notes::tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use fractal_store::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
 use super::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use rusqlite::StatementStatus;
 
 

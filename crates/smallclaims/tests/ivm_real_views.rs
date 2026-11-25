@@ -14,13 +14,9 @@ use anyhow::Result;
 use real_views::{Family, collection, desired_candidates, row};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use smallclaims::{
-    ClaimInput, ClaimRecord, Store,
-    fleet::MemberKey,
-    ivm::{LocalChange, Readiness, Views, runtime::ViewRuntime, source_cut},
-    replication::ReplicationInventory,
-    store::Runtime,
-};
+use fractal_auth::{MemberKey};
+use smallclaims::{ ClaimRecord, Store, ivm::{LocalChange, Readiness, Views, runtime::ViewRuntime, source_cut}, replication::ReplicationInventory, store::Runtime};
+use fractal_wire::{ClaimInput};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -850,7 +846,7 @@ fn signatures_only_replication_fences_changed_authority_without_claim_frontier_a
     let prior_rows = rows(&target.store.readers.get(), "fleet-membership");
     let envelope = &exchange.envelopes[0];
     let (additional_key, _) = MemberKey::generate().unwrap();
-    let message = smallclaims::fleet::envelope_signature_message(
+    let message = fractal_auth::envelope_signature_message(
         "fixture-fleet",
         &envelope.writer,
         envelope.sequence,

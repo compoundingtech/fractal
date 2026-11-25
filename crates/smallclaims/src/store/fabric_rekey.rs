@@ -175,7 +175,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet::MemberKey;
+    use fractal_auth::{MemberKey};
     use crate::store::runtime::Plain;
 
     fn configure(store: &Store) -> Arc<MemberKey> {

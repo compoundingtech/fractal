@@ -5,16 +5,9 @@ use fractal_daemon::RetirementsStore;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
-use fractal_daemon::{
-    api::AppState,
-    client::Client,
-    fleet::MemberKey,
-    model::{ClaimInput, IntentInput},
-    store::{
-        Store,
-        owned_sets::{Enforce, Options, PolicyRequest, Preview, Request, Source},
-    },
-};
+use fractal_auth::{MemberKey};
+use fractal_daemon::{api::AppState, client::Client, model::{ IntentInput}, store::{Store, owned_sets::{Enforce, Options, PolicyRequest, Preview, Request, Source}}};
+use fractal_wire::{ClaimInput};
 use tokio::sync::{Notify, watch};
 
 const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";

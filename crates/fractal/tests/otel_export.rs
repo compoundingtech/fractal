@@ -1745,7 +1745,7 @@ fn seed_roster(root: &Path, subject: &str) {
     let state = root.join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
     let store = fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
-    store.append_claim(&fractal_daemon::model::ClaimInput {
+    store.append_claim(&fractal_wire::ClaimInput {
         subject: subject.into(),
         kind: "runtime.observed".into(),
         actor: None,
@@ -2116,7 +2116,7 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     // standing in for N rereads. Other held windows are irrelevant to glass claims.
     let mut revision = Value::Null;
     for change in 0..3 {
-        let saved = source.append_claim(&fractal_daemon::model::ClaimInput {
+        let saved = source.append_claim(&fractal_wire::ClaimInput {
             subject: "glass/person/ada/019a0000-0000-7000-8000-000000000002".into(),
             kind: "glass.upserted".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(serde_json::json!({
@@ -2215,7 +2215,7 @@ async fn replication_projection_attempts_link_receive_and_stop_after_completion(
     target.project_replication_backlog().unwrap();
     let source = fractal_daemon::store::Store::open_memory("otel-source").unwrap();
     source.bind_fleet(FLEET).unwrap();
-    source.append_claim(&fractal_daemon::model::ClaimInput {
+    source.append_claim(&fractal_wire::ClaimInput {
         subject: "resource/otel-stage-projection".into(),
         kind: "resource.observed".into(),
         actor: None,
@@ -2804,7 +2804,7 @@ fn mailbox_gauges_export_local_managed_agents_states_ages_and_bootstrap_exceptio
         data::{AggregatedMetrics, MetricData},
     };
     use fractal_daemon::api::mailbox_metrics;
-    use fractal_daemon::model::ClaimInput;
+    use fractal_wire::{ClaimInput};
     use fractal_daemon::{CoordinationStore as _, SeatsStoreCore as _};
 
     const BUSY: &str = "agent/example.owner/busy";
@@ -3013,7 +3013,7 @@ fn population_gauges_export_exact_otlp_attribute_sets() {
         ).unwrap();
         store.apply_internal(&intent, "population-export").unwrap();
         let append = |kind: &str, fields: Value| {
-            store.append_claim(&fractal_daemon::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: "agent/example.worker".into(), kind: kind.into(),
                 actor: None, fields: serde_json::from_value(fields).unwrap(),
                 evidence: vec![], expected_subject: None, idempotency_key: None,

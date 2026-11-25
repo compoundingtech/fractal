@@ -87,8 +87,9 @@ use smallclaims::sync::PeerResponse;
 use fractal_daemon::api::AppState;
 use fractal_daemon::client::Client;
 use fractal_daemon::config::{Config, PeerConfig};
-use fractal_daemon::model::ClaimInput;
-use fractal_daemon::peer::{ClientReadOperation, ClientReadRequest, ClientRelay, FleetAuth};
+use fractal_wire::{ClaimInput};
+use fractal_auth::{FleetAuth};
+use fractal_daemon::peer::{ClientReadOperation, ClientReadRequest, ClientRelay};
 use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
@@ -2112,7 +2113,7 @@ async fn populated_ready_work_cost_by_cohort_size() {
                     "handoff_acknowledged": message,
                 })),
             ] {
-                store.append_claim(&fractal_daemon::model::ClaimInput {
+                store.append_claim(&fractal_wire::ClaimInput {
                     subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
                     fields: serde_json::from_value(fields).unwrap(),
                     evidence: Vec::new(), expected_subject: None, idempotency_key: None,
@@ -2251,7 +2252,7 @@ mission "cost/history" state="ready" {
     }).unwrap();
     store.apply(&intent, &planned.subject_tokens, "cost-history-definition").unwrap();
     for message in 0..500 {
-        store.append_claim(&fractal_daemon::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: format!("message/cost-history-{message}"),
             kind: "message.sent".into(),
             actor: Some("person/bench-operator".into()),
@@ -2671,8 +2672,8 @@ fn cold_dependency_reads_and_invalidation_pages_are_history_bounded() {
             let store = smallclaims::store::Store::open_memory(
                 "cost-node", Arc::new(smallclaims::store::runtime::Plain),
             ).unwrap();
-            store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
-            let claim = store.append_claim(&smallclaims::claim::ClaimInput {
+            store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
+            let claim = store.append_claim(&fractal_wire::ClaimInput {
                 subject: "note/cost-dependencies".into(),
                 kind: "example.note".into(),
                 actor: None,
@@ -2903,7 +2904,7 @@ fn slo_roll_source_reads_do_no_sql_independently_of_receipt_history() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_memory("cost-node").unwrap();
     fractal_daemon::roll_completion::install(&store, root.path()).unwrap();
-    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     store.bind_fleet(FLEET).unwrap();
     store.pin_fleet_anchor(key.public()).unwrap();
     store.set_member_key(Some(key)).unwrap();
@@ -3697,8 +3698,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     store.bind_fleet(FLEET).ok();
     let peer = Arc::new(Store::open(&peer_database, PEER).unwrap());
     // Notes publish only after the real fleet admission/advertisement barrier.
-    let anchor = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
-    let peer_key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    let anchor = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
+    let peer_key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     store.pin_fleet_anchor(anchor.public()).unwrap();
     store.set_member_key(Some(anchor.clone())).unwrap();
     store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
@@ -4680,7 +4681,7 @@ fn prepare_custom_fixture(store: &Store, fixture: &mut Fixture, scale: f64) {
     {
         let subject = format!("{}{}", manifest.subject_prefix, name);
         store
-            .append_claim(&fractal_daemon::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: subject.clone(),
                 kind: manifest.creation_kind.clone(),
                 actor: Some("person/bench-operator".into()),

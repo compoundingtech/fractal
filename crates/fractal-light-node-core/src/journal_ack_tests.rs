@@ -1,12 +1,12 @@
 //! Real SQLite custody, signed request identities and reopen boundaries; no transport substitutes.
 use super::*;
-use crate::store::run_credentials::{RunBinding, assertions::{RequestAssertion, RequestIdentity}};
+use crate::authority::{RunBinding, assertions::{RequestAssertion, RequestIdentity}};
 
 #[test]
 fn explicit_result_acceptance_is_scoped_retryable_after_restart_and_releases_capacity() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("seat.sqlite3");
-    let key = smallclaims::fleet::MemberKey::generate().unwrap().0;
+    let key = fractal_auth::MemberKey::generate().unwrap().0;
     let mut selected = super::tests::selection();
     selected.host_key = key.public().into();
     let limits = Limits { max_commands: 1, ..Limits::default() };
@@ -23,7 +23,7 @@ fn explicit_result_acceptance_is_scoped_retryable_after_restart_and_releases_cap
         seat.acknowledge_authority(through).unwrap();
     }
     let secret = seat.activate_and_issue(&binding, 10_000, 100).unwrap();
-    let claim = crate::model::ClaimInput { subject: "custom/example/accepted".into(), kind: "custom.example.recorded".into(),
+    let claim = fractal_wire::ClaimInput { subject: "custom/example/accepted".into(), kind: "custom.example.recorded".into(),
         actor: None, fields: Default::default(), evidence: vec![], expected_subject: None, idempotency_key: None };
     let identity = RequestIdentity::new("result/one".into(), "POST".into(), "/v1/claims".into(), &serde_json::to_vec(&claim).unwrap());
     let assertion = seat.with_authority(|connection| Ok(RequestAssertion::sign_local(connection, &secret, identity.clone(), &key, 100, 1_000)?)).unwrap();

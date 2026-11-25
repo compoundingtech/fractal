@@ -11,7 +11,8 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use crate::declaration_syntax::*;
-use crate::model::{ BaselineSpec, CompletionSpec, DependencySpec, GateSpec, LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec, MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, RetrySpec, RevisionCutover, FractalError, StepSpec, UsedMissionSpec, WorkSelector, };
+use crate::model::{ BaselineSpec, CompletionSpec, DependencySpec, GateSpec, LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec, MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, RetrySpec, RevisionCutover, StepSpec, UsedMissionSpec, WorkSelector};
+use fractal_wire::{Error as FractalError};
 
 #[test]
 fn fresh_context_is_opt_in_on_steps_and_seats() {

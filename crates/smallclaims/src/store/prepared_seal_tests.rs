@@ -9,7 +9,7 @@
 //! hold a chunk to its payload budget.
 use super::runtime::Plain;
 use super::*;
-use crate::fleet::{MemberKey, envelope_signature_message, verify_signature};
+use fractal_auth::{MemberKey, envelope_signature_message, verify_signature};
 use crate::principal::{
     ClaimSignature, HeldKey, Judged, KEY_GRANTED, KeyGrant, Role, content_digest,
 };
@@ -1148,7 +1148,7 @@ fn legacy_sign_own_envelopes_range_tx(
     drop(statement);
     let now = now_ms().to_string();
     for (sequence, envelope_hash) in &unsigned {
-        let signature = key.sign(&crate::fleet::envelope_signature_message(
+        let signature = key.sign(&fractal_auth::envelope_signature_message(
             &fleet_id,
             &store.origin,
             *sequence,

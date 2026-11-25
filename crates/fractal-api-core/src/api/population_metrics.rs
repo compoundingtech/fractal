@@ -455,7 +455,7 @@ mod tests {
             ("runtime.observed", json!({"status":"running", "incarnation_id":"one", "runtime_id":"wrapper"})),
             ("harness.observed", json!({"state":"working", "driver":"claude", "incarnation_id":"one"})),
         ] {
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: "agent/example.worker".into(), kind: kind.into(), actor: None,
                 fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
                 expected_subject: None, idempotency_key: None,
@@ -526,7 +526,7 @@ mod tests {
             "a failed fold with no commit or known deadline must remain asleep");
 
         store.connection.write().execute_batch("ALTER TABLE unavailable_desired RENAME TO desired").unwrap();
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: "agent/example.worker".into(), kind: "runtime.observed".into(), actor: None,
             fields: serde_json::from_value(json!({"status":"running","incarnation_id":"one"})).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -555,7 +555,7 @@ mod tests {
         };
         tokio::task::yield_now().await;
         for index in 0..3 {
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: format!("agent/example.worker-{index}"), kind: "runtime.observed".into(),
                 actor: None, fields: serde_json::from_value(json!({"status":"running","incarnation_id":"one"})).unwrap(),
                 evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -773,7 +773,7 @@ mod membership_tests {
         ).unwrap();
         store.apply_internal(&intent, "population-child-union").unwrap();
         let append = |subject: &str, kind: &str, fields: Value| {
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: subject.into(), kind: kind.into(), actor: None,
                 fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
                 expected_subject: None, idempotency_key: None,
@@ -868,7 +868,7 @@ mod membership_tests {
         ).unwrap();
         store.apply_internal(&intent, "population-blocking-fields").unwrap();
         let append = |kind: &str, fields: Value| {
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: "agent/example.worker".into(), kind: kind.into(), actor: None,
                 fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
                 expected_subject: None, idempotency_key: None,

@@ -55,7 +55,7 @@ async fn quiet_node_recovers_automatically_after_busy_writer_releases() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source
-        .append_client_claim(&smallclaims::ClaimInput {
+        .append_client_claim(&fractal_wire::ClaimInput {
             subject: "resource/quiet-busy".into(),
             kind: "resource.observed".into(),
             actor: None,
@@ -147,7 +147,7 @@ async fn gate_deferred_admission_projects_once_without_another_peer_page() {
     let dir = tempfile::tempdir().unwrap();
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
-    source.append_client_claim(&smallclaims::ClaimInput {
+    source.append_client_claim(&fractal_wire::ClaimInput {
         subject: "resource/quiet-gate".into(),
         kind: "resource.observed".into(),
         actor: None,
@@ -229,7 +229,7 @@ async fn quiet_receive_rearms_exhausted_retry_budget_only_after_cooldown() {
     let path = dir.path().join("claims.sqlite3");
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("quiet-source").unwrap();
-    source.append_client_claim(&smallclaims::ClaimInput {
+    source.append_client_claim(&fractal_wire::ClaimInput {
         subject: "resource/exhausted-quiet".into(),
         kind: "resource.observed".into(),
         actor: None,
@@ -426,7 +426,7 @@ async fn shard_projection_retry_recovers_without_another_receive() {
     let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     source_graph.bind_fleet(fleet).unwrap();
     let source = fractal_store::store::messages_shard::open(&source_graph, source_dir.path()).unwrap();
-    source.append_claim(&smallclaims::ClaimInput {
+    source.append_claim(&fractal_wire::ClaimInput {
         subject: "message/0123456789abcdef".into(),
         kind: "message.sent".into(),
         actor: Some("agent/birch".into()),

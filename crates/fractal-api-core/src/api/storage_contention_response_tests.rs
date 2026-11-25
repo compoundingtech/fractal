@@ -2,7 +2,7 @@
 fn admitted_contention_is_pending_not_a_peer_error_and_other_faults_stay_errors() {
     for code in ["database-busy", "database-locked"] {
         assert_eq!(super::admitted_projection_result(Err(anyhow::Error::new(
-            super::FractalError::new(code, "fixture contention")))).unwrap(), None);
+            fractal_wire::Error::new(code, "fixture contention")))).unwrap(), None);
         assert_eq!(super::client_error_code(Some(code)), code);
     }
     assert!(super::admitted_projection_result(Err(anyhow::anyhow!("other fault"))).is_err());
@@ -16,7 +16,7 @@ fn accepted_replication_survives_a_contended_begin_and_projects_after_release() 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");
     let source = Store::open_memory("source").unwrap();
-    source.append_client_claim(&smallclaims::ClaimInput {
+    source.append_client_claim(&fractal_wire::ClaimInput {
         subject: "resource/receive-busy".into(), kind: "resource.observed".into(), actor: None,
         fields: BTreeMap::from([("kind".into(), json!("custom.test.replication"))]),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
@@ -70,7 +70,7 @@ fn private_projection_context_stays_out_of_client_details() {
 }
 #[test]
 fn expired_idempotency_response_is_a_terminal_client_error() {
-    let error = super::ApiError::bad(super::FractalError::new(
+    let error = super::ApiError::bad(fractal_wire::Error::new(
         "idempotency-key-expired",
         "already committed",
     ));
@@ -88,16 +88,16 @@ fn expired_idempotency_response_is_a_terminal_client_error() {
 #[test]
 fn typed_sqlite_contention_is_a_service_failure_not_input_validation() {
     for code in ["database-busy", "database-locked"] {
-        let response = super::ApiError::bad(super::FractalError::new(code, "storage contention"));
+        let response = super::ApiError::bad(fractal_wire::Error::new(code, "storage contention"));
         assert_eq!(response.status, super::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.code, code);
     }
-    assert_eq!(super::ApiError::bad(super::FractalError::new("internal", "other fault")).status, super::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(super::ApiError::bad(fractal_wire::Error::new("internal", "other fault")).status, super::StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[test]
 fn diagnostic_rate_limit_keeps_its_public_retryable_code() {
-    let response = super::ApiError::bad(super::FractalError::new("client-diagnostics-rate-limit", "slow down"));
+    let response = super::ApiError::bad(fractal_wire::Error::new("client-diagnostics-rate-limit", "slow down"));
     assert_eq!(response.status, super::StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(super::client_error_code(Some(&response.code)), "rate-limited");
     assert!(super::client_error_retryable(response.status, Some("rate-limited")));

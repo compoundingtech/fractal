@@ -246,7 +246,7 @@ fn alias_authored_placement_keeps_signed_identity_when_partition_collision_wins(
     let target = "agent/example-target";
     let arrangement = "arrangement/person/robin/019a0000-0000-7000-8000-000000000003";
     for store in [&left, &right] {
-        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     }
     for store in [&left, &right, &naming_first, &collision_first] {
         store.bind_fleet(FLEET).unwrap();

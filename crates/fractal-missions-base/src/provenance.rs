@@ -6,7 +6,8 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use serde_json::Value;
 pub use fractal_schema::provenance::{Provenance, Source};
 
-use crate::model::{NormalizedIntent, FractalError};
+use crate::model::{NormalizedIntent};
+use fractal_wire::{Error as FractalError};
 
 fn invalid(message: impl Into<String>) -> FractalError {
     FractalError::new("invalid-mission-provenance", message)

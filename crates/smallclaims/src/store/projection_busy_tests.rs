@@ -2,7 +2,7 @@
 use super::checkpoint::{DropPlan, SealedSet};
 use super::runtime::{IncrementalProjection, LegacyDigestTable, Plain};
 use super::*;
-use crate::error::Error;
+use fractal_wire::Error;
 use std::sync::atomic::AtomicI32;
 
 struct FaultRuntime {

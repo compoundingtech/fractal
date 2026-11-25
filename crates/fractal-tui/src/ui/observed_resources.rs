@@ -180,7 +180,7 @@ mod socket_tests {
             ),
         ] {
             store
-                .append_client_claim(&fractal_daemon::model::ClaimInput {
+                .append_client_claim(&fractal_wire::ClaimInput {
                     subject: id.into(),
                     kind: "resource.observed".into(),
                     actor: None,

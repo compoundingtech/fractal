@@ -1,5 +1,5 @@
+use fractal_wire::ClaimInput;
 use smallclaims::{
-    claim::ClaimInput,
     replication::ReplicationInventory,
     store::{Store, runtime::Plain},
 };

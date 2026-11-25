@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tokio::sync::Mutex as AsyncMutex;
-use crate::model::{ClaimInput, ClaimRecord};
+use crate::model::{ ClaimRecord};
+use fractal_wire::{ClaimInput};
 use crate::github_capture::{AcquisitionCheckpoint, AcquisitionPage, AcquisitionStatus, CaptureAcquisition, CaptureProgress, GitHubCaptureLedger, RepositoryTarget};
 use crate::github_http::GithubAuth;
 use super::*;

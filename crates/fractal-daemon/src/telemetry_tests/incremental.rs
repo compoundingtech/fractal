@@ -22,7 +22,7 @@ fn change(subject: &str, kind: &str, actor: Option<&str>, body: &str) -> Change 
 
 fn observe(store: &Store, resource: &str) {
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: format!("resource/{resource}"),
             kind: "resource.observed".into(),
             actor: None,
@@ -100,7 +100,7 @@ fn a_subscription_start_wakes_only_its_run() {
         );
     }
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "subscription/reviews".into(),
             kind: "subscription.mission-started".into(),
             actor: None,

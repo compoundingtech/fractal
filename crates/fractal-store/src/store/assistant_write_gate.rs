@@ -1,7 +1,7 @@
 //! Test-support scheduling gate: delay a real mutation before it acquires the writer.
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 pub struct Gate {
     pub root: PathBuf,
     pub grant_subject: Option<String>,

@@ -6,7 +6,8 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use crate::claim::{ClaimRecord, ReplicaBatch};
-use crate::error::{Error, internal};
+use crate::error::{ internal};
+use fractal_wire::{Error};
 
 pub fn canonical_hash(value: &impl Serialize) -> Result<String> {
     let mut bytes = Vec::new();

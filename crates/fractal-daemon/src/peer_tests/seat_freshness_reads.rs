@@ -9,13 +9,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use smallclaims::sync::{FleetAuth, FleetContext, PeerState, peer_router};
+use fractal_auth::{FleetAuth};
+use smallclaims::sync::{FleetContext, PeerState, peer_router};
 use tokio::sync::watch;
 
 use crate::api::message_reads::{self, Relayed};
 use crate::config::{Config, PeerConfig};
 use crate::AdhocWorkStore as _;
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use crate::store::Store;
 use crate::store::message_marks;
 use fractal_peer::peer::*;

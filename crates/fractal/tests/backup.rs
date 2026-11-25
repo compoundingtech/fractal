@@ -2,7 +2,7 @@ use serde_json::json;
 use fractal_daemon::api::{AppState, router};
 use fractal_daemon::backup;
 use fractal_daemon::client::{Client, Endpoint};
-use fractal_daemon::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

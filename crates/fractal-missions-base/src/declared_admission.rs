@@ -3,9 +3,8 @@ use crate::declaration_syntax::{
     ensure_bare, ensure_no_children, ensure_no_properties, reject_unknown_children, unique_child,
 };
 use crate::model::{
-    DeclaredAdmission, DeclaredAttentionBudget, DeclaredBudgets, DeclaredLane, DeclaredPriority,
-    FractalError, MissionSpec, NormalizedIntent,
-};
+    DeclaredAdmission, DeclaredAttentionBudget, DeclaredBudgets, DeclaredLane, DeclaredPriority, MissionSpec, NormalizedIntent};
+use fractal_wire::{Error as FractalError};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Map, Value};

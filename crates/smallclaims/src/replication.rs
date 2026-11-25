@@ -375,9 +375,9 @@ pub struct ReceiveOptions<'a> {
 
 /// Local receive work checks this only before its first receipt transaction begins.
 /// Once receipt writes begin, the transaction and follow-up phases finish normally.
-pub fn check_receive_deadline(deadline_unix_ms: Option<u128>) -> Result<(), crate::error::Error> {
+pub fn check_receive_deadline(deadline_unix_ms: Option<u128>) -> Result<(), fractal_wire::Error> {
     if deadline_unix_ms.is_some_and(|deadline| crate::store::now_ms() >= deadline) {
-        return Err(crate::error::Error::new(
+        return Err(fractal_wire::Error::new(
             "replication-overloaded",
             "the replication receive answer deadline elapsed",
         ));
@@ -902,7 +902,7 @@ impl ReplicationExchangeFailure {
             }
             return failure;
         }
-        let code = if let Some(error) = error.downcast_ref::<crate::error::Error>() {
+        let code = if let Some(error) = error.downcast_ref::<fractal_wire::Error>() {
             error.code
         } else if let Some(error) = error.downcast_ref::<reqwest::Error>() {
             if error.is_timeout() {
@@ -917,7 +917,7 @@ impl ReplicationExchangeFailure {
         };
         // A typed I/O cause is useful without its possibly sensitive display/path.
         // One category plus one ErrorKind has a fixed bound, well below 512 bytes.
-        let mut cause = if error.downcast_ref::<crate::error::Error>().is_some() {
+        let mut cause = if error.downcast_ref::<fractal_wire::Error>().is_some() {
             "local store rejected the operation".to_owned()
         } else if error.downcast_ref::<reqwest::Error>().is_some() {
             "HTTP transport failed".to_owned()

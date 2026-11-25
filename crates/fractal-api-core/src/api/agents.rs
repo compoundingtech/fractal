@@ -191,7 +191,7 @@ pub async fn restart_agent(
     let member = desired
         .member
         .as_ref()
-        .filter(|member| member.lifecycle == crate::model::MemberLifecycle::Service)
+        .filter(|member| member.lifecycle == fractal_light_node_core::custody::MemberLifecycle::Service)
         .ok_or_else(|| {
             ApiError::bad(FractalError::new(
                 "restart-no-launch",

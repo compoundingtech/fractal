@@ -10,7 +10,7 @@ use kdl::KdlDocument;
 use serde_json::Value;
 
 use crate::declaration_kdl::{canonical_node, parse_duration};
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 
 /// The declaration kind and subject family.
 pub const KIND: &str = "objective";

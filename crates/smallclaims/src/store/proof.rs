@@ -84,7 +84,7 @@ impl Store {
             if !writers.contains(&envelope.writer) { return Ok(()); }
             // Use the runtime membership rule, not a second proof-only window reducer.
             let keys = membership.keys_for(&envelope.writer, envelope.sequence);
-            let message = crate::fleet::envelope_signature_message(
+            let message = fractal_auth::envelope_signature_message(
                 &fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
             );
             let selected = {
@@ -98,7 +98,7 @@ impl Store {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )? {
                     let (key, signature) = candidate?;
-                    if keys.contains(&key) && crate::fleet::verify_signature(&key, &message, &signature) {
+                    if keys.contains(&key) && fractal_auth::verify_signature(&key, &message, &signature) {
                         selected = Some((key, signature));
                         break;
                     }

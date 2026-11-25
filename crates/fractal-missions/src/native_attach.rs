@@ -1,7 +1,8 @@
 //! Typed native attach admission, intentionally not exposed through a transport yet.
 //! The selected native process proves possession before a paired person may approve.
 use crate::PersonWorkStore;
-use fractal_kernel::model::{FractalError, PersonAskRequest, StepRunView};
+use fractal_kernel::model::{ PersonAskRequest, StepRunView};
+use fractal_wire::{Error as FractalError};
 use fractal_store::store::{Store, native_attach::REQUESTER};
 
 pub trait NativeAttachStore {

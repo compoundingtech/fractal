@@ -1,5 +1,6 @@
 use crate::publication::*;
-use crate::model::{DesiredSubject, MemberLifecycle};
+use crate::model::DesiredSubject;
+use fractal_light_node_core::custody::MemberLifecycle;
 use crate::graph::parse_intent;
 
 fn seat() -> DesiredSubject {

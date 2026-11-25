@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{ClaimInput, FractalError};
+use fractal_wire::{ClaimInput, Error as FractalError};
 use crate::store::Store;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

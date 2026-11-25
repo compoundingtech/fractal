@@ -125,8 +125,8 @@ LOCAL = {
     'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
     'ci-script-tests': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-script-tests'],
     # The stages a linux-gate skip covers (the tests, clippy and fleet compatibility), in one run, as their CI jobs run them but
-    # with a home of their own (scripts/ci-local). The VM tests and the mail redelivery canaries run daily (daily-long.yml).
-    'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat'],
+    # with a home of their own (scripts/ci-local). Native scope/custody is required; mail canaries stay daily.
+    'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat', 'isolation-vm'],
     # The clippy stage, keyed by what it reads (docs/keyed-clippy.md). The recorded command is the small script that reads the stage's
     # report (scripts/ci-clippy-result, as rust-tests records ci-rust-test-result); the stage itself runs once, in linux-gate's run when that
     # runs here, else alone (RUN_CLIPPY). Right after linux-gate, so it signs from that run's report.

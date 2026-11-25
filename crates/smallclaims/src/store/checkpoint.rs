@@ -965,8 +965,8 @@ pub fn allocator_reclaim_stats_for_test() -> (u64, u64, std::time::Duration) {
 #[cfg(test)]
 mod forget_bound_tests {
     use super::*;
-    use crate::claim::ClaimInput;
-    use crate::fleet::MemberKey;
+    use fractal_wire::ClaimInput;
+    use fractal_auth::{MemberKey};
     use crate::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
     use std::sync::Arc;
 

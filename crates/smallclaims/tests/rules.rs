@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use smallclaims::claim::{ClaimInput, ClaimRecord};
-use smallclaims::error::Error;
+use smallclaims::claim::{ ClaimRecord};
+use fractal_wire::{ClaimInput};
+use fractal_wire::Error;
 use smallclaims::rules::{Mode, RULE_AUDITED, RULE_SET, Rule};
 use smallclaims::store::Store;
 use smallclaims::store::runtime::Plain;

@@ -114,7 +114,7 @@ async fn sidebar_arrangements_follow_the_explicit_person_and_remote_register_upd
     let append = |operations| {
         state
             .store
-            .append_client_claim(&fractal_daemon::model::ClaimInput {
+            .append_client_claim(&fractal_wire::ClaimInput {
                 subject: subject.into(),
                 kind: "arrangement.edited".into(),
                 actor: Some("person/avery".into()),

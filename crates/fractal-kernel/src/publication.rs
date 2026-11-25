@@ -1,5 +1,6 @@
 //! The launch boundary shared by publication and reconciliation.
-use crate::model::{DesiredSubject, MemberLifecycle, MemberSpec};
+use crate::model::{DesiredSubject, MemberSpec};
+use fractal_light_node_core::custody::MemberLifecycle;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Interruption {

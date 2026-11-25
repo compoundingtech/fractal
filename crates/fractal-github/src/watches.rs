@@ -3,7 +3,8 @@
 
 use crate::github_watch::{self, ThreadRef};
 use crate::model::ObserverSpec;
-use crate::model::{ClaimInput, DesiredSubject, FractalError, SubscriptionSpec};
+use crate::model::{ DesiredSubject, SubscriptionSpec};
+use fractal_wire::{ClaimInput, Error as FractalError};
 use crate::store::Store;
 use crate::store::*;
 use anyhow::Result;

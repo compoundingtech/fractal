@@ -23,15 +23,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 
-pub use smallclaims::sync::{
-    Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, WorkerConfig,
-};
+use fractal_auth::{FleetAuth};
+pub use smallclaims::sync::{Backend, Local, MAX_EXCHANGE_BYTES, WorkerConfig};
 use smallclaims::sync::{dial_targets, signed_error_response_for, signed_response_for};
 
 use crate::client::Client;
 use crate::config::{Config, PeerConfig};
 use crate::fleet::transport::{Fabric, LocalTransports, Route, local_addresses, parse_route, resolve_tool};
-use crate::fleet::{FleetView, MemberKey};
+use fractal_auth::{MemberKey};
+use crate::fleet::{FleetView};
 use crate::model::{
     ApiResponse, ReplicaEnvelopeId, ReplicationExchange, ReplicationExportRequest,
     ReplicationExportResponse, ReplicationInventory, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
@@ -402,7 +402,7 @@ impl ClientRelay {
         self.legacy
     }
 
-    fn accept_raw_watcher(&self, sender: &crate::fleet::Sender) -> Result<()> {
+    fn accept_raw_watcher(&self, sender: &fractal_auth::Sender) -> Result<()> {
         let view = self
             .links
             .as_ref()
@@ -462,7 +462,7 @@ impl ClientRelay {
                 fabric: self.fabric.is_some(),
                 tailscale: local_addresses()
                     .iter()
-                    .any(crate::fleet::transport::is_tailnet_address),
+                    .any(fractal_auth::is_tailnet_address),
                 ..LocalTransports::default()
             },
         )
@@ -1970,7 +1970,7 @@ impl Backend for MainBackend {
         Ok(())
     }
 
-    async fn redeem(&self, request: &crate::fleet::handshake::JoinRequest) -> Result<Value> {
+    async fn redeem(&self, request: &fractal_auth::handshake::JoinRequest) -> Result<Value> {
         self.client.post("/v1/internal/fleet/redeem", request).await
     }
 

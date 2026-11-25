@@ -44,7 +44,7 @@ mod harness {
 
     use anyhow::{Result, ensure};
     use serde_json::{Value, json};
-    use smallclaims::claim::ClaimInput;
+    use fractal_wire::ClaimInput;
     use smallclaims::sqlite::transport_bench;
     use smallclaims::store::runtime::Plain;
     use smallclaims::store::{Store, transport_observation_index};

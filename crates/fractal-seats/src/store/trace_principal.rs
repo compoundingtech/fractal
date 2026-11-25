@@ -300,7 +300,7 @@ mission "example/work" state="ready" {
         );
         assert_eq!(store.trace_principal("agent/example/root").unwrap(), None);
         store
-            .set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
+            .set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0))
             .unwrap();
         store.seal_local_batches().unwrap();
         store.judge_claims(true).unwrap();
@@ -321,7 +321,7 @@ mission "example/work" state="ready" {
         };
         for case in ["verified", "held", "invalid", "other-person", "fields-only"] {
             let store = store();
-            let device = crate::fleet::MemberKey::generate().unwrap().0;
+            let device = fractal_auth::MemberKey::generate().unwrap().0;
             let signer = if case == "other-person" {
                 "person/robin"
             } else {
@@ -443,7 +443,7 @@ mission "example/work" state="ready" {
                 .unwrap();
             assert_eq!(store.trace_principal("agent/example/child").unwrap(), None);
             if invalid {
-                let key = crate::fleet::MemberKey::generate().unwrap().0;
+                let key = fractal_auth::MemberKey::generate().unwrap().0;
                 let signature = smallclaims::principal::ClaimSignature::sign(
                     &key,
                     "wrong content",

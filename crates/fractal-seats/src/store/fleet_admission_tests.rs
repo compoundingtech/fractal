@@ -2,7 +2,8 @@
 use crate::MissionsStore;
 use crate::HarnessQuestionsStore;
 use super::*;
-use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_signature};
+use fractal_auth::{MemberKey, envelope_signature_message, verify_signature};
+use crate::fleet::{MemberState};
 use fractal_missions::store::fleet_admission_tests_shared_seats::*;
 pub use fractal_missions::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
 

@@ -616,7 +616,7 @@ mod tests {
     }
 
     fn observe(store: &Store, number: u64, facts: Value) -> String {
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: format!("resource/github/acme/garden/pull-request/{number}"),
             kind: "resource.observed".into(),
             actor: None,

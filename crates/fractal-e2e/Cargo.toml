@@ -10,6 +10,8 @@ publish = false
 # needs a dev-dependency on the daemon any more (fractal-client had one, which closed a cycle with the daemon).
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
+fractal-wire = { path = "../fractal-wire" }
 fractal-daemon = { path = "../fractal-daemon", features = ["test-support"] }
 fractal-client = { path = "../fractal-client" }
 fractal-feed = { path = "../fractal-feed" }

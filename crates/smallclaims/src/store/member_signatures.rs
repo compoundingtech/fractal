@@ -1,7 +1,7 @@
 //! Each claim carries its writer's own signature, so a claim authenticates without the envelope
 //! that carried it, and a member can release envelope history and still serve and verify every
 //! claim it holds. The writer's member key signs `st3-claim-v1`, the fleet, the writer, the batch's
-//! sequence and the claim id (`fleet::keys::claim_signature_message`). The claim id already
+//! sequence and the claim id (`fractal_auth::claim_signature_message`). The claim id already
 //! hashes the claim's content and its batch, so the signature binds both.
 //!
 //! A writer signs its own claims in a commit-driven background pass, the new ones and those it held
@@ -248,7 +248,7 @@ impl Store {
             .into_iter()
             .filter(|(_, _, _, signed)| !signed)
             .map(|(_, claim_id, sequence, _)| ClaimMemberSignature {
-                signature: key.sign(&crate::fleet::keys::claim_signature_message(
+                signature: key.sign(&fractal_auth::claim_signature_message(
                     &fleet_id, &self.origin, sequence, &claim_id,
                 )),
                 member_key: key.public().to_owned(),
@@ -309,9 +309,9 @@ impl Store {
                     crate::fleet::Window::Legacy => false,
                     crate::fleet::Window::Fenced => return None,
                 };
-                crate::fleet::verify_signature(
+                fractal_auth::verify_signature(
                         &signature.member_key,
-                        &crate::fleet::keys::claim_signature_message(
+                        &fractal_auth::claim_signature_message(
                             &fleet_id, &signature.writer, signature.sequence, &signature.claim_id,
                         ),
                         &signature.signature,

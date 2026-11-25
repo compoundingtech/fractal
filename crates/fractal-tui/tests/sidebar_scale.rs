@@ -1,5 +1,6 @@
 //! Pre-activation daemon gates. D-dependent tests are explicitly ignored, never simulated.
-use fractal_daemon::{ArrangementsStore, model::ClaimInput, store::Store};
+use fractal_daemon::{ArrangementsStore, store::Store};
+use fractal_wire::{ClaimInput};
 use fractal_sidebar::{client::{MembershipPage, membership_page}, paging::{Effect, Event, Paging, Scope, Status}};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::{Duration, Instant}};

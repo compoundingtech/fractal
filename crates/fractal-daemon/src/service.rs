@@ -250,7 +250,7 @@ pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) 
         config.fleet_id.as_deref(),
         config.shared_secret_file.as_deref(),
     ) {
-        crate::peer::FleetAuth::load(fleet_id, secret)?;
+        fractal_auth::FleetAuth::load(fleet_id, secret)?;
     }
     let mut spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
     spec.read_cache_kib = crate::read_cache::override_kib();

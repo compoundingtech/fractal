@@ -1,5 +1,5 @@
 use super::*;
-use smallclaims::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 
 const PERSON: &str = "person/avery";
 fn fixture() -> (tempfile::TempDir, AppState, MemberKey, ClaimRecord) {

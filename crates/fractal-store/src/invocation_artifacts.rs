@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use crate::{model::ClaimInput, store::Store};
+use crate::{ store::Store};
+use fractal_wire::{ClaimInput};
 use fractal_delivery_base::blobs::BlobDir;
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;

@@ -634,7 +634,7 @@ async fn a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_overri
     amber.declare("amber", true, "initial");
     amber
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "daemon/amber".into(),
             kind: "daemon.started".into(),
             actor: None,
@@ -865,7 +865,7 @@ async fn source_stops_even_when_the_selected_actual_belongs_to_the_destination()
     fields.insert("incarnation_id".into(), Value::String("fixture:1".into()));
     cobalt
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: SEAT.into(),
             kind: "runtime.observed".into(),
             actor: None,
@@ -1178,7 +1178,7 @@ async fn stopping_a_move_before_handoff_finishes_retires_both_local_copies() {
     ]);
     cobalt
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: SEAT.into(),
             kind: "runtime.observed".into(),
             actor: None,
@@ -1268,7 +1268,7 @@ async fn legacy_stopped_observations_keep_their_causal_stop_proof() {
     // its causal predecessors still retain the source's confirmed stop.
     amber
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: SEAT.into(),
             kind: "runtime.observed".into(),
             actor: None,

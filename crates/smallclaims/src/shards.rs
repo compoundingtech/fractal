@@ -87,7 +87,7 @@ impl ShardStores {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claim::ClaimInput;
+    use fractal_wire::ClaimInput;
     use crate::store::runtime::Plain;
     use std::collections::BTreeMap;
 
@@ -399,7 +399,7 @@ mod tests {
     }
 
     /// A default store founded by `a`, whose anchor key `a` holds, with `a` admitted.
-    fn founded_graph(path: &Path, origin: &str, anchor: &Arc<crate::fleet::MemberKey>) -> Arc<Store> {
+    fn founded_graph(path: &Path, origin: &str, anchor: &Arc<fractal_auth::MemberKey>) -> Arc<Store> {
         const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
         let graph = Arc::new(Store::open(path, origin, Arc::new(Plain)).unwrap());
         graph.bind_fleet(FLEET).unwrap();
@@ -585,7 +585,7 @@ mod tests {
         const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
         let a_root = tempfile::tempdir().unwrap();
         let b_root = tempfile::tempdir().unwrap();
-        let a_key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let a_key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         let a_graph = founded_graph(&a_root.path().join("claims.sqlite3"), "a", &a_key);
         a_graph.set_member_key(Some(a_key.clone())).unwrap();
         a_graph
@@ -631,16 +631,16 @@ mod tests {
         assert_eq!(exchange.shard_id.as_deref(), Some("messages"));
         let envelope = &exchange.envelopes[0];
         let signature = envelope.signature.as_deref().expect("the shard signs for the fleet");
-        assert!(crate::fleet::verify_signature(
+        assert!(fractal_auth::verify_signature(
             a_key.public(),
-            &crate::fleet::envelope_signature_message_in(
+            &fractal_auth::envelope_signature_message_in(
                 Some("messages"), FLEET, "a", envelope.sequence, &envelope.hash,
             ),
             signature,
         ));
-        assert!(!crate::fleet::verify_signature(
+        assert!(!fractal_auth::verify_signature(
             a_key.public(),
-            &crate::fleet::envelope_signature_message(FLEET, "a", envelope.sequence, &envelope.hash),
+            &fractal_auth::envelope_signature_message(FLEET, "a", envelope.sequence, &envelope.hash),
             signature,
         ));
 
@@ -648,7 +648,7 @@ mod tests {
         // an unsigned envelope from a keyed member is held.
         let mut graph_signed = exchange.clone();
         for envelope in &mut graph_signed.envelopes {
-            envelope.signature = Some(a_key.sign(&crate::fleet::envelope_signature_message(
+            envelope.signature = Some(a_key.sign(&fractal_auth::envelope_signature_message(
                 FLEET,
                 "a",
                 envelope.sequence,

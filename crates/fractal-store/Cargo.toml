@@ -7,9 +7,12 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = ["fractal-telemetry/test-support", "fractal-secrets/test-support", "fractal-seats-base/test-support", "fractal-delivery-base/test-support", "fractal-missions-base/test-support", "fractal-github-base/test-support", "smallclaims/test-support"]
+test-support = ["fractal-auth/test-support", "fractal-telemetry/test-support", "fractal-secrets/test-support", "fractal-seats-base/test-support", "fractal-delivery-base/test-support", "fractal-missions-base/test-support", "fractal-github-base/test-support", "smallclaims/test-support"]
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
+fractal-auth = { path = "../fractal-auth" }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
 agent-spec = { path = "../agent-spec" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
@@ -62,6 +65,8 @@ walkdir = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
+fractal-light-node-core = { path = "../fractal-light-node-core", features = ["test-support"] }
 fractal_store_self = { package = "fractal-store", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }

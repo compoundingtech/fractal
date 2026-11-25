@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 
 /// The most one upload may hold.
 pub const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024;

@@ -872,7 +872,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
     let incarnation = "contract-terminal:i1";
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: agent.into(),
             kind: "runtime.observed".into(),
             actor: Some(agent.into()),
@@ -896,7 +896,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
         .to_owned();
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "message/contract-first".into(),
             kind: "message.sent".into(),
             actor: Some("person/alex".into()),
@@ -956,7 +956,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
 
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: agent.into(),
             kind: "harness.timeline".into(),
             actor: Some(agent.into()),
@@ -1053,7 +1053,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
     assert_eq!(frame["value"]["lines"], screen["value"]["lines"]);
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: agent.into(),
             kind: "runtime.observed".into(),
             actor: Some(agent.into()),
@@ -2118,7 +2118,7 @@ mission "garden/workspace" state="ready" {
     assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "agent/garden/observed".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/garden/observed".into()),
@@ -2274,7 +2274,7 @@ async fn client_event_pages_hand_out_no_cursor_past_the_published_index() {
     let append = |number: usize| {
         state
             .store
-            .append_claim(&fractal_daemon::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: "custom/test/published".into(),
                 kind: "custom.test.recorded".into(),
                 actor: None,
@@ -2422,7 +2422,7 @@ async fn unchanged_store_index_names_one_stable_snapshot_and_payload() {
 
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "agent/stable-snapshot".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/stable-snapshot".into()),
@@ -2458,7 +2458,7 @@ async fn unchanged_store_index_names_one_stable_snapshot_and_payload() {
     let (_, before) = client_json(app.clone(), "/v1/client/agents?limit=1").await;
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "agent/snapshot-changed".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/snapshot-changed".into()),
@@ -2579,7 +2579,7 @@ async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
     let fleet = "issuer-envelope-proof";
     issuer.store.bind_fleet(fleet).unwrap();
     receiver.store.bind_fleet(fleet).unwrap();
-    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     for state in [&issuer, &receiver] {
         state.store.pin_fleet_anchor(key.public()).unwrap();
     }
@@ -2718,7 +2718,7 @@ async fn pairing_is_single_use_and_fenced_actions_are_idempotent() {
     let device = paired["value"]["device_id"].as_str().unwrap();
     state
         .store
-        .append_client_operation_claim(&fractal_daemon::model::ClaimInput {
+        .append_client_operation_claim(&fractal_wire::ClaimInput {
             subject: "custom/client/pairing-expired-inventory".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),
@@ -3097,7 +3097,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
 
     let expired_credential = "expired-paired-credential-000000000000000000";
     store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "custom/client/pairing-expired-proof".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/ada".into()),
@@ -3842,7 +3842,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
         ("agent/beta", "beta-runtime", "beta-runtime:i1"),
     ] {
         store
-            .append_claim(&fractal_daemon::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: subject.into(),
                 kind: "runtime.observed".into(),
                 actor: Some(subject.into()),
@@ -3900,7 +3900,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
     );
 
     store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "agent/gamma".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/gamma".into()),
@@ -4357,7 +4357,7 @@ async fn stopped_agents_are_annotated_history_not_default_membership() {
     let state = test_state(root.path());
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "agent/retired".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/retired".into()),
@@ -4992,7 +4992,7 @@ async fn status_history_is_typed_and_readable_through_the_paired_gateway() {
         ("harness.observed", serde_json::json!({"state":"idle", "incarnation_id":"one"})),
         ("runtime.observed", serde_json::json!({"status":"running", "runtime_id":"native", "incarnation_id":"two"})),
     ] {
-        state.store.append_claim(&fractal_daemon::model::ClaimInput {
+        state.store.append_claim(&fractal_wire::ClaimInput {
             subject: "agent/cedar".into(), kind: kind.into(), actor: Some("agent/cedar".into()),
             fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
             expected_subject: None, idempotency_key: None,
@@ -5039,7 +5039,7 @@ async fn custom_subject_contract_pagination_and_paired_person_reply() {
         manifest, actor: "agent/garden/seed".into(),
     }).unwrap();
     for name in ["one", "two"] {
-        state.store.append_claim(&fractal_daemon::model::ClaimInput{subject:format!("custom/garden/review/v1/{name}"),kind:"custom.garden.review.v1.requested".into(),actor:Some("agent/garden/seed".into()),fields:serde_json::from_value(serde_json::json!({"title":"Retain the seed history?","detail":"Choose Keep or Discard.","recipient":"person/lichen"})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
+        state.store.append_claim(&fractal_wire::ClaimInput{subject:format!("custom/garden/review/v1/{name}"),kind:"custom.garden.review.v1.requested".into(),actor:Some("agent/garden/seed".into()),fields:serde_json::from_value(serde_json::json!({"title":"Retain the seed history?","detail":"Choose Keep or Discard.","recipient":"person/lichen"})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
     }
     let local = fractal_daemon::api::router(state.clone());
     let fabric = fractal_daemon::api::fabric_router(state.clone());
@@ -5184,7 +5184,7 @@ mission "timing/run" state="ready" {
     state.store.set_step_state(retry, "failed", Some("rate limited")).unwrap();
     assert!(state.store.retry_step(retry, "rate limited", 60_000).unwrap());
     let improve = run.loops.iter().find(|loop_run| loop_run.path == "improve").unwrap();
-    state.store.append_claim(&fractal_daemon::model::ClaimInput {
+    state.store.append_claim(&fractal_wire::ClaimInput {
         subject: improve.subject.clone(),
         kind: "loop.state".into(),
         actor: None,
@@ -5249,7 +5249,7 @@ mission "timing/run" state="ready" {
     let (status, missing) = client_json(app, "/v1/client/missions/timing/missing").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
     let credential = "timing-no-projection-scope";
-    state.store.append_claim(&fractal_daemon::model::ClaimInput {
+    state.store.append_claim(&fractal_wire::ClaimInput {
         subject: "custom/client/pairing-timing".into(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some("person/avery".into()),
@@ -5302,7 +5302,7 @@ mission "program/land" state="ready" {{
     let land = run.steps.iter().find(|step| step.step == "land").unwrap().subject.clone();
     state.store.set_step_state(&land, "working", None).unwrap();
     let append = |kind: &str, fields: Value| {
-        state.store.append_claim(&fractal_daemon::model::ClaimInput {
+        state.store.append_claim(&fractal_wire::ClaimInput {
             subject: land.clone(),
             kind: kind.into(),
             actor: None,
@@ -5363,7 +5363,7 @@ async fn terminal_filters_use_projected_state_and_preserve_history_selection() {
         let subject = format!("agent/lookup/{name}");
         state
             .store
-            .append_claim(&fractal_daemon::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: subject.clone(),
                 kind: "runtime.observed".into(),
                 actor: Some(subject),
@@ -5427,7 +5427,7 @@ async fn terminal_filters_are_acknowledged_only_on_terminal_pages() {
         let subject = format!("agent/lookup/{name}");
         state
             .store
-            .append_claim(&fractal_daemon::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: subject.clone(),
                 kind: "runtime.observed".into(),
                 actor: Some(subject),

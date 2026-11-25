@@ -20,7 +20,8 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::{Instant, SystemTime, UNIX_EPOCH}};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use fractal_daemon::{api::{self, AppState}, client::Client, model::ClaimInput, store::Store};
+use fractal_daemon::{api::{self, AppState}, client::Client, store::Store};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::{AttentionListStore as _, EvidenceStore as _, SeatsStore as _};
 use fractal_daemon::api::client_v0::assistant::authorization::{ReadPayload, request_digest, signing_bytes, HEADER};
 use ring::{rand::SystemRandom, signature::{Ed25519KeyPair, KeyPair as _}};
@@ -129,7 +130,7 @@ async fn authenticated_get_during_pairing() {
     let database = root.path().join("admission.sqlite");
     let store = Arc::new(Store::open(&database, NODE).unwrap());
     store.bind_fleet(super::super::daemon_bench::FLEET).unwrap();
-    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     let state = AppState {
         browser_pairing_login:None,
         seat_admission:Default::default(), owning_person:Some(OWNER.into()), store:store.clone(),

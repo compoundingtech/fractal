@@ -1261,7 +1261,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-linux-clippy":[],"evidence-gate-linux-fleet-compat":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-ci-script-tests":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"hm-module-eval":["pick-runner"],"bundled-sqlite-packages":["pick-runner"],"ci-script-tests":["pick-runner","evidence-gate-ci-script-tests"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"swift-client-changes":[],"swift-client":["swift-client-changes"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-clippy":["pick-runner","evidence-gate-linux-gate","evidence-gate-linux-clippy"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate","evidence-gate-linux-fleet-compat","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","ci-script-tests","evidence-gate-ci-script-tests","hm-module-eval","bundled-sqlite-packages","evidence-gate-rust-tests","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","ci-script-tests","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"evidence-note-rust-tests":["linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","evidence-gate-linux-gate","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"],"Prepare verified compatibility archives (x86_64-unknown-linux-gnu)":[]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-linux-clippy":[],"evidence-gate-linux-fleet-compat":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-ci-script-tests":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"hm-module-eval":["pick-runner"],"bundled-sqlite-packages":["pick-runner"],"ci-script-tests":["pick-runner","evidence-gate-ci-script-tests"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"swift-client-changes":[],"swift-client":["swift-client-changes"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-clippy":["pick-runner","evidence-gate-linux-gate","evidence-gate-linux-clippy"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate","evidence-gate-linux-fleet-compat","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-linux-gate","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","isolation-vm","ci-script-tests","evidence-gate-ci-script-tests","hm-module-eval","bundled-sqlite-packages","evidence-gate-rust-tests","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","isolation-vm","genie-freshness","ci-script-tests","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"evidence-note-rust-tests":["linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","evidence-gate-linux-gate","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"],"Prepare verified compatibility archives (x86_64-unknown-linux-gnu)":[]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -1642,8 +1642,8 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
-      - name: Prove Home Manager activation ownership and rollback
-        run: "nix build .#checks.x86_64-linux.hm-module-eval --no-link --print-build-logs"
+      - name: Prove full-node activation and standalone agent packaging boundaries
+        run: "nix build .#checks.x86_64-linux.hm-module-eval .#checks.x86_64-linux.light-node-agent-packaging .#checks.x86_64-linux.st3-runtime-inputs --no-link --print-build-logs"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1708,10 +1708,10 @@ jobs:
           summarize: true
       - name: Record effective bundled SQLite derivation environment
         run: |
-          nix derivation show .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter |
+          nix derivation show .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter .#packages.x86_64-linux.fractal-light-node-agent |
             jq '.derivations | to_entries | map({derivation: .key, env: (.value.env | {pname, dontCargoUseSystemLibs, LIBSQLITE3_SYS_USE_PKG_CONFIG, buildInputs})})'
-      - name: Build bundled SQLite packages, including fractal-migrate
-        run: "nix build --no-link --print-build-logs .#checks.x86_64-linux.bundled-sqlite-env .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter"
+      - name: Build bundled SQLite packages and standalone graph-free seat agent
+        run: "nix build --no-link --print-build-logs .#checks.x86_64-linux.bundled-sqlite-env .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter .#packages.x86_64-linux.fractal-light-node-agent"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -2398,7 +2398,7 @@ jobs:
         evidence-gate-rust-tests,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && (needs.evidence-gate-linux-gate.outputs.skip == 'true')) && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && vars.CI_MERGE_TEST_BUILD_OWNED && (needs.pick-runner.outputs.ci1_build || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) || github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     env:
@@ -4199,6 +4199,233 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  isolation-vm:
+    name: isolation-vm
+    needs:
+      [
+        pick-runner,
+        linux-test-build,
+        evidence-gate-linux-gate,
+        compat-archives-x86_64-unknown-linux-gnu,
+      ]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    runs-on:
+      [
+        "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }};github.run-id=${{ github.run_id }}",
+      ]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CI_CACHE_DEV_SHELL: default
+    steps:
+      - name: Require the shared test producer to succeed
+        env:
+          PRODUCER_RESULT: ${{ needs.linux-test-build.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
+      - name: Use the runner's own caches
+        run: |
+          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
+      - name: Restore the local Nix cache
+        id: nix-cache
+        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/fractal-ci-cache"
+          key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
+          restore-keys: |
+            nix5-${{ github.job }}-${{ runner.os }}-
+            nix4-${{ github.job }}-${{ runner.os }}-
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test home and XDG state
+        run: |
+          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
+          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Use the cached Nix outputs
+        if: env.CI_LOCAL_CACHES != '1'
+        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Prepare the historical messaging channel
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          binary=$(timeout 10m bash scripts/messaging-compat-binary)
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
+      - name: Prepare provider component fixtures
+        run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths --print-build-logs)
+          for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
+            wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
+            printf 'ST2_%s_COMPONENT=%s/share/st2/providers/st2_%s_component.component.wasm\n' "$provider" "$components" "$wasm" >> "$GITHUB_ENV"
+          done
+      - name: Download this run attempt’s successful test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.linux-test-build.outputs.artifact-id }}
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+        run: python3 scripts/ci-test-archive download
+      - name: Verify source, hashes and extract test archives
+        shell: bash
+        run: nix develop -c python3 scripts/ci-test-archive consume
+        env:
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+      - name: Install matching rendered hooks
+        shell: bash
+        run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Probe KVM
+        id: kvm
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is missing: this runner profile offers no nested virtualization"
+            exit 1
+          fi
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then sudo chmod 0666 /dev/kvm; fi
+          python3 - <<'EOF'
+          import fcntl, os
+          fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+          version = fcntl.ioctl(fd, 0xAE00)  # KVM_GET_API_VERSION
+          vm = fcntl.ioctl(fd, 0xAE01, 0)  # KVM_CREATE_VM
+          assert version == 12, f"unexpected KVM API version {version}"
+          os.close(vm)
+          print(f"KVM API {version}: created a VM")
+          EOF
+          printf 'KVM: \x60%s\x60, CPU virtualization flag %s, VM creation succeeded\n\n| Phase | Elapsed |\n| --- | --- |\n' "$(ls -l /dev/kvm)" "$(grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo none)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the NixOS VM test driver
+        id: driver
+        run: |
+          start=$SECONDS
+          nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
+          printf '| VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run all seven selected systemd-scope tests in the VM
+        id: vmtest
+        env:
+          FRACTAL_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
+          FRACTAL_ISOLATION_WORKSPACE: ${{ github.workspace }}
+          FRACTAL_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
+          FRACTAL_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
+          ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
+          ST_ISOLATION_WORKSPACE: ${{ github.workspace }}
+          ST_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
+          ST_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
+        run: |
+          start=$SECONDS
+          mkdir -p "$RUNNER_TEMP/vm-out"
+          "$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
+          jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "${FRACTAL_ISOLATION_TIMINGS-${ST_ISOLATION_TIMINGS}}" >> "$GITHUB_STEP_SUMMARY"
+          printf '| VM test driver total | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the sekrets VM test driver
+        id: sekrets-driver
+        run: |
+          start=$SECONDS
+          nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
+          printf '| sekrets VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run the sekrets gateway test in the VM
+        id: sekrets-test
+        env:
+          FRACTAL_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
+          ST_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
+        run: |
+          start=$SECONDS
+          mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
+          "$RUNNER_TEMP/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/sekrets-vm-out"
+          printf '| sekrets VM test | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save Nix outputs
+        if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
+        run: bash scripts/ci-nix-cache save
+      - name: Retain the VM output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolation-vm-logs
+          path: |
+            ${{ runner.temp }}/vm-out/
+            ${{ runner.temp }}/sekrets-vm-out/
+          if-no-files-found: ignore
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   linux-gate:
     name: linux-gate
     needs:
@@ -4212,6 +4439,7 @@ jobs:
       - linux-tests-shard-4
       - linux-clippy
       - linux-fleet-compat
+      - isolation-vm
       - ci-script-tests
       - evidence-gate-ci-script-tests
       - hm-module-eval
@@ -4231,14 +4459,14 @@ jobs:
       - name: Require every Linux stage to pass
         env:
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' || needs.evidence-gate-linux-clippy.outputs.skip == 'true' || needs.evidence-gate-linux-fleet-compat.outputs.skip == 'true' }}
-          RESULTS: "${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }}"
+          RESULTS: "${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.isolation-vm.result }}"
           EVENT: ${{ github.event_name }}
           MERGE_RESULTS: "${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}"
-          STAGE_SKIPS: "${{ (needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') }} false ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-linux-clippy.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-linux-fleet-compat.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }}"
+          STAGE_SKIPS: "${{ (needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && (needs.evidence-gate-linux-gate.outputs.skip == 'true') }} false ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-linux-clippy.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-linux-fleet-compat.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }}"
         run: |
           set -eu
             set -- $RESULTS
-            [ "$#" = 6 ] || { echo "incomplete base-stage results"; exit 1; }
+            [ "$#" = 7 ] || { echo "incomplete base-stage results"; exit 1; }
             if [ "$EVENT" = merge_group ] || [ "$EVENT" = push ]; then
             set -- $MERGE_RESULTS
             [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
@@ -4256,7 +4484,7 @@ jobs:
             # gate, or for the test stages the per-crate rust-tests gate as well), and never for a failure or a cancellation.
             flag=$(printf '%s\n' "${STAGE_SKIPS:-}" | cut -d' ' -f"$position")
             if [ "${GATE_SKIP:-}" = true ] && [ "$flag" = true ] && [ "$result" = skipped ]; then
-              case "$position" in 1|3|4|5|6|7|8) continue ;; esac
+              case "$position" in 1|3|4|5|6|7|8|9) continue ;; esac
             fi
             exit 1
             done
@@ -4296,6 +4524,7 @@ jobs:
       - linux-tests-shard-4
       - linux-clippy
       - linux-fleet-compat
+      - isolation-vm
       - genie-freshness
       - ci-script-tests
       - typescript-client

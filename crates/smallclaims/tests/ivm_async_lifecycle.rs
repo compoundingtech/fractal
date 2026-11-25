@@ -1,17 +1,15 @@
 //! Deterministic worker shutdown schedules in a real Store. No timing/cost qualification.
 use anyhow::Result;
 use serde_json::json;
-use smallclaims::{
-    ClaimInput, ClaimRecord, Store,
+use smallclaims::{ ClaimRecord, Store,
     ivm::{
         Contribution, Definition, Readiness, View, Views,
         asynchronous::{self, Limits, PageStatus, Worker},
         events::{self, Publisher},
         runtime::ViewRuntime,
-        source_cut,
-    },
-    store::canonical,
-};
+        source_cut},
+    store::canonical};
+use fractal_wire::{ClaimInput};
 use std::{
     future::Future,
     sync::{Arc, Mutex, mpsc},

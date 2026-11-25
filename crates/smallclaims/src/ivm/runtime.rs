@@ -9,15 +9,13 @@
 use super::*;
 use crate::claim::ReplicaBatch;
 use crate::{
-    ClaimInput, Error,
     store::{
         ReplicatedClaimAdmission, Runtime, Store, append_claim_record_tx,
         checkpoint::{DropPlan, SealedSet},
         checkpointed_operation_outcome, claim_from_row, claim_operation, current_index_tx,
         operation_tx, register_operation_tx,
-        runtime::{IncrementalProjection, LegacyDigestTable},
-    },
-};
+        runtime::{IncrementalProjection, LegacyDigestTable}}};
+use fractal_wire::{ClaimInput, Error};
 use serde_json::json;
 
 pub struct ViewRuntime {

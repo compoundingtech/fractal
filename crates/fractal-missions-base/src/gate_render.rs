@@ -1,6 +1,7 @@
 //! Canonical gate nodes for declaration reads. Environment values never leave this renderer.
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
-use crate::model::{GateSpec, FractalError};
+use crate::model::{GateSpec};
+use fractal_wire::{Error as FractalError};
 
 pub(crate) fn node(name: &str, args: impl IntoIterator<Item = KdlValue>) -> KdlNode {
     let mut node = KdlNode::new(name);

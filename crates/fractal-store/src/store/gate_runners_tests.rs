@@ -6,7 +6,7 @@ use serde_json::json;
 
 fn request(store: &Store, subject: &str, fields: serde_json::Value) -> String {
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: "gate.requested".into(),
             actor: None,
@@ -21,7 +21,7 @@ fn request(store: &Store, subject: &str, fields: serde_json::Value) -> String {
 
 fn observe(store: &Store, subject: &str, status: &str) -> String {
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: "runtime.observed".into(),
             actor: None,

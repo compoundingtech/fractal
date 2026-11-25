@@ -2,8 +2,8 @@ use super::*;
 
 pub(super) fn selection() -> Selection {
     Selection {
-        home: "example-home".into(), home_key: smallclaims::fleet::MemberKey::generate().unwrap().0.public().into(),
-        host: "example-seat".into(), host_key: smallclaims::fleet::MemberKey::generate().unwrap().0.public().into(), epoch: 1,
+        home: "example-home".into(), home_key: fractal_auth::MemberKey::generate().unwrap().0.public().into(),
+        host: "example-seat".into(), host_key: fractal_auth::MemberKey::generate().unwrap().0.public().into(), epoch: 1,
         grant: Scope { subjects: vec!["agent/example/worker".into()], operations: vec![OperationKind::Observe, OperationKind::Stop] },
     }
 }
@@ -152,7 +152,7 @@ fn bounded_capacity_refuses_without_losing_accepted_work() {
 #[test]
 fn unknown_journal_versions_and_unversioned_authoritative_bytes_fail_closed() {
     let root=tempfile::tempdir().unwrap(); let path=root.path().join("unknown.sqlite3");
-    let connection=Connection::open(&path).unwrap(); connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbe5466693d21 owner=fractal_peer::light_node::journal_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE future(value TEXT); INSERT INTO future VALUES('preserve'); PRAGMA user_version=2;").unwrap(); drop(connection);
+    let connection=Connection::open(&path).unwrap(); connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h16754377790d owner=fractal_light_node_core::journal_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE future(value TEXT); INSERT INTO future VALUES('preserve'); PRAGMA user_version=2;").unwrap(); drop(connection);
     assert!(Journal::open(&path,Limits::default()).is_err());
     let connection=Connection::open(&path).unwrap(); assert_eq!(connection.query_row("SELECT value FROM future",[],|row|row.get::<_,String>(0)).unwrap(),"preserve");
     connection.execute_batch("PRAGMA user_version=0").unwrap(); drop(connection);
@@ -170,7 +170,7 @@ fn a_fresh_home_uses_epoch_scoped_receipt_and_authority_watermarks() {
     }
     acknowledge_epoch_ready(&home,&seat,first.epoch);
     let mut next=first.clone(); next.epoch=2; next.home="next-home".into();
-    next.home_key=smallclaims::fleet::MemberKey::generate().unwrap().0.public().into();
+    next.home_key=fractal_auth::MemberKey::generate().unwrap().0.public().into();
     assert_eq!(seat.install_epoch(&next).unwrap(),EpochInstall::Installed);
     let next_home=Journal::open(&root.path().join("next-home.sqlite3"),Limits::default()).unwrap();
     assert_eq!(next_home.install_epoch(&next).unwrap(),EpochInstall::Installed);
@@ -205,7 +205,7 @@ fn credentials_wait_for_home_admission_and_then_remint_offline() {
     let root=tempfile::tempdir().unwrap(); let selected=selection(); let (home,seat)=pair(root.path(),&selected);
     let binding=draft(&selected,"fixture").binding;
     let error=seat.activate_and_issue(&binding,1000,100).unwrap_err();
-    assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,"local-authority-backpressure");
+    assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code,"local-authority-backpressure");
     assert_eq!(seat.pending_authority().unwrap().len(),1,"wait must retain its durable admission");
     drain_authority(&home,&seat);
     let secret=seat.activate_and_issue(&binding,1000,100).unwrap();
@@ -222,11 +222,11 @@ fn start_is_a_typed_unsupported_operation_and_never_reaches_custody() {
     let mut unsupported=draft(&selected,"decision/start");
     unsupported.operation=Operation::Start;
     let error=home.enqueue(unsupported).unwrap_err();
-    assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,"light-node-start-not-supported");
+    assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code,"light-node-start-not-supported");
     assert!(home.pending_commands().unwrap().is_empty());
     let command=Command {version:VERSION,sequence:1,execution_id:"execution/unsupported-start".into(),decision_id:"decision/start".into(),binding:draft(&selected,"fixture").binding,operation:Operation::Start};
     let error=seat.admit(&command).unwrap_err();
-    assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,"light-node-start-not-supported");
+    assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code,"light-node-start-not-supported");
     assert!(seat.pending_receipts().unwrap().is_empty());
     assert!(seat.undispatched().unwrap().is_empty()); assert!(seat.recoverable().unwrap().is_empty());
     assert!(seat.enter(&command.execution_id,|_,_|panic!("unsupported Start cannot enter any native backend")).is_err());
@@ -270,7 +270,7 @@ fn revocation_winning_between_entry_transactions_does_not_invent_unknown_custody
     let command=home.enqueue(draft(&selected,"decision/fenced")).unwrap(); seat.admit(&command).unwrap();
     // Reproduce the committed conservative fence, before this live process calls the
     // native adapter. A separate SQLite connection then wins the authority withdrawal.
-    seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-ha8f636967dd7 owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1",[&command.execution_id]).unwrap();
+    seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h8b174be7e79f owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1",[&command.execution_id]).unwrap();
     let other=Journal::open(&root.path().join("seat.sqlite3"),Limits::default()).unwrap();
     other.revoke_execution(&command.binding).unwrap();
     {
@@ -289,7 +289,7 @@ async fn pending_admission_credential_retry_does_not_wake_itself() {
     let wake=seat.authority_changed.notified(); tokio::pin!(wake); wake.as_mut().enable();
     for _ in 0..3 {
         let error=seat.activate_and_issue(&binding,1000,100).unwrap_err();
-        assert_eq!(error.downcast_ref::<crate::model::FractalError>().unwrap().code,"local-authority-backpressure");
+        assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code,"local-authority-backpressure");
         assert!(wake.as_mut().now_or_never().is_none(),"offline ACK wait must not create a local retry loop");
     }
     assert_eq!(seat.pending_authority().unwrap().len(),1);
@@ -302,12 +302,12 @@ fn local_finalization_is_atomic_and_survives_restart_independently_of_receipt_ac
     let command=home.enqueue(input).unwrap(); seat.admit(&command).unwrap();
     seat.enter(&command.execution_id,|_,_|Ok("native-custody/finalize".into())).unwrap();
     let outcome=Outcome::Stopped {incarnation:command.binding.incarnation.clone()};
-    seat.lock().unwrap().execute_batch(/* sqlite-large-value: allow-for-now lv-hb1e17066eaea owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_finalization_marker BEFORE UPDATE OF local_finalization ON commands WHEN NEW.local_finalization>0 BEGIN SELECT RAISE(ABORT,'injected finalization marker failure'); END;").unwrap();
+    seat.lock().unwrap().execute_batch(/* sqlite-large-value: allow-for-now lv-hd1698ccbd75a owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_finalization_marker BEFORE UPDATE OF local_finalization ON commands WHEN NEW.local_finalization>0 BEGIN SELECT RAISE(ABORT,'injected finalization marker failure'); END;").unwrap();
     assert!(seat.complete_requiring_local_finalization(&command.execution_id,outcome.clone(),"native-retirement/finalize").is_err());
     assert_eq!(seat.recoverable().unwrap().len(),1);
     assert!(seat.pending_terminal_results().unwrap().is_empty());
     assert_eq!(seat.pending_receipts().unwrap().len(),1,"terminal proof cannot commit without its barrier");
-    seat.lock().unwrap().execute_batch(/* sqlite-large-value: allow-for-now lv-he07cde45bf1f owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_finalization_marker").unwrap();
+    seat.lock().unwrap().execute_batch(/* sqlite-large-value: allow-for-now lv-h8f52c2148eda owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_finalization_marker").unwrap();
     let terminal=seat.complete_requiring_local_finalization(&command.execution_id,outcome.clone(),"native-retirement/finalize").unwrap();
     assert_eq!(seat.complete(&command.execution_id,outcome.clone()).unwrap(),terminal,"ordinary idempotent completion must not release the barrier");
     assert!(seat.complete_requiring_local_finalization(&command.execution_id,outcome.clone(),"conflicting-retirement-proof").is_err());
@@ -317,7 +317,7 @@ fn local_finalization_is_atomic_and_survives_restart_independently_of_receipt_ac
     assert!(seat.checkpoint("seat",selected.epoch,command.sequence).is_err());
     seat.begin_closing().unwrap(); drain_authority(&home,&seat);
     // Even an already persisted ACK cannot be the only repair-retention mechanism.
-    seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h8c2f07f2635e owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE receipts SET acknowledged=1",[]).unwrap();
+    seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h60231a720985 owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE receipts SET acknowledged=1",[]).unwrap();
     assert!(!seat.drained().unwrap());
     assert!(seat.checkpoint("seat",selected.epoch,command.sequence).is_err());
     drop(seat);
@@ -327,10 +327,10 @@ fn local_finalization_is_atomic_and_survives_restart_independently_of_receipt_ac
     assert_eq!(pending[0].0.custody_proof.as_deref(),Some("native-retirement/finalize"));
     assert_eq!(seat.recoverable().unwrap()[0].command.execution_id,command.execution_id,"live reconnect recovery must include settled pending finalization");
     // Inject a real SQLite failure into finalization release: retained proof must remain.
-    seat.lock().unwrap().execute_batch(/* sqlite-large-value: allow-for-now lv-hcd66212e35cf owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_finalization_release BEFORE UPDATE OF local_finalization ON commands WHEN NEW.local_finalization=-1 BEGIN SELECT RAISE(ABORT,'injected finalization release failure'); END;").unwrap();
+    seat.lock().unwrap().execute_batch(/* sqlite-large-value: allow-for-now lv-h5cb44b49a2ac owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_finalization_release BEFORE UPDATE OF local_finalization ON commands WHEN NEW.local_finalization=-1 BEGIN SELECT RAISE(ABORT,'injected finalization release failure'); END;").unwrap();
     assert!(seat.finish_local_finalization(&command.execution_id).is_err());
     assert_eq!(seat.pending_terminal_results().unwrap().len(),1);
-    seat.lock().unwrap().execute_batch(/* sqlite-large-value: allow-for-now lv-hb9686663e41e owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_finalization_release").unwrap();
+    seat.lock().unwrap().execute_batch(/* sqlite-large-value: allow-for-now lv-h79329e28ce55 owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_finalization_release").unwrap();
     seat.finish_local_finalization(&command.execution_id).unwrap();
     seat.finish_local_finalization(&command.execution_id).unwrap();
     assert!(seat.pending_terminal_results().unwrap().is_empty()); assert!(seat.recoverable().unwrap().is_empty());
@@ -372,7 +372,7 @@ fn entered_stop_without_proof_can_reconcile_only_once_under_live_authority() {
     let root=tempfile::tempdir().unwrap(); let selected=selection(); let (home,seat)=pair(root.path(),&selected);
     let mut input=draft(&selected,"decision/pre-signal-crash"); input.operation=Operation::Stop;
     let command=home.enqueue(input).unwrap(); seat.admit(&command).unwrap();
-    seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h694feccb0766 owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1",[&command.execution_id]).unwrap();
+    seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-heac8db6d76dd owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1",[&command.execution_id]).unwrap();
     let recovered=seat.reconcile_entered_stop(&command.execution_id,|received,authority| {
         assert_eq!(received.execution_id,command.execution_id);
         local::require_execution(authority,&received.binding)?;
@@ -392,11 +392,11 @@ fn withdrawn_or_non_stop_unknown_custody_never_reenters_or_fabricates_a_terminal
         let mut input=draft(&selected,"decision/unknown");
         if barrier!="observe" {input.operation=Operation::Stop;}
         let command=home.enqueue(input).unwrap(); seat.admit(&command).unwrap();
-        seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-hb88d5c28fd9b owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1",[&command.execution_id]).unwrap();
+        seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-hf9c7b20dd1f3 owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1",[&command.execution_id]).unwrap();
         match barrier {
             "closing"=>seat.begin_closing().unwrap(),
             "revoked"=>seat.revoke_execution(&command.binding).unwrap(),
-            "cancelled"=>{seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-hf320d659814b owner=fractal_peer::light_node::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason='withdrawn' WHERE side='seat' AND execution=?1",[&command.execution_id]).unwrap();},
+            "cancelled"=>{seat.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-hfdc73a7e5a6c owner=fractal_light_node_core::journal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason='withdrawn' WHERE side='seat' AND execution=?1",[&command.execution_id]).unwrap();},
             "observe"=>{},
             _=>unreachable!(),
         }

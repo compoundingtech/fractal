@@ -177,7 +177,7 @@ mod tests {
             store.apply_internal(&crate::graph::parse_intent(source, "node").unwrap(), key).unwrap();
         };
         let append = |kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: AGENT.into(), kind: kind.into(), actor: Some("person/operator".into()),
                 fields: serde_json::from_value(fields).unwrap(), evidence,
                 expected_subject: None, idempotency_key: key,

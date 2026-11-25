@@ -216,7 +216,7 @@ pub async fn claim_initial_message(
     if !prior.claims.is_empty() {
         return Ok(false);
     }
-    let input = crate::model::ClaimInput {
+    let input = fractal_wire::ClaimInput {
         subject: marker,
         kind: "custom.agent.initial-message".into(),
         actor: Some(subject.into()),

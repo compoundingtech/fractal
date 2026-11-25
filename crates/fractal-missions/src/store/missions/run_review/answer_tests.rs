@@ -289,7 +289,7 @@ fn agent_review_answer_transaction_post_insert_error_rolls_back_before_outer_com
         .claim_by_id(input.fields["request"].as_str().unwrap())
         .unwrap()
         .unwrap();
-    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let (key, _) = fractal_auth::MemberKey::generate().unwrap();
     let signature = smallclaims::principal::ClaimSignature::sign(
         &key,
         &smallclaims::principal::content_digest(

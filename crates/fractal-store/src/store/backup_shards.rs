@@ -112,8 +112,8 @@ pub fn write_records(shard: &GraphStore, mut write: impl FnMut(&Record) -> Resul
 /// Whether a signature is the writer's for this shard envelope in the archive's fleet.
 fn verified(fleet: &str, writer: &str, sequence: u64, hash: &str, key: &str, signature: &str) -> bool {
     let message =
-        smallclaims::fleet::envelope_signature_message_in(Some(SHARD_ID), fleet, writer, sequence, hash);
-    smallclaims::fleet::verify_signature(key, &message, signature)
+        fractal_auth::envelope_signature_message_in(Some(SHARD_ID), fleet, writer, sequence, hash);
+    fractal_auth::verify_signature(key, &message, signature)
 }
 
 /// Hold one page of archived shard envelopes as pending, each signature verified in the shard's

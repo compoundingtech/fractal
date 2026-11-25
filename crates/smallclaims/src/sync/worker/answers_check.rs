@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(daily_cut(day + DAY_MS - 1), day);
     }
 
-    use crate::claim::ClaimInput;
+    use fractal_wire::ClaimInput;
     use crate::replication::{ReceiveOptions, ReplicationInventory};
     use crate::store::Store;
     use crate::sync::Local;
@@ -393,7 +393,7 @@ mod tests {
             self.0.publish_endpoints(mode, endpoints).await
         }
 
-        async fn redeem(&self, request: &crate::fleet::handshake::JoinRequest) -> Result<Value> {
+        async fn redeem(&self, request: &fractal_auth::handshake::JoinRequest) -> Result<Value> {
             self.0.redeem(request).await
         }
 

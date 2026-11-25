@@ -8,8 +8,9 @@
 //! because judging their signatures and grants needs principal facts only the graph holds.
 use serde_json::{Value, json};
 use crate::model::MessageView;
-use smallclaims::claim::{ClaimInput, ClaimRecord, ReplicaBatch};
-use smallclaims::error::Error as FractalError;
+use smallclaims::claim::{ ClaimRecord, ReplicaBatch};
+use fractal_wire::{ClaimInput};
+use fractal_wire::Error as FractalError;
 use smallclaims::store::runtime::{IncrementalProjection, LegacyDigestTable, Runtime};
 use smallclaims::store::{
     DropPlan, ReplicatedClaimAdmission, SealedSet, Store as GraphStore, append_claim_record_tx,
@@ -1051,10 +1052,10 @@ mod tests {
     }
 
     /// A graph keyed as the daemon keys it: the member key is loaded before the shard opens.
-    fn keyed_graph(root: &Path) -> (Arc<Store>, Arc<smallclaims::fleet::MemberKey>) {
+    fn keyed_graph(root: &Path) -> (Arc<Store>, Arc<fractal_auth::MemberKey>) {
         let graph = Arc::new(Store::open(&root.join("claims.sqlite3"), "alder").unwrap());
         graph.bind_fleet(FLEET).unwrap();
-        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         graph.load_member_key(Some(key.clone())).unwrap();
         graph.use_key_directory(&root.join("keys")).unwrap();
         (graph, key)
@@ -1085,9 +1086,9 @@ mod tests {
         let [envelope] = exchange.envelopes.as_slice() else {
             panic!("one envelope, not {}", exchange.envelopes.len());
         };
-        assert!(smallclaims::fleet::verify_signature(
+        assert!(fractal_auth::verify_signature(
             key.public(),
-            &smallclaims::fleet::envelope_signature_message_in(
+            &fractal_auth::envelope_signature_message_in(
                 Some(SHARD_ID), FLEET, "alder", envelope.sequence, &envelope.hash,
             ),
             envelope.signature.as_deref().expect("the shard signs with the member key"),
@@ -1101,7 +1102,7 @@ mod tests {
     #[test]
     fn a_leavers_held_envelopes_are_admitted_once_the_graph_admits_its_bounds() {
         use crate::store::fleet_admission_tests_shared_seats::{admit, key, sync};
-        let on_disk = |root: &Path, name: &str, member: &Arc<smallclaims::fleet::MemberKey>, anchor: &smallclaims::fleet::MemberKey| {
+        let on_disk = |root: &Path, name: &str, member: &Arc<fractal_auth::MemberKey>, anchor: &fractal_auth::MemberKey| {
             let store = Arc::new(Store::open(&root.join("claims.sqlite3"), name).unwrap());
             store.bind_fleet(FLEET).unwrap();
             store.pin_fleet_anchor(anchor.public()).unwrap();
