@@ -4,7 +4,7 @@ use super::*;
 use fractal_light_node_core::journal::{Admission, CommandDraft, Limits, OperationKind, ReceiptState, Scope};
 use fractal_light_node_core::session::{Home, SeatClient};
 use fractal_store::light_node::StoreRunEffects;
-use crate::store::local_sessions::{LocalSession, SessionCustody};
+use fractal_light_node_core::custody::{LocalSession, SessionCustody};
 use fractal_auth::{MemberKey, FleetAuth};
 use tokio::sync::watch;
 
