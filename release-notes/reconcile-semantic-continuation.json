@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep reconcile continuation and desired-input invalidation tied to semantic input changes",
+  "replay": {"status": "none", "detail": "No claim or projection replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "changed", "detail": "Background reconciliation continues for its claim/local-observation writes and native desired-row changes, not unrelated physical bookkeeping writes. Unrelated validated schema boundaries preserve the desired changed-key journal. Actual desired replacement and lost native coverage still force a full refresh."},
+  "downtime": {"status": "none", "detail": "Normal binary restart only."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Existing startup, external wake, convergence cap and failure recovery behavior remains."}
+}

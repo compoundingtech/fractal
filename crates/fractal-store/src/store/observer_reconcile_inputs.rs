@@ -230,7 +230,9 @@ impl WriterObserver for Observer {
     }
     fn unobserved(&self, database: &str, table: &str) {
         self.inner.unobserved(database, table);
-        self.invalidate();
+        // The writer expands missed hooks and opaque schema changes into exact-table
+        // hints for every watched table; unrelated physical changes need no roster read.
+        if database == "main" && table == "desired" { self.invalidate(); }
     }
     fn failed(&self, error: Arc<str>) {
         self.inner.failed(error);
@@ -241,8 +243,10 @@ impl WriterObserver for Observer {
     fn coverage_verified(&self) {
         self.inner.coverage_verified();
         let mut state = self.inputs.0.lock().unwrap_or_else(PoisonError::into_inner);
+        // Successful validation also follows unrelated DDL. Only recovery from lost
+        // coverage requires a full read; desired replacement already marked invalid.
+        state.invalid |= state.coverage_failed;
         state.coverage_failed = false;
-        state.invalid = true;
     }
     fn coverage_unavailable(&self) {
         self.inner.coverage_unavailable();
