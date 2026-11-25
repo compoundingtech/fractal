@@ -1,9 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import * as Native from '@fractal/client/schema/read'
-import { Option, Schema } from 'effect'
+import { Option, Schema, SchemaIssue, type SchemaAST } from 'effect'
 import { gatewayCredential, type GatewayOptions } from './gateway.mts'
 import { boundedGet, failure, json, LoadsBusy, ReadDeadline, ReadTooLarge, ttlCache, type LoopbackProducer } from './relayHttp.mts'
-import { readCapabilities, scopeGranted } from './tagAuthorization.mts'
+import { admittedNativeApiVersions, nativeEnvelope as envelope } from './nativeEnvelope.mts'
+import { NativeCapabilities, readCapabilities } from './tagAuthorization.mts'
 
 /**
  * Descendant-inclusive spend of one agent's current native root, for the Details pane.
@@ -68,10 +69,48 @@ const ProducerRootDetail = Schema.Struct({
   coverage: optional(Schema.Struct({ account_share: optional(Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }))) })),
   children: Schema.optionalKey(Schema.Array(Schema.Struct({ session_id: Text, role: optional(Text), model: optional(Text), usd: Amount, requests: Count })).check(Schema.isMaxLength(200))),
 })
-const envelope = <S extends Schema.Top>(value: S) => Schema.Struct({ api_version: Schema.Literals(['st3.client.v0', 'fractal.client.v0']), value })
+/** Only schema-owned names enter the diagnostic; record keys and array indices are redacted. */
+const failingField = (issue: SchemaIssue.Issue, ast: SchemaAST.AST, path = '$'): string => {
+  switch (issue._tag) {
+    case 'Composite': return failingField(issue.issues[0], issue.ast, path)
+    case 'Pointer': {
+      for (const key of issue.path) {
+        const field = ast._tag === 'Objects' ? ast.propertySignatures.find(field => field.name === key) : undefined
+        path += field === undefined ? '[*]' : `.${String(field.name)}`
+        if (field !== undefined) ast = field.type
+        else if (ast._tag === 'Arrays') ast = ast.rest[0] ?? ast.elements[0] ?? ast
+      }
+      return failingField(issue.issue, ast, path)
+    }
+    case 'Encoding': return failingField(issue.issue, issue.ast, path)
+    case 'Filter': return failingField(issue.issue, ast, path)
+    case 'AnyOf':
+      if (issue.issues[0] !== undefined) return failingField(issue.issues[0], ast, path)
+      return `${path}: ${SchemaIssue.defaultLeafHook(new SchemaIssue.InvalidType(ast)).replace(/^Expected /, 'expected ')}`
+    default: return `${path}: ${SchemaIssue.defaultLeafHook(new SchemaIssue.InvalidType('ast' in issue ? issue.ast : ast)).replace(/^Expected /, 'expected ')}`
+  }
+}
 const decode = <T,>(schema: Schema.Decoder<T>, body: string, code: string): T => {
-  try { return Schema.decodeUnknownSync(schema)(JSON.parse(body)) }
-  catch { throw new Refusal(502, code, 'An upstream answer was not recognized') }
+  const native = code === 'root-detail-gateway-unavailable'
+  let input: unknown
+  try { input = JSON.parse(body) }
+  catch {
+    const context = native
+      ? `native envelope; api_version=unavailable; admitted=${admittedNativeApiVersions.join(',')}`
+      : 'producer lens; lens_version=unavailable'
+    throw new Refusal(502, code, `${context}; $: expected JSON object`)
+  }
+  const version = input !== null && typeof input === 'object'
+    ? Reflect.get(input, native ? 'api_version' : 'lens_version') : undefined
+  const identifier = native
+    ? typeof version === 'string' && version.length <= 128 && /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*\.v[0-9]+$/.test(version) ? version : 'unavailable'
+    : typeof version === 'number' && Number.isSafeInteger(version) ? String(version) : 'unavailable'
+  const context = native ? `native envelope; api_version=${identifier}; admitted=${admittedNativeApiVersions.join(',')}` : `producer lens; lens_version=${identifier}`
+  try { return Schema.decodeUnknownSync(schema, { reportInput: false })(input) }
+  catch (error) {
+    if (!Schema.isSchemaError(error)) throw error
+    throw new Refusal(502, code, `${context}; ${failingField(error.issue, schema.ast)}`)
+  }
 }
 
 interface RootIdentity { readonly agent: string; readonly incarnationId: string; readonly host: string; readonly nativeSessionId: string }
@@ -143,9 +182,8 @@ export const createRootDetailRelay = ({ producer, gateway, producerDeadlineMs = 
     catch { throw new Refusal(502, 'root-detail-gateway-unavailable', 'The gateway could not verify the agent') }
     if (grant.status === 401 || grant.status === 403) throw new Refusal(403, 'forbidden', 'Forbidden')
     if (grant.status !== 200) throw new Refusal(502, 'root-detail-gateway-unavailable', 'The gateway could not verify the agent')
-    let granted: boolean
-    try { granted = scopeGranted(grant.body, 'read.projections') }
-    catch { throw new Refusal(502, 'root-detail-gateway-unavailable', 'The gateway could not verify the agent') }
+    const granted = decode(NativeCapabilities, grant.body, 'root-detail-gateway-unavailable').value.capabilities
+      .some(capability => capability.id === 'read.projections' && capability.state === 'granted')
     if (!granted) throw new Refusal(403, 'forbidden', 'Forbidden')
     const agent = decode(envelope(Native.Agent), await read(credential, `/v1/client/agents/${encodeURIComponent(agentRef)}`), 'root-detail-gateway-unavailable').value
     const identity = rootBinding(agentRef, agent)
