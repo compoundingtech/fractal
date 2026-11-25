@@ -1134,6 +1134,7 @@ fn source_retention_is_bounded_through_completion_and_eligibility_changes() {
         // An empty live ask must retain its negative requester-declaration dependency.
         for (kind, visible) in [("stop", false), ("agent", true)] {
             store.connection.lock().unwrap().execute(
+                /* sqlite-large-value: allow-for-now lv-h739e49aaa3c0 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE desired SET kind=?1 WHERE subject='agent/alder.asker'", [kind],
             ).unwrap();
             snapshot = store.read_snapshot(|_| {
@@ -1164,9 +1165,11 @@ fn source_retention_prunes_non_person_undeclared_and_retired_subjects() {
         None, None, &BTreeSet::new(), now_ms(),
     )).unwrap();
     store.connection.lock().unwrap().execute(
+        /* sqlite-large-value: allow-for-now lv-h55ee5aa1b61d owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
         "UPDATE step_runs SET assignee='agent/alder.asker' WHERE subject=?1", [&ask.subject],
     ).unwrap();
     store.connection.lock().unwrap().execute(
+        /* sqlite-large-value: allow-for-now lv-ha95729b63172 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
         "UPDATE desired SET kind='stop' WHERE subject='agent/alder.asker'", [],
     ).unwrap();
     let after = store.read_snapshot(|_| store.attention_source_snapshot(
@@ -1182,11 +1185,13 @@ fn source_retention_prunes_non_person_undeclared_and_retired_subjects() {
     for turn in 0..32 {
         let seat = format!("agent/alder.retired-{turn}");
         store.connection.lock().unwrap().execute(
+            /* sqlite-large-value: allow-for-now lv-h4bce0ef03f59 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
             "UPDATE desired SET subject=?1, kind='agent' WHERE subject=?2",
             params![seat, previous_seat],
         ).unwrap();
         for (kind, retained) in [("agent", bounded + 1), ("stop", bounded)] {
             store.connection.lock().unwrap().execute(
+                /* sqlite-large-value: allow-for-now lv-h174602194f79 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE desired SET kind=?1 WHERE subject=?2", params![kind, seat],
             ).unwrap();
             snapshot = store.read_snapshot(|_| store.attention_source_snapshot(
